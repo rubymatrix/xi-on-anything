@@ -16,11 +16,15 @@
  *   - The Config list's layout, rebuilt from the DAT with our item after its last and registered
  *     in place of the original, which is renamed out of the way.
  *   - The page's layout: buttons and sliders over its panel.
- *   - The menu table has no free entry, but has one the game never finds: the second of two
- *     "conf1win" entries. It becomes the page's, pointing at a global of our own.
+ *   - The menu table has no free entry, but has one the game never finds - the second of two
+ *     "conf1win" entries - and room for one more in its end marker. Each becomes a page's,
+ *     pointing at a global of our own.
  *   - The page's handler is a Config page (the game's base class, ctor 0x10196980) whose vtable
  *     points at shims here; the Config list's handler gets a copy of its vtable whose select slot
  *     comes here first. (The pages are a table: another is a row in PAGES and a spare entry.)
+ * Config > Menus hides items of the game's own menus the same way: the combat menu's lists of
+ * actions without Trust, and Magic's, Status's and Abilities' layouts, rebuilt with the items
+ * hidden empty.
  * What is there is checked before anything is written: another build leaves the menus as they are. */
 #include <math.h>
 #include <stdio.h>
@@ -84,9 +88,25 @@ typedef struct Row
     const char* help;
 } Row;
 
+/* the game's items the Menus page can hide: a bit each in g_hide */
+enum
+{
+    HIDE_TRUST,          /* the combat menu's and Magic's */
+    HIDE_MAGIC_GEOMANCY,
+    HIDE_OLD_MAGIC_TRUST, /* was Magic's alone: read as HIDE_TRUST */
+    HIDE_MASTER_LEVELS,
+    HIDE_UNITY,
+    HIDE_JOB_POINTS,
+    HIDE_ALTER_EGO,
+    HIDE_MOUNTS, /* Abilities' Mount, the combat menu's and the main menu's */
+    NHIDE,
+};
+
 static ModernSetup g_setup;
 static char g_data_dir[1024], g_game[1024];
 static float g_ui_aspect;
+static unsigned g_hide;
+static void hide_apply(void);
 static int g_fx_touched, g_host_touched;
 static char g_fx_keys[32][24]; /* the scene settings changed, to write */
 static int g_nfx_keys;
@@ -97,6 +117,8 @@ static float get(const Row* r)
         return g_setup.fps_divisor ? (float)*g_setup.fps_divisor : 1.0f;
     if (!strcmp(r->key, "@ui"))
         return g_ui_aspect;
+    if (!strncmp(r->key, "@hide", 5))
+        return g_hide >> atoi(r->key + 5) & 1 ? 0.0f : 1.0f;
     return gfx_fx_get(r->key);
 }
 
@@ -113,6 +135,13 @@ static void set(const Row* r, float v)
         g_ui_aspect = v;
         user32_set_ui_aspect(v);
         g_host_touched = 1;
+    }
+    else if (!strncmp(r->key, "@hide", 5))
+    {
+        unsigned bit = 1u << atoi(r->key + 5);
+        g_hide = v != 0.0f ? g_hide & ~bit : g_hide | bit;
+        g_host_touched = 1;
+        hide_apply();
     }
     else
     {
@@ -175,6 +204,24 @@ static const Row MODERN_ROWS[] = {
     { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
     { "Interface Shape", "@ui", CHOICE, 3, { "Full", "16:9", "4:3" }, { 0, 16.0f / 9.0f, 4.0f / 3.0f }, 0, 0,
         "Keeps the menus in a box of this shape on a wide screen." },
+    { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "The frame rate, in the screen's top left corner." },
+};
+
+static const Row MENUS_ROWS[] = {
+    { "Trust", "@hide0", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "Trust in the combat menu and in the main menu's Magic." },
+    { "Mounts", "@hide7", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "Mount in Abilities, the combat menu's and the main menu's." },
+    { "Geomancy (Magic)", "@hide1", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "Geomancy in the main menu's Magic." },
+    { "Master Levels", "@hide3", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "Master Levels in the main menu's Status." },
+    { "Unity", "@hide4", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0, "Unity in the main menu's Status." },
+    { "Job Points", "@hide5", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "Job Points in the main menu's Status." },
+    { "Alter Ego Points", "@hide6", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "Alter Ego Points in the main menu's Status." },
 };
 
 /* ---- remembering ---- */
@@ -257,8 +304,8 @@ static void save(void)
         FILE* f = fopen(path, "w");
         if (f)
         {
-            fprintf(f, "fps_divisor=%u\nui_aspect=%g\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
-                (double)g_ui_aspect);
+            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
+                (double)g_ui_aspect, g_hide);
             fclose(f);
         }
         else
@@ -543,7 +590,7 @@ typedef struct Page
     const char* config_help;
     uint32_t spare; /* the menu table entry it takes, */
     const char* spare_was; /* named this (and, for the duplicate conf1win, after one of the same) */
-    int spare_dup;
+    int spare_how;         /* SPARE_* */
     const Row* rows;
     int nrows;
     /* made at setup */
@@ -553,9 +600,23 @@ typedef struct Page
     uint32_t layout, layout_size, handler, str_name, str_config_help, str_help[MAX_ROWS];
 } Page;
 
+/* How a page's menu table entry is free: the second of two of a name (the game only ever finds the
+ * first), or the table's end - the empty entry its loops stop at, unread otherwise, whose place the
+ * next thing in memory (first byte 0) then takes */
+enum
+{
+    SPARE_DUP = 1,
+    SPARE_END = 2,
+    TABLE_END = 0x10376270u,
+};
+
+static const char NO_NAME[16] = { 0 };
+
 static Page PAGES[] = {
+    { "menu    menushid", "Menus", "Show or hide items of the game's own menus.", TABLE_END, NO_NAME, SPARE_END,
+        MENUS_ROWS, sizeof MENUS_ROWS / sizeof MENUS_ROWS[0] },
     { "menu    modernwi", "Modern", "Graphics beyond the original's: effects, lighting and draw distance.",
-        0x10375064u, "menu    conf1win", 1, MODERN_ROWS, sizeof MODERN_ROWS / sizeof MODERN_ROWS[0] },
+        0x10375064u, "menu    conf1win", SPARE_DUP, MODERN_ROWS, sizeof MODERN_ROWS / sizeof MODERN_ROWS[0] },
 };
 enum
 {
@@ -563,6 +624,7 @@ enum
 };
 
 static int g_spr_track, g_spr_fill; /* a slider's hit area (nothing to see) and its fill */
+static int g_spr_blank;             /* nothing to see: what a hidden item of the game's draws */
 
 static int row_top(int r) { return TITLE_H + r * ROW_H; }
 
@@ -657,6 +719,8 @@ static int build_sheet(void)
     part(0, 0, TRACK_W, 16, 64, 8, 0, 0, 0x7f7f7f00u, M_ITEM, GAUGE);
     g_spr_fill = sprite_begin();
     part(0, 2, TRACK_W, 14, 64, 6, 0, 1, 0x60607f7fu, M_GAUGE, GAUGE);
+    g_spr_blank = sprite_begin();
+    part(0, 0, 1, 1, 1, 1, 0, 0, 0x7f7f7f00u, M_ITEM, GAUGE);
     for (int k = 0; k < NPAGES; ++k)
     {
         layout_items(&PAGES[k]);
@@ -928,6 +992,198 @@ static void add(uint32_t fn, uint32_t list, uint32_t payload)
     guest_thiscall(fn, list, 1, (uint32_t[]){ g_scratch + 40 });
 }
 
+/* ---- hiding the game's own items ---- */
+
+/* The combat menu is no layout: as it opens, the game fills it from a list of action ids for the
+ * kind of menu it is (13 each, 0x1c ending one) and picks the window ("actionm<n>") for its length.
+ * Trust is action 25: a list without it is a menu without it. */
+enum
+{
+    ACTION_LISTS = 0x1036f390u,
+    ACTION_KINDS = 8,
+    ACTION_LEN = 13,
+    ACTION_TRUST = 25,
+};
+
+static const uint8_t ACTIONS_KNOWN[ACTION_KINDS][ACTION_LEN] = {
+    { 4, 8, 7, 25, 9, 12, 13, 22, 24, 28 },
+    { 4, 14, 12, 15, 28 },
+    { 4, 8, 7, 25, 9, 19, 16, 12, 22, 24, 27, 10, 28 },
+    { 4, 14, 16, 12, 15, 27, 10, 28 },
+    { 1, 8, 7, 25, 9, 12, 22, 24, 11, 28 },
+    { 21, 14, 12, 11, 28 },
+    { 18, 8, 7, 25, 9, 3, 12, 24, 11, 28 },
+    { 6, 8, 7, 25, 9, 20, 17, 12, 26, 28 },
+};
+
+static int g_hide_ready, g_actions_ok;
+
+static void actions_install(void)
+{
+    if (!g_actions_ok)
+        return;
+    uint8_t* d = GUEST_PTR(ACTION_LISTS);
+    for (int k = 0; k < ACTION_KINDS; ++k)
+    {
+        int n = 0;
+        for (int i = 0; i < ACTION_LEN; ++i)
+            if (!(ACTIONS_KNOWN[k][i] == ACTION_TRUST && g_hide >> HIDE_TRUST & 1))
+                d[k * ACTION_LEN + n++] = ACTIONS_KNOWN[k][i];
+        while (n < ACTION_LEN)
+            d[k * ACTION_LEN + n++] = 0;
+    }
+}
+
+/* Magic, Status and Abilities are layouts, their handlers going by an item's id. The game keeps its cursor
+ * within the count of items, so a hidden item stays - its id, and the count, as they were - but
+ * empty: no size, a sprite of nothing, the links that led to it leading past it. The rows under it
+ * move up and the window is shorter. */
+typedef struct HiddenItem
+{
+    int id, bit, sprite; /* sprite: its first ref's, as known */
+} HiddenItem;
+
+typedef struct Menu
+{
+    const char *name, *renamed;
+    int blocks; /* its items, the title tab one of them */
+    HiddenItem items[4];
+    int nitems;
+    int from_bottom;      /* 1: it stands on the combat menu, its foot where it was */
+    unsigned installed;   /* the hide bits of ours in the game's list */
+    uint32_t guest, size; /* ours, which the game keeps pointers into */
+} Menu;
+
+static Menu MENUS[] = {
+    { "menu    mgcmenu ", "menu    mgcmenu_", 9,
+        { { 7, HIDE_MAGIC_GEOMANCY, 496 }, { 8, HIDE_TRUST, 505 } }, 2 },
+    { "menu    abimenu ", "menu    abimenu_", 7, { { 6, HIDE_MOUNTS, 551 } }, 1 },
+    { "menu    abiselec", "menu    abisele_", 6, { { 5, HIDE_MOUNTS, 551 } }, 1, 1 },
+    { "menu    statcom2", "menu    statcom_", 14,
+        { { 12, HIDE_MASTER_LEVELS, 564 }, { 11, HIDE_UNITY, 529 }, { 8, HIDE_JOB_POINTS, 669 },
+            { 13, HIDE_ALTER_EGO, 843 } },
+        4 },
+};
+enum
+{
+    NMENUS = sizeof MENUS / sizeof MENUS[0],
+    MENU_MAX_BLOCKS = 32,
+};
+
+/* the menu's layout from the DAT with the items in hide empty; NULL when it is not the one known */
+static uint8_t* menu_layout(const Menu* m, unsigned hide, size_t* out_size)
+{
+    size_t size;
+    uint8_t* p = dat_layout(m->name, &size);
+    if (!p)
+        return NULL;
+    size_t at[MENU_MAX_BLOCKS], o = 0x20, win = 0x20;
+    int y[MENU_MAX_BLOCKS], hidden[MENU_MAX_BLOCKS] = { 0 }, n = p[0x11], ok = n == m->blocks && n < MENU_MAX_BLOCKS;
+    uint8_t links[MENU_MAX_BLOCKS][6];
+    for (int b = -1; ok && b < n; ++b)
+    {
+        size_t len = o + 0x20 <= size ? (size_t)r16(p + o) : 0;
+        if (len < 0x20 || o + len > size)
+            ok = 0;
+        else if (b >= 0)
+        {
+            at[b] = o, y[b] = r16(p + o + 4);
+            memcpy(links[b], p + o + 0x15, 6);
+            if (r16(p + o + 0x12) != b + 1) /* the known ones number their items in order */
+                ok = 0;
+        }
+        o += len;
+    }
+    int nhidden = 0;
+    for (int i = 0; ok && i < m->nitems; ++i)
+    {
+        int b = m->items[i].id - 1;
+        if (b < 0 || b >= n || p[at[b] + 0x1b] < 1 || r16(p + at[b] + 0x22) != m->items[i].sprite)
+            ok = 0;
+        else if (hide >> m->items[i].bit & 1)
+            hidden[b] = 1, ++nhidden;
+    }
+    if (!ok)
+    {
+        free(p);
+        return NULL;
+    }
+    for (int b = 0; b < n; ++b)
+    {
+        uint8_t* q = p + at[b];
+        if (hidden[b])
+        {
+            w16(q + 2, 0), w16(q + 4, 0), w16(q + 0xa, 0), w16(q + 0xc, 0);
+            for (int r = 0; r < q[0x1b]; ++r)
+            {
+                w16(q + 0x20 + 20 * r + 2, g_spr_blank);
+                memcpy(q + 0x20 + 20 * r + 4, SHEET_NAME, 16);
+            }
+            continue;
+        }
+        if (links[b][0] == 0xFF)
+            continue; /* the title tab */
+        int above = 0;
+        for (int c = 0; c < n; ++c)
+            above += hidden[c] && y[c] < y[b];
+        w16(q + 4, y[b] - 16 * above);
+        for (int j = 0; j < 6; ++j)
+        {
+            int t = links[b][j];
+            for (int guard = 0; guard < n && t >= 1 && t <= n && hidden[t - 1]; ++guard)
+                t = links[t - 1][j];
+            q[0x15 + j] = (uint8_t)t;
+        }
+    }
+    /* the window shorter, and its frame: "comwin" sprite k is a panel with k + 1 buttons' wells */
+    w16(p + win + 0xc, r16(p + win + 0xc) - 16 * nhidden);
+    if (m->from_bottom)
+        w16(p + win + 4, r16(p + win + 4) + 16 * nhidden);
+    if (p[win + 0x14] >= 1 && !memcmp(p + win + 0x24, "menu    comwin  ", 16) && r16(p + win + 0x22) >= nhidden)
+        w16(p + win + 0x22, r16(p + win + 0x22) - nhidden);
+    *out_size = size;
+    return p;
+}
+
+/* ours in the game's list in place of what is there, when what is there hides other than it should */
+static void menu_install(Menu* m)
+{
+    unsigned want = 0;
+    for (int i = 0; i < m->nitems; ++i)
+        want |= g_hide & 1u << m->items[i].bit;
+    uint32_t cur = find_layout(m->name);
+    if (!cur)
+        return;
+    uint32_t parsed = rd32(cur + 8), block = parsed ? rd32(parsed) : 0;
+    int ours = m->guest && block >= m->guest && block < m->guest + m->size;
+    if (ours ? want == m->installed : !want)
+        return;
+    size_t n;
+    uint8_t* l = menu_layout(m, want, &n);
+    if (!l)
+    {
+        fprintf(stderr, "[modern] %.16s in the menu DAT is not the one known: its items stay\n", m->name);
+        m->nitems = 0;
+        return;
+    }
+    m->guest = gbytes(l, (uint32_t)n), m->size = (uint32_t)n;
+    free(l);
+    memcpy(GUEST_PTR(cur + 0x46), m->renamed, 16);
+    if (!find_layout(m->name))
+        add(LAYOUT_ADD, MGR, m->guest);
+    m->installed = want;
+}
+
+/* the settings into the game's menus: each shows as it next opens */
+static void hide_apply(void)
+{
+    if (!g_hide_ready)
+        return;
+    actions_install();
+    for (int k = 0; k < NMENUS; ++k)
+        menu_install(&MENUS[k]);
+}
+
 /* Ours in the game's lists: the sheet, the Config list in place of the game's (renamed), the pages.
  * The game could load its menu data again, so this is looked at now and then. */
 static void install(void)
@@ -947,6 +1203,7 @@ static void install(void)
     for (int k = 0; k < NPAGES; ++k)
         if (!find_layout(PAGES[k].name))
             add(LAYOUT_ADD, MGR, PAGES[k].layout);
+    hide_apply();
 }
 
 /* 0 when this is not the build the addresses are for */
@@ -960,10 +1217,14 @@ static int setup(void)
         if (CONFIG_KNOWN[i] && rd32(CONFIG_VTBL + 4u * i) != CONFIG_KNOWN[i])
             return 0;
     for (int k = 0; k < NPAGES; ++k)
-        if (!guest_is(PAGES[k].spare, PAGES[k].spare_was, 16) ||
-            (PAGES[k].spare_dup && !guest_is(PAGES[k].spare - 0x2c, PAGES[k].spare_was, 16)) ||
-            find_layout(PAGES[k].spare_was))
+        if (PAGES[k].spare_how == SPARE_END
+                ? !guest_is(PAGES[k].spare, NO_NAME, 16) || rd32(PAGES[k].spare + 0x20) ||
+                      *GUEST_PTR(PAGES[k].spare + 0x2c)
+                : !guest_is(PAGES[k].spare, PAGES[k].spare_was, 16) ||
+                      (PAGES[k].spare_how == SPARE_DUP && !guest_is(PAGES[k].spare - 0x2c, PAGES[k].spare_was, 16)) ||
+                      find_layout(PAGES[k].spare_was))
             return 0;
+    g_actions_ok = guest_is(ACTION_LISTS, ACTIONS_KNOWN, sizeof ACTIONS_KNOWN);
     size_t csize;
     uint8_t* c = build_sheet() ? config_layout(&csize) : NULL;
     if (!c)
@@ -1018,6 +1279,9 @@ static int setup(void)
     wr32(cvt + 4 * 4, thunk_for("modern", "config_draw"));
     wr32(cvt + 4 * 6, thunk_for("modern", "config_input"));
     wr32(cfg, cvt);
+    g_hide_ready = 1;
+    if (!g_actions_ok)
+        fprintf(stderr, "[modern] the combat menu's lists are not the ones known: its items stay\n");
     fprintf(stderr, "[modern] Config > Modern ready (%d sprites, %zu bytes)\n", S.sprites, S.n);
     return 1;
 }
@@ -1077,5 +1341,11 @@ void modern_init(const ModernSetup* setup)
         float v = (float)atof(buf);
         if (v == 0.0f || (v >= 0.5f && v <= 8.0f))
             g_ui_aspect = v, user32_set_ui_aspect(v);
+    }
+    if (cfg_value(path, "hide", buf, sizeof buf))
+    {
+        g_hide = (unsigned)strtoul(buf, NULL, 10) & ((1u << NHIDE) - 1);
+        if (g_hide >> HIDE_OLD_MAGIC_TRUST & 1)
+            g_hide = (g_hide & ~(1u << HIDE_OLD_MAGIC_TRUST)) | 1u << HIDE_TRUST;
     }
 }

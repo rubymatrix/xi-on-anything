@@ -128,8 +128,7 @@ static float g_clear_color[4], g_clear_z;
 static uint32_t g_clear_stencil;
 static id<MTLBuffer> g_dummy;
 static id<MTLRenderPipelineState> g_present_pipe, g_present_cas_pipe, g_overlay_pipe;
-/* the frame-rate overlay: presents counted over half-second windows */
-static int g_overlay = 1;
+/* the frame-rate overlay (g_fxs.fps): presents counted over half-second windows */
 static double g_fps_since;
 static uint32_t g_fps_frames;
 static char g_fps_text[32] = "-- FPS";
@@ -142,7 +141,7 @@ static struct
 {
     float fx, ao, radius, grade, sat, contrast, sharpen, filter, aniso, fog, fog_falloff, fog_height, fog_max, fog_sun,
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft, sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw,
-        draw_entities;
+        draw_entities, fps;
 } g_fxs;
 
 /* --- small hash maps (key bytes -> object) ------------------------------------------------------------- */
@@ -2206,6 +2205,8 @@ static const struct
     /* not effects: the host's draw distances (host64 --draw-distance), live while tuning; 0 leaves them */
     { "draw", offsetof(__typeof__(g_fxs), draw), 0.0f },
     { "draw_entities", offsetof(__typeof__(g_fxs), draw_entities), 0.0f },
+    /* not an effect either: the frame-rate overlay, shown (1) or hidden (0) */
+    { "fps", offsetof(__typeof__(g_fxs), fps), 1.0f },
 };
 
 static float* fx_setting(const char* key)
@@ -3149,7 +3150,7 @@ void gfx_present(GfxTex* bb)
                 [e setFragmentTexture:bb->view atIndex:0];
                 [e setFragmentSamplerState:g_present_samp atIndex:0];
                 [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-                if (g_overlay && g_overlay_pipe)
+                if (g_fxs.fps != 0.0f && g_overlay_pipe)
                     draw_overlay(e, drawable.texture.width, drawable.texture.height);
                 [e endEncoding];
                 [cmd() presentDrawable:drawable];
@@ -3218,12 +3219,14 @@ int gfx_init(void* window, int vsync)
         [vf release];
         [ff release];
         [pd release];
-        /* the overlay: blended over the frame; FFXI_FPS=0 turns it off */
+        /* the overlay: blended over the frame; FFXI_FPS=0 hides it (the settings file's fps, from
+         * Config > Modern, has the last word) */
         const char* prof = getenv("FFXI_PROFILE");
         gfx_profiling = prof && prof[0] && prof[0] != '0';
-        const char* show = getenv("FFXI_FPS");
-        g_overlay = !(show && show[0] == '0');
         fx_config();
+        const char* show = getenv("FFXI_FPS");
+        if (show && show[0] == '0')
+            g_fxs.fps = 0.0f;
         pd = [[MTLRenderPipelineDescriptor alloc] init];
         vf = [g_util newFunctionWithName:@"overlay_vs"], ff = [g_util newFunctionWithName:@"overlay_fs"];
         pd.vertexFunction = vf;
