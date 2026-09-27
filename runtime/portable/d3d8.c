@@ -3077,10 +3077,15 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
         gfx_prof_front(gfx_now_ns() - t0);
 }
 
-/* The game's cursor: a small screen-space draw (its sprite, 18 pixels in a 1280-wide menu) whose box
- * holds the point the game was last given the mouse at */
+/* The game's cursor: a small screen-space draw (its sprite, 18 pixels in a 1280-wide menu) from the
+ * cursor's 64x64 sheet whose box holds the point the game was last given the mouse at. The sheet
+ * matters: with the mouse outside the interface box that point is raw, and a menu glyph whose
+ * unsqueezed place lies under it would otherwise be taken for the cursor and drawn there. */
 static int ui_is_cursor(GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data, uint32_t up_stride)
 {
+    Obj* t = obj(g_dev.cur.tex[0]);
+    if (!t || t->width > 64 || t->height > 64)
+        return 0;
     uint32_t base, stride, size;
     if (up_data)
         base = up_data, stride = up_stride, size = 0xFFFFFFFFu;
