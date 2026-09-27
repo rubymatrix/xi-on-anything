@@ -1111,15 +1111,16 @@ static uint32_t chain_levels(uint32_t w, uint32_t h, uint32_t levels)
  * size (locks, descriptions, XYZRHW coordinates), and its draws land on the larger texture through a
  * viewport scaled to match (scale_to_target), so the interface is drawn at the screen's resolution
  * and the final stretch is one to one. FFXI_UI_NATIVE=0 draws it at the menu resolution again. */
-/* w x h is smaller than the screen and of the --ui-aspect box's shape (1280x720 for 16:9, 1px either way) */
+/* w x h is smaller than the screen and of the --ui-aspect box's shape (1280x720 for 16:9, 1px either
+ * way): narrower than the screen in a wider window, shorter in a taller one */
 static int ui_box_shape(uint32_t w, uint32_t h)
 {
     uint32_t bw = g_dev.pp[0], bh = g_dev.pp[1];
-    float s = user32_ui_squeeze(g_dev.hwnd);
-    if (s >= 1.0f || !h || w >= bw || h >= bh)
+    float s = user32_ui_squeeze(g_dev.hwnd), sy = user32_ui_squeeze_y(g_dev.hwnd);
+    if ((s >= 1.0f && sy >= 1.0f) || !h || w >= bw || h >= bh)
         return 0;
-    double boxw = bw * (double)s;
-    return fabs((double)w * bh - boxw * h) <= (double)bh;
+    double boxw = bw * (double)s, boxh = bh * (double)sy;
+    return fabs((double)w * boxh - boxw * h) <= boxh;
 }
 
 static int native_size(uint32_t w, uint32_t h, uint32_t* pw, uint32_t* ph)
@@ -2572,30 +2573,34 @@ static void ui_present(void)
     user32_ui_hit = ui_hit;
 }
 
-/* The draw's x mapped to a + b x (the game's pixels, across the whole target): its viewport - the
- * clip rectangle the game gave it, in the target's pixels - moves and narrows to match, while the
- * XYZRHW mapping (u.vp, the viewport in the game's pixels) stays, so the draw keeps its clip */
+/* The draw's x (axis 0) or y (axis 1) mapped to a + b x (the game's pixels, across the whole
+ * target): its viewport - the clip rectangle the game gave it, in the target's pixels - moves and
+ * narrows to match, while the XYZRHW mapping (u.vp, the viewport in the game's pixels) stays, so the
+ * draw keeps its clip */
 static void ui_target_size(float* w, float* h);
 
-static void ui_map(GfxDraw* d, float a, float b)
+static void ui_map_axis(GfxDraw* d, int i, float a, float b)
 {
-    float x0 = d->u.vp[0], w = d->u.vp[2];
+    float x0 = d->u.vp[i], w = d->u.vp[i + 2];
     if (!(w > 0))
         return;
-    float k = (float)d->vp[2] / w; /* the target's pixels per game pixel */
+    float k = (float)d->vp[i + 2] / w; /* the target's pixels per game pixel */
     float l = (a + b * x0) * k, r = (a + b * (x0 + w)) * k;
     /* kept within the target: the back ends clip a viewport to it, which would shrink the mapping
      * (a bar's edge line, widened past the screen's edge, stopped short of its corner) */
     float tw, th;
     ui_target_size(&tw, &th);
+    float edge = i == 0 ? tw : th;
     l = l < 0 ? 0 : l;
-    r = r > tw * k ? tw * k : r;
-    d->vp[0] = (uint32_t)(l + 0.5f);
-    d->vp[2] = r > l ? (uint32_t)(r - l + 0.5f) : 0;
+    r = r > edge * k ? edge * k : r;
+    d->vp[i] = (uint32_t)(l + 0.5f);
+    d->vp[i + 2] = r > l ? (uint32_t)(r - l + 0.5f) : 0;
     /* what rounding the clip took off, given back to the mapping so the draw lands where asked */
-    d->u.vp[0] = x0 + ((float)d->vp[0] / k - (a + b * x0)) / b;
-    d->u.vp[2] = (float)d->vp[2] / k / b;
+    d->u.vp[i] = x0 + ((float)d->vp[i] / k - (a + b * x0)) / b;
+    d->u.vp[i + 2] = (float)d->vp[i + 2] / k / b;
 }
+
+static void ui_map(GfxDraw* d, float a, float b) { ui_map_axis(d, 0, a, b); }
 
 /* The game's size of the target the draw goes to: the back buffer's, or the menu target's */
 static void ui_target_size(float* w, float* h)
@@ -2608,8 +2613,8 @@ static void ui_target_size(float* w, float* h)
 
 static void ui_squeeze(GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data, uint32_t up_stride, int mark)
 {
-    float s = user32_ui_squeeze(g_dev.hwnd);
-    if (s >= 1.0f)
+    float s = user32_ui_squeeze(g_dev.hwnd), sy = user32_ui_squeeze_y(g_dev.hwnd);
+    if (s >= 1.0f && sy >= 1.0f)
         return;
     uint32_t base, stride, size;
     if (up_data)
@@ -2642,6 +2647,26 @@ static void ui_squeeze(GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data,
     float W, h;
     ui_target_size(&W, &h);
     float slack = 1.0f + W / 256.0f;
+    if (sy < 1.0f)
+    {
+        /* a window taller than the interface's shape: squeezed toward the middle up and down. What
+         * covers the whole target stays (the 3D scene put on the screen, fades, the dimming behind a
+         * menu); a full-width band at the top or bottom (a cutscene's bars, the lobby's help bar)
+         * keeps its outer edge on the screen's */
+        float yslack = 1.0f + h / 256.0f, a = h * 0.5f * (1.0f - sy), b = sy;
+        int wide = lo <= slack && hi >= W - slack, top = ylo <= yslack, bottom = yhi >= h - yslack;
+        if (wide && top && bottom)
+            return;
+        if (wide && (top || bottom) && yhi > ylo)
+        {
+            float t0 = top ? 0.0f : a + sy * ylo, t1 = bottom ? h : a + sy * yhi;
+            b = (t1 - t0) / (yhi - ylo), a = t0 - b * ylo;
+        }
+        ui_map_axis(d, 1, a, b);
+        if (mark)
+            ui_mark(lo / W, hi / W, (a + b * ylo) / h, (a + b * yhi) / h);
+        return;
+    }
     if (lo <= slack && hi >= W - slack)
     {
         if (yhi - ylo <= h * UI_BAR_MAX_H && g_ui_nbars < UI_MAX_BARS)
