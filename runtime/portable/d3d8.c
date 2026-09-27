@@ -2575,6 +2575,8 @@ static void ui_present(void)
 /* The draw's x mapped to a + b x (the game's pixels, across the whole target): its viewport - the
  * clip rectangle the game gave it, in the target's pixels - moves and narrows to match, while the
  * XYZRHW mapping (u.vp, the viewport in the game's pixels) stays, so the draw keeps its clip */
+static void ui_target_size(float* w, float* h);
+
 static void ui_map(GfxDraw* d, float a, float b)
 {
     float x0 = d->u.vp[0], w = d->u.vp[2];
@@ -2582,7 +2584,12 @@ static void ui_map(GfxDraw* d, float a, float b)
         return;
     float k = (float)d->vp[2] / w; /* the target's pixels per game pixel */
     float l = (a + b * x0) * k, r = (a + b * (x0 + w)) * k;
+    /* kept within the target: the back ends clip a viewport to it, which would shrink the mapping
+     * (a bar's edge line, widened past the screen's edge, stopped short of its corner) */
+    float tw, th;
+    ui_target_size(&tw, &th);
     l = l < 0 ? 0 : l;
+    r = r > tw * k ? tw * k : r;
     d->vp[0] = (uint32_t)(l + 0.5f);
     d->vp[2] = r > l ? (uint32_t)(r - l + 0.5f) : 0;
     /* what rounding the clip took off, given back to the mapping so the draw lands where asked */
