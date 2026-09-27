@@ -16,6 +16,7 @@
  *      so our gamecore reports 16 zero bytes. Its command line carries the view port.
  *   5. The game's lobby host name resolves to the server (host64's --server). */
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -64,8 +65,23 @@ typedef int sock_t;
 #include "gamecore_config.h"
 #include "ws2.h"
 
-/* the sign-in protocol version sent to xi_connect, which refuses versions it does not know */
-static const int LOADER_VERSION[3] = { 2, 1, 2 };
+int lsb_parse_version(const char* s, int out[3])
+{
+    if (!s)
+        return 0;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (*s < '0' || *s > '9')
+            return 0;
+        char* end;
+        long v = strtol(s, &end, 10);
+        if (v > 65535 || *end != (i < 2 ? '.' : 0))
+            return 0;
+        out[i] = (int)v;
+        s = end + (i < 2);
+    }
+    return 1;
+}
 
 #define TIMEOUT_MS 15000
 
@@ -402,7 +418,7 @@ static int json_int(const char* j, const char* key, long long* out)
     return 1;
 }
 
-/* a JSON string's text, unescaped simply (\n and \" and \\) */
+/* a JSON string's text, unescaped (\uXXXX beyond ASCII as '?') */
 static int json_str(const char* j, const char* key, char* out, size_t n)
 {
     const char* p = json_find(j, key);
@@ -414,7 +430,18 @@ static int json_str(const char* j, const char* key, char* out, size_t n)
         if (*p == '\\' && p[1])
         {
             ++p;
-            out[o++] = *p == 'n' ? '\n' : *p == 't' ? '\t' : *p;
+            if (*p == 'u')
+            {
+                /* \uXXXX: ASCII as itself, anything else as '?' */
+                char hex[5] = { 0 };
+                int k = 0;
+                for (; k < 4 && isxdigit((unsigned char)p[1]); ++k)
+                    hex[k] = *++p;
+                unsigned long c = strtoul(hex, NULL, 16);
+                out[o++] = k == 4 && c < 0x80 ? (char)c : '?';
+            }
+            else
+                out[o++] = *p == 'n' ? '\n' : *p == 'r' ? '\r' : *p == 't' ? '\t' : *p == 'b' ? '\b' : *p == 'f' ? '\f' : *p;
         }
         else
             out[o++] = *p;
@@ -526,12 +553,34 @@ int read_secret(const char* prompt, char* out, size_t n)
 #endif
 }
 
+/* the version a refusal names ("... update to version '2.0.x' ..."), an x as 0 */
+static int server_version(const char* message, int out[3])
+{
+    const char* p = strstr(message, "version '");
+    if (!p)
+        return 0;
+    p += strlen("version '");
+    char v[24];
+    size_t n = 0;
+    for (; *p && *p != '\'' && n + 1 < sizeof v; ++p)
+        v[n++] = *p == 'x' || *p == 'X' || *p == '*' ? '0' : *p;
+    v[n] = 0;
+    return *p == '\'' && lsb_parse_version(v, out);
+}
+
 int lsb_login(const LsbLogin* l, char* err, size_t errn)
 {
 #if defined(_WIN32)
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
+    int version[3];
+    const char* v = l->version && *l->version ? l->version : LSB_LOADER_VERSION;
+    if (!lsb_parse_version(v, version))
+    {
+        snprintf(err, errn, "the loader version \"%s\" is not major.minor.patch", v);
+        return 0;
+    }
     char user[160], pass[160], otp[64], token[600], req[1400];
     json_string(user, sizeof user, l->user);
     json_string(pass, sizeof pass, l->password ? l->password : "");
@@ -545,20 +594,55 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         json_string(t, sizeof t, l->login_token);
         snprintf(token, sizeof token, "\"login_token\":%s,", t);
     }
-    snprintf(req, sizeof req,
-        "{\"command\":16,%s\"new_password\":\"\",\"otp\":%s,\"password\":%s,\"trust_this_computer\":false,"
-        "\"trust_token\":\"\",\"username\":%s,\"version\":[%d,%d,%d]}",
-        token, otp, pass, user, LOADER_VERSION[0], LOADER_VERSION[1], LOADER_VERSION[2]);
+    if (l->version_used)
+        l->version_used[0] = 0;
+    char reply[8192], message[512];
+    int adopted = 0;
+    for (int attempt = 0;; ++attempt)
+    {
+        snprintf(req, sizeof req,
+            "{\"command\":16,%s\"new_password\":\"\",\"otp\":%s,\"password\":%s,\"trust_this_computer\":false,"
+            "\"trust_token\":\"\",\"username\":%s,\"version\":[%d,%d,%d]}",
+            token, otp, pass, user, version[0], version[1], version[2]);
+        int ok = tls_exchange(l->server, l->auth_port, req, reply, sizeof reply, err, errn);
+        memset(req, 0, sizeof req);
+        if (!ok)
+        {
+            memset(pass, 0, sizeof pass);
+            return 0;
+        }
+        /* A version the server refuses: xi_connect names the one it wants ("Please update to version
+         * '2.0.x'"). Once, sign in again with that (x as 0) and report it for next time. */
+        int want[3];
+        if (attempt == 0 && json_str(reply, "error_message", message, sizeof message) && server_version(message, want)
+            && memcmp(want, version, sizeof want))
+        {
+            fprintf(stderr, "[lsb] the server wants loader version %d.%d.%d, not %d.%d.%d: signing in with that\n",
+                want[0], want[1], want[2], version[0], version[1], version[2]);
+            memcpy(version, want, sizeof version);
+            adopted = 1;
+            continue;
+        }
+        break;
+    }
     memset(pass, 0, sizeof pass);
-    char reply[8192];
-    int ok = tls_exchange(l->server, l->auth_port, req, reply, sizeof reply, err, errn);
-    memset(req, 0, sizeof req);
-    if (!ok)
-        return 0;
 
-    char message[512];
     if (json_str(reply, "error_message", message, sizeof message) && message[0])
     {
+        /* its lines (\r\n) and other control characters as single spaces: the message is shown on
+         * one line, in the log and on the sign-in screen */
+        size_t o = 0;
+        for (const char* p = message; *p; ++p)
+            if ((unsigned char)*p < 0x20 || *p == ' ')
+            {
+                if (o && message[o - 1] != ' ')
+                    message[o++] = ' ';
+            }
+            else
+                message[o++] = *p;
+        while (o && message[o - 1] == ' ')
+            --o;
+        message[o] = 0;
         snprintf(err, errn, "the server says: %s", message);
         return 0;
     }
@@ -627,5 +711,7 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
     snprintf(cmd, sizeof cmd, " /game eAZcFcB -net 3 -port %u", l->view_port);
     gamecore_set_cmdline(cmd);
     fprintf(stderr, "[lsb] signed in to LSB as %s (account %lld)\n", l->user, account);
+    if (adopted && l->version_used)
+        snprintf(l->version_used, 24, "%d.%d.%d", version[0], version[1], version[2]);
     return 1;
 }

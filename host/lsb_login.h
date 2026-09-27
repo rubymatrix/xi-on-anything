@@ -14,7 +14,18 @@ typedef struct LsbLogin
     /* A single-use launch token from a server's own launcher (e.g. minted after a Discord
      * login), sent in place of the password and OTP; NULL for none. */
     const char* login_token;
+    /* The loader version sent at sign-in, "major.minor.patch"; NULL or "" for LSB_LOADER_VERSION.
+     * xi_connect refuses versions it does not expect, and servers pin their own. */
+    const char* version;
+    /* When not NULL (24 bytes): the version signed in with when the server refused the one sent
+     * and named another, "" otherwise - to send it from the start next time. */
+    char* version_used;
 } LsbLogin;
+
+#define LSB_LOADER_VERSION "2.1.2"
+
+/* A loader version as major.minor.patch (each 0..65535); 0 when it is not one. */
+int lsb_parse_version(const char* s, int out[3]);
 
 /* Signs in on the auth port (TLS, xi_connect's JSON), opens the login data connection and
  * answers it for the rest of the run, and arranges what FFXI's lobby traffic needs: the session

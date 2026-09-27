@@ -441,7 +441,7 @@ int main(int argc, char** argv)
     unsigned npacks = 0;
     const char* user_dir = NULL;
     uint32_t game_server = DEFAULT_GAME_SERVER;
-    LsbLogin lsb = { 0, 54231, 54230, 54001, NULL, NULL, "", NULL };
+    LsbLogin lsb = { 0, 54231, 54230, 54001, NULL, NULL, "", NULL, NULL, NULL };
     static char base_reg[1100];
     const char* server_name = NULL; /* --server as given, for the sign-in screen */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0;
@@ -482,6 +482,16 @@ int main(int argc, char** argv)
             lsb.otp = argv[i + 1];
         else if (!strcmp(argv[i], "--login-token"))
             lsb.login_token = argv[i + 1];
+        else if (!strcmp(argv[i], "--loader-version"))
+        {
+            int v[3];
+            if (!lsb_parse_version(argv[i + 1], v))
+            {
+                fprintf(stderr, "--loader-version: major.minor.patch, the version the server expects (" LSB_LOADER_VERSION " by default)\n");
+                return 2;
+            }
+            lsb.version = argv[i + 1];
+        }
         else if (!strcmp(argv[i], "--fps-divisor"))
         {
             long d = strtol(argv[i + 1], NULL, 10);
@@ -558,7 +568,7 @@ int main(int argc, char** argv)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
                         "[--server name] [--user name [--pass p] [--otp code] [--authport n] "
-                        "[--dataport n] [--viewport n]] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k]\n");
+                        "[--dataport n] [--viewport n]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k]\n");
         return 2;
     }
     if (!lsb.password)
@@ -573,6 +583,7 @@ int main(int argc, char** argv)
         /* an app bundle's first-run defaults (appdefaults.h) */
         su.default_mode = -1, su.default_space = -1;
         su.user_dir = user_dir;
+        su.loader_version = lsb.version;
         if (app_default("FFXIFullscreenSpace", app_val, sizeof app_val))
             su.default_space = atoi(app_val) != 0;
         if (app_default("FFXIServer", app_server, sizeof app_server))

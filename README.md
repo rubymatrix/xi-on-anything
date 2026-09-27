@@ -176,6 +176,7 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--otp <code>` | The two-factor code, for an account that has one. |
 | `--login-token <token>` | A single-use launch token from a server's own launcher (for example a Discord login). It stands in for the password. |
 | `--authport`, `--dataport`, `--viewport` | LandSandBoat's ports, by default 54231 (sign-in, TLS), 54230 (data), 54001 (lobby view). |
+| `--loader-version <a.b.c>` | The loader version sent at sign-in, `2.1.2` by default. LandSandBoat refuses a version it does not expect; when its refusal names the one it wants (`2.0.x`), `host64` signs in again once with that (an `x` as 0). The sign-in screen remembers the version (`loader_version=` in `signin.cfg`), including one a server asked for. |
 | `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its own registry keys. `ffxi.reg` in this repo is a starting point. |
 | `--reg-overlay <file.reg>` | Where the game saves settings it changes. It is loaded after the `--reg` files, and those are never rewritten. |
 | `--data-dir <folder>` | Where `host64` writes its own files (the `patch.ver` it makes for an install without one). Default: beside `host64`. |

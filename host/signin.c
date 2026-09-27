@@ -32,6 +32,7 @@ typedef struct Config
     int theme;
     int space; /* full screen in a macOS Space of its own (1) or in place (0) */
     uint16_t auth_port, data_port, view_port;
+    char loader_version[24]; /* "": LSB_LOADER_VERSION */
     char background[1024]; /* a picture behind the screen; "": background.png/.jpg beside signin.cfg */
 } Config;
 
@@ -177,6 +178,8 @@ static void config_load(const char* path, Config* c)
             c->data_port = (uint16_t)atoi(v);
         else if (!strcmp(line, "view_port"))
             c->view_port = (uint16_t)atoi(v);
+        else if (!strcmp(line, "loader_version"))
+            SDL_strlcpy(c->loader_version, v, sizeof c->loader_version);
     }
     fclose(f);
 }
@@ -195,6 +198,8 @@ static void config_save(const char* path, const Config* c)
         fprintf(f, "background=%s\n", c->background);
     if (c->auth_port || c->data_port || c->view_port)
         fprintf(f, "auth_port=%u\ndata_port=%u\nview_port=%u\n", c->auth_port, c->data_port, c->view_port);
+    if (c->loader_version[0])
+        fprintf(f, "loader_version=%s\n", c->loader_version);
     fclose(f);
 }
 
@@ -277,6 +282,7 @@ typedef struct Job
     SDL_AtomicInt state;
     char server[128], user[64], password[128], otp[32];
     uint16_t auth_port, data_port, view_port;
+    char loader_version[24], version_used[24];
     uint32_t ip;
     char error[512];
 } Job;
@@ -298,7 +304,9 @@ static void job_thread(void* arg)
             j->user,
             j->password,
             j->otp,
-            NULL };
+            NULL,
+            j->loader_version,
+            j->version_used };
         ok = lsb_login(&l, j->error, sizeof j->error);
     }
     memset(j->password, 0, sizeof j->password);
@@ -578,6 +586,7 @@ static void start_signin(Ui* u)
     SDL_strlcpy(j->password, u->password, sizeof j->password);
     SDL_strlcpy(j->otp, u->otp, sizeof j->otp);
     j->auth_port = u->cfg.auth_port, j->data_port = u->cfg.data_port, j->view_port = u->cfg.view_port;
+    SDL_strlcpy(j->loader_version, u->cfg.loader_version, sizeof j->loader_version);
     j->error[0] = 0;
     SDL_SetAtomicInt(&j->state, JOB_RUNNING);
     fprintf(stderr, "[signin] signing in as %s on %s\n", j->user, j->server);
@@ -676,6 +685,7 @@ enum
     RIGHT = 34,  /* its controls, and the buttons (Decline), from its right */
     LINE_H = 16, /* a line of its words */
     TOP_H = 36,  /* the status line, and room under it */
+    STATUS_LINES = 3, /* the most the status wraps to (a server's message) */
     ROW_H = 24,    /* a field's row */
     CHOICE_H = 30, /* a row of buttons' (their pills 24 tall) */
     OPTION_W = 44, /* a choice's button at the least */
@@ -938,6 +948,8 @@ static int choice_need(const Widget* c)
     return c->nopt * w + (c->nopt - 1) * GAP;
 }
 
+static int top_h(const Ui* u, int mw);
+
 /* The window's size in units (WIN_W wide, or wider for a row of buttons that needs it), its
  * controls' column and right edge */
 static void measure(const Ui* u, int* pw, int* ph, int* pcx, int* pright)
@@ -957,7 +969,66 @@ static void measure(const Ui* u, int* pw, int* ph, int* pcx, int* pright)
             cw = choice_need(&u->w[i]);
     *pw = cx + cw + RIGHT, *pcx = cx, *pright = cx + cw;
     /* the status line, the rows, the buttons' 26 at the bottom as Accept's */
-    *ph = TOP_H + rows + 8 + 26;
+    *ph = top_h(u, *pw) + rows + 8 + 26;
+}
+
+/* The status line's words, and their colour: what is going on - the sign-in, a wait on the
+ * keychain, what went wrong - or else where it signs in */
+static const uint8_t* status_text(const Ui* u, char* msg, size_t n)
+{
+    if (busy())
+        SDL_strlcpy(msg, "Connecting...", n);
+    else if (u->status[0])
+    {
+        SDL_strlcpy(msg, u->status, n);
+        return u->status_error ? RED : WHITE;
+    }
+    else if (SDL_GetAtomicInt(&g_keyread.state) == 1 && SDL_GetTicks() - u->opened > 1500)
+        SDL_strlcpy(msg, "Waiting keychain...", n);
+    else if (u->screen == SCREEN_SIGNIN)
+        snprintf(msg, n, "Sign in to %s", u->cfg.server[0] ? u->cfg.server : "(no server)");
+    else
+        SDL_strlcpy(msg, "Settings", n);
+    return WHITE;
+}
+
+/* Breaks msg into lines no wider than width, at spaces where it can: their starts and lengths.
+ * Past STATUS_LINES the last is cut short. */
+static int status_wrap(const Ui* u, const char* msg, float width, const char* start[STATUS_LINES],
+    size_t len[STATUS_LINES])
+{
+    int n = 0;
+    while (*msg && n < STATUS_LINES)
+    {
+        char line[512];
+        size_t fit = 0, brk = 0, total = strlen(msg);
+        while (fit < total && fit + 1 < sizeof line)
+        {
+            memcpy(line, msg, fit + 1);
+            line[fit + 1] = 0;
+            if (ui_text_width(&u->font, line, 1) > width)
+                break;
+            if (msg[++fit] == ' ' || !msg[fit])
+                brk = fit;
+        }
+        if (fit < total && brk && n + 1 < STATUS_LINES)
+            fit = brk; /* at the last space that fits */
+        start[n] = msg, len[n] = fit ? fit : 1;
+        msg += len[n++];
+        while (*msg == ' ')
+            ++msg;
+    }
+    return n ? n : 1;
+}
+
+/* the status line's height with the room under it: a line more for each it wraps onto */
+static int top_h(const Ui* u, int mw)
+{
+    char msg[512];
+    const char* start[STATUS_LINES];
+    size_t len[STATUS_LINES];
+    status_text(u, msg, sizeof msg);
+    return TOP_H + (status_wrap(u, msg, (float)(mw - 2 * PAD), start, len) - 1) * LINE_H;
 }
 
 /* How far open the window is, 0-1: the game's menus take 25 ticks of 1/60 s either way */
@@ -1040,29 +1111,23 @@ static void draw(Ui* u, int w, int h)
     }
     theme_window(u, wx, wy, ww, wh, k, 1, 1, notice_fill, k);
 
-    /* The status line: what is going on - the sign-in, a wait on the keychain, what went wrong - or
-     * else where it signs in */
+    /* the status line, wrapped over as many lines as it takes (up to STATUS_LINES) */
     {
-        char msg[512];
-        const uint8_t* col = WHITE;
-        if (busy())
-            SDL_strlcpy(msg, "Connecting...", sizeof msg);
-        else if (u->status[0])
-            SDL_strlcpy(msg, u->status, sizeof msg), col = u->status_error ? RED : WHITE;
-        else if (SDL_GetAtomicInt(&g_keyread.state) == 1 && SDL_GetTicks() - u->opened > 1500)
-            SDL_strlcpy(msg, "Waiting keychain...", sizeof msg);
-        else if (u->screen == SCREEN_SIGNIN)
-            snprintf(msg, sizeof msg, "Sign in to %s", u->cfg.server[0] ? u->cfg.server : "(no server)");
-        else
-            SDL_strlcpy(msg, "Settings", sizeof msg);
-        for (size_t len = strlen(msg); len > 0 && ui_text_width(&u->font, msg, 1) > mw - 2 * PAD; --len)
-            msg[len - 1] = 0;
-        text(u, msg, X(PAD), Y(10), k, col);
+        char msg[512], line[512];
+        const char* start[STATUS_LINES];
+        size_t len[STATUS_LINES];
+        const uint8_t* col = status_text(u, msg, sizeof msg);
+        int n = status_wrap(u, msg, (float)(mw - 2 * PAD), start, len);
+        for (int i = 0; i < n && msg[0]; ++i)
+        {
+            snprintf(line, sizeof line, "%.*s", (int)len[i], start[i]);
+            text(u, line, X(PAD), Y(10 + i * LINE_H), k, col);
+        }
     }
 
     /* a row a field or choice: its caption, then the field or the choice's buttons */
     Uint64 now = SDL_GetTicks();
-    int r = TOP_H;
+    int r = top_h(u, mw);
     for (int i = 0; i < u->nw; ++i)
     {
         Widget* c = &u->w[i];
@@ -1269,6 +1334,8 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         c->data_port = setup->data_port;
     if (setup->view_port)
         c->view_port = setup->view_port;
+    if (setup->loader_version)
+        SDL_strlcpy(c->loader_version, setup->loader_version, sizeof c->loader_version);
     /* Full screen in a Space of its own (the Mac's way: it slides in, and Ctrl+arrows or a swipe
      * move between it and the other desktops) or in place over the desktop. SDL reads this when it
      * starts, for the whole run: the game's window (user32) keeps it. */
@@ -1462,6 +1529,9 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
                 if (!plat_thread_start(keysave_thread, ks))
                     free(ks);
             }
+            /* the loader version the server asked for, sent from the start next time */
+            if (g_job.version_used[0])
+                SDL_strlcpy(c->loader_version, g_job.version_used, sizeof c->loader_version);
             out->server = g_job.ip;
             SDL_SetAtomicInt(&g_job.state, JOB_IDLE);
             begin_close(u, 1);
