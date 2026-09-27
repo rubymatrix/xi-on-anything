@@ -60,13 +60,31 @@ curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/install.s
 
 It installs Apple's command line tools if they are missing (a dialog: click Install), finds the
 game folder (or asks you to choose it), builds the game for your Mac from your own game files
-(a few minutes the first time), puts **Final Fantasy XI** in `/Applications` and starts it. Pick
-your server in the sign-in screen's Settings and sign in.
+(a few minutes the first time), puts **Final Fantasy XI** in `/Applications` and starts it.
+
+Before building it asks:
+
+- **Server**: the name or address to sign in to (blank: `127.0.0.1`).
+- **Resolution** and **window mode** (windowed, borderless window, borderless full screen, full
+  screen). The menus' resolution and the interface's shape follow: menus at half the window's
+  height, and wider than 16:9 the interface stays 16:9 in the middle (`--ui-aspect`).
+- **DAT overlay folder**: a server's own DATs (see [DAT overlays](#dat-overlays---dats); blank: none).
+
+Each question starts from what you have now, so on an update Enter keeps it. The options
+`--server`, `--resolution WxH`, `--window-mode 0-3` and `--dats <folder>|none` answer instead, e.g.
+`curl -fsSL .../install.sh | bash -s -- --server play.example.net --resolution 2560x1440`.
 
 Run the same line again to update, or after your server hands out a new game version. To name the
 folder yourself: `curl -fsSL .../install.sh | bash -s -- --game ~/Games/"FINAL FANTASY XI"`. The
 build's output is in `~/Library/Application Support/FFXIRecompile/source/build/setup.log`. From a
 clone of this repo, `./setup.command` does the same with the clone.
+
+To test the installer from a clone, uncommitted changes included, without touching your own app
+or settings: `python3 tests/setup_test.py` checks the questions and the saved files they update,
+and `tools/test_install.sh` runs `install.sh` as a player would, piped to bash, with everything in a
+sandbox folder. By default it stops after the questions; `--full` builds and installs into the
+sandbox, `--saved` starts from copies of your saved settings (an update), `--sandbox <folder>`
+reuses one (`--help`).
 
 ## Rules
 

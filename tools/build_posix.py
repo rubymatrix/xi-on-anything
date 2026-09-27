@@ -11,7 +11,8 @@
         parse checks, and renders in build/datui/ (tests/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
         [--menu-resolution WxH] [--window-mode 0-3] [--background picture] [--fullscreen-space 0|1]
-        [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--sign-identity name]
+        [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--dats folder]
+        [--sign-identity name]
         build/Final Fantasy XI.app: host64 with its libraries, ffxi.reg and the defaults above in
         its Info.plist (host/appdefaults.h), so it starts from Finder with no command line. The values
         go into the built app only: nothing names a server in the source.
@@ -288,6 +289,8 @@ def app(game, a):
         keys['FFXIUIAspect'] = a.ui_aspect
     if a.draw_distance:
         keys['FFXIDrawDistance'] = a.draw_distance
+    if a.dats:
+        keys['FFXIDats'] = os.path.abspath(os.path.expanduser(a.dats))
     if a.background:
         # the sign-in screen reads PNG, JPEG and BMP; anything else (WebP) becomes a PNG
         src, ext = os.path.expanduser(a.background), os.path.splitext(a.background)[1].lower()
@@ -348,6 +351,7 @@ def main():
     ap.add_argument('--nameplate-scale')
     ap.add_argument('--draw-distance')
     ap.add_argument('--ui-aspect')
+    ap.add_argument('--dats')
     args = ap.parse_args()
     if args.target == 'gfxtest':
         return gfxtest()

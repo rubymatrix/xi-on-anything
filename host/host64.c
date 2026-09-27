@@ -427,7 +427,7 @@ int main(int argc, char** argv)
         }
     }
 #endif
-    static char app_game[1024], app_server[256], app_bg[1100], app_val[64];
+    static char app_game[1024], app_server[256], app_bg[1100], app_dats[1024], app_val[64];
     const char* game = NULL;
     const char* regs[8];
     unsigned nregs = 0;
@@ -553,6 +553,8 @@ int main(int argc, char** argv)
     }
     if (!game && app_default("FFXIGameFolder", app_game, sizeof app_game))
         game = app_game;
+    if (!ndats && app_default("FFXIDats", app_dats, sizeof app_dats))
+        dats[ndats++] = app_dats;
     if (!ui_aspect_given && app_default("FFXIUIAspect", app_val, sizeof app_val) && !parse_aspect(app_val, &ui_aspect))
         ui_aspect = 0.0f;
     user32_set_ui_aspect(ui_aspect);

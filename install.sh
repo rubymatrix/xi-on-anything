@@ -51,6 +51,8 @@ main() {
         git clone --depth 1 --branch "$branch" "$repo" "$src"
     fi
 
+    # relative folders (--game, --dats, answers) are the player's, from where they ran this
+    export FFXI_CALLER_DIR="$PWD"
     cd "$src"
     # stdin is this script when piped from curl; setup asks its questions on the terminal
     if (exec </dev/tty) 2>/dev/null; then

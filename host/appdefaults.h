@@ -12,6 +12,7 @@
  *   FFXINameplates       "fix" or "off": names over heads keep their 4:3 shape, or widen with the window
  *   FFXINameplateScale   "1.25", or "1x1.2" (across x down): the size of those names
  *   FFXIDrawDistance     "3", or "3x1.5" (world x characters): draw distance, times the game's
+ *   FFXIDats             a DAT overlay folder (--dats), when the command line gives none
  *
  * They are defaults: what the player saved (signin.cfg, settings.reg) and the command line win.
  * Elsewhere, and outside a bundle, there are none. */
