@@ -99,6 +99,7 @@ static const char* g_cap_path;
 static void scene_forget(GfxTex* t);
 static FILE* g_cap;
 static uint32_t g_cap_esp, g_cap_frame, g_cap_n;
+static uint32_t g_cap_at[32], g_cap_nat; /* <path>.at: draws after which the target is dumped */
 static void cap_present(void);
 static void scene_present(void);
 
@@ -1799,6 +1800,48 @@ static uint32_t widen_quad(uint32_t data, const Obj* t)
     return buf;
 }
 
+/* An axis-aligned sprite quad drawn into a render target native_size enlarged: at the menu
+ * resolution a quad's edges fall between pixels, but enlarged (2.5x) an edge can fall on a pixel's
+ * centre, which then samples the quad's texture exactly at its edge - and a hair past it, wrapping to
+ * the far side of the sheet. FFXI draws its wider menu buttons as two strips side by side, the right
+ * one starting at u 0 of a sheet whose last column is transparent there: the alpha test dropped that
+ * pixel, a black line down the button (the selected one, a pixel off the others, lands on a centre);
+ * Config > Modern's pills stretch a body from u 0 of the same sheet. The UVs are pulled in by a sliver of a texel, which point sampling does not otherwise show. A copy:
+ * the game's vertices stay. */
+static int g_cap_inset; /* the drawlog: what inset_quad did with the draw it notes (-1 not a sprite, 1 inset) */
+
+static uint32_t inset_quad(uint32_t data, const Obj* t)
+{
+    g_cap_inset = -1;
+    Obj* rt = obj(g_dev.rt);
+    Obj* rtt = rt && rt->container ? obj(rt->container) : NULL;
+    if (!rtt || !rtt->pw || g_dev.cur.tss[0][16] != 1 || !t->width || !t->height)
+        return data;
+    float ex = (1.0f / 64.0f) / (float)t->width, ey = (1.0f / 64.0f) / (float)t->height;
+    float x[4], y[4], u[4], v[4];
+    for (int i = 0; i < 4; ++i)
+    {
+        x[i] = u2f(rd32(data + 28u * (uint32_t)i)), y[i] = u2f(rd32(data + 28u * (uint32_t)i + 4));
+        u[i] = u2f(rd32(data + 28u * (uint32_t)i + 20)), v[i] = u2f(rd32(data + 28u * (uint32_t)i + 24));
+    }
+    /* axis aligned: vertices 0 and 1 share a row, 0 and 2 a column (a strip) */
+    if (fabsf(y[0] - y[1]) > 0.01f || fabsf(y[2] - y[3]) > 0.01f || fabsf(x[0] - x[2]) > 0.01f ||
+        fabsf(x[1] - x[3]) > 0.01f || fabsf(v[0] - v[1]) > 1e-6f || fabsf(u[0] - u[2]) > 1e-6f)
+        return data;
+    g_cap_inset = 1;
+    static uint32_t buf;
+    if (!buf)
+        buf = gheap_alloc(4 * 28, 1);
+    memcpy(GUEST_PTR(buf), GUEST_PTR(data), 4 * 28);
+    float uc = (u[0] + u[1]) * 0.5f, vc = (v[0] + v[2]) * 0.5f;
+    for (int i = 0; i < 4; ++i)
+    {
+        wr32(buf + 28u * (uint32_t)i + 20, f2u(u[i] + (u[i] < uc ? ex : u[i] > uc ? -ex : 0.0f)));
+        wr32(buf + 28u * (uint32_t)i + 24, f2u(v[i] + (v[i] < vc ? ey : v[i] > vc ? -ey : 0.0f)));
+    }
+    return buf;
+}
+
 static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
 {
     g_cap_esp = g->esp;
@@ -1813,6 +1856,8 @@ static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
         else if (t0->repl_pad)
             data = widen_quad(data, t0);
     }
+    else if (t0 && ARG(1) == 5 && ARG(2) == 2 && ARG(4) == 28 && g_dev.cur.vs == 0x144)
+        data = inset_quad(data, t0);
     draw(ARG(1), ARG(2), 0, 0, 0, data, ARG(4));
     bind(&g_dev.cur.stream[0], 0);
     g_dev.cur.stride[0] = 0;
@@ -2661,11 +2706,44 @@ static void cap_present(void)
     fclose(f);
     g_cap = fopen(g_cap_path, "w");
     g_cap_n = 0;
+    g_cap_nat = 0;
+    char at[1024];
+    snprintf(at, sizeof at, "%s.at", g_cap_path);
+    FILE* af = fopen(at, "r");
+    while (af && g_cap_nat < 32 && fscanf(af, "%u", &g_cap_at[g_cap_nat]) == 1)
+        g_cap_nat++;
+    if (af)
+        fclose(af);
     uint32_t w, h;
     d3d8_screen_size(&w, &h);
     if (g_cap)
         fprintf(g_cap, "frame %u screen %ux%u backbuffer %ux%u image %08x-%08x\n", g_cap_frame, w, h, g_dev.pp[0],
             g_dev.pp[1], rt_image_lo, rt_image_hi);
+}
+
+/* the current target as it is after draw n, if <path>.at asks for it: <path>.<n>.bin, a header
+ * of width and height, then its pixels as the GPU holds them (BGRA) */
+static void cap_dump_target(uint32_t n)
+{
+    uint32_t k = 0;
+    while (k < g_cap_nat && g_cap_at[k] != n)
+        k++;
+    Obj* rt = obj(g_dev.rt);
+    Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+    if (k == g_cap_nat || !t || !t->gpu || t->format != 21)
+        return;
+    uint32_t w = t->pw ? t->pw : t->width, h = t->pw ? t->ph : t->height;
+    uint8_t* px = (uint8_t*)malloc((size_t)w * h * 4);
+    gfx_tex_read(t->gpu, 0, 0, px, w * 4);
+    char path[1100];
+    snprintf(path, sizeof path, "%s.%u.bin", g_cap_path, n);
+    FILE* f = fopen(path, "wb");
+    if (f)
+    {
+        fwrite(&w, 4, 1, f), fwrite(&h, 4, 1, f), fwrite(px, 4, (size_t)w * h, f);
+        fclose(f);
+    }
+    free(px);
 }
 
 static void cap_draw(GfxDraw* d, uint32_t prim, uint32_t count, uint32_t first, uint32_t n, uint32_t up_data,
@@ -2682,8 +2760,10 @@ static void cap_draw(GfxDraw* d, uint32_t prim, uint32_t count, uint32_t first, 
         crs[27], crs[19], crs[20], crs[171], ct[1], ct[2], ct[3], ct[4], ct[5], ct[6], g_dev.cur.tss[1][1]);
     Obj* t = obj(g_dev.cur.tex[0]);
     if (t)
-        fprintf(f, " tex %08x %ux%u fmt %u", g_dev.cur.tex[0], t->width, t->height, t->format);
-    fprintf(f, " z %u/%u fog %u/%u lit %u caster %u", d->depth.zenable, d->depth.zwrite, d->fs.fog, d->vs.fog_vertex,
+        fprintf(f, " tex %08x %ux%u fmt %u filt %u/%u", g_dev.cur.tex[0], t->width, t->height, t->format, ct[16], ct[17]);
+    fprintf(f, " up %u inset %d", up_data ? 1u : 0u, g_cap_inset);
+    g_cap_inset = 0;
+    fprintf(f, " z %u/%u func %u fog %u/%u lit %u caster %u", d->depth.zenable, d->depth.zwrite, d->depth.zfunc, d->fs.fog, d->vs.fog_vertex,
         d->vs.lighting, d->caster);
     if (!d->vs.rhw)
     {
@@ -2727,8 +2807,8 @@ static void cap_draw(GfxDraw* d, uint32_t prim, uint32_t count, uint32_t first, 
             hi[c] = x > hi[c] ? x : hi[c];
         }
         if (i < 4 && g_dev.cur.vs == 0x144 && stride == 28) /* XYZRHW, diffuse, one texture: with its UV */
-            fprintf(f, "  v%u %.2f %.2f %.4f uv %.5f %.5f\n", i, u2f(rd32(base + at)), u2f(rd32(base + at + 4)),
-                u2f(rd32(base + at + 8)), u2f(rd32(base + at + 20)), u2f(rd32(base + at + 24)));
+            fprintf(f, "  v%u %.2f %.2f %.4f uv %.5f %.5f c %08x\n", i, u2f(rd32(base + at)), u2f(rd32(base + at + 4)),
+                u2f(rd32(base + at + 8)), u2f(rd32(base + at + 20)), u2f(rd32(base + at + 24)), rd32(base + at + 16));
         else if (i < 4)
             fprintf(f, "  v%u %.2f %.2f %.4f\n", i, u2f(rd32(base + at)), u2f(rd32(base + at + 4)),
                 u2f(rd32(base + at + 8)));
@@ -3103,6 +3183,8 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
     d->prim = prim, d->count = count;
     apply_targets();
     gfx_draw(d);
+    if (g_cap)
+        cap_dump_target(g_cap_n - 1);
 }
 
 /* --- resources: IDirect3DResource8, textures, buffers, surfaces ------------------------------------------ */
