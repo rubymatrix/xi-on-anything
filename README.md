@@ -47,6 +47,16 @@ sign-in screen's Settings.
   </tr>
 </table>
 
+## Ashita and Windower will never be supported
+
+> [!WARNING]
+> Ashita and Windower are fundamentally incompatible with this project and will never be
+> supported. Both work by injecting a Windows DLL into the original 32-bit x86 game process and
+> hooking its code and its Direct3D 8 device at fixed addresses. Here the original game code never
+> runs: it is recompiled to native C on our own platform layer (Metal on macOS), so there are no
+> x86 addresses, no game process and no Direct3D 8 device for them to load into or hook. Their addons and plugins will not work either.
+> Please don't open issues asking for them.
+
 ## Install (players)
 
 You need a Mac with Apple silicon (M1 or later), macOS 12 or later, about 3 GB free, and the
