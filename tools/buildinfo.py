@@ -39,7 +39,9 @@ def record(label, game):
 
 
 def current(required=True):
-    """{'build', 'game', 'ffximain_meta', 'ffxi_meta', 'ffximain_sha', 'ffxi_sha', 'addresses', 'hooks', 'crt'},
+    """{'build', 'game', 'ffximain_meta', 'ffxi_meta', 'ffximain_sha', 'ffxi_sha', 'addresses', 'hooks', 'crt',
+    'modern', 'modern_keys'}, ('modern_keys': every name a build's modern section has, so build.h
+    names them all whichever this build is)
     or None if tools/prepare.py has not run and not required."""
     try:
         with open(CHOSEN) as f:
@@ -60,4 +62,6 @@ def current(required=True):
         'addresses': b['addresses'],
         'hooks': b.get('hooks', {}),
         'crt': b['crt'],
+        'modern': b.get('modern', {}),
+        'modern_keys': sorted({k for other in known().values() for k in other.get('modern', {})}),
     }

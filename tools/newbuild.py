@@ -5,10 +5,11 @@
         known build or its .text is byte-identical to one (then its metadata carries over)
   python tools/newbuild.py unpack --game <folder>
         copy and unpack the retail DLLs into generated/images/<label>/, known build or not
-  python tools/newbuild.py carry --from <old label> --to <new label> [--write]
-        map every address the old build's entry names (builds.json addresses and crt, the manual
-        verdicts in discovery/verdicts.py) onto the new image; --write adds the new build to
-        meta/builds.json and discovery/verdicts.py. Unmapped addresses are listed for a hand read.
+  python tools/newbuild.py carry --from <old label> --to <new label> [--write] [--only modern]
+        map every address the old build's entry names (builds.json addresses, hooks, modern and
+        crt, the manual verdicts in discovery/verdicts.py) onto the new image; --write adds the new
+        build to meta/builds.json and discovery/verdicts.py. Unmapped addresses are listed for a
+        hand read. --only: just that section, written into a build builds.json already has.
   python tools/newbuild.py meta --from <old label> --to <new label> --module FFXi.dll
         a module whose .text is byte-identical to the old build's: its metadata, with the new hash
   python tools/newbuild.py dis --label <build> --at <hex> [--module FFXi.dll] [--before 32] [--count 16]
@@ -276,19 +277,21 @@ def neighbour_hint(old, new, va):
         ', '.join('%+#x (x%d)' % (k, n) for k, n in sorted(deltas.items(), key=lambda kv: -kv[1])), va + best)
 
 
-def map_data(old, new, va, near=0x100):
-    """(new address, votes) for a data address, from the .text sites that reference it."""
-    votes = {}
-    for r in sorted(old.relocs):
-        if not old.t0 <= r <= old.t1 - 4:
-            continue
-        v = old.dword(r)
-        k = v - va
-        if not -near <= k <= near:
-            continue
+def map_data(old, new, va, near=0x100, sites=None):
+    """(new address, votes) for a data address, from the .text sites that reference it: those
+    naming it exactly first, then those near it; at most `sites` of them mapped (each is a search of
+    the whole new .text, and a global the game uses everywhere has hundreds)."""
+    votes, mapped = {}, 0
+    refs = [(abs(old.dword(r) - va), r) for r in sorted(old.relocs)
+            if old.t0 <= r <= old.t1 - 4 and -near <= old.dword(r) - va <= near]
+    for _, r in sorted(refs):
+        if sites is not None and mapped >= sites:
+            break
+        k = old.dword(r) - va
         site, _ = map_code(old, new, r)
         if site is None:
             continue
+        mapped += 1
         cand = new.dword(site) - k
         votes[cand] = votes.get(cand, 0) + (4 if k == 0 else 1)
     if not votes:
@@ -303,7 +306,7 @@ def load_verdicts():
     return ns
 
 
-def carry(old_label, new_label, write):
+def carry(old_label, new_label, write, only=None):
     known = buildinfo.known()
     if old_label not in known:
         raise SystemExit('%s is not in meta/builds.json' % old_label)
@@ -324,7 +327,9 @@ def carry(old_label, new_label, write):
         return b
 
     main_old, main_new = Image(image(old_label, 'FFXiMain.dll')), Image(image(new_label, 'FFXiMain.dll'))
-    entry = {'FFXiMain.dll': {}, 'FFXi.dll': {}, 'version': None, 'addresses': {}, 'hooks': {}, 'crt': {}}
+    entry = {'FFXiMain.dll': {}, 'FFXi.dll': {}, 'version': None, 'addresses': {}, 'hooks': {}, 'modern': {}, 'crt': {}}
+    if only:
+        return carry_section(old_entry, new_label, only, main_old, main_new, put, report, failed, write)
     report.append('FFXiMain.dll addresses')
     for k, v in old_entry['addresses'].items():
         a = int(v, 16)
@@ -338,6 +343,8 @@ def carry(old_label, new_label, write):
         put('hook', k, a, b, how)
         if b:
             entry['hooks'][k] = '0x%08x' % b
+    report.append('FFXiMain.dll host/modern.c')
+    entry['modern'] = map_modern(old_entry, main_old, main_new, put)
     report.append('FFXiMain.dll difftest CRT slice')
     for k, v in old_entry['crt'].items():
         a = int(v, 16)
@@ -390,6 +397,47 @@ def carry(old_label, new_label, write):
     write_verdicts(new_label, ts, new_verdicts, old_label,
                    [line.strip() for line in report if 'UNMAPPED' in line and not line.lstrip().startswith(('address', 'hook', 'crt'))])
     print('\nwrote meta/builds.json (%s, version %s) and discovery/verdicts.py' % (new_label, entry['version']))
+
+
+def map_modern(old_entry, main_old, main_new, put):
+    """host/modern.c's addresses: functions and code (mapped as code), globals, vtables and menu-table
+    entries (as data, from the code that names them). Unmapped ones stay as such: build.h then has
+    FFXI_MODERN 0 until they are filled in by hand."""
+    out = {}
+    for k, v in old_entry.get('modern', {}).items():
+        a = int(v, 16)
+        if main_old.t0 <= a < main_old.t1:
+            b, how = map_code(main_old, main_new, a)
+        else:
+            b, how = map_data(main_old, main_new, a, sites=16)
+        put('modern', k, a, b, how)
+        out[k] = '0x%08x' % b if b else 'UNMAPPED from %s' % v
+    return out
+
+
+SECTIONS = {'modern': map_modern}
+
+
+def carry_section(old_entry, new_label, section, main_old, main_new, put, report, failed, write):
+    """--only: one section carried into a build meta/builds.json already has, the rest of its entry
+    (hand-checked addresses among it) left as it is."""
+    report.append('FFXiMain.dll %s' % section)
+    out = SECTIONS[section](old_entry, main_old, main_new, put)
+    print('\n'.join(report))
+    if failed:
+        print('\n%d unmapped: read them by hand (newbuild.py dis in both builds) and fix them in '
+              'meta/builds.json after --write' % len(failed))
+    if not write:
+        return
+    with open(buildinfo.BUILDS) as f:
+        doc = json.load(f)
+    if new_label not in doc['builds']:
+        raise SystemExit('%s is not in meta/builds.json: carry it without --only first' % new_label)
+    doc['builds'][new_label][section] = out
+    with open(buildinfo.BUILDS, 'w') as f:
+        json.dump(doc, f, indent=2)
+        f.write('\n')
+    print('\nwrote meta/builds.json (%s: %s)' % (new_label, section))
 
 
 def write_verdicts(label, ts, verdicts, old_label, unmapped):
@@ -475,6 +523,7 @@ def main():
     p.add_argument('--from', dest='old', required=True)
     p.add_argument('--to', dest='new', required=True)
     p.add_argument('--write', action='store_true')
+    p.add_argument('--only', choices=sorted(SECTIONS), help='carry one section into a build already known')
     p = sub.add_parser('meta')
     p.add_argument('--from', dest='old', required=True)
     p.add_argument('--to', dest='new', required=True)
@@ -503,7 +552,7 @@ def main():
             same = identical_text(label, m)
             print('%s: .text %s' % (m, ('identical to ' + ', '.join(same)) if same else 'differs from every unpacked known build'))
     elif args.cmd == 'carry':
-        carry(args.old, args.new, args.write)
+        carry(args.old, args.new, args.write, args.only)
     elif args.cmd == 'meta':
         carry_meta(args.old, args.new, args.module)
     else:
