@@ -595,6 +595,16 @@ typedef struct Dev
 } Dev;
 
 static Dev g_dev; /* the game makes one device */
+/* One past the highest transform, light and vertex shader constant ever set, in any state: past
+ * them every state holds the defaults, so a state block's apply or capture stops there (a
+ * D3DSBT_ALL block is otherwise 280 matrices, 64 lights and 256 constants a copy). Never lowered. */
+static int g_xf_top, g_light_top, g_vsc_top;
+
+static void raise_top(int* top, uint32_t n)
+{
+    if ((int)n > *top)
+        *top = (int)n;
+}
 /* A 16x16 occlusion probe tests a quad at the sky's depth (z 0x3f7ffffe, 1 - 2^-23: the game's
  * probe for the sun and its lens flare) since the last probe was read; see lock_rect. */
 static int g_probe_sky;
@@ -682,28 +692,41 @@ static State* target(Mask** m)
     return &g_dev.cur;
 }
 
+/* to[i] = from[i] where m[i] (0 or 1), eight at a time: a group with none set is skipped, one with
+ * all set is one copy. n is a multiple of 8. */
+static void copy_masked(uint32_t* to, const uint32_t* from, const uint8_t* m, int n)
+{
+    for (int i = 0; i < n; i += 8)
+    {
+        uint64_t group;
+        memcpy(&group, m + i, 8);
+        if (group == 0x0101010101010101ull)
+            memcpy(to + i, from + i, 32);
+        else if (group)
+            for (int j = i; j < i + 8; ++j)
+                if (m[j])
+                    to[j] = from[j];
+    }
+}
+
 /* Copies the masked entries from `from` to `to` (Apply: block -> device; Capture: device -> block). */
 static void state_copy(State* to, const State* from, const Mask* m)
 {
-    for (int i = 0; i < 256; ++i)
-        if (m->rs[i])
-            to->rs[i] = from->rs[i];
+    copy_masked(to->rs, from->rs, m->rs, 256);
     for (int t = 0; t < 8; ++t)
     {
-        for (int i = 0; i < 32; ++i)
-            if (m->tss[t][i])
-                to->tss[t][i] = from->tss[t][i];
+        copy_masked(to->tss[t], from->tss[t], m->tss[t], 32);
         if (m->tex[t])
             bind(&to->tex[t], from->tex[t]);
     }
-    for (int i = 0; i < NXF; ++i)
+    for (int i = 0; i < g_xf_top; ++i)
         if (m->xf[i])
             memcpy(to->xf[i], from->xf[i], 64);
     if (m->vp)
         memcpy(to->vp, from->vp, sizeof to->vp);
     if (m->mat)
         memcpy(to->mat, from->mat, sizeof to->mat);
-    for (int i = 0; i < MAX_LIGHTS; ++i)
+    for (int i = 0; i < g_light_top; ++i)
     {
         if (m->light[i])
             memcpy(to->light[i].v, from->light[i].v, sizeof to->light[i].v);
@@ -728,7 +751,7 @@ static void state_copy(State* to, const State* from, const Mask* m)
         to->vs = from->vs;
     if (m->ps)
         to->ps = from->ps;
-    for (int i = 0; i < NVSC; ++i)
+    for (int i = 0; i < g_vsc_top; ++i)
         if (m->vsc[i])
             memcpy(to->vsc[i], from->vsc[i], 16);
     for (int i = 0; i < NPSC; ++i)
@@ -1418,6 +1441,7 @@ static void IDirect3DDevice8_SetTransform(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->xf[i], ARGP(2), 64);
+    raise_top(&g_xf_top, (uint32_t)i + 1);
     if (m)
         m->xf[i] = 1;
     RET(D3D_OK, 3);
@@ -1447,6 +1471,7 @@ static void IDirect3DDevice8_MultiplyTransform(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->xf[i], r, 64);
+    raise_top(&g_xf_top, (uint32_t)i + 1);
     if (m)
         m->xf[i] = 1;
     RET(D3D_OK, 3);
@@ -1492,6 +1517,7 @@ static void IDirect3DDevice8_SetLight(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->light[i].v, ARGP(2), 104);
+    raise_top(&g_light_top, i + 1);
     if (m)
         m->light[i] = 1;
     RET(D3D_OK, 3);
@@ -1519,6 +1545,7 @@ static void IDirect3DDevice8_LightEnable(Guest* g)
             m->light[i] = 1;
     }
     s->light[i].enabled = ARG(2) != 0;
+    raise_top(&g_light_top, i + 1);
     if (m)
         m->lighten[i] = 1;
     RET(D3D_OK, 3);
@@ -1619,6 +1646,12 @@ static void IDirect3DDevice8_CreateStateBlock(Guest* g)
     if (type < 1 || type > 3 || g_dev.rec)
         RET(D3DERR_INVALIDCALL, 3);
     Block* b = (Block*)calloc(1, sizeof(Block));
+    /* state_copy stops at the high-water marks (g_xf_top, g_light_top, g_vsc_top): past them the block
+     * starts as the device is (identity transforms, lights off, zero constants), so one applied after
+     * the game first sets such an entry puts its default back, not zeros */
+    memcpy(b->s.xf, g_dev.cur.xf, sizeof b->s.xf);
+    memcpy(b->s.light, g_dev.cur.light, sizeof b->s.light);
+    memcpy(b->s.vsc, g_dev.cur.vsc, sizeof b->s.vsc);
     Mask* m = &b->m;
     memset(m->rs, 1, sizeof m->rs);
     memset(m->tss, 1, sizeof m->tss);
@@ -2027,6 +2060,7 @@ static void IDirect3DDevice8_SetVertexShader(Guest* g)
             for (uint32_t k = 0; k < count && reg + k < NVSC && i + 1 + 4 * k + 3 < sh->ndecl; ++k)
             {
                 memcpy(s->vsc[reg + k], &sh->decl[i + 1 + 4 * k], 16);
+                raise_top(&g_vsc_top, reg + k + 1);
                 if (m)
                     m->vsc[reg + k] = 1;
             }
@@ -2066,6 +2100,7 @@ static void IDirect3DDevice8_SetVertexShaderConstant(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->vsc[r], ARGP(2), 16 * n);
+    raise_top(&g_vsc_top, r + n);
     if (m)
         memset(&m->vsc[r], 1, n);
     RET(D3D_OK, 4);
@@ -2343,7 +2378,7 @@ static int build_draw(GfxDraw* d)
         }
         const float* view = s->xf[2];
         int n = 0;
-        for (int i = 0; i < MAX_LIGHTS && n < GFX_NLIGHTS; ++i)
+        for (int i = 0; i < g_light_top && n < GFX_NLIGHTS; ++i)
         {
             const Light* l = &s->light[i];
             uint32_t type = l->v[0];
