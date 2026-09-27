@@ -1,9 +1,51 @@
 # FFXI on Mac
 
-Static recompilation of FINAL FANTASY XI's `FFXiMain.dll` (and `FFXi.dll`) from 32-bit x86 to C,
-so the game runs natively on arm64 macOS without Wine or Rosetta. This repo holds the recompiler,
-its runtime, the platform layer (Win32, Direct3D 8 on Metal, audio, input, sockets), `host64`,
-the game host, with its own sign-in screen drawn in the game's UI art.
+FINAL FANTASY XI running natively on Apple silicon Macs, with no Wine or Rosetta. The game's
+`FFXiMain.dll` (and `FFXi.dll`) are statically recompiled from 32-bit x86 to C on your own machine,
+from your own install, and run on a platform layer written for macOS: Win32, Direct3D 8 on Metal,
+audio, input and sockets. This repo holds the recompiler, its runtime, that platform layer, and
+`host64`, the game host, with its own sign-in screen drawn in the game's UI art.
+
+**Works with [LandSandBoat](https://github.com/LandSandBoat/server) servers.** Sign in with a
+username, password and one-time code, or a server launcher's token; pick the server in the
+sign-in screen's Settings.
+
+## What's better than the original
+
+- **A Modern page in the game's own Config menu**, next to Gameplay, Windows and the rest:
+  - ambient occlusion, fog, god rays, bloom, color grading and sun shadows, each with a slider
+  - per-pixel lighting (off, sun only, all lights), sharpening and anti-shimmer
+  - texture filtering up to 16x, and longer draw and character distances
+  - 30 or 60 fps
+  - interface shape: full width, 16:9 or 4:3
+- **Widescreen and ultrawide**: the 3D view widens with the window instead of stretching a 4:3
+  view, the interface can stay 16:9 in the middle of an ultrawide, and nameplates keep their shape.
+- **A native sign-in screen** in the game's own window themes and font, with the password kept in
+  the macOS Keychain.
+- **DAT overlays** for a server's own DATs, without touching the install.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td colspan="2"><img src="screenshots/titlescreen_uw.jpg" alt="Title screen at 3440x1440"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/login.jpg" alt="Sign-in screen"></td>
+    <td width="50%"><img src="screenshots/login_config.jpg" alt="Sign-in settings"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="screenshots/graphics_options.jpg" alt="Config &gt; Modern graphics options"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/godrays.jpg" alt="God rays in Bastok Mines"></td>
+    <td width="50%"><img src="screenshots/shadows_ao.jpg" alt="Sun shadows and ambient occlusion"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/lighting.jpg" alt="Per-pixel lighting"></td>
+    <td width="50%"><img src="screenshots/lighting2.jpg" alt="Per-pixel lighting and shadows"></td>
+  </tr>
+</table>
 
 ## Install (players)
 
