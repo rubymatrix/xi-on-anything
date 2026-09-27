@@ -55,6 +55,13 @@ def write_build_h():
         a = int(v, 16)
         lines.append('#define CRT_%s 0x%08xu' % (k.upper(), a))
         lines.append('#define F_%s f_%08x' % (k.upper(), a))
+    # host/modern.c's addresses: FFXI_MODERN is 1 only when this build has every one of them (a
+    # build carried without them, or with one unmapped, gets 0 and every address 0: not called).
+    modern = BUILD['modern']
+    whole = bool(BUILD['modern_keys']) and all(modern.get(k, '').startswith('0x') for k in BUILD['modern_keys'])
+    lines.append('#define FFXI_MODERN %d /* Config > Modern and Config > Menus */' % whole)
+    for k in BUILD['modern_keys']:
+        lines.append('#define FFXI_MODERN_%s 0x%08xu' % (k.upper(), int(modern[k], 16) if whole else 0))
     text = '\n'.join(lines) + '\n'
     try:
         with open(BUILD_H) as f:

@@ -336,7 +336,10 @@ install folder. By hand:
    Maps every address the previous build's entry names onto the new image: `chars_ptr` (the
    global the character list hangs from, read by gamecore), `present_site` (the return address of
    the game's `IDirect3DDevice8::Present` call, used on Windows), the CRT functions the
-   differential test compares, and the manual verdicts in `discovery/verdicts.py`. `--write` adds
+   differential test compares, host/modern.c's menu addresses (the `modern` section; a build
+   without all of them builds with Config > Modern and Config > Menus off), and the manual verdicts
+   in `discovery/verdicts.py`. `--only modern --write` carries just that section into a build
+   `meta/builds.json` already has. `--write` adds
    the build to `meta/builds.json` and `discovery/verdicts.py`. Addresses it cannot map come with
    a hint (how their neighbours moved); check each with
    `python tools/newbuild.py dis --label <build> --at <addr>` in both builds and fill it in.

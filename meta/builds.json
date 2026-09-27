@@ -1,6 +1,6 @@
 {
   "format": "ffxi-recomp-builds/1",
-  "comment": "Every retail build the recompiler knows: the files it takes (SHA-256 of the retail, packed DLLs), their metadata, and the handful of addresses the runtime and tests name directly. hooks: instructions where host64 steps in (recomp.py --hooks); a build without one lacks that feature. tools/prepare.py picks the build whose FFXiMain.dll hash matches the install; tools/build.py writes these addresses to generated/build.h. Addresses only, no bytes. version: the client version string patch.ver carries (what the lobby's version check sees); 30260805_0 is read from the retail file, 30260903_0 and 30251226_0 follow the same pattern (PE timestamp date) for installs that ship no patch.ver.",
+  "comment": "Every retail build the recompiler knows: the files it takes (SHA-256 of the retail, packed DLLs), their metadata, and the handful of addresses the runtime and tests name directly. hooks: instructions where host64 steps in (recomp.py --hooks); a build without one lacks that feature. tools/prepare.py picks the build whose FFXiMain.dll hash matches the install; tools/build.py writes these addresses to generated/build.h. Addresses only, no bytes. version: the client version string patch.ver carries (what the lobby's version check sees); 30260805_0 is read from the retail file, 30260903_0 and 30251226_0 follow the same pattern (PE timestamp date) for installs that ship no patch.ver. modern: host/modern.c's menu addresses (Config > Modern and Config > Menus): functions, globals, vtables and menu-table entries; a build without every one of them builds with the feature off.",
   "builds": {
     "2026-08-22": {
       "FFXiMain.dll": {
@@ -51,6 +51,29 @@
       "hooks": {
         "nameplate_scale": "0x100863d6"
       },
+      "modern": {
+        "mgr": "0x10621838",
+        "layout_find": "0x1015e030",
+        "layout_add": "0x1015df80",
+        "sheets": "0x104e1bf8",
+        "sheet_add": "0x10120290",
+        "sheet_find": "0x10120450",
+        "menu_open": "0x1015e350",
+        "page_ctor": "0x10196980",
+        "page_vtbl": "0x10336a38",
+        "page_mark": "0x10196a20",
+        "page_fill": "0x10196b10",
+        "config_inst": "0x10662718",
+        "config_vtbl": "0x10337798",
+        "window_part": "0x101181d0",
+        "menus_end": "0x10376270",
+        "menus_conf1win": "0x10375064",
+        "action_lists": "0x1036f390",
+        "config_slot0": "0x101a9e90",
+        "config_slot1": "0x101968e0",
+        "config_slot4": "0x1011ba30",
+        "config_slot6": "0x10196770"
+      },
       "crt": {
         "strlen": "0x10317440",
         "strncmp": "0x10312940",
@@ -85,6 +108,29 @@
       },
       "hooks": {
         "nameplate_scale": "0x100861e6"
+      },
+      "modern": {
+        "mgr": "0x105ecb98",
+        "layout_find": "0x1015cd60",
+        "layout_add": "0x1015ccb0",
+        "sheets": "0x104dfa88",
+        "sheet_add": "0x1011fe90",
+        "sheet_find": "0x10120050",
+        "menu_open": "0x1015d080",
+        "page_ctor": "0x101950d0",
+        "page_vtbl": "0x103348f0",
+        "page_mark": "0x10195170",
+        "page_fill": "0x10195260",
+        "config_inst": "0x1062da78",
+        "config_vtbl": "0x10335650",
+        "window_part": "0x10117dd0",
+        "menus_end": "0x1037417c",
+        "menus_conf1win": "0x10372f70",
+        "action_lists": "0x1036d398",
+        "config_slot0": "0x101a85f0",
+        "config_slot1": "0x10195030",
+        "config_slot4": "0x1011b630",
+        "config_slot6": "0x10194ec0"
       },
       "crt": {
         "strlen": "0x10315a00",

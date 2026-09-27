@@ -33,6 +33,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "build.h"
 #include "datui.h"
 #include "gfx.h"
 #include "gthread.h"
@@ -42,23 +43,25 @@
 #include "user32.h"
 #include "vfs.h"
 
-/* ---- the game (FFXiMain 2026-09-03) ---- */
+/* ---- the game ----
+ * Its addresses are the build's (meta/builds.json "modern", generated/build.h; 2026-09-03's in the
+ * comments here). A build without them all has FFXI_MODERN 0: then nothing here calls the game. */
 enum
 {
-    MGR = 0x10621838u,          /* the menu manager */
-    LAYOUT_FIND = 0x1015e030u,  /* thiscall mgr (const char name[16]): the layout, or 0 */
-    LAYOUT_ADD = 0x1015df80u,   /* thiscall mgr (const void** payload): parses and registers it */
-    SHEETS = 0x104e1bf8u,       /* the sprite sheets */
-    SHEET_ADD = 0x10120290u,    /* thiscall SHEETS (const void** payload) */
-    SHEET_FIND = 0x10120450u,   /* thiscall SHEETS (const char name[16]): the sheet; [sheet] its sprites */
-    MENU_OPEN = 0x1015e350u,    /* thiscall mgr (const char* name, bool, bool) */
-    PAGE_CTOR = 0x10196980u,    /* thiscall: a Config page */
-    PAGE_VTBL = 0x10336a38u,
-    PAGE_MARK = 0x10196a20u,    /* thiscall page (v, a, b): sprite +0x14 at item (v ? b : a), +0x25, +4 */
-    PAGE_FILL = 0x10196b10u,    /* thiscall page (item, float, colour): sprite +0x1c across item, scaled */
-    CONFIG_INST = 0x10662718u,  /* the global holding the Config list's handler */
-    CONFIG_VTBL = 0x10337798u,
-    WINDOW_PART = 0x101181d0u,  /* thiscall window (short item): its part */
+    MGR = FFXI_MODERN_MGR,                 /* 0x10621838 the menu manager */
+    LAYOUT_FIND = FFXI_MODERN_LAYOUT_FIND, /* 0x1015e030 thiscall mgr (const char name[16]): the layout, or 0 */
+    LAYOUT_ADD = FFXI_MODERN_LAYOUT_ADD,   /* 0x1015df80 thiscall mgr (const void** payload): parses and registers it */
+    SHEETS = FFXI_MODERN_SHEETS,           /* 0x104e1bf8 the sprite sheets */
+    SHEET_ADD = FFXI_MODERN_SHEET_ADD,     /* 0x10120290 thiscall SHEETS (const void** payload) */
+    SHEET_FIND = FFXI_MODERN_SHEET_FIND,   /* 0x10120450 thiscall SHEETS (const char name[16]): the sheet; [sheet] its sprites */
+    MENU_OPEN = FFXI_MODERN_MENU_OPEN,     /* 0x1015e350 thiscall mgr (const char* name, bool, bool) */
+    PAGE_CTOR = FFXI_MODERN_PAGE_CTOR,     /* 0x10196980 thiscall: a Config page */
+    PAGE_VTBL = FFXI_MODERN_PAGE_VTBL,     /* 0x10336a38 */
+    PAGE_MARK = FFXI_MODERN_PAGE_MARK,     /* 0x10196a20 thiscall page (v, a, b): sprite +0x14 at item (v ? b : a), +0x25, +4 */
+    PAGE_FILL = FFXI_MODERN_PAGE_FILL,     /* 0x10196b10 thiscall page (item, float, colour): sprite +0x1c across item, scaled */
+    CONFIG_INST = FFXI_MODERN_CONFIG_INST, /* 0x10662718 the global holding the Config list's handler */
+    CONFIG_VTBL = FFXI_MODERN_CONFIG_VTBL, /* 0x10337798 */
+    WINDOW_PART = FFXI_MODERN_WINDOW_PART, /* 0x101181d0 thiscall window (short item): its part */
     VTBL_SLOTS = 17,
     CONFIG_ITEMS = 13,          /* the Config list's own */
     EV_DOWN = 1, EV_UP = 2, EV_LEFT = 3, EV_RIGHT = 4, EV_SELECT = 5, /* a menu's input events (OnInput) */
@@ -607,7 +610,7 @@ enum
 {
     SPARE_DUP = 1,
     SPARE_END = 2,
-    TABLE_END = 0x10376270u,
+    TABLE_END = FFXI_MODERN_MENUS_END, /* 0x10376270 */
 };
 
 static const char NO_NAME[16] = { 0 };
@@ -616,7 +619,7 @@ static Page PAGES[] = {
     { "menu    menushid", "Menus", "Show or hide items of the game's own menus.", TABLE_END, NO_NAME, SPARE_END,
         MENUS_ROWS, sizeof MENUS_ROWS / sizeof MENUS_ROWS[0] },
     { "menu    modernwi", "Modern", "Graphics beyond the original's: effects, lighting and draw distance.",
-        0x10375064u, "menu    conf1win", SPARE_DUP, MODERN_ROWS, sizeof MODERN_ROWS / sizeof MODERN_ROWS[0] },
+        FFXI_MODERN_MENUS_CONF1WIN, "menu    conf1win", SPARE_DUP, MODERN_ROWS, sizeof MODERN_ROWS / sizeof MODERN_ROWS[0] },
 };
 enum
 {
@@ -999,7 +1002,7 @@ static void add(uint32_t fn, uint32_t list, uint32_t payload)
  * Trust is action 25: a list without it is a menu without it. */
 enum
 {
-    ACTION_LISTS = 0x1036f390u,
+    ACTION_LISTS = FFXI_MODERN_ACTION_LISTS, /* 0x1036f390 */
     ACTION_KINDS = 8,
     ACTION_LEN = 13,
     ACTION_TRUST = 25,
@@ -1209,9 +1212,10 @@ static void install(void)
 /* 0 when this is not the build the addresses are for */
 static int setup(void)
 {
-    static const uint32_t CONFIG_KNOWN[7] = { 0x101a9e90, 0x101968e0, 0, 0, 0x1011ba30, 0, 0x10196770 };
+    static const uint32_t CONFIG_KNOWN[7] = { FFXI_MODERN_CONFIG_SLOT0, FFXI_MODERN_CONFIG_SLOT1, 0, 0,
+        FFXI_MODERN_CONFIG_SLOT4, 0, FFXI_MODERN_CONFIG_SLOT6 };
     uint32_t cfg = rd32(CONFIG_INST);
-    if (!cfg || rd32(cfg) != CONFIG_VTBL || rd32(PAGE_VTBL + 16) != 0x1011ba30u)
+    if (!cfg || rd32(cfg) != CONFIG_VTBL || rd32(PAGE_VTBL + 16) != FFXI_MODERN_CONFIG_SLOT4)
         return 0;
     for (int i = 0; i < 7; ++i)
         if (CONFIG_KNOWN[i] && rd32(CONFIG_VTBL + 4u * i) != CONFIG_KNOWN[i])
@@ -1296,6 +1300,15 @@ void modern_frame(void)
         g_scratch = gheap_alloc(64, 1);
     if (state == 0)
     {
+        /* Without this build's addresses there is nothing to call: a wrong one need not even be a
+         * function (FATAL: no translation). */
+        if (!FFXI_MODERN)
+        {
+            fprintf(stderr, "[modern] build %s has no menu addresses (meta/builds.json): no Config > Modern\n",
+                FFXI_BUILD);
+            state = -1;
+            return;
+        }
         /* the menus are there once the Config list's layout is */
         if (!find_layout(CONFIG_NAME))
             return;
