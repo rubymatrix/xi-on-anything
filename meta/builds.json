@@ -1,0 +1,108 @@
+{
+  "format": "ffxi-recomp-builds/1",
+  "comment": "Every retail build the recompiler knows: the files it takes (SHA-256 of the retail, packed DLLs), their metadata, and the handful of addresses the runtime and tests name directly. hooks: instructions where host64 steps in (recomp.py --hooks); a build without one lacks that feature. tools/prepare.py picks the build whose FFXiMain.dll hash matches the install; tools/build.py writes these addresses to generated/build.h. Addresses only, no bytes. version: the client version string patch.ver carries (what the lobby's version check sees); 30260805_0 is read from the retail file, 30260903_0 and 30251226_0 follow the same pattern (PE timestamp date) for installs that ship no patch.ver.",
+  "builds": {
+    "2026-08-22": {
+      "FFXiMain.dll": {
+        "sha256": "6f8844eb7f0380f30a3db2fc3c435e1145f5c450bdd0999133cc75c516ec3c3b",
+        "meta": "FFXiMain.2026-08-22.meta.json"
+      },
+      "FFXi.dll": {
+        "sha256": "b1e7e53a53640d7b56ca82d42700745b089f2466ffe55965511cbf5168804d7b",
+        "meta": "FFXi.2026-08-22.meta.json"
+      },
+      "version": "30260805_0",
+      "addresses": {
+        "chars_ptr": "0x104df7b0",
+        "present_site": "0x100035cb"
+      },
+      "crt": {
+        "strlen": "0x10317480",
+        "strncmp": "0x10312980",
+        "strncpy": "0x10312090",
+        "memcmp": "0x10317270",
+        "memset": "0x10316dd0",
+        "memcpy": "0x103169e0",
+        "allmul": "0x10315c20",
+        "alldiv": "0x10316840",
+        "aulldiv": "0x10316970",
+        "aullrem": "0x103168f0",
+        "allshl": "0x10312a60",
+        "aullshr": "0x103152d0",
+        "ftol": "0x10311c6c",
+        "strrchr": "0x10312800",
+        "strpbrk": "0x10322bf0"
+      }
+    },
+    "2026-09-03": {
+      "FFXiMain.dll": {
+        "sha256": "f2245d1c9d06e02c36624942483913f5120c0d40777fc1bb8703c6f4bda823e4",
+        "meta": "FFXiMain.2026-09-03.meta.json"
+      },
+      "FFXi.dll": {
+        "sha256": "9053d4106160a073a215dcd1d9045c804a27f459c6cb7cacec74eaefaf827bc7",
+        "meta": "FFXi.2026-09-03.meta.json"
+      },
+      "version": "30260903_0",
+      "addresses": {
+        "chars_ptr": "0x104df770",
+        "present_site": "0x100035cb"
+      },
+      "hooks": {
+        "nameplate_scale": "0x100863d6"
+      },
+      "crt": {
+        "strlen": "0x10317440",
+        "strncmp": "0x10312940",
+        "strncpy": "0x10312050",
+        "memcmp": "0x10317230",
+        "memset": "0x10316d90",
+        "memcpy": "0x103169a0",
+        "allmul": "0x10315be0",
+        "alldiv": "0x10316800",
+        "aulldiv": "0x10316930",
+        "aullrem": "0x103168b0",
+        "allshl": "0x10312a20",
+        "aullshr": "0x10315290",
+        "ftol": "0x10311c2c",
+        "strrchr": "0x103127c0",
+        "strpbrk": "0x10322bb0"
+      }
+    },
+    "2025-12-26": {
+      "FFXiMain.dll": {
+        "sha256": "f5ed4c3b6aabef3936ac2c1cf49c2475b3ab9a5b7c20c3c2744bdb938ce7a7f6",
+        "meta": "FFXiMain.2025-12-26.meta.json"
+      },
+      "FFXi.dll": {
+        "sha256": "8a12ecba859c8ba5653dea89c80d23acf4a23f18021ea755724d5d6bde36a663",
+        "meta": "FFXi.2025-12-26.meta.json"
+      },
+      "version": "30251226_0",
+      "addresses": {
+        "chars_ptr": "0x104dd600",
+        "present_site": "0x100035cb"
+      },
+      "hooks": {
+        "nameplate_scale": "0x100861e6"
+      },
+      "crt": {
+        "strlen": "0x10315a00",
+        "strncmp": "0x10310f00",
+        "strncpy": "0x10310610",
+        "memcmp": "0x103157f0",
+        "memset": "0x10315350",
+        "memcpy": "0x10314f60",
+        "allmul": "0x103141a0",
+        "alldiv": "0x10314dc0",
+        "aulldiv": "0x10314ef0",
+        "aullrem": "0x10314e70",
+        "allshl": "0x10310fe0",
+        "aullshr": "0x10313850",
+        "ftol": "0x103101ec",
+        "strrchr": "0x10310d80",
+        "strpbrk": "0x10321170"
+      }
+    }
+  }
+}

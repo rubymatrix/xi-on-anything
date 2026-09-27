@@ -1,0 +1,30 @@
+/* USER32 and WINMM on SDL3 (user32.c). */
+#pragma once
+
+#include <stdint.h>
+
+void user32_init(void);
+/* An SDL_Window already open (host64's sign-in screen, the graphics back end already on it) for
+ * the game's first top-level window to take over instead of opening one: one window, start to end. */
+void user32_adopt_window(void* sdl_window);
+/* A full-screen device (D3D8 Windowed = FALSE) on hwnd: its window covers the display, in the
+ * desktop's own mode. */
+void user32_set_fullscreen(uint32_t hwnd, int on);
+/* The SDL_Window behind a guest HWND (for the graphics layer), or NULL. */
+void* user32_sdl_window(uint32_t hwnd);
+/* A window's client size (unchanged if hwnd is not ours); the desktop's mode. */
+void user32_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h);
+void user32_desktop_mode(uint32_t* w, uint32_t* h, uint32_t* hz);
+/* --ui-aspect: the game's screen-space draws (its interface) keep width / height = aspect, centered
+ * in a wider window, and the mouse is mapped to match. 0 (the default) is off. */
+void user32_set_ui_aspect(float aspect);
+float user32_ui_aspect(void);
+/* The fraction of hwnd's width the interface keeps: 1 when off, or the window is not wider. */
+float user32_ui_squeeze(uint32_t hwnd);
+/* Set by the graphics layer: whether the interface covers this point of the window (0..1 across
+ * and down), as drawn last frame. The mouse is unsqueezed only there. */
+extern int (*user32_ui_hit)(float fx, float fy);
+/* 1 when the game was last given the cursor as it is (over the world), 0 unsqueezed */
+int user32_mouse_raw(void);
+/* where the game was last given the cursor, 0..1 of its window across and down */
+void user32_mouse_given(float* fx, float* fy);

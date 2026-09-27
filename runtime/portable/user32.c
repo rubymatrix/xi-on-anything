@@ -1,0 +1,1740 @@
+/* USER32 and WINMM for 64-bit hosts (R3.1), on SDL3 (decided 2026-09-24: SDL3 for window, input
+ * and audio). What FFXiMain uses, from the R3.0 boundary trace: one window class and one window
+ * (a WS_POPUP "FFXiClass" window sized to the game's resolution), a PeekMessage/Dispatch loop with
+ * MsgWaitForMultipleObjects, posted and thread messages, the keyboard state, cursors, a
+ * low-level keyboard hook, and its own resources through LoadStringA.
+ *
+ * The window is an SDL window; SDL's events become the Win32 messages the game's window procedure
+ * expects. SDL's video and event calls stay on the thread that created the window (macOS requires
+ * the main thread, which is where GameStart runs FFXiMain's window code). Messages posted from
+ * other guest threads go through a per-thread queue. */
+#include <SDL3/SDL.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "gthread.h"
+#include "gwin.h"
+#include "input.h"
+#include "k32.h"
+#include "kobj.h"
+#include "pe.h"
+#include "plat.h"
+#include "thunk.h"
+#include "user32.h"
+
+#define WM_CREATE 0x0001
+#define WM_DESTROY 0x0002
+#define WM_MOVE 0x0003
+#define WM_SIZE 0x0005
+#define WM_ACTIVATE 0x0006
+#define WM_SETFOCUS 0x0007
+#define WM_KILLFOCUS 0x0008
+#define WM_CLOSE 0x0010
+#define WM_QUIT 0x0012
+#define WM_ERASEBKGND 0x0014
+#define WM_SHOWWINDOW 0x0018
+#define WM_ACTIVATEAPP 0x001C
+#define WM_NCCREATE 0x0081
+#define WM_NCDESTROY 0x0082
+#define WM_KEYDOWN 0x0100
+#define WM_KEYUP 0x0101
+#define WM_CHAR 0x0102
+#define WM_SYSKEYDOWN 0x0104
+#define WM_SYSKEYUP 0x0105
+#define WM_SYSCOMMAND 0x0112
+#define WM_MOUSEMOVE 0x0200
+#define WM_LBUTTONDOWN 0x0201
+#define WM_LBUTTONUP 0x0202
+#define WM_RBUTTONDOWN 0x0204
+#define WM_RBUTTONUP 0x0205
+#define WM_MBUTTONDOWN 0x0207
+#define WM_MBUTTONUP 0x0208
+#define WM_MOUSEWHEEL 0x020A
+
+/* --- windows and classes ------------------------------------------------------------------------ */
+#define MAX_CLASSES 16
+#define MAX_WINDOWS 16
+#define HWND_BASE 0x00010010u
+#define HWND_STRIDE 0x10u
+
+static struct
+{
+    char name[64];
+    uint32_t wndproc;
+} g_classes[MAX_CLASSES];
+
+typedef struct Wnd
+{
+    int used;
+    uint32_t hwnd, wndproc, tid, style;
+    int x, y, w, h, visible;
+    int fullscreen; /* a full-screen D3D device is on it */
+    SDL_Window* sdl;
+} Wnd;
+static Wnd g_wnds[MAX_WINDOWS];
+static uint32_t g_focus;
+static int g_sdl_up;
+static float g_ui_aspect; /* --ui-aspect: width / height of the interface's box, 0 off */
+
+static Wnd* wnd(uint32_t hwnd)
+{
+    if (hwnd < HWND_BASE || (hwnd - HWND_BASE) % HWND_STRIDE)
+        return NULL;
+    uint32_t i = (hwnd - HWND_BASE) / HWND_STRIDE;
+    return i < MAX_WINDOWS && g_wnds[i].used ? &g_wnds[i] : NULL;
+}
+
+/* The fraction of the client's width the interface keeps under --ui-aspect: 1 when it is off or the
+ * window is no wider than the aspect. */
+static float ui_squeeze(const Wnd* w)
+{
+    if (!(g_ui_aspect > 0) || w->w <= 0 || w->h <= 0)
+        return 1.0f;
+    float s = g_ui_aspect * (float)w->h / (float)w->w;
+    return s < 1.0f ? s : 1.0f;
+}
+
+/* The game takes one mouse position for its interface and its 3D world alike. Over the interface
+ * (where d3d8.c drew it last frame: user32_ui_hit) the cursor's client x goes to the game as the x
+ * the game drew there before its draws were squeezed toward the middle, so its hit tests line up;
+ * over the world it goes as it is, so picking and the target arrow do. A press keeps its mode until
+ * the buttons are up (dragging a window out over the world). The game's own cursor is drawn to
+ * match (user32_mouse_raw). */
+int (*user32_ui_hit)(float fx, float fy);
+static int g_mouse_raw = 1, g_mouse_held;
+
+static float g_mouse_fx, g_mouse_fy; /* where the game was last told the cursor is: 0..1 of the client */
+
+int user32_mouse_raw(void) { return g_mouse_raw; }
+
+void user32_mouse_given(float* fx, float* fy) { *fx = g_mouse_fx, *fy = g_mouse_fy; }
+
+static int ui_unsqueeze_x(const Wnd* w, int x, int y)
+{
+    float s = ui_squeeze(w);
+    if (s >= 1.0f)
+        return g_mouse_raw = 1, x;
+    if (!g_mouse_held)
+        g_mouse_raw = !(user32_ui_hit && user32_ui_hit(((float)x + 0.5f) / (float)w->w, ((float)y + 0.5f) / (float)w->h));
+    g_mouse_fy = ((float)y + 0.5f) / (float)w->h;
+    if (g_mouse_raw)
+        return g_mouse_fx = ((float)x + 0.5f) / (float)w->w, x;
+    float c = (float)w->w * 0.5f, gx = c + ((float)x - c) / s;
+    int r = gx < 0 ? 0 : gx > (float)(w->w - 1) ? w->w - 1 : (int)(gx + 0.5f);
+    g_mouse_fx = ((float)r + 0.5f) / (float)w->w;
+    return r;
+}
+
+static Wnd* wnd_of_sdl(SDL_WindowID id)
+{
+    for (int i = 0; i < MAX_WINDOWS; ++i)
+        if (g_wnds[i].used && g_wnds[i].sdl && SDL_GetWindowID(g_wnds[i].sdl) == id)
+            return &g_wnds[i];
+    return NULL;
+}
+
+static SDL_Window* g_adopt;
+
+void user32_adopt_window(void* sdl_window)
+{
+    g_adopt = sdl_window;
+}
+
+static void sdl_up(void)
+{
+    if (g_sdl_up)
+        return;
+    /* full screen in place, as on Windows, unless the sign-in screen chose a macOS Space already
+     * (it starts SDL first, with the player's choice) */
+    if (!SDL_GetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES))
+        SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD))
+        rt_log("[recomp] SDL_Init: %s\n", SDL_GetError());
+    g_sdl_up = 1;
+}
+
+static int show_window(Wnd* w, int show);
+
+/* the window procedure, called as the guest would: stdcall (hwnd, msg, wParam, lParam) */
+static uint32_t call_wndproc(Wnd* w, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    uint32_t a[4] = { w->hwnd, msg, wp, lp };
+    return guest_call(w->wndproc, 4, a);
+}
+
+/* --- message queues -------------------------------------------------------------------------------- */
+typedef struct Msg
+{
+    uint32_t hwnd, message, wparam, lparam, time;
+    int32_t x, y;
+} Msg;
+
+#define QUEUE_LEN 1024
+typedef struct Queue
+{
+    uint32_t tid;
+    Msg m[QUEUE_LEN];
+    unsigned head, count;
+} Queue;
+static Queue g_queues[16];
+static volatile uint32_t g_qlock;
+
+static void qlock(void) { while (plat_atomic_cas32(&g_qlock, 0, 1) != 0) plat_yield(); }
+static void qunlock(void) { plat_atomic_cas32(&g_qlock, 1, 0); }
+
+static Queue* queue_of(uint32_t tid)
+{
+    for (int i = 0; i < 16; ++i)
+        if (g_queues[i].tid == tid)
+            return &g_queues[i];
+    for (int i = 0; i < 16; ++i)
+        if (!g_queues[i].tid)
+        {
+            g_queues[i].tid = tid;
+            return &g_queues[i];
+        }
+    return NULL;
+}
+
+static int post(uint32_t tid, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    qlock();
+    Queue* q = queue_of(tid);
+    if (!q || q->count == QUEUE_LEN)
+    {
+        qunlock();
+        return 0;
+    }
+    Msg* m = &q->m[(q->head + q->count++) % QUEUE_LEN];
+    m->hwnd = hwnd;
+    m->message = msg;
+    m->wparam = wp;
+    m->lparam = lp;
+    m->time = (uint32_t)(rt_monotonic_ns() / 1000000u);
+    m->x = m->y = 0;
+    qunlock();
+    k_poke(); /* wakes MsgWaitForMultipleObjects */
+    return 1;
+}
+
+/* takes the first message for hwnd (0 = any) in [lo, hi] (0,0 = any) */
+static int take(uint32_t tid, uint32_t hwnd, uint32_t lo, uint32_t hi, int remove, Msg* out)
+{
+    qlock();
+    Queue* q = queue_of(tid);
+    for (unsigned k = 0; q && k < q->count; ++k)
+    {
+        Msg* m = &q->m[(q->head + k) % QUEUE_LEN];
+        if ((hwnd && m->hwnd != hwnd) || ((lo || hi) && (m->message < lo || m->message > hi)))
+            continue;
+        *out = *m;
+        if (remove)
+        {
+            for (unsigned j = k; j + 1 < q->count; ++j)
+                q->m[(q->head + j) % QUEUE_LEN] = q->m[(q->head + j + 1) % QUEUE_LEN];
+            q->count--;
+        }
+        qunlock();
+        return 1;
+    }
+    qunlock();
+    return 0;
+}
+
+static unsigned queued(uint32_t tid)
+{
+    qlock();
+    Queue* q = queue_of(tid);
+    unsigned n = q ? q->count : 0;
+    qunlock();
+    return n;
+}
+
+/* --- SDL events -> Win32 messages ------------------------------------------------------------------- */
+static uint8_t g_keys[256]; /* VK -> 0x80 pressed */
+
+static uint32_t vk_of(SDL_Scancode sc)
+{
+    if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z)
+        return 'A' + (sc - SDL_SCANCODE_A);
+    if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9)
+        return '1' + (sc - SDL_SCANCODE_1);
+    if (sc == SDL_SCANCODE_0)
+        return '0';
+    if (sc >= SDL_SCANCODE_F1 && sc <= SDL_SCANCODE_F12)
+        return 0x70 + (sc - SDL_SCANCODE_F1);
+    if (sc >= SDL_SCANCODE_KP_1 && sc <= SDL_SCANCODE_KP_9)
+        return 0x61 + (sc - SDL_SCANCODE_KP_1);
+    switch (sc)
+    {
+    case SDL_SCANCODE_KP_0: return 0x60;
+    case SDL_SCANCODE_RETURN:
+    case SDL_SCANCODE_KP_ENTER: return 0x0D;
+    case SDL_SCANCODE_ESCAPE: return 0x1B;
+    case SDL_SCANCODE_BACKSPACE: return 0x08;
+    case SDL_SCANCODE_TAB: return 0x09;
+    case SDL_SCANCODE_SPACE: return 0x20;
+    case SDL_SCANCODE_LEFT: return 0x25;
+    case SDL_SCANCODE_UP: return 0x26;
+    case SDL_SCANCODE_RIGHT: return 0x27;
+    case SDL_SCANCODE_DOWN: return 0x28;
+    case SDL_SCANCODE_INSERT: return 0x2D;
+    case SDL_SCANCODE_DELETE: return 0x2E;
+    case SDL_SCANCODE_HOME: return 0x24;
+    case SDL_SCANCODE_END: return 0x23;
+    case SDL_SCANCODE_PAGEUP: return 0x21;
+    case SDL_SCANCODE_PAGEDOWN: return 0x22;
+    case SDL_SCANCODE_LSHIFT:
+    case SDL_SCANCODE_RSHIFT: return 0x10;
+    case SDL_SCANCODE_LCTRL:
+    case SDL_SCANCODE_RCTRL: return 0x11;
+    case SDL_SCANCODE_LALT:
+    case SDL_SCANCODE_RALT: return 0x12;
+    case SDL_SCANCODE_CAPSLOCK: return 0x14;
+    case SDL_SCANCODE_NUMLOCKCLEAR: return 0x90;
+    case SDL_SCANCODE_SCROLLLOCK: return 0x91;
+    case SDL_SCANCODE_PRINTSCREEN: return 0x2C;
+    case SDL_SCANCODE_PAUSE: return 0x13;
+    case SDL_SCANCODE_KP_MULTIPLY: return 0x6A;
+    case SDL_SCANCODE_KP_PLUS: return 0x6B;
+    case SDL_SCANCODE_KP_MINUS: return 0x6D;
+    case SDL_SCANCODE_KP_PERIOD: return 0x6E;
+    case SDL_SCANCODE_KP_DIVIDE: return 0x6F;
+    case SDL_SCANCODE_MINUS: return 0xBD;
+    case SDL_SCANCODE_EQUALS: return 0xBB;
+    case SDL_SCANCODE_LEFTBRACKET: return 0xDB;
+    case SDL_SCANCODE_RIGHTBRACKET: return 0xDD;
+    case SDL_SCANCODE_BACKSLASH: return 0xDC;
+    case SDL_SCANCODE_SEMICOLON: return 0xBA;
+    case SDL_SCANCODE_APOSTROPHE: return 0xDE;
+    case SDL_SCANCODE_GRAVE: return 0xC0;
+    case SDL_SCANCODE_COMMA: return 0xBC;
+    case SDL_SCANCODE_PERIOD: return 0xBE;
+    case SDL_SCANCODE_SLASH: return 0xBF;
+    default: return 0;
+    }
+}
+
+/* PC set-1 scan codes by virtual key (the keyboard Windows reports in lParam and MapVirtualKey);
+ * 0x100 marks the extended keys (E0 prefix). */
+static uint16_t scan_of_vk(uint32_t vk)
+{
+    static const char row1[] = "QWERTYUIOP", row2[] = "ASDFGHJKL", row3[] = "ZXCVBNM";
+    for (int i = 0; row1[i]; ++i)
+        if (vk == (uint32_t)row1[i])
+            return (uint16_t)(0x10 + i);
+    for (int i = 0; row2[i]; ++i)
+        if (vk == (uint32_t)row2[i])
+            return (uint16_t)(0x1E + i);
+    for (int i = 0; row3[i]; ++i)
+        if (vk == (uint32_t)row3[i])
+            return (uint16_t)(0x2C + i);
+    if (vk >= '1' && vk <= '9')
+        return (uint16_t)(0x02 + vk - '1');
+    if (vk >= 0x70 && vk <= 0x79) /* F1-F10 */
+        return (uint16_t)(0x3B + vk - 0x70);
+    switch (vk)
+    {
+    case '0': return 0x0B;
+    case 0x1B: return 0x01;
+    case 0xBD: return 0x0C;
+    case 0xBB: return 0x0D;
+    case 0x08: return 0x0E;
+    case 0x09: return 0x0F;
+    case 0xDB: return 0x1A;
+    case 0xDD: return 0x1B;
+    case 0x0D: return 0x1C;
+    case 0x11: return 0x1D;
+    case 0xBA: return 0x27;
+    case 0xDE: return 0x28;
+    case 0xC0: return 0x29;
+    case 0x10: return 0x2A;
+    case 0xDC: return 0x2B;
+    case 0xBC: return 0x33;
+    case 0xBE: return 0x34;
+    case 0xBF: return 0x35;
+    case 0x6A: return 0x37;
+    case 0x12: return 0x38;
+    case 0x20: return 0x39;
+    case 0x14: return 0x3A;
+    case 0x90: return 0x45;
+    case 0x91: return 0x46;
+    case 0x67: return 0x47;
+    case 0x68: return 0x48;
+    case 0x69: return 0x49;
+    case 0x6D: return 0x4A;
+    case 0x64: return 0x4B;
+    case 0x65: return 0x4C;
+    case 0x66: return 0x4D;
+    case 0x6B: return 0x4E;
+    case 0x61: return 0x4F;
+    case 0x62: return 0x50;
+    case 0x63: return 0x51;
+    case 0x60: return 0x52;
+    case 0x6E: return 0x53;
+    case 0x7A: return 0x57; /* F11 */
+    case 0x7B: return 0x58; /* F12 */
+    case 0x24: return 0x147; /* Home */
+    case 0x26: return 0x148; /* Up */
+    case 0x21: return 0x149; /* Page Up */
+    case 0x25: return 0x14B; /* Left */
+    case 0x27: return 0x14D; /* Right */
+    case 0x23: return 0x14F; /* End */
+    case 0x28: return 0x150; /* Down */
+    case 0x22: return 0x151; /* Page Down */
+    case 0x2D: return 0x152; /* Insert */
+    case 0x2E: return 0x153; /* Delete */
+    case 0x6F: return 0x135; /* keypad / */
+    default: return 0;
+    }
+}
+
+static uint32_t mouse_keys(SDL_MouseButtonFlags b)
+{
+    return ((b & SDL_BUTTON_LMASK) ? 1u : 0) | ((b & SDL_BUTTON_RMASK) ? 2u : 0) | ((b & SDL_BUTTON_MMASK) ? 0x10u : 0) |
+        (g_keys[0x10] ? 4u : 0) | (g_keys[0x11] ? 8u : 0);
+}
+
+/* Pumps SDL on the window's thread and turns its events into queued messages. */
+static void pump(void)
+{
+    if (!g_sdl_up)
+        return;
+    SDL_Event e;
+    while (SDL_PollEvent(&e))
+    {
+        input_sdl_event(&e); /* DirectInput's view of the same events */
+        Wnd* w = NULL;
+        switch (e.type)
+        {
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
+        {
+            w = wnd_of_sdl(e.key.windowID);
+            uint32_t vk = vk_of(e.key.scancode);
+            if (!w || !vk)
+                break;
+            int down = e.type == SDL_EVENT_KEY_DOWN;
+            uint32_t scan = scan_of_vk(vk);
+            if (e.key.scancode == SDL_SCANCODE_RCTRL || e.key.scancode == SDL_SCANCODE_RALT || e.key.scancode == SDL_SCANCODE_KP_ENTER)
+                scan |= 0x100;
+            if (e.key.scancode == SDL_SCANCODE_RSHIFT)
+                scan = 0x36;
+            /* lParam: repeat 1, scan code, extended bit 24, previous state 30, transition 31 */
+            uint32_t lp = 1u | ((scan & 0xFFu) << 16) | ((scan & 0x100u) << 16) |
+                (down ? (e.key.repeat ? 0x40000000u : 0) : 0xC0000000u);
+            g_keys[vk] = down ? 0x80 : 0;
+            uint32_t msg = vk == 0x12 || (g_keys[0x12] && vk != 0x12) ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP);
+            post(w->tid, w->hwnd, msg, vk, lp);
+            break;
+        }
+        case SDL_EVENT_TEXT_INPUT:
+        {
+            w = wnd_of_sdl(e.text.windowID);
+            if (!w)
+                break;
+            /* UTF-8 -> code page 1252 characters, one WM_CHAR each */
+            for (const unsigned char* p = (const unsigned char*)e.text.text; *p;)
+            {
+                unsigned c = *p++;
+                if (c >= 0x80)
+                {
+                    unsigned n = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1, v = c & (0x3F >> n);
+                    for (unsigned k = 0; k < n && (*p & 0xC0) == 0x80; ++k)
+                        v = (v << 6) | (*p++ & 0x3F);
+                    c = v <= 0xFF ? v : '?';
+                }
+                post(w->tid, w->hwnd, WM_CHAR, c, 1);
+            }
+            break;
+        }
+        case SDL_EVENT_MOUSE_MOTION:
+            w = wnd_of_sdl(e.motion.windowID);
+            if (w)
+                post(w->tid, w->hwnd, WM_MOUSEMOVE, mouse_keys(e.motion.state),
+                    ((uint32_t)(uint16_t)(int)e.motion.y << 16) | (uint16_t)ui_unsqueeze_x(w, (int)e.motion.x, (int)e.motion.y));
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        {
+            w = wnd_of_sdl(e.button.windowID);
+            if (!w)
+                break;
+            int down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+            uint32_t msg = e.button.button == SDL_BUTTON_LEFT    ? (down ? WM_LBUTTONDOWN : WM_LBUTTONUP)
+                         : e.button.button == SDL_BUTTON_RIGHT   ? (down ? WM_RBUTTONDOWN : WM_RBUTTONUP)
+                         : e.button.button == SDL_BUTTON_MIDDLE ? (down ? WM_MBUTTONDOWN : WM_MBUTTONUP)
+                                                                 : 0;
+            if (!msg)
+                break;
+            uint32_t lp = ((uint32_t)(uint16_t)(int)e.button.y << 16) | (uint16_t)ui_unsqueeze_x(w, (int)e.button.x, (int)e.button.y);
+            g_mouse_held = SDL_GetMouseState(NULL, NULL) != 0;
+            post(w->tid, w->hwnd, msg, mouse_keys(SDL_GetMouseState(NULL, NULL)), lp);
+            break;
+        }
+        case SDL_EVENT_MOUSE_WHEEL:
+            w = wnd_of_sdl(e.wheel.windowID);
+            if (w)
+                post(w->tid, w->hwnd, WM_MOUSEWHEEL, ((uint32_t)(uint16_t)(int16_t)(e.wheel.y * 120) << 16),
+                    ((uint32_t)(uint16_t)(int)e.wheel.mouse_y << 16) | (uint16_t)(int)e.wheel.mouse_x);
+            break;
+        case SDL_EVENT_QUIT:
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            /* Cmd+Q, the Dock's Quit, Ctrl+C, the window's close button: the player leaving. FFXI
+             * only leaves from its own menus (its window procedure ignores WM_CLOSE), so the host
+             * ends the run here; nothing is lost - the registry is saved as the game changes it. */
+            rt_log("[recomp] quit\n");
+            fflush(NULL);
+            _Exit(0);
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+        {
+            w = wnd_of_sdl(e.window.windowID);
+            if (!w)
+                break;
+            int on = e.type == SDL_EVENT_WINDOW_FOCUS_GAINED;
+            post(w->tid, w->hwnd, WM_ACTIVATEAPP, (uint32_t)on, 0);
+            post(w->tid, w->hwnd, WM_ACTIVATE, on ? 1u : 0u, 0);
+            post(w->tid, w->hwnd, on ? WM_SETFOCUS : WM_KILLFOCUS, 0, 0);
+            if (on)
+                g_focus = w->hwnd;
+            else
+            {
+                memset(g_keys, 0, sizeof g_keys);
+                input_release_all();
+            }
+            break;
+        }
+        case SDL_EVENT_WINDOW_MOVED:
+            w = wnd_of_sdl(e.window.windowID);
+            if (w)
+            {
+                w->x = e.window.data1;
+                w->y = e.window.data2;
+                post(w->tid, w->hwnd, WM_MOVE, 0, ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
+            }
+            break;
+        default: break;
+        }
+    }
+}
+
+/* --- window shims ---------------------------------------------------------------------------------- */
+static void sh_RegisterClassA(Guest* g)
+{
+    uint32_t wc = ARG(0);
+    const char* name = (const char*)GUEST_PTR(rd32(wc + 36));
+    for (int i = 0; i < MAX_CLASSES; ++i)
+        if (!g_classes[i].name[0])
+        {
+            snprintf(g_classes[i].name, sizeof g_classes[i].name, "%s", name);
+            g_classes[i].wndproc = rd32(wc + 4);
+            RET(0xC000u + (uint32_t)i, 1);
+        }
+    RET(0, 1);
+}
+
+static void sh_UnregisterClassA(Guest* g)
+{
+    for (int i = 0; i < MAX_CLASSES; ++i)
+        if (!strcmp(g_classes[i].name, ARGS(0)))
+            g_classes[i].name[0] = 0;
+    RET(1, 2);
+}
+
+/* No window frame here: the client area is the window. */
+static void sh_AdjustWindowRectEx(Guest* g) { RET(1, 4); }
+static void sh_AdjustWindowRect(Guest* g) { RET(1, 3); }
+
+/* The window's frame from its style, as Windows would draw it (macOS; Windows does its own when the
+ * window is made): a WS_POPUP without a caption (FFXI's borderless modes) has none, and one covering
+ * the desktop is full screen - the desktop's own mode, no mode change (SDL's fullscreen with no
+ * display mode), not a macOS Space. */
+static void apply_frame(Wnd* w)
+{
+#if defined(_WIN32)
+    (void)w; /* Windows: the window is made borderless when created, and placed where the game puts it */
+    return;
+#else
+    if (!w->sdl)
+        return;
+    int popup = (w->style & 0x80000000u) && (w->style & 0x00C00000u) != 0x00C00000u; /* WS_POPUP, no WS_CAPTION */
+    uint32_t dw, dh, hz;
+    user32_desktop_mode(&dw, &dh, &hz);
+    int cover = popup && (uint32_t)w->w >= dw && (uint32_t)w->h >= dh, full = cover || w->fullscreen;
+    /* a macOS Space is only for a window with a frame: full screen hides it anyway */
+    int spaces = SDL_GetHintBoolean(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, false);
+    SDL_SetWindowBordered(w->sdl, !popup || (full && spaces));
+    SDL_SetWindowFullscreenMode(w->sdl, NULL);
+    SDL_SetWindowFullscreen(w->sdl, full);
+#endif
+}
+
+void user32_set_fullscreen(uint32_t hwnd, int on)
+{
+    Wnd* w = wnd(hwnd);
+    if (!w)
+        return;
+    w->fullscreen = on != 0;
+    apply_frame(w);
+}
+
+/* CreateWindowExA(ex, class, title, style, x, y, w, h, parent, menu, instance, param) */
+static void sh_CreateWindowExA(Guest* g)
+{
+    const char* cls = ARGS(1);
+    uint32_t proc = 0;
+    for (int i = 0; i < MAX_CLASSES; ++i)
+        if (g_classes[i].name[0] && !strcmp(g_classes[i].name, cls))
+            proc = g_classes[i].wndproc;
+    Wnd* w = NULL;
+    for (int i = 0; i < MAX_WINDOWS && !w; ++i)
+        if (!g_wnds[i].used)
+        {
+            w = &g_wnds[i];
+            memset(w, 0, sizeof *w);
+            w->used = 1;
+            w->hwnd = HWND_BASE + HWND_STRIDE * (uint32_t)i;
+        }
+    if (!proc || !w)
+    {
+        if (w)
+            w->used = 0;
+        RET(0, 12);
+    }
+    w->wndproc = proc;
+    w->tid = gt_self()->tid;
+    w->style = ARG(3);
+    w->x = (int32_t)ARG(4) == (int32_t)0x80000000 ? 0 : (int32_t)ARG(4);
+    w->y = (int32_t)ARG(5) == (int32_t)0x80000000 ? 0 : (int32_t)ARG(5);
+    w->w = (int32_t)ARG(6) == (int32_t)0x80000000 ? 640 : (int32_t)ARG(6);
+    w->h = (int32_t)ARG(7) == (int32_t)0x80000000 ? 480 : (int32_t)ARG(7);
+    sdl_up();
+    /* A WS_POPUP window with no caption (the game's full-screen and borderless windowed modes) has no
+     * frame here either, and goes where the game puts it: at its size, borderless full screen. */
+    int popup = (w->style & 0x80000000u) && !(w->style & 0x00C00000u);
+    (void)popup;
+    if (g_adopt && !ARG(8)) /* no parent: the game's main window */
+    {
+        w->sdl = g_adopt;
+        g_adopt = NULL;
+        SDL_SetWindowTitle(w->sdl, ARG(2) ? ARGS(2) : "");
+        SDL_SetWindowSize(w->sdl, w->w, w->h);
+    }
+    else
+    {
+        SDL_WindowFlags flags = SDL_WINDOW_HIDDEN;
+#if defined(_WIN32)
+        if (popup)
+            flags |= SDL_WINDOW_BORDERLESS;
+#endif
+        w->sdl = SDL_CreateWindow(ARG(2) ? ARGS(2) : "", w->w, w->h, flags);
+    }
+    apply_frame(w);
+    if (!w->sdl)
+        rt_log("[recomp] SDL_CreateWindow: %s\n", SDL_GetError());
+#if defined(_WIN32)
+    else if (popup)
+        SDL_SetWindowPosition(w->sdl, w->x, w->y);
+#endif
+
+    /* WM_NCCREATE / WM_CREATE with a CREATESTRUCTA, as Windows sends them */
+    uint32_t cs = gheap_alloc(48, 1);
+    uint32_t v[12] = { ARG(11), ARG(10), ARG(9), ARG(8), (uint32_t)w->h, (uint32_t)w->w, (uint32_t)w->y, (uint32_t)w->x,
+                       ARG(3), ARG(2), ARG(1), ARG(0) };
+    for (int i = 0; i < 12; ++i)
+        wr32(cs + 4 * (uint32_t)i, v[i]);
+    uint32_t hwnd = w->hwnd;
+    if (!call_wndproc(w, WM_NCCREATE, 0, cs) || call_wndproc(w, WM_CREATE, 0, cs) == 0xFFFFFFFFu)
+    {
+        gheap_free(cs);
+        if (w->sdl)
+            SDL_DestroyWindow(w->sdl);
+        w->used = 0;
+        RET(0, 12);
+    }
+    gheap_free(cs);
+    call_wndproc(w, WM_SIZE, 0, ((uint32_t)(uint16_t)w->h << 16) | (uint16_t)w->w);
+    call_wndproc(w, WM_MOVE, 0, ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
+    if (w->style & 0x10000000u) /* WS_VISIBLE: shown and activated, as Windows does */
+        show_window(w, 1);
+    RET(hwnd, 12);
+}
+
+static void destroy(Wnd* w)
+{
+    call_wndproc(w, WM_DESTROY, 0, 0);
+    call_wndproc(w, WM_NCDESTROY, 0, 0);
+    if (w->sdl)
+        SDL_DestroyWindow(w->sdl);
+    if (g_focus == w->hwnd)
+        g_focus = 0;
+    w->used = 0;
+}
+
+static void sh_DestroyWindow(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (w)
+        destroy(w);
+    RET(w != NULL, 1);
+}
+
+static void sh_DefWindowProcA(Guest* g)
+{
+    uint32_t msg = ARG(1);
+    Wnd* w = wnd(ARG(0));
+    switch (msg)
+    {
+    case WM_NCCREATE: RET(1, 4);
+    case WM_ERASEBKGND: RET(1, 4);
+    case WM_CLOSE:
+        if (w)
+            destroy(w);
+        RET(0, 4);
+    case WM_SYSCOMMAND:
+        if ((ARG(2) & 0xFFF0u) == 0xF060u && w) /* SC_CLOSE */
+            post(w->tid, w->hwnd, WM_CLOSE, 0, 0);
+        RET(0, 4);
+    default: RET(0, 4);
+    }
+}
+
+static void sh_ShowWindow(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (!w)
+        RET(0, 2);
+    RET((uint32_t)show_window(w, ARG(1) != 0), 2); /* SW_HIDE = 0 */
+}
+
+/* shows and activates (or hides) a window, with the messages Windows sends; returns whether it was visible */
+static int show_window(Wnd* w, int show)
+{
+    int was = w->visible;
+    if (show && !was)
+    {
+        if (w->sdl)
+        {
+            SDL_ShowWindow(w->sdl);
+            SDL_RaiseWindow(w->sdl);
+            SDL_StartTextInput(w->sdl);
+        }
+        call_wndproc(w, WM_SHOWWINDOW, 1, 0);
+        call_wndproc(w, WM_ACTIVATEAPP, 1, 0);
+        call_wndproc(w, WM_ACTIVATE, 1, 0);
+        call_wndproc(w, WM_SETFOCUS, 0, 0);
+        g_focus = w->hwnd;
+    }
+    else if (!show && was && w->sdl)
+        SDL_HideWindow(w->sdl);
+    w->visible = show;
+    return was;
+}
+
+static void sh_UpdateWindow(Guest* g) { RET(1, 1); }
+
+static void write_rect(uint32_t p, int l, int t, int r, int b)
+{
+    wr32(p, (uint32_t)l);
+    wr32(p + 4, (uint32_t)t);
+    wr32(p + 8, (uint32_t)r);
+    wr32(p + 12, (uint32_t)b);
+}
+
+static void sh_GetWindowRect(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (!w)
+        RET(0, 2);
+    write_rect(ARG(1), w->x, w->y, w->x + w->w, w->y + w->h);
+    RET(1, 2);
+}
+
+static void sh_GetClientRect(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (!w)
+        RET(0, 2);
+    write_rect(ARG(1), 0, 0, w->w, w->h);
+    RET(1, 2);
+}
+
+static void sh_SetRect(Guest* g) { write_rect(ARG(0), (int)ARG(1), (int)ARG(2), (int)ARG(3), (int)ARG(4)); RET(1, 5); }
+
+static void sh_ClientToScreen(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (w)
+    {
+        wr32(ARG(1), rd32(ARG(1)) + (uint32_t)w->x);
+        wr32(ARG(1) + 4, rd32(ARG(1) + 4) + (uint32_t)w->y);
+    }
+    RET(w != NULL, 2);
+}
+
+static void sh_ScreenToClient(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (w)
+    {
+        wr32(ARG(1), rd32(ARG(1)) - (uint32_t)w->x);
+        wr32(ARG(1) + 4, rd32(ARG(1) + 4) - (uint32_t)w->y);
+    }
+    RET(w != NULL, 2);
+}
+
+static void sh_GetCursorPos(Guest* g)
+{
+    float x = 0, y = 0;
+    if (g_sdl_up)
+        SDL_GetGlobalMouseState(&x, &y);
+    Wnd* w = wnd(g_focus);
+    if (w && x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h)
+        x = (float)(w->x + ui_unsqueeze_x(w, (int)x - w->x, (int)y - w->y));
+    wr32(ARG(0), (uint32_t)(int32_t)x);
+    wr32(ARG(0) + 4, (uint32_t)(int32_t)y);
+    RET(1, 1);
+}
+
+static void sh_GetSystemMetrics(Guest* g)
+{
+    int32_t cx = 1920, cy = 1080;
+    sdl_up();
+    const SDL_DisplayMode* dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+    if (dm)
+        cx = dm->w, cy = dm->h;
+    switch (ARG(0))
+    {
+    case 0:  /* SM_CXSCREEN */
+    case 78: /* SM_CXVIRTUALSCREEN */
+    case 16: /* SM_CXFULLSCREEN */
+        RET((uint32_t)cx, 1);
+    case 1:
+    case 79:
+    case 17:
+        RET((uint32_t)cy, 1);
+    case 4: RET(23, 1);     /* SM_CYCAPTION */
+    case 5:
+    case 6: RET(1, 1);      /* SM_CXBORDER, SM_CYBORDER */
+    case 7:
+    case 8: RET(3, 1);      /* SM_CXFIXEDFRAME */
+    case 32:
+    case 33: RET(4, 1);     /* SM_CXFRAME */
+    case 11:
+    case 12: RET(32, 1);    /* SM_CXICON */
+    case 13:
+    case 14: RET(32, 1);    /* SM_CXCURSOR */
+    case 15: RET(20, 1);    /* SM_CYMENU */
+    case 43: RET(3, 1);     /* SM_CMOUSEBUTTONS */
+    case 80: RET(1, 1);     /* SM_CMONITORS */
+    default: RET(0, 1);
+    }
+}
+
+static void sh_GetSystemMenu(Guest* g) { RET(0, 2); }
+static void sh_InsertMenuItemA(Guest* g) { RET(0, 4); }
+
+/* LoadStringA(instance, id, buf, n): RT_STRING block (id >> 4) + 1, entry id & 15 */
+static void sh_LoadStringA(Guest* g)
+{
+    uint32_t id = ARG(1), buf = ARG(2);
+    int32_t n = (int32_t)ARG(3);
+    uint32_t size = 0, block = pe_resource(ARG(0), 6, (id >> 4) + 1, &size);
+    if (!block || n <= 0)
+        RET(0, 4);
+    uint32_t p = block;
+    for (uint32_t i = 0; i < (id & 15); ++i)
+        p += 2 + 2 * rd16(p);
+    uint32_t len = rd16(p), o = 0;
+    for (; o < len && o + 1 < (uint32_t)n; ++o)
+    {
+        uint16_t c = rd16(p + 2 + 2 * o);
+        wr8(buf + o, c > 0xFF ? '?' : (uint8_t)c);
+    }
+    wr8(buf + o, 0);
+    RET(o, 4);
+}
+
+/* icons and cursors: opaque handles; the game only hands them back */
+static uint32_t g_cursor = 0x00030001u;
+static int g_cursor_count;
+static void sh_LoadIconA(Guest* g) { RET(0x00020001u, 2); }
+static void sh_LoadCursorA(Guest* g) { RET(0x00030001u, 2); }
+static void sh_LoadCursorFromFileA(Guest* g) { RET(0x00030002u, 1); }
+static void sh_SetCursor(Guest* g) { uint32_t old = g_cursor; g_cursor = ARG(0); RET(old, 1); }
+
+static void sh_ShowCursor(Guest* g)
+{
+    g_cursor_count += ARG(0) ? 1 : -1;
+    if (g_sdl_up)
+    {
+        if (g_cursor_count >= 0)
+            SDL_ShowCursor();
+        else
+            SDL_HideCursor();
+    }
+    RET((uint32_t)g_cursor_count, 1);
+}
+
+/* The low-level keyboard hook (it keeps the Windows key from leaving the game): never called here. */
+static void sh_SetWindowsHookExA(Guest* g) { RET(0x00040001u, 4); }
+static void sh_UnhookWindowsHookEx(Guest* g) { RET(1, 1); }
+static void sh_CallNextHookEx(Guest* g) { RET(0, 4); }
+
+static void sh_GetKeyboardState(Guest* g)
+{
+    memcpy(ARGP(0), g_keys, 256);
+    RET(1, 1);
+}
+
+static void sh_GetKeyState(Guest* g) { RET(g_keys[ARG(0) & 0xFF] ? 0xFFFF8000u : 0, 1); }
+static void sh_GetAsyncKeyState(Guest* g) { RET(g_keys[ARG(0) & 0xFF] ? 0x8000u : 0, 1); }
+static void sh_GetKeyboardLayout(Guest* g) { RET(0x04090409u, 1); } /* US English */
+
+static void sh_GetForegroundWindow(Guest* g) { RET(g_focus, 0); }
+static void sh_GetFocus(Guest* g) { RET(g_focus, 0); }
+static void sh_SetFocus(Guest* g) { uint32_t old = g_focus; g_focus = ARG(0); RET(old, 1); }
+static void sh_SetForegroundWindow(Guest* g) { RET(1, 1); }
+static void sh_IsWindow(Guest* g) { RET(wnd(ARG(0)) != NULL, 1); }
+static void sh_IsIconic(Guest* g) { RET(0, 1); }
+static void sh_IsWindowVisible(Guest* g) { Wnd* w = wnd(ARG(0)); RET(w && w->visible, 1); }
+
+/* --- messages ----------------------------------------------------------------------------------------- */
+static void write_msg(uint32_t p, const Msg* m)
+{
+    wr32(p, m->hwnd);
+    wr32(p + 4, m->message);
+    wr32(p + 8, m->wparam);
+    wr32(p + 12, m->lparam);
+    wr32(p + 16, m->time);
+    wr32(p + 20, (uint32_t)m->x);
+    wr32(p + 24, (uint32_t)m->y);
+}
+
+/* PeekMessageA(msg, hwnd, min, max, remove) */
+static void sh_PeekMessageA(Guest* g)
+{
+    pump();
+    Msg m;
+    if (!take(gt_self()->tid, ARG(1), ARG(2), ARG(3), (ARG(4) & 1) != 0, &m))
+        RET(0, 5);
+    write_msg(ARG(0), &m);
+    RET(1, 5);
+}
+
+/* GetMessageA(msg, hwnd, min, max): waits; 0 for WM_QUIT */
+static void sh_GetMessageA(Guest* g)
+{
+    Msg m;
+    uint32_t tid = gt_self()->tid;
+    for (;;)
+    {
+        pump();
+        if (take(tid, ARG(1), ARG(2), ARG(3), 1, &m))
+            break;
+        gt_unlock();
+        plat_sleep_ms(5);
+        gt_lock();
+    }
+    write_msg(ARG(0), &m);
+    RET(m.message != WM_QUIT, 4);
+}
+
+static void sh_TranslateMessage(Guest* g) { RET(0, 1); } /* WM_CHAR comes from SDL's text input */
+
+static void sh_DispatchMessageA(Guest* g)
+{
+    uint32_t p = ARG(0);
+    Wnd* w = wnd(rd32(p));
+    RET(w ? call_wndproc(w, rd32(p + 4), rd32(p + 8), rd32(p + 12)) : 0, 1);
+}
+
+static void sh_SendMessageA(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    RET(w ? call_wndproc(w, ARG(1), ARG(2), ARG(3)) : 0, 4);
+}
+
+static void sh_PostMessageA(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    RET(w ? post(w->tid, w->hwnd, ARG(1), ARG(2), ARG(3)) : post(gt_self()->tid, 0, ARG(1), ARG(2), ARG(3)), 4);
+}
+
+static void sh_PostThreadMessageA(Guest* g) { RET(post(ARG(0), 0, ARG(1), ARG(2), ARG(3)), 4); }
+static void sh_PostQuitMessage(Guest* g) { post(gt_self()->tid, 0, WM_QUIT, ARG(0), 0); RET(0, 1); }
+
+static void sh_GetQueueStatus(Guest* g)
+{
+    pump();
+    unsigned n = queued(gt_self()->tid);
+    RET(n ? (ARG(0) << 16) | ARG(0) : 0, 1);
+}
+
+/* MsgWaitForMultipleObjects(n, handles, all, ms, wake): the handles, or a message in the queue */
+static void sh_MsgWaitForMultipleObjects(Guest* g)
+{
+    uint32_t n = ARG(0), all = ARG(2), ms = ARG(3), hs[64];
+    for (uint32_t i = 0; i < n && i < 64; ++i)
+        hs[i] = rd32(ARG(1) + 4 * i);
+    uint32_t tid = gt_self()->tid;
+    uint64_t deadline = ms == 0xFFFFFFFFu ? ~0ull : rt_monotonic_ns() / 1000000u + ms;
+    for (;;)
+    {
+        pump();
+        if (queued(tid))
+            RET(n, 5); /* WAIT_OBJECT_0 + n: input */
+        uint64_t now = rt_monotonic_ns() / 1000000u;
+        uint32_t slice = now >= deadline ? 0 : (uint32_t)(deadline - now < 10 ? deadline - now : 10);
+        uint32_t r = n ? k_wait(hs, n, all != 0, slice) : K_WAIT_TIMEOUT;
+        if (!n && slice)
+        {
+            gt_unlock();
+            plat_sleep_ms(slice);
+            gt_lock();
+        }
+        if (r != K_WAIT_TIMEOUT)
+            RET(r, 5);
+        if (now >= deadline)
+            RET(K_WAIT_TIMEOUT, 5);
+    }
+}
+
+/* --- WINMM timers ----------------------------------------------------------------------------------- */
+static void sh_timeGetTime(Guest* g) { RET((uint32_t)(rt_monotonic_ns() / 1000000u), 0); }
+static void sh_timeBeginPeriod(Guest* g) { RET(0, 1); }
+static void sh_timeEndPeriod(Guest* g) { RET(0, 1); }
+
+static void sh_timeGetDevCaps(Guest* g)
+{
+    wr32(ARG(0), 1);          /* wPeriodMin */
+    wr32(ARG(0) + 4, 1000000); /* wPeriodMax */
+    RET(0, 2);
+}
+
+/* timeSetEvent(uDelay, uResolution, lpTimeProc, dwUser, fuEvent): a host thread per timer, calling
+ * the guest's TimeProc(uTimerID, uMsg, dwUser, dw1, dw2) - or setting an event, for
+ * TIME_CALLBACK_EVENT_SET - once (TIME_ONESHOT) or every uDelay ms (TIME_PERIODIC) */
+typedef struct Timer
+{
+    volatile uint32_t live;
+    uint32_t id, delay, proc, user, flags;
+} Timer;
+
+static Timer g_timers[16];
+
+static void timer_thread(void* arg)
+{
+    Timer* t = (Timer*)arg;
+    uint64_t next = rt_monotonic_ns() / 1000000u + t->delay;
+    while (t->live)
+    {
+        uint64_t now = rt_monotonic_ns() / 1000000u;
+        if (now < next)
+        {
+            plat_sleep_ms((uint32_t)(next - now < 5 ? next - now : 5));
+            continue;
+        }
+        if (!t->live)
+            break;
+        if (t->flags & 0x10) /* TIME_CALLBACK_EVENT_SET */
+            k_event_set(t->proc, 1);
+        else if (t->flags & 0x20) /* TIME_CALLBACK_EVENT_PULSE */
+            k_event_set(t->proc, 1);
+        else
+        {
+            uint32_t a[5] = { t->id, 0, t->user, 0, 0 };
+            guest_call(t->proc, 5, a);
+        }
+        if (!(t->flags & 1)) /* TIME_ONESHOT */
+        {
+            t->live = 0;
+            break;
+        }
+        next += t->delay ? t->delay : 1;
+    }
+    gt_exit_self();
+}
+
+static void sh_timeSetEvent(Guest* g)
+{
+    for (uint32_t i = 0; i < 16; ++i)
+        if (!g_timers[i].live)
+        {
+            Timer* t = &g_timers[i];
+            t->id = i + 1, t->delay = ARG(0), t->proc = ARG(2), t->user = ARG(3), t->flags = ARG(4);
+            t->live = 1;
+            if (!plat_thread_start(timer_thread, t))
+            {
+                t->live = 0;
+                RET(0, 5);
+            }
+            RET(t->id, 5);
+        }
+    RET(0, 5);
+}
+
+static void sh_timeKillEvent(Guest* g)
+{
+    uint32_t id = ARG(0);
+    if (!id || id > 16 || !g_timers[id - 1].live)
+        RET(97, 1); /* MMSYSERR_INVALPARAM */
+    g_timers[id - 1].live = 0;
+    RET(0, 1);
+}
+
+/* --- the rest of USER32 ---------------------------------------------------------------------------------- */
+static void sh_GetWindowThreadProcessId(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (ARG(1))
+        wr32(ARG(1), w ? 0x1000u : 0); /* the process id the TEB reports */
+    RET(w ? w->tid : 0, 2);
+}
+
+/* keybd_event(bVk, bScan, dwFlags, dwExtraInfo): synthesised keys go through the queue */
+static void sh_keybd_event(Guest* g)
+{
+    Wnd* w = wnd(g_focus);
+    uint32_t vk = ARG(0) & 0xFF, up = ARG(2) & 2; /* KEYEVENTF_KEYUP */
+    if (w && vk)
+    {
+        g_keys[vk] = up ? 0 : 0x80;
+        post(w->tid, w->hwnd, up ? WM_KEYUP : WM_KEYDOWN, vk, 1u | (scan_of_vk(vk) & 0xFFu) << 16 | (up ? 0xC0000000u : 0));
+    }
+    RET(0, 4);
+}
+
+/* MapVirtualKeyA(uCode, uMapType): 0 VK->scan, 1 scan->VK, 2 VK->character, 3 scan->VK (left/right) */
+static void sh_MapVirtualKeyA(Guest* g)
+{
+    uint32_t c = ARG(0);
+    switch (ARG(1))
+    {
+    case 0: RET(scan_of_vk(c) & 0xFF, 2);
+    case 1:
+    case 3:
+        for (uint32_t vk = 1; vk < 256; ++vk)
+            if ((scan_of_vk(vk) & 0xFF) == c && !(scan_of_vk(vk) & 0x100))
+                RET(vk, 2);
+        RET(0, 2);
+    case 2:
+    {
+        static const struct { uint8_t vk, ch; } oem[] = { { 0xBA, ';' }, { 0xBB, '=' }, { 0xBC, ',' }, { 0xBD, '-' },
+            { 0xBE, '.' }, { 0xBF, '/' }, { 0xC0, '`' }, { 0xDB, '[' }, { 0xDC, '\\' }, { 0xDD, ']' }, { 0xDE, '\'' },
+            { 0x20, ' ' }, { 0x0D, '\r' }, { 0x08, '\b' }, { 0x09, '\t' }, { 0x1B, 0x1B } };
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+            RET(c, 2);
+        for (size_t i = 0; i < sizeof oem / sizeof oem[0]; ++i)
+            if (oem[i].vk == c)
+                RET(oem[i].ch, 2);
+        RET(0, 2);
+    }
+    default: RET(0, 2);
+    }
+}
+
+/* FindWindowA(lpClassName, lpWindowName): only this process's windows exist */
+static void sh_FindWindowA(Guest* g)
+{
+    const char* cls = ARG(0) && ARG(0) > 0xFFFF ? ARGS(0) : NULL;
+    for (int i = 0; i < MAX_WINDOWS; ++i)
+    {
+        Wnd* w = &g_wnds[i];
+        if (!w->used || !cls)
+            continue;
+        for (int c = 0; c < MAX_CLASSES; ++c)
+            if (g_classes[c].wndproc == w->wndproc && !strcmp(g_classes[c].name, cls))
+                RET(w->hwnd, 2);
+    }
+    RET(0, 2);
+}
+
+/* wsprintf's formatting: %[-#0][width][.prec][h|l]{c d i u x X s S p %}, no floating point, at
+ * most 1024 characters. `args` walks the guest's argument list. */
+static uint32_t guest_format(uint32_t out, uint32_t fmt, uint32_t args)
+{
+    char buf[1100];
+    uint32_t o = 0;
+    for (uint32_t f = fmt; rd8(f) && o < 1024;)
+    {
+        char c = (char)rd8(f++);
+        if (c != '%')
+        {
+            buf[o++] = c;
+            continue;
+        }
+        char spec[16] = "%";
+        int s = 1, wide = 0;
+        while (strchr("-#0", (char)rd8(f)) && rd8(f) && s < 4)
+            spec[s++] = (char)rd8(f++);
+        while (rd8(f) >= '0' && rd8(f) <= '9' && s < 8)
+            spec[s++] = (char)rd8(f++);
+        if (rd8(f) == '.')
+            for (spec[s++] = (char)rd8(f++); rd8(f) >= '0' && rd8(f) <= '9' && s < 12;)
+                spec[s++] = (char)rd8(f++);
+        if (rd8(f) == 'l' || rd8(f) == 'h')
+            wide = rd8(f++) == 'l' ? 1 : -1;
+        char t = (char)rd8(f++);
+        char piece[1100];
+        piece[0] = 0;
+        switch (t)
+        {
+        case '%': strcpy(piece, "%"); break;
+        case 'c':
+        case 'C':
+            spec[s++] = 'c', spec[s] = 0;
+            snprintf(piece, sizeof piece, spec, (int)(rd32(args) & 0xFF)), args += 4;
+            break;
+        case 'd':
+        case 'i':
+        case 'u':
+        case 'x':
+        case 'X':
+            spec[s++] = t, spec[s] = 0;
+            if (t == 'd' || t == 'i')
+                snprintf(piece, sizeof piece, spec, (int)(int32_t)rd32(args));
+            else
+                snprintf(piece, sizeof piece, spec, (unsigned)rd32(args));
+            args += 4;
+            break;
+        case 'p':
+            snprintf(piece, sizeof piece, "%08X", rd32(args)), args += 4;
+            break;
+        case 's':
+        case 'S':
+        {
+            char str[1025];
+            uint32_t p = rd32(args), n = 0;
+            args += 4;
+            int w16 = t == 'S' ? wide >= 0 : wide == 1;
+            if (!p)
+                strcpy(str, "(null)");
+            else
+            {
+                for (; n < 1024; ++n)
+                {
+                    uint32_t ch = w16 ? rd16(p + 2 * n) : rd8(p + n);
+                    if (!ch)
+                        break;
+                    str[n] = (char)(ch > 0xFF ? '?' : ch);
+                }
+                str[n] = 0;
+            }
+            spec[s++] = 's', spec[s] = 0;
+            snprintf(piece, sizeof piece, spec, str);
+            break;
+        }
+        default:
+            piece[0] = t, piece[1] = 0;
+            break;
+        }
+        for (const char* p = piece; *p && o < 1024; ++p)
+            buf[o++] = *p;
+    }
+    for (uint32_t i = 0; i < o; ++i)
+        wr8(out + i, (uint8_t)buf[i]);
+    wr8(out + o, 0);
+    return o;
+}
+
+static void sh_wsprintfA(Guest* g) { RETC(guest_format(ARG(0), ARG(1), g->esp + 12)); } /* cdecl, varargs */
+static void sh_wvsprintfA(Guest* g) { RET(guest_format(ARG(0), ARG(1), ARG(2)), 3); }
+
+static uint32_t g_next_message = 0xC100;
+static struct
+{
+    char name[64];
+    uint32_t id;
+} g_messages[32];
+
+static void sh_RegisterWindowMessageA(Guest* g)
+{
+    for (int i = 0; i < 32; ++i)
+        if (g_messages[i].id && !strcmp(g_messages[i].name, ARGS(0)))
+            RET(g_messages[i].id, 1);
+    for (int i = 0; i < 32; ++i)
+        if (!g_messages[i].id)
+        {
+            snprintf(g_messages[i].name, sizeof g_messages[i].name, "%s", ARGS(0));
+            g_messages[i].id = g_next_message++;
+            RET(g_messages[i].id, 1);
+        }
+    RET(0, 1);
+}
+
+static void sh_RemoveMenu(Guest* g) { RET(1, 3); }
+static void sh_AttachThreadInput(Guest* g) { RET(1, 3); }
+
+static void sh_SetCursorPos(Guest* g)
+{
+    if (g_sdl_up)
+        SDL_WarpMouseGlobal((float)(int32_t)ARG(0), (float)(int32_t)ARG(1));
+    RET(1, 2);
+}
+
+/* the clipboard: text only (CF_TEXT, code page 1252), into the host's clipboard as UTF-8 */
+static void sh_OpenClipboard(Guest* g) { RET(1, 1); }
+static void sh_EmptyClipboard(Guest* g) { RET(1, 0); }
+static void sh_CloseClipboard(Guest* g) { RET(1, 0); }
+
+static void sh_SetClipboardData(Guest* g)
+{
+    if (ARG(0) == 1 && ARG(1)) /* CF_TEXT; the handle is GlobalAlloc's pointer */
+    {
+        char utf8[4096];
+        size_t o = 0;
+        for (uint32_t p = ARG(1); rd8(p) && o + 3 < sizeof utf8; ++p)
+        {
+            uint8_t c = rd8(p);
+            if (c < 0x80)
+                utf8[o++] = (char)c;
+            else
+                utf8[o++] = (char)(0xC0 | c >> 6), utf8[o++] = (char)(0x80 | (c & 0x3F));
+        }
+        utf8[o] = 0;
+        sdl_up();
+        SDL_SetClipboardText(utf8);
+    }
+    RET(ARG(1), 2);
+}
+
+/* SystemParametersInfoA(uiAction, uiParam, pvParam, fWinIni) */
+static void sh_SystemParametersInfoA(Guest* g)
+{
+    uint32_t p = ARG(2);
+    switch (ARG(0))
+    {
+    case 0x0030: /* SPI_GETWORKAREA */
+    {
+        uint32_t w, h, hz;
+        user32_desktop_mode(&w, &h, &hz);
+        write_rect(p, 0, 0, (int)w, (int)h);
+        break;
+    }
+    case 0x0010: /* SPI_GETSCREENSAVEACTIVE */
+    case 0x0044: /* SPI_GETSCREENREADER */
+        if (p)
+            wr32(p, 0);
+        break;
+    case 0x0032: /* SPI_GETFILTERKEYS, SPI_GETTOGGLEKEYS, SPI_GETSTICKYKEYS: {cbSize, dwFlags, ...}: off */
+    case 0x0034:
+    case 0x003A:
+        if (p)
+            wr32(p + 4, 0);
+        break;
+    default: break; /* the SET actions: accepted */
+    }
+    RET(1, 4);
+}
+
+/* WINDOWPLACEMENT {length, flags, showCmd, ptMinPosition, ptMaxPosition, rcNormalPosition} */
+static void sh_GetWindowPlacement(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (!w)
+        RET(0, 2);
+    uint32_t p = ARG(1);
+    wr32(p + 4, 0);
+    wr32(p + 8, w->visible ? 1 : 0); /* SW_SHOWNORMAL / SW_HIDE */
+    for (uint32_t i = 12; i < 28; i += 4)
+        wr32(p + i, 0xFFFFFFFFu);
+    write_rect(p + 28, w->x, w->y, w->x + w->w, w->y + w->h);
+    RET(1, 2);
+}
+
+/* MoveWindow(hWnd, X, Y, nWidth, nHeight, bRepaint) */
+static void sh_MoveWindow(Guest* g)
+{
+    Wnd* w = wnd(ARG(0));
+    if (!w)
+        RET(0, 6);
+    w->x = (int32_t)ARG(1), w->y = (int32_t)ARG(2), w->w = (int32_t)ARG(3), w->h = (int32_t)ARG(4);
+    if (w->sdl)
+    {
+        SDL_SetWindowPosition(w->sdl, w->x, w->y);
+        SDL_SetWindowSize(w->sdl, w->w, w->h);
+        apply_frame(w);
+    }
+    call_wndproc(w, WM_MOVE, 0, ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
+    call_wndproc(w, WM_SIZE, 0, ((uint32_t)(uint16_t)w->h << 16) | (uint16_t)w->w);
+    RET(1, 6);
+}
+
+/* --- GDI: the device contexts, DIB sections and fonts the game draws text with -------------------------------
+ * The objects are real (a DIB's bits are guest memory the game reads back); DrawText measures but
+ * does not rasterise yet - text through GDI is for the IME's windows, which a US client never
+ * opens. */
+enum
+{
+    GDI_FREE,
+    GDI_DC,
+    GDI_DIB,
+    GDI_FONT,
+};
+
+typedef struct GdiObj
+{
+    int kind;
+    uint32_t bits, width, height, bpp, stride; /* DIB */
+    uint32_t font, bitmap, bk_mode, bk_color, text_color; /* DC: selected objects and state */
+    int32_t font_height;
+} GdiObj;
+
+#define GDI_BASE 0x00060010u
+#define GDI_MAX 64
+static GdiObj g_gdi[GDI_MAX];
+
+static uint32_t gdi_new(int kind)
+{
+    for (uint32_t i = 0; i < GDI_MAX; ++i)
+        if (g_gdi[i].kind == GDI_FREE)
+        {
+            memset(&g_gdi[i], 0, sizeof g_gdi[i]);
+            g_gdi[i].kind = kind;
+            return GDI_BASE + 4 * i;
+        }
+    return 0;
+}
+
+static GdiObj* gdi(uint32_t h, int kind)
+{
+    uint32_t i = (h - GDI_BASE) / 4;
+    return h >= GDI_BASE && !((h - GDI_BASE) % 4) && i < GDI_MAX && g_gdi[i].kind == kind ? &g_gdi[i] : NULL;
+}
+
+static void sh_CreateCompatibleDC(Guest* g)
+{
+    uint32_t h = gdi_new(GDI_DC);
+    GdiObj* d = gdi(h, GDI_DC);
+    if (d)
+        d->bk_mode = 2, d->bk_color = 0xFFFFFF; /* OPAQUE, white */
+    RET(h, 1);
+}
+
+static void sh_DeleteDC(Guest* g)
+{
+    GdiObj* d = gdi(ARG(0), GDI_DC);
+    if (d)
+        d->kind = GDI_FREE;
+    RET(d != NULL, 1);
+}
+
+/* CreateDIBSection(hdc, pbmi, usage, ppvBits, hSection, offset): bottom-up unless the height is negative */
+static void sh_CreateDIBSection(Guest* g)
+{
+    uint32_t bi = ARG(1);
+    int32_t w = (int32_t)rd32(bi + 4), h = (int32_t)rd32(bi + 8);
+    uint32_t bpp = rd16(bi + 14);
+    if (w <= 0 || !h || (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32))
+        RET(0, 6);
+    uint32_t hb = gdi_new(GDI_DIB);
+    GdiObj* b = gdi(hb, GDI_DIB);
+    if (!b)
+        RET(0, 6);
+    b->width = (uint32_t)w, b->height = (uint32_t)(h < 0 ? -h : h), b->bpp = bpp;
+    b->stride = (((uint32_t)w * bpp + 31) / 32) * 4;
+    b->bits = gheap_alloc(b->stride * b->height, 1);
+    if (ARG(3))
+        wr32(ARG(3), b->bits);
+    RET(hb, 6);
+}
+
+/* CreateFontIndirectA(LOGFONTA*) */
+static void sh_CreateFontIndirectA(Guest* g)
+{
+    uint32_t h = gdi_new(GDI_FONT);
+    GdiObj* f = gdi(h, GDI_FONT);
+    if (f)
+        f->font_height = (int32_t)rd32(ARG(0));
+    RET(h, 1);
+}
+
+static void sh_SelectObject(Guest* g)
+{
+    GdiObj* d = gdi(ARG(0), GDI_DC);
+    uint32_t h = ARG(1), old = 0;
+    if (!d)
+        RET(0, 2);
+    if (gdi(h, GDI_FONT))
+        old = d->font, d->font = h;
+    else if (gdi(h, GDI_DIB))
+        old = d->bitmap, d->bitmap = h;
+    else
+        old = 0x00060001u; /* a stock object stood in for */
+    RET(old ? old : 0x00060001u, 2);
+}
+
+static void sh_DeleteObject(Guest* g)
+{
+    GdiObj* b = gdi(ARG(0), GDI_DIB);
+    GdiObj* f = gdi(ARG(0), GDI_FONT);
+    if (b)
+    {
+        gheap_free(b->bits);
+        b->kind = GDI_FREE;
+    }
+    if (f)
+        f->kind = GDI_FREE;
+    RET(1, 1);
+}
+
+/* GetObjectA(h, c, pv): BITMAP {bmType, bmWidth, bmHeight, bmWidthBytes, bmPlanes, bmBitsPixel, bmBits} */
+static void sh_GetObjectA(Guest* g)
+{
+    GdiObj* b = gdi(ARG(0), GDI_DIB);
+    if (b)
+    {
+        if (!ARG(2))
+            RET(24, 3);
+        uint32_t p = ARG(2);
+        wr32(p, 0);
+        wr32(p + 4, b->width);
+        wr32(p + 8, b->height);
+        wr32(p + 12, b->stride);
+        wr16(p + 16, 1);
+        wr16(p + 18, (uint16_t)b->bpp);
+        wr32(p + 20, b->bits);
+        RET(24, 3);
+    }
+    GdiObj* f = gdi(ARG(0), GDI_FONT);
+    if (f)
+    {
+        if (ARG(2))
+        {
+            memset(GUEST_PTR(ARG(2)), 0, ARG(1) < 60 ? ARG(1) : 60);
+            wr32(ARG(2), (uint32_t)f->font_height);
+        }
+        RET(60, 3);
+    }
+    RET(0, 3);
+}
+
+static void sh_SetBkMode(Guest* g)
+{
+    GdiObj* d = gdi(ARG(0), GDI_DC);
+    uint32_t old = d ? d->bk_mode : 0;
+    if (d)
+        d->bk_mode = ARG(1);
+    RET(old, 2);
+}
+
+static void sh_SetBkColor(Guest* g)
+{
+    GdiObj* d = gdi(ARG(0), GDI_DC);
+    uint32_t old = d ? d->bk_color : 0xFFFFFFFFu;
+    if (d)
+        d->bk_color = ARG(1);
+    RET(old, 2);
+}
+
+static void sh_SetTextColor(Guest* g)
+{
+    GdiObj* d = gdi(ARG(0), GDI_DC);
+    uint32_t old = d ? d->text_color : 0xFFFFFFFFu;
+    if (d)
+        d->text_color = ARG(1);
+    RET(old, 2);
+}
+
+/* DrawTextA/W(hdc, lpchText, cchText, lprc, format): measured with a fixed cell (half the font's
+ * height wide), DT_CALCRECT (0x400) honoured; nothing is rasterised yet */
+static void draw_text(Guest* g, int wide)
+{
+    GdiObj* d = gdi(ARG(0), GDI_DC);
+    GdiObj* f = d ? gdi(d->font, GDI_FONT) : NULL;
+    int32_t ch = f && f->font_height ? (f->font_height < 0 ? -f->font_height : f->font_height) : 16;
+    int32_t n = (int32_t)ARG(2), lines = 1, col = 0, width = 0;
+    uint32_t s = ARG(1);
+    for (int32_t i = 0; n < 0 ? (wide ? rd16(s + 2 * (uint32_t)i) : rd8(s + (uint32_t)i)) != 0 : i < n; ++i)
+    {
+        uint32_t c = wide ? rd16(s + 2 * (uint32_t)i) : rd8(s + (uint32_t)i);
+        if (c == '\n')
+            lines++, col = 0;
+        else if (++col > width)
+            width = col;
+    }
+    static int warned;
+    if (!warned++)
+        rt_log("[recomp] DrawText: text is measured, not drawn (GDI text is not rasterised yet)\n");
+    if (ARG(4) & 0x400)
+    {
+        uint32_t r = ARG(3);
+        wr32(r + 8, rd32(r) + (uint32_t)(width * ch / 2));
+        wr32(r + 12, rd32(r + 4) + (uint32_t)(lines * ch));
+    }
+    RET((uint32_t)(lines * ch), 5);
+}
+
+static void sh_DrawTextA(Guest* g) { draw_text(g, 0); }
+static void sh_DrawTextW(Guest* g) { draw_text(g, 1); }
+
+/* --- IMM32: the US client with no IME: a context that is never open ----------------------------------------- */
+static void sh_ImmGetContext(Guest* g) { RET(0x00070001u, 1); }
+static void sh_ImmReleaseContext(Guest* g) { RET(1, 2); }
+static void sh_ImmGetOpenStatus(Guest* g) { RET(0, 1); }
+static void sh_ImmSetOpenStatus(Guest* g) { RET(1, 2); }
+static void sh_ImmNotifyIME(Guest* g) { RET(1, 4); }
+static void sh_ImmSetCandidateWindow(Guest* g) { RET(1, 2); }
+static void sh_ImmSetCompositionWindow(Guest* g) { RET(1, 2); }
+static void sh_ImmGetCandidateListA(Guest* g) { RET(0, 4); }
+static void sh_ImmGetCandidateListCountA(Guest* g) { if (ARG(1)) wr32(ARG(1), 0); RET(0, 2); }
+static void sh_ImmGetCompositionStringA(Guest* g) { RET(0, 4); }
+static void sh_ImmSetCompositionStringA(Guest* g) { RET(0, 6); }
+static void sh_ImmSetConversionStatus(Guest* g) { RET(1, 3); }
+static void sh_ImmGetDescriptionA(Guest* g) { RET(0, 3); }
+static void sh_ImmGetVirtualKey(Guest* g) { RET(0, 1); }
+
+static void sh_ImmGetConversionStatus(Guest* g)
+{
+    if (ARG(1))
+        wr32(ARG(1), 0);
+    if (ARG(2))
+        wr32(ARG(2), 0);
+    RET(1, 3);
+}
+
+static const ShimDef USER32[] = {
+    { "user32.dll", "RegisterClassA", sh_RegisterClassA },
+    { "user32.dll", "UnregisterClassA", sh_UnregisterClassA },
+    { "user32.dll", "AdjustWindowRectEx", sh_AdjustWindowRectEx },
+    { "user32.dll", "AdjustWindowRect", sh_AdjustWindowRect },
+    { "user32.dll", "CreateWindowExA", sh_CreateWindowExA },
+    { "user32.dll", "DestroyWindow", sh_DestroyWindow },
+    { "user32.dll", "DefWindowProcA", sh_DefWindowProcA },
+    { "user32.dll", "ShowWindow", sh_ShowWindow },
+    { "user32.dll", "UpdateWindow", sh_UpdateWindow },
+    { "user32.dll", "GetWindowRect", sh_GetWindowRect },
+    { "user32.dll", "GetClientRect", sh_GetClientRect },
+    { "user32.dll", "SetRect", sh_SetRect },
+    { "user32.dll", "ClientToScreen", sh_ClientToScreen },
+    { "user32.dll", "ScreenToClient", sh_ScreenToClient },
+    { "user32.dll", "GetCursorPos", sh_GetCursorPos },
+    { "user32.dll", "GetSystemMetrics", sh_GetSystemMetrics },
+    { "user32.dll", "GetSystemMenu", sh_GetSystemMenu },
+    { "user32.dll", "InsertMenuItemA", sh_InsertMenuItemA },
+    { "user32.dll", "LoadStringA", sh_LoadStringA },
+    { "user32.dll", "LoadIconA", sh_LoadIconA },
+    { "user32.dll", "LoadCursorA", sh_LoadCursorA },
+    { "user32.dll", "LoadCursorFromFileA", sh_LoadCursorFromFileA },
+    { "user32.dll", "SetCursor", sh_SetCursor },
+    { "user32.dll", "ShowCursor", sh_ShowCursor },
+    { "user32.dll", "SetWindowsHookExA", sh_SetWindowsHookExA },
+    { "user32.dll", "UnhookWindowsHookEx", sh_UnhookWindowsHookEx },
+    { "user32.dll", "CallNextHookEx", sh_CallNextHookEx },
+    { "user32.dll", "GetKeyboardState", sh_GetKeyboardState },
+    { "user32.dll", "GetKeyState", sh_GetKeyState },
+    { "user32.dll", "GetAsyncKeyState", sh_GetAsyncKeyState },
+    { "user32.dll", "GetKeyboardLayout", sh_GetKeyboardLayout },
+    { "user32.dll", "GetForegroundWindow", sh_GetForegroundWindow },
+    { "user32.dll", "GetFocus", sh_GetFocus },
+    { "user32.dll", "SetFocus", sh_SetFocus },
+    { "user32.dll", "SetForegroundWindow", sh_SetForegroundWindow },
+    { "user32.dll", "IsWindow", sh_IsWindow },
+    { "user32.dll", "IsIconic", sh_IsIconic },
+    { "user32.dll", "IsWindowVisible", sh_IsWindowVisible },
+    { "user32.dll", "PeekMessageA", sh_PeekMessageA },
+    { "user32.dll", "GetMessageA", sh_GetMessageA },
+    { "user32.dll", "TranslateMessage", sh_TranslateMessage },
+    { "user32.dll", "DispatchMessageA", sh_DispatchMessageA },
+    { "user32.dll", "SendMessageA", sh_SendMessageA },
+    { "user32.dll", "PostMessageA", sh_PostMessageA },
+    { "user32.dll", "PostThreadMessageA", sh_PostThreadMessageA },
+    { "user32.dll", "PostQuitMessage", sh_PostQuitMessage },
+    { "user32.dll", "GetQueueStatus", sh_GetQueueStatus },
+    { "user32.dll", "MsgWaitForMultipleObjects", sh_MsgWaitForMultipleObjects },
+    { "winmm.dll", "timeGetTime", sh_timeGetTime },
+    { "winmm.dll", "timeBeginPeriod", sh_timeBeginPeriod },
+    { "winmm.dll", "timeEndPeriod", sh_timeEndPeriod },
+    { "winmm.dll", "timeGetDevCaps", sh_timeGetDevCaps },
+    { "winmm.dll", "timeSetEvent", sh_timeSetEvent },
+    { "winmm.dll", "timeKillEvent", sh_timeKillEvent },
+    { "user32.dll", "GetWindowThreadProcessId", sh_GetWindowThreadProcessId },
+    { "user32.dll", "keybd_event", sh_keybd_event },
+    { "user32.dll", "MapVirtualKeyA", sh_MapVirtualKeyA },
+    { "user32.dll", "FindWindowA", sh_FindWindowA },
+    { "user32.dll", "wsprintfA", sh_wsprintfA },
+    { "user32.dll", "wvsprintfA", sh_wvsprintfA },
+    { "user32.dll", "RegisterWindowMessageA", sh_RegisterWindowMessageA },
+    { "user32.dll", "RemoveMenu", sh_RemoveMenu },
+    { "user32.dll", "AttachThreadInput", sh_AttachThreadInput },
+    { "user32.dll", "SetCursorPos", sh_SetCursorPos },
+    { "user32.dll", "OpenClipboard", sh_OpenClipboard },
+    { "user32.dll", "EmptyClipboard", sh_EmptyClipboard },
+    { "user32.dll", "CloseClipboard", sh_CloseClipboard },
+    { "user32.dll", "SetClipboardData", sh_SetClipboardData },
+    { "user32.dll", "SystemParametersInfoA", sh_SystemParametersInfoA },
+    { "user32.dll", "GetWindowPlacement", sh_GetWindowPlacement },
+    { "user32.dll", "MoveWindow", sh_MoveWindow },
+    { "user32.dll", "DrawTextA", sh_DrawTextA },
+    { "user32.dll", "DrawTextW", sh_DrawTextW },
+    { "gdi32.dll", "CreateCompatibleDC", sh_CreateCompatibleDC },
+    { "gdi32.dll", "DeleteDC", sh_DeleteDC },
+    { "gdi32.dll", "CreateDIBSection", sh_CreateDIBSection },
+    { "gdi32.dll", "CreateFontIndirectA", sh_CreateFontIndirectA },
+    { "gdi32.dll", "SelectObject", sh_SelectObject },
+    { "gdi32.dll", "DeleteObject", sh_DeleteObject },
+    { "gdi32.dll", "GetObjectA", sh_GetObjectA },
+    { "gdi32.dll", "SetBkMode", sh_SetBkMode },
+    { "gdi32.dll", "SetBkColor", sh_SetBkColor },
+    { "gdi32.dll", "SetTextColor", sh_SetTextColor },
+    { "imm32.dll", "ImmGetContext", sh_ImmGetContext },
+    { "imm32.dll", "ImmReleaseContext", sh_ImmReleaseContext },
+    { "imm32.dll", "ImmGetOpenStatus", sh_ImmGetOpenStatus },
+    { "imm32.dll", "ImmSetOpenStatus", sh_ImmSetOpenStatus },
+    { "imm32.dll", "ImmNotifyIME", sh_ImmNotifyIME },
+    { "imm32.dll", "ImmSetCandidateWindow", sh_ImmSetCandidateWindow },
+    { "imm32.dll", "ImmSetCompositionWindow", sh_ImmSetCompositionWindow },
+    { "imm32.dll", "ImmGetCandidateListA", sh_ImmGetCandidateListA },
+    { "imm32.dll", "ImmGetCandidateListCountA", sh_ImmGetCandidateListCountA },
+    { "imm32.dll", "ImmGetCompositionStringA", sh_ImmGetCompositionStringA },
+    { "imm32.dll", "ImmSetCompositionStringA", sh_ImmSetCompositionStringA },
+    { "imm32.dll", "ImmGetConversionStatus", sh_ImmGetConversionStatus },
+    { "imm32.dll", "ImmSetConversionStatus", sh_ImmSetConversionStatus },
+    { "imm32.dll", "ImmGetDescriptionA", sh_ImmGetDescriptionA },
+    { "imm32.dll", "ImmGetVirtualKey", sh_ImmGetVirtualKey },
+    { NULL, NULL, NULL },
+};
+
+void user32_init(void)
+{
+    thunk_register(USER32);
+}
+
+void* user32_sdl_window(uint32_t hwnd)
+{
+    Wnd* w = wnd(hwnd);
+    return w ? w->sdl : NULL;
+}
+
+void user32_set_ui_aspect(float aspect) { g_ui_aspect = aspect; }
+
+float user32_ui_aspect(void) { return g_ui_aspect; }
+
+float user32_ui_squeeze(uint32_t hwnd)
+{
+    Wnd* w = wnd(hwnd);
+    return w ? ui_squeeze(w) : 1.0f;
+}
+
+void user32_client_size(uint32_t hwnd, uint32_t* cw, uint32_t* ch)
+{
+    Wnd* w = wnd(hwnd);
+    if (w)
+        *cw = (uint32_t)w->w, *ch = (uint32_t)w->h;
+}
+
+void user32_desktop_mode(uint32_t* w, uint32_t* h, uint32_t* hz)
+{
+    *w = 1920, *h = 1080, *hz = 60;
+    sdl_up();
+    const SDL_DisplayMode* dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+    if (dm)
+    {
+        *w = (uint32_t)dm->w, *h = (uint32_t)dm->h;
+        if (dm->refresh_rate > 0)
+            *hz = (uint32_t)(dm->refresh_rate + 0.5f);
+    }
+}
