@@ -6,9 +6,10 @@ from your own install, and run on a platform layer written for macOS: Win32, Dir
 audio, input and sockets. This repo holds the recompiler, its runtime, that platform layer, and
 `host64`, the game host, with its own sign-in screen drawn in the game's UI art.
 
-**Works with [LandSandBoat](https://github.com/LandSandBoat/server) servers.** Sign in with a
-username, password and one-time code, or a server launcher's token; pick the server in the
-sign-in screen's Settings.
+**Works with [LandSandBoat](https://github.com/LandSandBoat/server) servers** and with servers
+that have PlayOnline behind them. Sign in to LandSandBoat with a username, password and one-time
+code, or a server launcher's token; to PlayOnline's own servers with a PlayOnline ID and password.
+Pick the method (and, for LandSandBoat, the server) in the sign-in screen's Settings.
 
 ## What's better than the original
 
@@ -183,11 +184,14 @@ python tools\build.py host64     # x64: the game host (SDL3 at C:\Dev\SDL3)
 
 ## The sign-in screen and `Final Fantasy XI.app`
 
-Started without a way in on its command line (no `--user` with a password or token),
+Started without a way in on its command line (no `--session`, nor `--user` with a password or token),
 `host64` shows its own sign-in screen before the game, in the game's own UI art read from the
 install (window themes, font, title art; `host/datui.c`), in the window the game then takes over.
-It signs in to a **LandSandBoat server** (username, password, one-time code), with the server,
-whether to remember the password (macOS Keychain) and the window theme in its **Settings**. It
+It signs in to a **LandSandBoat server** (username, password, one-time code) or to **PlayOnline**'s
+own servers (PlayOnline ID, password), with the method, the LandSandBoat server, whether to remember the password
+(macOS Keychain) and the window theme in its **Settings**. A PlayOnline sign-in stays open while the
+game runs: the server's lobby checks the session value against it. It redirects none of the game's
+hosts: they resolve through DNS. It
 keeps its files in `~/Library/Application Support/FFXIRecompile/FFXI` (or `--data-dir`):
 `signin.cfg`, `settings.reg` (the display settings, written once with defaults), `saved.reg` (the
 game's own saves), `host64.log` when started from Finder, and an optional `background.png`/`.jpg` behind the
@@ -198,7 +202,7 @@ and `ffxi.reg`, and first-run defaults in its `Info.plist` so it starts from Fin
 command line (`host/appdefaults.h`):
 
 ```
-python3 tools/build_posix.py app --game <FINAL FANTASY XI folder> --server <name> \
+python3 tools/build_posix.py app --game <FINAL FANTASY XI folder> [--sign-in lsb|pol] --server <name> \
     --resolution 2560x1440 --menu-resolution 1280x720 --window-mode 3 --background <picture>
 ```
 
@@ -257,7 +261,8 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | option | what it does |
 | --- | --- |
 | `--game <folder>` | **Required.** The `FINAL FANTASY XI` folder, with the viewer folder beside it if the install has one. On macOS both are mounted where a retail Windows install puts them. |
-| `--server <name or a.b.c.d>` | Where the game's servers are. The lobby and every other host under the game's domain resolve here instead of through DNS; the LandSandBoat sign-in connects here too. Default `127.0.0.1`. `--lobby` is an older name for it. |
+| `--server <name or a.b.c.d>` | Where the game's servers are. The lobby and every other host under the game's domain resolve here instead of through DNS; the LandSandBoat sign-in connects here too. Default `127.0.0.1`. `--lobby` is an older name for it. With a PlayOnline sign-in it is not used: nothing is redirected, the game's hosts resolve through DNS, and the sign-in goes to PlayOnline's own servers. |
+| `--session <V>` | A PlayOnline server's session value for this sign-in (16 characters, or 32 hex digits), from another client that signed in (`build/pol-signin`, from `build_posix.py poltest`). Skips the sign-in screen. |
 | `--user <account>` | Sign in to a LandSandBoat server with this account, before anything is loaded. |
 | `--pass <password>` | The account's password. Without it, `host64` reads `FFXI_PASSWORD`, else the sign-in screen asks for it. Prefer those: a password on the command line ends up in your shell history. |
 | `--otp <code>` | The two-factor code, for an account that has one. |
@@ -416,7 +421,7 @@ runtime/portable/  64-bit hosts: plat.h (+ plat_win.c, plat_posix.c), gwin (gues
                    d3d8 (the D3D8 front end), ws2 (sockets), gfx.h (the graphics back end):
                    gfx_metal.m (Metal) + gfx_msl*.c (D3D8 state and shaders -> MSL), gfx_null.c (elsewhere)
 host/              ffximain.c: the 32-bit stand-in FFXiMain.dll; host64.c: the 64-bit game host;
-                   lsb_login.c: the LandSandBoat sign-in
+                   lsb_login.c: the LandSandBoat sign-in; pol/: the PlayOnline client
 tests/             difftest.c (original vs translation), boot.c (x86), boot64.c (x64),
                    gfx_test.c (the Metal back end), d3d8_test.c (the D3D8 front end on it)
 tools/             prepare.py, buildinfo.py, unpack.py, build.py (MSVC), build_posix.py (clang),

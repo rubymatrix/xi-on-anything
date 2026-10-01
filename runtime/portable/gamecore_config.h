@@ -24,6 +24,10 @@ void gamecore_set_session(const uint8_t v[16]);
 /* The lobby's IPv4 address (host byte order), which the lobby's host name resolves to. Default
  * 127.0.0.1; the hosts set it to their account server (host64: --server). */
 void gamecore_set_lobby(uint32_t ipv4_host_order);
+/* Resolve the lobby's host name through this instead (a PlayOnline sign-in: the name's real
+ * address, as retail does); NULL goes back to the address above. It is called with the guest lock
+ * held and returns 1 with the IPv4 in host byte order, 0 if the name does not resolve. */
+void gamecore_set_lobby_resolver(int (*resolve)(const char* name, uint32_t* ipv4_host_order));
 /* The command line gamecore reports (GetlpCmdLine): empty, or " /game eAZcFcB -net 3
  * -port <lobby view port>" for a LandSandBoat sign-in. Before gamecore_init. */
 void gamecore_set_cmdline(const char* text);

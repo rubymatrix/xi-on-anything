@@ -9,7 +9,9 @@
         offscreen, without the game (tests/gfx_test.c, tests/d3d8_test.c)
   python3 tools/build_posix.py datuitest --game <folder>  the game's UI art read from its DATs (host/datui.c):
         parse checks, and renders in build/datui/ (tests/datui_test.c)
-  python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
+  python3 tools/build_posix.py poltest                   the PlayOnline client (host/pol/) against its
+        vectors (tests/polcrypt_test.c), and build/pol-signin, which signs in from a terminal
+  python3 tools/build_posix.py app --game <folder> [--sign-in lsb|pol] [--server name] [--resolution WxH]
         [--menu-resolution WxH] [--window-mode 0-3] [--background picture] [--fullscreen-space 0|1]
         [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--dats folder]
         [--sign-identity name]
@@ -38,7 +40,7 @@ import thirdparty  # noqa: E402
 ROOT = build.ROOT
 GEN_FFXI_IMAGE = build.FFXI_IMAGE
 CFLAGS = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-fno-strict-aliasing', '-I', 'runtime', '-I', 'runtime/portable',
-          '-I', 'generated', '-I', 'third_party/stb']
+          '-I', 'generated', '-I', 'host/pol', '-I', 'third_party/stb']
 # the generated C: every label and local is emitted whether used or not
 GEN_WARNINGS = ['-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-set-variable', '-Wno-unused-function',
                 '-Wno-parentheses-equality', '-Wno-unreachable-code']
@@ -50,9 +52,11 @@ if sys.platform == 'darwin':
 else:
     GFX_SOURCES = ['runtime/portable/gfx_null.c']
     GFX_LIBS = []
+# the sign-in screen's PlayOnline client
+POL_SOURCES = ['host/pol/polcrypt.c', 'host/pol/polnet.c', 'host/pol/polsession.c']
 HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime/portable/dsound.c',
                 'runtime/portable/input.c', 'runtime/portable/dinput.c', 'runtime/portable/ws2.c', 'host/host64.c',
-                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/discord.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c'] + GFX_SOURCES
+                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/discord.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c'] + POL_SOURCES + GFX_SOURCES
 # the addon host (host/addons/, docs/addon-compat-design.md): C, C++ (ImGui) and its embedded Lua
 ADDON_SOURCES = sorted('host/addons/' + f for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'host', 'addons'))
                        if f.endswith('.c') or f.endswith('.cpp')) + ['generated/addons_lua.c']
@@ -224,6 +228,16 @@ def gfxtest():
     run(['build/d3d8_test'])
 
 
+def poltest():
+    """The PlayOnline client alone: its primitives against the reference vectors, then build/pol-signin."""
+    os.makedirs(os.path.join(ROOT, 'build'), exist_ok=True)
+    cc = ['clang', '-O2', '-std=c11', '-Wall', '-I', 'host/pol']
+    run(cc + ['-o', 'build/polcrypt_test', 'tests/polcrypt_test.c'] + POL_SOURCES)
+    run(['build/polcrypt_test'])
+    run(cc + ['-o', 'build/pol-signin', 'host/pol/pol_signin.c'] + POL_SOURCES)
+    print('built build/pol-signin')
+
+
 def datuitest(game):
     """host/datui.c against the install's DATs; renders the windows and lobby into build/datui/."""
     os.makedirs(os.path.join(ROOT, 'build', 'datui'), exist_ok=True)
@@ -294,6 +308,8 @@ def app(game, a):
     shutil.copy(os.path.join(ROOT, 'ffxi.reg'), res)
     shutil.copy(os.path.join(ROOT, 'assets', 'icon.icns'), res)
     keys = {'FFXIGameFolder': game}
+    if a.sign_in:
+        keys['FFXISignInMethod'] = a.sign_in
     if a.server:
         keys['FFXIServer'] = a.server
     if a.resolution:
@@ -360,9 +376,10 @@ APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'datuitest', 'app'])
+    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'datuitest', 'poltest', 'app'])
     ap.add_argument('--game', default=os.path.expanduser('~/SquareEnix/FINAL FANTASY XI'))
     # app: its first-run defaults (host/appdefaults.h)
+    ap.add_argument('--sign-in', choices=['lsb', 'pol'])
     ap.add_argument('--server')
     ap.add_argument('--resolution')
     ap.add_argument('--menu-resolution')
@@ -378,6 +395,8 @@ def main():
     args = ap.parse_args()
     if args.target == 'gfxtest':
         return gfxtest()
+    if args.target == 'poltest':
+        return poltest()
     game = os.path.abspath(args.game)
     if not os.path.exists(os.path.join(game, 'FFXiMain.dll')):
         raise SystemExit('no FFXiMain.dll in %s (--game)' % game)

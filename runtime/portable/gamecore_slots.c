@@ -9,6 +9,7 @@
  * (cmd 4 sub 5), 936 the authCode block, 1003 the session value V. On retail, V is the first 16
  * bytes of the account server's cmd 4 sub 5 reply; here the host supplies it (gamecore_set_session),
  * byte-identical to the session value in LSB's account table, which LSB's lobby checks. */
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -18,6 +19,9 @@
 static uint8_t g_session[16];
 static int g_have_session;
 static uint32_t g_lobby_ipv4 = 0x7F000001u; /* host byte order */
+static int (*g_lobby_resolve)(const char* name, uint32_t* ipv4);
+static int g_lobby_resolved; /* slot 221's answer: 1 found, -1 not */
+static uint32_t g_lobby_found;
 static int32_t g_exit_code;
 static char g_exit_message[1024];
 
@@ -30,6 +34,11 @@ void gamecore_set_session(const uint8_t v[16])
 void gamecore_set_lobby(uint32_t ipv4_host_order)
 {
     g_lobby_ipv4 = ipv4_host_order;
+}
+
+void gamecore_set_lobby_resolver(int (*resolve)(const char* name, uint32_t* ipv4_host_order))
+{
+    g_lobby_resolve = resolve;
 }
 
 int32_t gamecore_exit_code(const char** message)
@@ -47,18 +56,32 @@ static void s818_pump(Guest* g) { gamecore_idle_tick(); RETC(1); }
 static void s705_pump_frame(Guest* g) { gamecore_idle_tick(); RETC(1); }
 
 /* 221 (0x1000ff40): start resolving a host name; returns a handle. The only caller asks for
- * the lobby's host name: it resolves to the configured lobby address, never through DNS
- * (the R3.0 runs showed public DNS sends it to Square Enix). */
-static void s221_dns_begin(Guest* g) { RETC(0); }
+ * the lobby's host name: it resolves to the configured lobby address, never through DNS (the
+ * R3.0 runs showed public DNS sends it to Square Enix) - unless the host gave a resolver for a
+ * PlayOnline sign-in, which looks the name up for real. Then it resolves here, at once. */
+static void s221_dns_begin(Guest* g)
+{
+    if (g_lobby_resolve)
+    {
+        char name[256];
+        snprintf(name, sizeof name, "%s", ARGS(0));
+        g_lobby_resolved = g_lobby_resolve(name, &g_lobby_found) ? 1 : -1;
+        rt_log("[recomp] gamecore: lobby %s -> %s%u.%u.%u.%u\n", name, g_lobby_resolved > 0 ? "" : "(not found) ",
+            g_lobby_found >> 24, (g_lobby_found >> 16) & 255, (g_lobby_found >> 8) & 255, g_lobby_found & 255);
+    }
+    RETC(0);
+}
 
 /* 222 (0x100101e0): poll a resolve. 1 = done: out[0..0x14) = { u16 1, u16 0, u32 IPv4 in host
  * byte order, zeros }. */
 static void s222_dns_poll(Guest* g)
 {
     uint32_t out = ARG(1);
+    if (g_lobby_resolve && g_lobby_resolved < 0)
+        RETC((uint32_t)-1); /* the lobby's name did not resolve: the bring-up fails, as retail's */
     memset(GUEST_PTR(out), 0, 0x14);
     wr16(out, 1);
-    wr32(out + 4, g_lobby_ipv4);
+    wr32(out + 4, g_lobby_resolve ? g_lobby_found : g_lobby_ipv4);
     RETC(1);
 }
 

@@ -748,6 +748,21 @@ static int is_game_host_name(const char* name)
     return n == 7 || tail[-1] == '.';
 }
 
+int ws2_resolve_ipv4(const char* name, uint32_t* ipv4_host_order)
+{
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    gt_unlock();
+    int r = getaddrinfo(name, NULL, &hints, &res);
+    gt_lock();
+    if (r != 0 || !res)
+        return 0;
+    *ipv4_host_order = ntohl(((struct sockaddr_in*)res->ai_addr)->sin_addr.s_addr);
+    freeaddrinfo(res);
+    return 1;
+}
+
 /* gethostbyname(name): one hostent the guest reads before the next call, as Winsock's per-thread one */
 static void sh_gethostbyname(Guest* g)
 {

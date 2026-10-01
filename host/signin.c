@@ -1,12 +1,14 @@
 /* The sign-in screen. See signin.h.
  *
- * Two windows drawn as the game's Config pages are: Sign in (the LandSandBoat username, the
- * password, the one-time code, Sign in and Settings) and Settings (the server, remembering the
- * password, the window theme, full screen). Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
+ * Two windows drawn as the game's Config pages are: Sign in (the ID - a LandSandBoat username or a
+ * PlayOnline ID, one field either way - the password, LandSandBoat's one-time code, Sign in and
+ * Settings) and Settings (the method, the server, remembering the password, the window theme, full
+ * screen). Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
  * picks, Escape goes back or quits; the mouse clicks.
  *
  * What it remembers is in signin.cfg (key=value lines) beside settings.reg, the password in the
- * keychain (keychain.h). The sign-in runs on a worker thread so the window keeps drawing. */
+ * keychain (keychain.h). The sign-in runs on a worker thread so the window keeps drawing; a
+ * PlayOnline session then stays open for the run, its keepalives answered on a thread of its own. */
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <stdio.h>
@@ -14,9 +16,11 @@
 #include <string.h>
 
 #include "datui.h"
+#include "gamecore_config.h"
 #include "keychain.h"
 #include "lsb_login.h"
 #include "plat.h"
+#include "polsession.h"
 #include "sewave.h"
 #include "signin.h"
 #include "discord.h"
@@ -27,6 +31,7 @@
 
 typedef struct Config
 {
+    int method; /* SIGNIN_LSB or SIGNIN_POL */
     char server[128];
     char user[64];
     int remember;
@@ -161,7 +166,9 @@ static void config_load(const char* path, Config* c)
         if (!v)
             continue;
         *v++ = 0;
-        if (!strcmp(line, "server"))
+        if (!strcmp(line, "method"))
+            c->method = !strcmp(v, "pol") ? SIGNIN_POL : SIGNIN_LSB;
+        else if (!strcmp(line, "server"))
             SDL_strlcpy(c->server, v, sizeof c->server);
         else if (!strcmp(line, "user"))
             SDL_strlcpy(c->user, v, sizeof c->user);
@@ -193,7 +200,8 @@ static void config_save(const char* path, const Config* c)
         fprintf(stderr, "[signin] cannot write %s\n", path);
         return;
     }
-    fprintf(f, "server=%s\nuser=%s\nremember=%d\ntheme=%d\n", c->server, c->user, c->remember, c->theme);
+    fprintf(f, "method=%s\nserver=%s\nuser=%s\nremember=%d\ntheme=%d\n", c->method == SIGNIN_POL ? "pol" : "lsb",
+        c->server, c->user, c->remember, c->theme);
     fprintf(f, "fullscreen_space=%d\n", c->space);
     if (c->background[0])
         fprintf(f, "background=%s\n", c->background);
@@ -206,7 +214,10 @@ static void config_save(const char* path, const Config* c)
 
 static void keychain_key(const Config* c, char* out, size_t n)
 {
-    snprintf(out, n, "lsb:%s:%s", c->server, c->user);
+    if (c->method == SIGNIN_POL)
+        snprintf(out, n, "pol:%s:%s", POL_HOST, c->user);
+    else
+        snprintf(out, n, "lsb:%s:%s", c->server, c->user);
 }
 
 /* The game's display settings when nothing else gives them: a window of 1920x1080, as the
@@ -281,6 +292,7 @@ enum
 typedef struct Job
 {
     SDL_AtomicInt state;
+    int method;
     char server[128], user[64], password[128], otp[32];
     uint16_t auth_port, data_port, view_port;
     char loader_version[24], version_used[24];
@@ -290,12 +302,53 @@ typedef struct Job
 
 static Job g_job;
 
+/* Keeps a PlayOnline session alive for the run: the server drops a member whose keepalives go
+ * unanswered, and the lobby checks the session value against the live session. */
+static void pol_keepalive(void* arg)
+{
+    PolSession* s = arg;
+    while (pol_pump(s, 5000))
+        ;
+    fprintf(stderr, "[signin] the PlayOnline session closed: %s\n", s->error[0] ? s->error : "by the server");
+}
+
+/* PlayOnline: sign in on the server's IRC port, then ask for the game's session value V, which
+ * the lobby checks. The session stays open (pol_keepalive) while the game runs. */
+static int pol_job(Job* j)
+{
+    PolSession* s = calloc(1, sizeof *s);
+    uint8_t v[16];
+    if (!s)
+    {
+        snprintf(j->error, sizeof j->error, "Out of memory.");
+        return 0;
+    }
+    s->irc = POL_NO_SOCKET;
+    if (!pol_signin(s, j->server, POL_PORT_IRC, j->user, j->password) || !pol_ffxi_session_value(s, POL_PORT_POLPRO, v))
+    {
+        snprintf(j->error, sizeof j->error, "%s", s->error[0] ? s->error : "The sign-in failed.");
+        pol_signout(s);
+        free(s);
+        return 0;
+    }
+    gamecore_set_session(v);
+    memset(v, 0, sizeof v);
+    if (!plat_thread_start(pol_keepalive, s))
+    {
+        snprintf(j->error, sizeof j->error, "Cannot keep the PlayOnline session open.");
+        return 0;
+    }
+    return 1;
+}
+
 static void job_thread(void* arg)
 {
     Job* j = arg;
     int ok = 0;
     if (!net_resolve_ipv4(j->server, &j->ip))
         snprintf(j->error, sizeof j->error, "Cannot find the server \"%s\".", j->server);
+    else if (j->method == SIGNIN_POL)
+        ok = pol_job(j);
     else
     {
         LsbLogin l = { j->ip,
@@ -312,7 +365,8 @@ static void job_thread(void* arg)
     }
     memset(j->password, 0, sizeof j->password);
     if (ok)
-        fprintf(stderr, "[signin] signed in as %s on %s\n", j->user, j->server);
+        fprintf(stderr, "[signin] signed in as %s on %s (%s)\n", j->user, j->server,
+            j->method == SIGNIN_POL ? "PlayOnline" : "LandSandBoat");
     else
         fprintf(stderr, "[signin] sign-in as %s on %s failed: %s\n", j->user, j->server, j->error);
     SDL_SetAtomicInt(&j->state, ok ? JOB_DONE : JOB_FAILED);
@@ -412,6 +466,7 @@ enum
     ID_OTP,
     ID_SIGNIN,
     ID_SETTINGS,
+    ID_METHOD,
     ID_SERVER,
     ID_REMEMBER,
     ID_THEME,
@@ -519,19 +574,24 @@ static void build(Ui* u)
 {
     static const char* const ONOFF[] = { "ON", "OFF" },
                              *const THEMES[] = { "1", "2", "3", "4", "5", "6", "7", "8" },
-                             *const SPACE[] = { "Own Space", "In Place" };
+                             *const SPACE[] = { "Own Space", "In Place" },
+                             *const METHODS[] = { "LandSandBoat", "PlayOnline" };
     u->nw = 0;
     if (u->screen == SCREEN_SIGNIN)
     {
-        add(u, W_TEXT, ID_USER, "Username", u->cfg.user, sizeof u->cfg.user);
+        add(u, W_TEXT, ID_USER, u->cfg.method == SIGNIN_POL ? "PlayOnline ID" : "Username", u->cfg.user,
+            sizeof u->cfg.user);
         add(u, W_SECRET, ID_PASSWORD, "Password", u->password, sizeof u->password);
-        add(u, W_TEXT, ID_OTP, "One-time Code", u->otp, sizeof u->otp);
+        if (u->cfg.method != SIGNIN_POL)
+            add(u, W_TEXT, ID_OTP, "One-time Code", u->otp, sizeof u->otp);
         add(u, W_BUTTON, ID_SIGNIN, "Sign In", NULL, 0);
         add(u, W_BUTTON, ID_SETTINGS, "Settings", NULL, 0);
     }
     else
     {
-        add(u, W_TEXT, ID_SERVER, "Server", u->cfg.server, sizeof u->cfg.server);
+        options(u, ID_METHOD, "Sign-in Method", 2, METHODS);
+        if (u->cfg.method != SIGNIN_POL) /* PlayOnline's servers are its own (POL_HOST) */
+            add(u, W_TEXT, ID_SERVER, "Server", u->cfg.server, sizeof u->cfg.server);
         options(u, ID_REMEMBER, "Remember Password", 2, ONOFF);
         options(u, ID_THEME, "Window Theme", 8, THEMES);
         options(u, ID_SPACE, "Full Screen", 2, SPACE);
@@ -544,6 +604,8 @@ static void build(Ui* u)
 /* the option a choice is set to */
 static int choice_value(const Ui* u, int id)
 {
+    if (id == ID_METHOD)
+        return u->cfg.method == SIGNIN_POL ? 1 : 0;
     if (id == ID_REMEMBER)
         return u->cfg.remember ? 0 : 1;
     if (id == ID_SPACE)
@@ -570,19 +632,35 @@ static void start_signin(Ui* u)
 {
     if (busy())
         return;
-    if (!u->cfg.server[0])
+    if (u->cfg.method != SIGNIN_POL && !u->cfg.server[0])
     {
         set_status(u, "Set the server in Settings first.", 1);
         return;
     }
     if (!u->cfg.user[0] || !u->password[0])
     {
-        set_status(u, "Enter your username and password.", 1);
+        set_status(u, u->cfg.method == SIGNIN_POL ? "Enter your PlayOnline ID and password." :
+                                                    "Enter your username and password.", 1);
         u->focus = !u->cfg.user[0] ? 0 : 1;
         return;
     }
+    if (u->cfg.method == SIGNIN_POL)
+    {
+        /* PlayOnline IDs are upper case */
+        for (char* p = u->cfg.user; *p; ++p)
+            if (*p >= 'a' && *p <= 'z')
+                *p = (char)(*p - 32);
+        char nick[10];
+        if (!pol_nick_from_id(u->cfg.user, nick))
+        {
+            set_status(u, "That is not a PlayOnline ID (8 letters and digits).", 1);
+            u->focus = 0;
+            return;
+        }
+    }
     Job* j = &g_job;
-    SDL_strlcpy(j->server, u->cfg.server, sizeof j->server);
+    j->method = u->cfg.method;
+    SDL_strlcpy(j->server, u->cfg.method == SIGNIN_POL ? POL_HOST : u->cfg.server, sizeof j->server);
     SDL_strlcpy(j->user, u->cfg.user, sizeof j->user);
     SDL_strlcpy(j->password, u->password, sizeof j->password);
     SDL_strlcpy(j->otp, u->otp, sizeof j->otp);
@@ -590,7 +668,8 @@ static void start_signin(Ui* u)
     SDL_strlcpy(j->loader_version, u->cfg.loader_version, sizeof j->loader_version);
     j->error[0] = 0;
     SDL_SetAtomicInt(&j->state, JOB_RUNNING);
-    fprintf(stderr, "[signin] signing in as %s on %s\n", j->user, j->server);
+    fprintf(stderr, "[signin] signing in as %s on %s (%s)\n", j->user, j->server,
+        j->method == SIGNIN_POL ? "PlayOnline" : "LandSandBoat");
     if (!plat_thread_start(job_thread, j))
     {
         snprintf(j->error, sizeof j->error, "Cannot start the sign-in.");
@@ -604,7 +683,13 @@ static void choose(Ui* u, int id, int v)
 {
     if (v == choice_value(u, id))
         return;
-    if (id == ID_REMEMBER)
+    if (id == ID_METHOD)
+    {
+        u->cfg.method = v == 1 ? SIGNIN_POL : SIGNIN_LSB;
+        u->password[0] = u->otp[0] = 0; /* another account's */
+        build(u); /* the Server row comes and goes with it */
+    }
+    else if (id == ID_REMEMBER)
         u->cfg.remember = v == 0;
     else if (id == ID_SPACE)
     {
@@ -987,7 +1072,9 @@ static const uint8_t* status_text(const Ui* u, char* msg, size_t n)
     else if (SDL_GetAtomicInt(&g_keyread.state) == 1 && SDL_GetTicks() - u->opened > 1500)
         SDL_strlcpy(msg, "Waiting keychain...", n);
     else if (u->screen == SCREEN_SIGNIN)
-        snprintf(msg, n, "Sign in to %s", u->cfg.server[0] ? u->cfg.server : "(no server)");
+        snprintf(msg, n, "Sign in to %s", u->cfg.method == SIGNIN_POL ? "PlayOnline"
+                                          : u->cfg.server[0]               ? u->cfg.server
+                                                                           : "(no server)");
     else
         SDL_strlcpy(msg, "Settings", n);
     return WHITE;
@@ -1321,10 +1408,13 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     default_settings(out->settings_reg, setup);
 
     Config* c = &u->cfg;
+    c->method = setup->default_method == SIGNIN_POL ? SIGNIN_POL : SIGNIN_LSB;
     c->remember = 1, c->theme = 1;
     c->space = setup->default_space >= 0 ? setup->default_space != 0 : 1;
     SDL_strlcpy(c->server, setup->default_server ? setup->default_server : "127.0.0.1", sizeof c->server);
     config_load(cfg_path, c);
+    if (setup->method)
+        c->method = setup->method;
     if (setup->server)
         SDL_strlcpy(c->server, setup->server, sizeof c->server);
     if (setup->user)
@@ -1535,6 +1625,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             if (g_job.version_used[0])
                 SDL_strlcpy(c->loader_version, g_job.version_used, sizeof c->loader_version);
             out->server = g_job.ip;
+            out->method = g_job.method;
             SDL_SetAtomicInt(&g_job.state, JOB_IDLE);
             begin_close(u, 1);
         }

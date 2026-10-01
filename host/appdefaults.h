@@ -4,6 +4,7 @@
  *
  *   FFXIGameFolder       the FINAL FANTASY XI folder (--game)
  *   FFXIServer           the sign-in screen's first-run server
+ *   FFXISignInMethod     "lsb" or "pol": the sign-in screen's first-run method (LandSandBoat, PlayOnline)
  *   FFXIWindowMode       0 full screen, 1 windowed, 2 borderless, 3 borderless full screen
  *   FFXIResolution       "3440x1440": the game's first-run window
  *   FFXIMenuResolution   "1720x720": its menus

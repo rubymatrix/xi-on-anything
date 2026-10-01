@@ -10,7 +10,8 @@
  *               [--reg-final <file.reg>]...   loaded after the overlay: a launcher's settings
  *               [--data-dir <folder>]   where host64 writes its own files (default: beside it)
  *               [--server <name or a.b.c.d>]
- *               [--user <name> [--pass <password>] [--otp <code>] [--login-token <t>]
+ *               [--session <V: 16 characters, or 32 hex digits>]                   PlayOnline servers
+ *               [--user <name> [--pass <password>] [--otp <code>] [--login-token <t>]   LandSandBoat servers
  *                [--authport 54231] [--dataport 54230] [--viewport 54001]]
  *               [--dats <folder>]...   DAT overlays, as XIPivot: the first folder given wins
  *               [--textures <folder>]...   texture packs: high-resolution replacements for the
@@ -20,7 +21,9 @@
  *
  * --server is where the game's servers are: the lobby and every other host under the game's
  * domain resolve to it instead of through DNS. Default 127.0.0.1 (this machine); --lobby is an
- * older name for it.
+ * older name for it. A PlayOnline sign-in (--session, or the sign-in screen's) redirects nothing:
+ * the game's hosts resolve through DNS, as retail's do, and --server is not used: the sign-in
+ * screen signs in on PlayOnline's own servers (POL_HOST, host/pol/polsession.h).
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped.
  *
@@ -40,12 +43,16 @@
  * factor of the game's own distances (1 as shipped; 3, or 3x1.5). An app bundle's FFXIDrawDistance
  * key is the default.
  *
- * Signing in (host/lsb_login.c): --user signs in on the LandSandBoat server's auth port first. The password comes from --pass, else FFXI_PASSWORD, else the
- *     sign-in screen; --otp is the two-factor code, if the account has one. --login-token is a
- *     launch token from the server's own launcher, in place of the password and code.
+ * Two ways in:
+ *   - a server with PlayOnline behind it: the session value V its lobby checks. --session gives
+ *     it; else the sign-in screen gets it (host/pol/polsession.c) and keeps that session open.
+ *   - a LandSandBoat server (host/lsb_login.c): --user signs in on the server's auth port first.
+ *     The password comes from --pass, else FFXI_PASSWORD, else the sign-in screen; --otp is the
+ *     two-factor code, if the account has one. --login-token is a launch token from the server's
+ *     own launcher, in place of the password and code.
  *
- * Without --user, the sign-in screen (host/signin.c) comes first, in the game's own UI art, with the
- * server in its Settings; it remembers them in <data dir>/signin.cfg
+ * With neither, the sign-in screen (host/signin.c) comes first, in the game's own UI art: either
+ * method, picked in its Settings, and the server; it remembers them in <data dir>/signin.cfg
  * (--data-dir, else the user's app data), the password in the keychain, and writes display
  * defaults to <data dir>/settings.reg, loaded when no --reg-final is given. Its window becomes the
  * game's. */
@@ -270,6 +277,27 @@ static int parse_draw_distance(const char* s, float* world, float* entities)
     return 1;
 }
 
+/* --session: 16 characters as they are, or 32 hex digits */
+static int parse_session(const char* s, uint8_t v[16])
+{
+    size_t n = strlen(s);
+    if (n == 16)
+    {
+        memcpy(v, s, 16);
+        return 1;
+    }
+    if (n != 32)
+        return 0;
+    for (int i = 0; i < 16; ++i)
+    {
+        unsigned b;
+        if (sscanf(s + 2 * i, "%2x", &b) != 1)
+            return 0;
+        v[i] = (uint8_t)b;
+    }
+    return 1;
+}
+
 /* w:h (16:9), wxh, w/h, or a ratio (1.778); 0 if it is none of those */
 static double parse_shape(const char* s)
 {
@@ -449,6 +477,7 @@ int main(int argc, char** argv)
     const char* user_dir = NULL;
     uint32_t game_server = DEFAULT_GAME_SERVER;
     LsbLogin lsb = { 0, 54231, 54230, 54001, NULL, NULL, "", NULL, NULL, NULL };
+    int have_session = 0; /* a PlayOnline sign-in: --session, or the sign-in screen's */
     static char base_reg[1100];
     const char* server_name = NULL; /* --server as given, for the sign-in screen */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0;
@@ -474,6 +503,17 @@ int main(int argc, char** argv)
             packs[npacks++] = argv[i + 1];
         else if (!strcmp(argv[i], "--user-dir"))
             user_dir = argv[i + 1];
+        else if (!strcmp(argv[i], "--session"))
+        {
+            uint8_t v[16];
+            if (!parse_session(argv[i + 1], v))
+            {
+                fprintf(stderr, "--session: 16 characters or 32 hex digits\n");
+                return 2;
+            }
+            gamecore_set_session(v);
+            have_session = 1;
+        }
         else if (!strcmp(argv[i], "--server") || !strcmp(argv[i], "--lobby"))
         {
             server_name = argv[i + 1];
@@ -578,7 +618,7 @@ int main(int argc, char** argv)
     if (!game)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
-                        "[--server name] [--user name [--pass p] [--otp code] [--authport n] "
+                        "[--server name] [--session V | --user name [--pass p] [--otp code] [--authport n] "
                         "[--dataport n] [--viewport n]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k]\n");
         return 2;
     }
@@ -586,11 +626,11 @@ int main(int argc, char** argv)
         lsb.password = getenv("FFXI_PASSWORD");
     if (!addon_harness)
         discord_init();
-    if (!addon_harness && !(lsb.user && (lsb.password || lsb.login_token)))
+    if (!addon_harness && !have_session && !(lsb.user && (lsb.password || lsb.login_token)))
     {
         /* Nothing on the command line signs in: the sign-in screen, in the game's own art. Its
-         * window becomes the game's. */
-        SigninSetup su = { game, data_dir, server_name, lsb.user,
+         * window becomes the game's; a PlayOnline sign-in sets the session value itself. */
+        SigninSetup su = { game, data_dir, lsb.user ? SIGNIN_LSB : 0, server_name, lsb.user,
                            lsb.password, lsb.otp, lsb.auth_port != 54231 ? lsb.auth_port : 0,
                            lsb.data_port != 54230 ? lsb.data_port : 0, lsb.view_port != 54001 ? lsb.view_port : 0 };
         /* an app bundle's first-run defaults (appdefaults.h) */
@@ -599,6 +639,8 @@ int main(int argc, char** argv)
         su.loader_version = lsb.version;
         if (app_default("FFXIFullscreenSpace", app_val, sizeof app_val))
             su.default_space = atoi(app_val) != 0;
+        if (app_default("FFXISignInMethod", app_val, sizeof app_val))
+            su.default_method = !strcmp(app_val, "pol") ? SIGNIN_POL : SIGNIN_LSB;
         if (app_default("FFXIServer", app_server, sizeof app_server))
             su.default_server = app_server;
         if (app_default("FFXIWindowMode", app_val, sizeof app_val))
@@ -616,6 +658,7 @@ int main(int argc, char** argv)
         if (r > 0)
         {
             game_server = sr.server;
+            have_session = sr.method == SIGNIN_POL;
             user32_adopt_window(sr.window);
             if (!nfinals)
                 finals[nfinals++] = strdup(sr.settings_reg);
@@ -636,7 +679,7 @@ int main(int argc, char** argv)
         }
         else if (!lsb.user)
         {
-            fprintf(stderr, "no sign-in screen here: --user name for a LandSandBoat server\n");
+            fprintf(stderr, "no sign-in screen here: --session V, or --user name for a LandSandBoat server\n");
             return 2;
         }
     }
@@ -701,11 +744,20 @@ int main(int argc, char** argv)
     dinput_init();
     ws2_init();
     /* the game's hosts: the lobby through gamecore's resolver, every other one through
-     * gethostbyname */
-    ws2_set_game_server(game_server);
-    gamecore_set_lobby(game_server);
-    rt_log("[recomp] game hosts -> %u.%u.%u.%u\n", game_server >> 24, (game_server >> 16) & 255, (game_server >> 8) & 255,
-        game_server & 255);
+     * gethostbyname. A PlayOnline sign-in redirects none: they resolve through DNS, as retail's. */
+    if (have_session)
+    {
+        ws2_set_game_server(0);
+        gamecore_set_lobby_resolver(ws2_resolve_ipv4);
+        rt_log("[recomp] game hosts through DNS (PlayOnline)\n");
+    }
+    else
+    {
+        ws2_set_game_server(game_server);
+        gamecore_set_lobby(game_server);
+        rt_log("[recomp] game hosts -> %u.%u.%u.%u\n", game_server >> 24, (game_server >> 16) & 255,
+            (game_server >> 8) & 255, game_server & 255);
+    }
     reg_init(regs, nregs, overlay);
     for (unsigned i = 0; i < nfinals; ++i)
         reg_load_final(finals[i]);

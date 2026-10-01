@@ -13,6 +13,8 @@
   python tools/build.py uwp-lib    host64 as a library for the UWP app (FFXIXbox): build/uwp/ffxi_uwp.lib
   python tools/build.py gfxtest    the Direct3D 12 back end and the D3D8 front end, offscreen, without
                                    the game (tests/gfx_test.c, tests/d3d8_test.c); needs no prepare
+  python tools/build.py poltest    the PlayOnline client (host/pol/) against its vectors
+                                   (tests/polcrypt_test.c), and build/pol-signin.exe; needs no prepare
 
 Needs generated/FFXiMain.unpacked.dll and generated/build.json (python tools/prepare.py), which
 pick the retail build; its addresses go to generated/build.h. Incremental: the recompiler only
@@ -183,15 +185,17 @@ SDL3 = os.environ.get('SDL3_DIR', r'C:\Dev\SDL3\SDL3-3.4.16')  # the SDL3 VC dev
 # the graphics back end on Windows: Direct3D 12, its shaders generated as HLSL and compiled at run time
 GFX_SOURCES = ['runtime\\portable\\gfx_hlsl.c', 'runtime\\portable\\gfx_hlsl_shaders.c', 'runtime\\portable\\gfx_d3d12.c']
 GFX_LIBS = ['d3d12.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dxguid.lib']
+# the sign-in screen's PlayOnline client
+POL_SOURCES = ['host\\pol\\polcrypt.c', 'host\\pol\\polnet.c', 'host\\pol\\polsession.c']
 HOST_BASE = ['runtime\\portable\\user32.c', 'runtime\\portable\\d3d8.c', 'runtime\\portable\\dsound.c',
              'runtime\\portable\\input.c', 'runtime\\portable\\dinput.c', 'runtime\\portable\\ws2.c', 'host\\host64.c',
              'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\discord.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c',
-             'host\\keychain.c', 'host\\appdefaults.c', 'runtime\\portable\\sampler_win.c']
+             'host\\keychain.c', 'host\\appdefaults.c', 'runtime\\portable\\sampler_win.c'] + POL_SOURCES
 HOST_SOURCES = HOST_BASE + GFX_SOURCES
-# the sign-in screen's: stb_image
-HOST_INCLUDES = ['/I', 'third_party\\stb']
+# the sign-in screen's: its PlayOnline client, stb_image
+HOST_INCLUDES = ['/I', 'host\\pol', '/I', 'third_party\\stb']
 # the sign-in screen itself (host/signin.c), the Modern panel (host/modern.c) and what only they use
-SIGNIN_SCREEN = ['host\\signin.c', 'host\\sewave.c', 'host\\modern.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\ui_art.c']
+SIGNIN_SCREEN = ['host\\signin.c', 'host\\sewave.c', 'host\\modern.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\ui_art.c'] + POL_SOURCES
 # the LandSandBoat sign-in's TLS is SChannel here (secur32.lib); mbedtls on POSIX hosts
 HOST_LIBS = ['synchronization.lib', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'secur32.lib'] + GFX_LIBS
 
@@ -320,7 +324,7 @@ def uwp_lib(env):
     objs = compile_stale(env, gen, 'build\\uwp\\all', ['/I', 'generated\\all'], UWP_CFLAGS)
     objs += compile_stale(env, gen_ffxi, 'build\\uwp\\ffxi', ['/I', 'generated\\ffxi'], UWP_CFLAGS)
     sdl_inc = ['/I', os.path.join(SDL3, 'include')]
-    # the app signs in itself (its own login screen): no sign-in screen
+    # the app signs in itself (its own login screen): no sign-in screen, nor its PlayOnline client
     host = [s for s in HOST_SOURCES if s not in SIGNIN_SCREEN] + ['host\\signin_none.c', 'runtime\\portable\\sdl_uwp.c']
     objs += compile_stale(env, PORTABLE + host, 'build\\uwp\\host', sdl_inc + ['/Dmain=host_main'], UWP_CFLAGS)
     objs += addon_objects(env, UWP_CFLAGS, 'build\\uwp', uwp=True)
@@ -343,14 +347,26 @@ def gfxtest(env):
     run(['build\\d3d8_test.exe'], env)
 
 
+def poltest(env):
+    """The PlayOnline client alone: its primitives against the reference vectors, then build/pol-signin.exe."""
+    os.makedirs(os.path.join(ROOT, 'build', 'pol'), exist_ok=True)
+    cl = ['cl', '/nologo', '/O2', '/MT', '/W3', '/std:c11', '/D_CRT_SECURE_NO_WARNINGS', '/I', 'host\\pol',
+          '/Fo:build\\pol\\']
+    run(cl + ['/Fe:build\\polcrypt_test.exe', 'tests\\polcrypt_test.c'] + POL_SOURCES + ['ws2_32.lib'], env)
+    run(['build\\polcrypt_test.exe'], env)
+    run(cl + ['/Fe:build\\pol-signin.exe', 'host\\pol\\pol_signin.c'] + POL_SOURCES + ['ws2_32.lib'], env)
+    print('built build\\pol-signin.exe')
+
+
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else 'difftest'
     targets = {'difftest': difftest, 'host': host, 'boot64': boot64, 'host64': host64,
-               'host64-headless': host64_headless, 'uwp-lib': uwp_lib, 'gfxtest': gfxtest}
+               'host64-headless': host64_headless, 'uwp-lib': uwp_lib, 'gfxtest': gfxtest,
+               'poltest': poltest}
     if what not in targets:
         raise SystemExit('targets: ' + ', '.join(targets))
-    env = msvc_env('x64' if what in ('boot64', 'host64', 'host64-headless', 'uwp-lib', 'gfxtest') else 'x86')
-    if what != 'gfxtest':  # the others translate the game: they need the build prepare.py chose
+    env = msvc_env('x64' if what in ('boot64', 'host64', 'host64-headless', 'uwp-lib', 'gfxtest', 'poltest') else 'x86')
+    if what not in ('gfxtest', 'poltest'):  # the others translate the game: they need the build prepare.py chose
         if BUILD is None:
             buildinfo.current()  # exits: run tools/prepare.py first
         write_build_h()
