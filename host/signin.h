@@ -25,6 +25,7 @@ typedef struct SigninSetup
     const char* default_background;  /* a picture, when the player has none */
     int default_space;               /* full screen in a macOS Space of its own: 1, 0, -1 for none */
     const char* user_dir;            /* the game's USER folder (host64 --user-dir); NULL: the install's */
+    const char* textures;            /* the texture packs that come with the game; NULL: none */
 } SigninSetup;
 
 typedef struct SigninResult
