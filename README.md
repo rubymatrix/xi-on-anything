@@ -183,7 +183,7 @@ python tools\build.py host64     # x64: the game host (SDL3 at C:\Dev\SDL3)
 
 ## The sign-in screen and `Final Fantasy XI.app`
 
-Started without a way in on its command line (no `--user` with a password or token),
+Started without a way in on its command line (no `--session`, nor `--user` with a password or token),
 `host64` shows its own sign-in screen before the game, in the game's own UI art read from the
 install (window themes, font, title art; `host/datui.c`), in the window the game then takes over.
 It signs in to a **LandSandBoat server** (username, password, one-time code), with the server,
@@ -258,12 +258,15 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | --- | --- |
 | `--game <folder>` | **Required.** The `FINAL FANTASY XI` folder, with the viewer folder beside it if the install has one. On macOS both are mounted where a retail Windows install puts them. |
 | `--server <name or a.b.c.d>` | Where the game's servers are. The lobby and every other host under the game's domain resolve here instead of through DNS; the LandSandBoat sign-in connects here too. Default `127.0.0.1`. `--lobby` is an older name for it. |
+| `--session <V>` | A session value for this sign-in (16 characters, or 32 hex digits), from a launcher that signed in and keeps that sign-in open while the game runs. Skips the sign-in screen; nothing is redirected and `--server` is not used: the game's hosts resolve through DNS. |
+| `--auth <block>` | With `--session`: the 0x34-byte authCode block the game sends its lobby (104 hex digits), as the launcher that signed in made it. `host64` passes the bytes to the game unchanged. Without it the block is zeros, which a LandSandBoat lobby accepts. |
 | `--user <account>` | Sign in to a LandSandBoat server with this account, before anything is loaded. |
 | `--pass <password>` | The account's password. Without it, `host64` reads `FFXI_PASSWORD`, else the sign-in screen asks for it. Prefer those: a password on the command line ends up in your shell history. |
 | `--otp <code>` | The two-factor code, for an account that has one. |
 | `--login-token <token>` | A single-use launch token from a server's own launcher (for example a Discord login). It stands in for the password. |
+| `--trust on` | xiloader's "trust this computer": with an account's two-factor code, the server hands out a token that stands in for the code for 30 days, kept in the keychain per `--server` name and account (the sign-in screen's Settings has the same switch). Where there is no keychain (Windows, for now) nothing is kept. |
 | `--authport`, `--dataport`, `--viewport` | LandSandBoat's ports, by default 54231 (sign-in, TLS), 54230 (data), 54001 (lobby view). |
-| `--loader-version <a.b.c>` | The loader version sent at sign-in, `2.1.2` by default. LandSandBoat refuses a version it does not expect; when its refusal names the one it wants (`2.0.x`), `host64` signs in again once with that (an `x` as 0). The sign-in screen remembers the version (`loader_version=` in `signin.cfg`), including one a server asked for. |
+| `--loader-version <a.b.c>` | The loader version sent at sign-in, `2.2.0` by default (current xiloader). LandSandBoat refuses a version it does not expect; when its refusal names the one it wants (`2.1.x`), `host64` signs in again once with that (an `x` as 0). The sign-in screen remembers the version (`loader_version=` in `signin.cfg`), including one a server asked for. |
 | `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its own registry keys. `ffxi.reg` in this repo is a starting point. |
 | `--reg-overlay <file.reg>` | Where the game saves settings it changes. It is loaded after the `--reg` files, and those are never rewritten. |
 | `--data-dir <folder>` | Where `host64` writes its own files (the `patch.ver` it makes for an install without one). Default: beside `host64`. |

@@ -229,6 +229,9 @@ def luajit(env, uwp):
     text = text.replace('@set LJCOMPILE=cl /nologo /c /O2 /W3', '@set LJCOMPILE=cl /nologo /c /O2 /W3' + extra, 1)
     open(bat, 'w').write(text)
     print('> msvcbuild.bat lua52compat static (%s)' % ('uwp' if uwp else 'win'))
+    # msvcbuild.bat runs itself and the tools it builds (minilua, buildvm) from the current folder,
+    # which cmd refuses when NoDefaultCurrentDirectoryInExePath is set
+    env = {k: v for k, v in env.items() if k.lower() != 'nodefaultcurrentdirectoryinexepath'}
     subprocess.check_call(['cmd', '/c', 'msvcbuild.bat', 'lua52compat', 'static'], cwd=os.path.join(work, 'src'), env=env)
     return lib
 
@@ -246,7 +249,9 @@ def addon_objects(env, cflags, objdir, uwp=False):
     objs += compile_stale(env, cpp, objdir + '\\addons_cpp', ADDON_INCLUDES + sdl_inc + HOST_INCLUDES + ['/I', 'runtime\\portable'], cxx)
     objs += compile_stale(env, IMGUI, objdir + '\\imgui', ADDON_INCLUDES, cxx)
     objs += compile_stale(env, LUASOCKET, objdir + '\\luasocket', ADDON_INCLUDES, cflags)
-    objs += compile_stale(env, ['third_party\\lfs\\lfs.c'], objdir + '\\lfs', ADDON_INCLUDES, cflags)
+    # without LuaSocket's src/ on the path: its io.h would stand in for the CRT's, which lfs needs here
+    lfs_inc = ['/I', 'third_party\\luajit\\src', '/D_CRT_SECURE_NO_WARNINGS']
+    objs += compile_stale(env, ['third_party\\lfs\\lfs.c'], objdir + '\\lfs', lfs_inc, cflags)
     # SQLite and its Lua binding (Windower's sqlite3 module)
     objs += compile_stale(env, ['third_party\\sqlite\\sqlite3.c', 'third_party\\sqlite\\lsqlite3\\lsqlite3.c'], objdir + '\\sqlite',
                           ADDON_INCLUDES + ['/I', 'third_party\\sqlite', '/DSQLITE_THREADSAFE=0', '/DSQLITE_OMIT_LOAD_EXTENSION'], cflags)
@@ -277,6 +282,14 @@ def game_objects(env):
     return objs
 
 
+def host_resources(env, objdir):
+    """host/host64.rc (the game's icon and the file's description) as a .res for link."""
+    res = os.path.join(objdir, 'host64.res')
+    os.makedirs(os.path.join(ROOT, objdir), exist_ok=True)
+    run(['rc', '/nologo', '/fo', res, 'host\\host64.rc'], env)
+    return res
+
+
 def host64(env):
     """The 64-bit game host: FFXiMain and FFXi.dll translated, the portable runtime, SDL3."""
     objs = game_objects(env)
@@ -288,6 +301,7 @@ def host64(env):
     # host64.exe exports them (link also writes an import .lib/.exp nobody needs). Win32 functions are the
     # real ones (win32_ffi.c is empty on Windows); ones in other DLLs (winmm's PlaySound, shell32) need
     # xi.lua to ffi.load the real DLL there rather than map it to ffi.C.
+    objs.append(host_resources(env, 'build\\host64'))
     run(['link', '/nologo', '/OUT:build\\host64.exe', '/MACHINE:X64', sdl_lib] + HOST_LIBS + objs, env)
     shutil.copy(os.path.join(SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, 'build'))
     print('built build\\host64.exe; run: build\\host64.exe --game "%s" ...' % BUILD['game'])
@@ -300,6 +314,7 @@ def host64_headless(env):
     objs += compile_stale(env, PORTABLE + HOST_BASE + ['runtime\\portable\\gfx_null.c'], 'build\\headless', sdl_inc + HOST_INCLUDES,
                           CFLAGS64)
     libs = [lib for lib in HOST_LIBS if lib not in GFX_LIBS]
+    objs.append(host_resources(env, 'build\\headless'))
     run(['link', '/nologo', '/OUT:build\\host64-headless.exe', '/MACHINE:X64', sdl_lib] + libs + objs, env)
     shutil.copy(os.path.join(SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, 'build'))
     print('built build\\host64-headless.exe')

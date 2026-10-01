@@ -20,9 +20,17 @@ typedef struct LsbLogin
     /* When not NULL (24 bytes): the version signed in with when the server refused the one sent
      * and named another, "" otherwise - to send it from the start next time. */
     char* version_used;
+    /* xiloader's "trust this computer": with an OTP on the account, a token the server hands out
+     * stands in for the code for 30 days. trust_name (the server as the player named it) keys the
+     * token saved for this user in the credential store (keychain.h), sent at every sign-in, and
+     * NULL keeps none; trust asks the server for one when the OTP is typed. */
+    const char* trust_name;
+    int trust;
 } LsbLogin;
 
-#define LSB_LOADER_VERSION "2.1.2"
+/* The xiloader version current LandSandBoat servers expect (xiloader src/main.cpp g_VersionNumber,
+ * LandSandBoat src/login/auth_session.h SupportedXiloaderVersion): only major.minor is checked. */
+#define LSB_LOADER_VERSION "2.2.0"
 
 /* A loader version as major.minor.patch (each 0..65535); 0 when it is not one. */
 int lsb_parse_version(const char* s, int out[3]);

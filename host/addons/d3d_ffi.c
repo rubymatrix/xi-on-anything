@@ -2171,7 +2171,9 @@ static size_t put_utf8(char* o, uint32_t c)
 /* DrawText: lines (split at \n unless DT_SINGLELINE) placed in the rect; returns the height. */
 static int font_draw_utf8(Font* f, const char* s, size_t n, XRECT* r, uint32_t fmt, uint32_t color)
 {
+#ifndef DT_CENTER /* windows.h has them, with these values */
     enum { DT_CENTER = 1, DT_RIGHT = 2, DT_VCENTER = 4, DT_BOTTOM = 8, DT_SINGLELINE = 0x20, DT_CALCRECT = 0x400 };
+#endif
     XRECT zero = { 0, 0, 0, 0 };
     if (!r)
         r = &zero;

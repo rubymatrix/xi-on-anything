@@ -2,9 +2,15 @@
  *
  * gamecore is our own and Winsock is our shim, so each piece of the sign-in has a direct home:
  *
- *   1. Auth (TLS, port 54231, xi_connect): one JSON request - username, password, OTP, the loader
- *      version, command 0x10 (login) - and one JSON reply: result 1 with account_id and the 16-byte
- *      session_hash, or error_message.
+ *   1. Auth (TLS 1.3 on current servers, port 54231, xi_connect): one JSON request - username,
+ *      password, OTP, the loader version (2.2.x now), command 0x10 (login), the saved trust token
+ *      and whether to trust this computer - and one JSON reply: result 1 with account_id, the
+ *      16-byte session_hash and perhaps a new trust_token, another result, or error_message
+ *      (xiloader src/network.cpp VerifyAccount, src/command_handler.h; LandSandBoat
+ *      src/login/auth_session.cpp). The hash is random now: it is also the account's credential
+ *      on the server's profile service (src/profile), which xiloader 2.2 connects the game's
+ *      friend list, presence and messages to. We do not connect there; the game and the lobby do
+ *      not need it.
  *   2. The login data connection (TCP 54230): we send 0xFE + the hash, then answer the server for
  *      the rest of the run - 0x01 with 0xA1 (account id, server address, hash), 0x02 / 0x15 with
  *      0xA2 and the server's fixed key, 0x03 (the character list) with nothing: our gamecore
@@ -19,6 +25,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -28,6 +35,9 @@
 #include <windows.h>
 #if !defined(FFXI_UWP) /* UWP apps have no SChannel and no console: uwp_bridge.h */
 #include <security.h>
+/* SCH_CREDENTIALS (TLS 1.3) is declared only with this, and it needs UNICODE_STRING */
+#define SCHANNEL_USE_BLACKLISTS
+#include <subauth.h>
 #include <schannel.h>
 #include <conio.h>
 #include <io.h>
@@ -63,6 +73,7 @@ typedef int sock_t;
 #include "uwp_bridge.h"
 #endif
 #include "gamecore_config.h"
+#include "keychain.h"
 #include "ws2.h"
 
 int lsb_parse_version(const char* s, int out[3])
@@ -138,44 +149,30 @@ static int send_all(sock_t s, const void* p, size_t n)
     return 1;
 }
 
-static int tls_exchange(uint32_t server, uint16_t port, const char* request, char* reply, size_t replyn, char* err, size_t errn)
+/* Drives InitializeSecurityContext until it is done: the handshake (no context yet), or, on a
+ * context, a TLS 1.3 post-handshake message DecryptMessage hands back with SEC_I_RENEGOTIATE: the
+ * two session tickets a LandSandBoat server's OpenSSL sends right after the handshake each come
+ * back that way. in[0..*got] is what was received and not yet used; what is left over stays there. */
+static int tls_drive(sock_t s, CredHandle* cred, CtxtHandle* ctx, int* have_ctx, char* in, size_t cap, size_t* got,
+    char* err, size_t errn)
 {
-    sock_t s = tcp_connect(server, port, TIMEOUT_MS, err, errn);
-    if (s == SOCK_BAD)
-        return 0;
-    int ok = 0, have_cred = 0, have_ctx = 0;
-    CredHandle cred;
-    CtxtHandle ctx;
-    SCHANNEL_CRED sc;
-    memset(&sc, 0, sizeof sc);
-    sc.dwVersion = SCHANNEL_CRED_VERSION;
-    /* private servers present self-signed certificates */
-    sc.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
-    if (AcquireCredentialsHandleA(NULL, (SEC_CHAR*)UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL, &sc, NULL, NULL, &cred, NULL) != SEC_E_OK)
-    {
-        snprintf(err, errn, "TLS setup failed");
-        goto out;
-    }
-    have_cred = 1;
-    static char in[32768];
-    size_t got = 0;
     for (;;)
     {
-        SecBuffer ib[2] = { { (unsigned long)got, SECBUFFER_TOKEN, in }, { 0, SECBUFFER_EMPTY, NULL } };
+        SecBuffer ib[2] = { { (unsigned long)*got, SECBUFFER_TOKEN, in }, { 0, SECBUFFER_EMPTY, NULL } };
         SecBuffer ob[1] = { { 0, SECBUFFER_TOKEN, NULL } };
         SecBufferDesc id = { SECBUFFER_VERSION, 2, ib }, od = { SECBUFFER_VERSION, 1, ob };
         unsigned long flags = ISC_REQ_USE_SUPPLIED_CREDS | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONFIDENTIALITY |
             ISC_REQ_REPLAY_DETECT | ISC_REQ_SEQUENCE_DETECT | ISC_REQ_STREAM;
-        SECURITY_STATUS st = InitializeSecurityContextA(&cred, have_ctx ? &ctx : NULL, have_ctx ? NULL : (SEC_CHAR*)"ffxi", flags, 0, 0,
-            have_ctx ? &id : NULL, 0, have_ctx ? NULL : &ctx, &od, &flags, NULL);
-        have_ctx = 1;
+        SECURITY_STATUS st = InitializeSecurityContextA(cred, *have_ctx ? ctx : NULL, *have_ctx ? NULL : (SEC_CHAR*)"ffxi", flags, 0, 0,
+            *have_ctx ? &id : NULL, 0, *have_ctx ? NULL : ctx, &od, &flags, NULL);
+        *have_ctx = 1;
         if (ib[1].BufferType == SECBUFFER_EXTRA)
         {
-            memmove(in, in + (got - ib[1].cbBuffer), ib[1].cbBuffer);
-            got = ib[1].cbBuffer;
+            memmove(in, in + (*got - ib[1].cbBuffer), ib[1].cbBuffer);
+            *got = ib[1].cbBuffer;
         }
         else if (st != SEC_E_INCOMPLETE_MESSAGE)
-            got = 0;
+            *got = 0;
         if (ob[0].pvBuffer)
         {
             int sent = !ob[0].cbBuffer || send_all(s, ob[0].pvBuffer, ob[0].cbBuffer);
@@ -184,19 +181,88 @@ static int tls_exchange(uint32_t server, uint16_t port, const char* request, cha
                 st = SEC_E_INTERNAL_ERROR;
         }
         if (st == SEC_E_OK)
-            break;
+            return 1;
         if (st != SEC_I_CONTINUE_NEEDED && st != SEC_E_INCOMPLETE_MESSAGE)
         {
             snprintf(err, errn, "TLS handshake with the login server failed (0x%08lx)", (unsigned long)st);
-            goto out;
+            return 0;
         }
-        int n = got < sizeof in ? recv(s, in + got, (int)(sizeof in - got), 0) : 0;
+        int n = *got < cap ? recv(s, in + *got, (int)(cap - *got), 0) : 0;
         if (n <= 0)
         {
             snprintf(err, errn, "TLS handshake with the login server failed (connection closed)");
-            goto out;
+            return 0;
         }
-        got += (size_t)n;
+        *got += (size_t)n;
+    }
+}
+
+/* The credentials for one try. Current LandSandBoat servers speak TLS 1.3 only (src/login/handler.h:
+ * asio::ssl::context::tlsv13_server; xiloader src/network.cpp sets the same minimum), which
+ * SChannel offers only through SCH_CREDENTIALS (SCHANNEL_CRED stops at TLS 1.2; TLS 1.3 itself
+ * needs Windows 11 or Server 2022). Try 0 asks for TLS 1.2 or 1.3 that way; try 1 is the older
+ * SCHANNEL_CRED with the system's protocols, for Windows without SCH_CREDENTIALS. Neither checks
+ * the certificate: private servers present self-signed ones. */
+static int tls_credentials(int attempt, CredHandle* cred)
+{
+    const DWORD flags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
+#if defined(SCH_CREDENTIALS_VERSION)
+    if (attempt == 0)
+    {
+        TLS_PARAMETERS tp;
+        memset(&tp, 0, sizeof tp);
+        tp.grbitDisabledProtocols = (DWORD) ~(SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_3_CLIENT);
+        SCH_CREDENTIALS sc;
+        memset(&sc, 0, sizeof sc);
+        sc.dwVersion = SCH_CREDENTIALS_VERSION;
+        sc.dwFlags = flags;
+        sc.cTlsParameters = 1;
+        sc.pTlsParameters = &tp;
+        return AcquireCredentialsHandleA(NULL, (SEC_CHAR*)UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL, &sc, NULL, NULL, cred, NULL) == SEC_E_OK;
+    }
+#else
+    if (attempt == 0)
+        return 0;
+#endif
+    SCHANNEL_CRED sc;
+    memset(&sc, 0, sizeof sc);
+    sc.dwVersion = SCHANNEL_CRED_VERSION;
+    sc.dwFlags = flags;
+    return AcquireCredentialsHandleA(NULL, (SEC_CHAR*)UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL, &sc, NULL, NULL, cred, NULL) == SEC_E_OK;
+}
+
+static int tls_exchange(uint32_t server, uint16_t port, const char* request, char* reply, size_t replyn, char* err, size_t errn)
+{
+    sock_t s = SOCK_BAD;
+    int ok = 0, have_cred = 0, have_ctx = 0;
+    CredHandle cred;
+    CtxtHandle ctx;
+    static char in[32768];
+    size_t got = 0;
+    /* a handshake that fails is tried again, on a new connection, with the next credentials;
+     * nothing has been sent yet */
+    for (int attempt = 0;; ++attempt)
+    {
+        if (attempt == 2)
+            goto out;
+        if (have_ctx)
+            DeleteSecurityContext(&ctx), have_ctx = 0;
+        if (have_cred)
+            FreeCredentialsHandle(&cred), have_cred = 0;
+        if (s != SOCK_BAD)
+            sock_close(s);
+        got = 0, s = SOCK_BAD;
+        if (!tls_credentials(attempt, &cred))
+        {
+            snprintf(err, errn, "TLS setup failed");
+            continue;
+        }
+        have_cred = 1;
+        s = tcp_connect(server, port, TIMEOUT_MS, err, errn);
+        if (s == SOCK_BAD)
+            goto out;
+        if (tls_drive(s, &cred, &ctx, &have_ctx, in, sizeof in, &got, err, errn))
+            break;
     }
     SecPkgContext_StreamSizes sz;
     if (QueryContextAttributesA(&ctx, SECPKG_ATTR_STREAM_SIZES, &sz) != SEC_E_OK)
@@ -258,7 +324,23 @@ static int tls_exchange(uint32_t server, uint16_t port, const char* request, cha
                     ok = 1;
                     break;
                 }
-                continue; /* a record with nothing for us (a session ticket) */
+                continue; /* a record with nothing for us */
+            }
+            if (st == SEC_I_RENEGOTIATE)
+            {
+                /* a TLS 1.3 post-handshake message (a session ticket), which SChannel wants
+                 * InitializeSecurityContext to take: what follows it is in the extra buffer */
+                SecBuffer* extra = NULL;
+                for (int i = 1; i < 4; ++i)
+                    if (b[i].BufferType == SECBUFFER_EXTRA)
+                        extra = &b[i];
+                if (extra)
+                    memmove(in, in + (got - extra->cbBuffer), extra->cbBuffer), got = extra->cbBuffer;
+                else
+                    got = 0;
+                if (!tls_drive(s, &cred, &ctx, &have_ctx, in, sizeof in, &got, err, errn))
+                    break;
+                continue;
             }
             if (st != SEC_E_INCOMPLETE_MESSAGE)
             {
@@ -279,7 +361,8 @@ out:
         DeleteSecurityContext(&ctx);
     if (have_cred)
         FreeCredentialsHandle(&cred);
-    sock_close(s);
+    if (s != SOCK_BAD)
+        sock_close(s);
     return ok;
 }
 #else
@@ -319,7 +402,8 @@ static int tls_exchange(uint32_t server, uint16_t port, const char* request, cha
         snprintf(err, errn, "TLS setup failed");
         goto out;
     }
-    /* private servers present self-signed certificates */
+    /* private servers present self-signed certificates. TLS 1.2 or 1.3: current servers speak
+     * only 1.3 (xiloader src/network.cpp asks for nothing less), older ones 1.2 as well */
     mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
 #if MBEDTLS_VERSION_MAJOR < 4
     mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
@@ -597,6 +681,66 @@ static int server_version(const char* message, const int sent[3], int out[3])
     return found == 2;
 }
 
+/* --- trust tokens ----------------------------------------------------------------------------------
+ * xiloader keeps them per server and user with their expiry, in a DPAPI-sealed file
+ * (src/trust_token.cpp); ours go in the credential store as "<expires> <token>" under
+ * "lsbtrust:<server>:<user>". Where there is no store (keychain.h) none is kept, and an account
+ * with an OTP asks for the code every time, as before. */
+static void trust_key(const LsbLogin* l, char* out, size_t n)
+{
+    snprintf(out, n, "lsbtrust:%s:%s", l->trust_name, l->user);
+}
+
+/* the saved token, "" for none; an expired one is forgotten (xiloader loadTrustToken) */
+static void trust_load(const LsbLogin* l, char* out, size_t n)
+{
+    out[0] = 0;
+    if (!l->trust_name)
+        return;
+    char key[400], v[256];
+    trust_key(l, key, sizeof key);
+    if (!keychain_get(key, v, sizeof v))
+        return;
+    char* sp;
+    long long expires = strtoll(v, &sp, 10);
+    if (*sp == ' ' && expires > (long long)time(NULL))
+        snprintf(out, n, "%s", sp + 1);
+    else
+        keychain_delete(key);
+    memset(v, 0, sizeof v);
+}
+
+static void trust_forget(const LsbLogin* l)
+{
+    if (!l->trust_name)
+        return;
+    char key[400];
+    trust_key(l, key, sizeof key);
+    keychain_delete(key);
+}
+
+/* the token a sign-in handed out: trust_expires (seconds since 1970) when the server says, else
+ * 30 days, LandSandBoat's lifetime (src/login/otp_helpers.h saveTrustToken; xiloader
+ * src/command_handler.h does the same) */
+static void trust_save(const LsbLogin* l, const char* reply)
+{
+    char token[200], key[400], v[256];
+    if (!json_str(reply, "trust_token", token, sizeof token) || !token[0])
+        return;
+    long long now = (long long)time(NULL), expires;
+    if (!json_int(reply, "trust_expires", &expires))
+        expires = now + 30 * 24 * 60 * 60;
+    if (!l->trust_name)
+        return;
+    trust_key(l, key, sizeof key);
+    snprintf(v, sizeof v, "%lld %s", expires, token);
+    if (keychain_set(key, v))
+        fprintf(stderr, "[lsb] this computer is trusted for %lld days\n", (expires - now) / (24 * 60 * 60));
+    else
+        fprintf(stderr, "[lsb] the server trusts this computer, but there is nowhere to keep its token\n");
+    memset(token, 0, sizeof token), memset(v, 0, sizeof v);
+}
+
 int lsb_login(const LsbLogin* l, char* err, size_t errn)
 {
 #if defined(_WIN32)
@@ -610,10 +754,18 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         snprintf(err, errn, "the loader version \"%s\" is not major.minor.patch", v);
         return 0;
     }
-    char user[160], pass[160], otp[64], token[600], req[1400];
+    char user[160], pass[160], otp[64], token[600], trust[200], req[1600];
     json_string(user, sizeof user, l->user);
     json_string(pass, sizeof pass, l->password ? l->password : "");
     json_string(otp, sizeof otp, l->otp ? l->otp : "");
+    /* the trust token saved for this server and user, sent with every login (xiloader
+     * src/network.cpp: trust_token and trust_this_computer go with command 0x10 only) */
+    {
+        char t[160];
+        trust_load(l, t, sizeof t);
+        json_string(trust, sizeof trust, t);
+        memset(t, 0, sizeof t);
+    }
     /* login_token, which some servers add: their launcher's single-use token
      * stands in for the password and the OTP */
     token[0] = 0;
@@ -630,14 +782,14 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
     for (int attempt = 0;; ++attempt)
     {
         snprintf(req, sizeof req,
-            "{\"command\":16,%s\"new_password\":\"\",\"otp\":%s,\"password\":%s,\"trust_this_computer\":false,"
-            "\"trust_token\":\"\",\"username\":%s,\"version\":[%d,%d,%d]}",
-            token, otp, pass, user, version[0], version[1], version[2]);
+            "{\"command\":16,%s\"new_password\":\"\",\"otp\":%s,\"password\":%s,\"trust_this_computer\":%s,"
+            "\"trust_token\":%s,\"username\":%s,\"version\":[%d,%d,%d]}",
+            token, otp, pass, l->trust ? "true" : "false", trust, user, version[0], version[1], version[2]);
         int ok = tls_exchange(l->server, l->auth_port, req, reply, sizeof reply, err, errn);
         memset(req, 0, sizeof req);
         if (!ok)
         {
-            memset(pass, 0, sizeof pass);
+            memset(pass, 0, sizeof pass), memset(trust, 0, sizeof trust);
             return 0;
         }
         /* A version the server refuses names the one it wants ("This server requires version
@@ -655,7 +807,7 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         }
         break;
     }
-    memset(pass, 0, sizeof pass);
+    memset(pass, 0, sizeof pass), memset(trust, 0, sizeof trust);
 
     if (json_str(reply, "error_message", message, sizeof message) && message[0])
     {
@@ -682,19 +834,38 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         snprintf(err, errn, "the login server's reply has no result");
         return 0;
     }
-    if (result == 2)
+    /* the results a login can get (LandSandBoat src/login/auth_session.h login_result, xiloader
+     * src/command_handler.h handleLoginCommand) */
+    switch (result)
     {
-        snprintf(err, errn, "invalid username or password");
+    case 1: /* LOGIN_SUCCESS */
+        break;
+    case 0: /* LOGIN_FAIL: an account whose status is not normal (auth_session.cpp, LOGIN_ATTEMPT) */
+        snprintf(err, errn, "this account may not sign in (it is suspended or banned)");
         return 0;
-    }
-    if (result == 0x14)
-    {
+    case 2: /* LOGIN_ERROR: the password, or the OTP of an account that has one */
+        snprintf(err, errn, (l->otp && *l->otp) ? "invalid username, password or one-time code" : "invalid username or password");
+        return 0;
+    case 0x0A: /* LOGIN_ERROR_ALREADY_LOGGED_IN */
+        snprintf(err, errn, "this account is already signed in");
+        return 0;
+    case 0x0B: /* LOGIN_ERROR_VERSION_UNSUPPORTED */
+        snprintf(err, errn, "the server does not accept this loader version: check with the server which one it expects");
+        return 0;
+    case 0x13: /* LOGIN_ERROR_TRUST_TOKEN_INVALID: the saved token, sent without a code, was refused */
+        trust_forget(l);
+        snprintf(err, errn, "the server no longer trusts this computer: sign in with your one-time code");
+        return 0;
+    case 0x14: /* not LandSandBoat's: servers whose launchers hand out login_token */
         snprintf(err, errn, "the launch token is invalid or expired: get a new one from the server's launcher");
         return 0;
-    }
-    if (result != 1 || !json_int(reply, "account_id", &account))
-    {
+    default:
         snprintf(err, errn, "the login server answered %lld", result);
+        return 0;
+    }
+    if (!json_int(reply, "account_id", &account))
+    {
+        snprintf(err, errn, "the login server sent no account id");
         return 0;
     }
     /* session_hash: 16 numbers (signed chars) */
@@ -718,6 +889,7 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         snprintf(err, errn, "the login server sent no session hash");
         return 0;
     }
+    trust_save(l, reply);
 
     /* the data connection, answered for the rest of the run */
     g_data.s = tcp_connect(l->server, l->data_port, 0, err, errn);

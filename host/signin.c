@@ -2,7 +2,7 @@
  *
  * Two windows drawn as the game's Config pages are: Sign in (the LandSandBoat username, the
  * password, the one-time code, Sign in and Settings) and Settings (the server, remembering the
- * password, the window theme, full screen). Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
+ * password, trusting this computer, the window theme, full screen). Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
  * picks, Escape goes back or quits; the mouse clicks.
  *
  * What it remembers is in signin.cfg (key=value lines) beside settings.reg, the password in the
@@ -30,6 +30,7 @@ typedef struct Config
     char server[128];
     char user[64];
     int remember;
+    int trust; /* xiloader's "trust this computer" (lsb_login.h) */
     int theme;
     int space; /* full screen in a macOS Space of its own (1) or in place (0) */
     uint16_t auth_port, data_port, view_port;
@@ -167,6 +168,8 @@ static void config_load(const char* path, Config* c)
             SDL_strlcpy(c->user, v, sizeof c->user);
         else if (!strcmp(line, "remember"))
             c->remember = atoi(v) != 0;
+        else if (!strcmp(line, "trust"))
+            c->trust = atoi(v) != 0;
         else if (!strcmp(line, "theme"))
             c->theme = atoi(v);
         else if (!strcmp(line, "fullscreen_space"))
@@ -194,7 +197,7 @@ static void config_save(const char* path, const Config* c)
         return;
     }
     fprintf(f, "server=%s\nuser=%s\nremember=%d\ntheme=%d\n", c->server, c->user, c->remember, c->theme);
-    fprintf(f, "fullscreen_space=%d\n", c->space);
+    fprintf(f, "fullscreen_space=%d\ntrust=%d\n", c->space, c->trust);
     if (c->background[0])
         fprintf(f, "background=%s\n", c->background);
     if (c->auth_port || c->data_port || c->view_port)
@@ -282,6 +285,7 @@ typedef struct Job
 {
     SDL_AtomicInt state;
     char server[128], user[64], password[128], otp[32];
+    int trust;
     uint16_t auth_port, data_port, view_port;
     char loader_version[24], version_used[24];
     uint32_t ip;
@@ -307,7 +311,9 @@ static void job_thread(void* arg)
             j->otp,
             NULL,
             j->loader_version,
-            j->version_used };
+            j->version_used,
+            j->server, /* the saved trust token's key, with the user */
+            j->trust };
         ok = lsb_login(&l, j->error, sizeof j->error);
     }
     memset(j->password, 0, sizeof j->password);
@@ -414,6 +420,7 @@ enum
     ID_SETTINGS,
     ID_SERVER,
     ID_REMEMBER,
+    ID_TRUST,
     ID_THEME,
     ID_SPACE,
     ID_BACK,
@@ -533,6 +540,7 @@ static void build(Ui* u)
     {
         add(u, W_TEXT, ID_SERVER, "Server", u->cfg.server, sizeof u->cfg.server);
         options(u, ID_REMEMBER, "Remember Password", 2, ONOFF);
+        options(u, ID_TRUST, "Trust This Computer", 2, ONOFF);
         options(u, ID_THEME, "Window Theme", 8, THEMES);
         options(u, ID_SPACE, "Full Screen", 2, SPACE);
         add(u, W_BUTTON, ID_BACK, "Back", NULL, 0);
@@ -546,6 +554,8 @@ static int choice_value(const Ui* u, int id)
 {
     if (id == ID_REMEMBER)
         return u->cfg.remember ? 0 : 1;
+    if (id == ID_TRUST)
+        return u->cfg.trust ? 0 : 1;
     if (id == ID_SPACE)
         return u->cfg.space ? 0 : 1;
     return (u->cfg.theme >= 1 && u->cfg.theme <= 8 ? u->cfg.theme : 1) - 1;
@@ -586,6 +596,7 @@ static void start_signin(Ui* u)
     SDL_strlcpy(j->user, u->cfg.user, sizeof j->user);
     SDL_strlcpy(j->password, u->password, sizeof j->password);
     SDL_strlcpy(j->otp, u->otp, sizeof j->otp);
+    j->trust = u->cfg.trust;
     j->auth_port = u->cfg.auth_port, j->data_port = u->cfg.data_port, j->view_port = u->cfg.view_port;
     SDL_strlcpy(j->loader_version, u->cfg.loader_version, sizeof j->loader_version);
     j->error[0] = 0;
@@ -606,6 +617,12 @@ static void choose(Ui* u, int id, int v)
         return;
     if (id == ID_REMEMBER)
         u->cfg.remember = v == 0;
+    else if (id == ID_TRUST)
+    {
+        u->cfg.trust = v == 0;
+        if (u->cfg.trust)
+            set_status(u, "With a one-time code, the server trusts this computer for 30 days.", 0);
+    }
     else if (id == ID_SPACE)
     {
         u->cfg.space = v == 0;

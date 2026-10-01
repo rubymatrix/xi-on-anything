@@ -649,7 +649,7 @@ static int i_key_down(lua_State* L)
     lua_pushboolean(L, xi_key_down((uint32_t)luaL_checknumber(L, 1)));
     return 1;
 }
-static const luaL_Reg INPUT[] = { { "bind", i_bind }, { "unbind", i_unbind }, { "key_down", i_key_down }, { NULL, NULL } };
+static const luaL_Reg INPUT_FNS[] = { { "bind", i_bind }, { "unbind", i_unbind }, { "key_down", i_key_down }, { NULL, NULL } };
 
 /* --- xi.addons -------------------------------------------------------------------------------- */
 
@@ -1008,7 +1008,7 @@ void xi_lua_open(lua_State* L, Addon* a)
     sub(L, "chat", CHAT);
     sub(L, "ui", UI);
     sub(L, "packets", PACKETS);
-    sub(L, "input", INPUT);
+    sub(L, "input", INPUT_FNS);
     sub(L, "addons", ADDONS);
     sub(L, "fs", FS);
     xi_windower_open(L), lua_setfield(L, -2, "windower_native");

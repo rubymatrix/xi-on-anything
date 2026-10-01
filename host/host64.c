@@ -10,8 +10,10 @@
  *               [--reg-final <file.reg>]...   loaded after the overlay: a launcher's settings
  *               [--data-dir <folder>]   where host64 writes its own files (default: beside it)
  *               [--server <name or a.b.c.d>]
- *               [--user <name> [--pass <password>] [--otp <code>] [--login-token <t>]
- *                [--authport 54231] [--dataport 54230] [--viewport 54001]]
+ *               [--session <V: 16 characters, or 32 hex digits>]                   a launcher's sign-in
+ *                [--auth <the authCode block: 104 hex digits>]
+ *               [--user <name> [--pass <password>] [--otp <code>] [--login-token <t>]   LandSandBoat servers
+ *                [--authport 54231] [--dataport 54230] [--viewport 54001] [--trust on|off]]
  *               [--dats <folder>]...   DAT overlays, as XIPivot: the first folder given wins
  *               [--textures <folder>]...   texture packs: high-resolution replacements for the
  *                                      game's textures (tools/make_texpack.py); default <data dir>/textures
@@ -20,7 +22,8 @@
  *
  * --server is where the game's servers are: the lobby and every other host under the game's
  * domain resolve to it instead of through DNS. Default 127.0.0.1 (this machine); --lobby is an
- * older name for it.
+ * older name for it. With --session nothing is redirected: the game's hosts resolve through DNS,
+ * as retail's do, and --server is not used.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped.
  *
@@ -40,12 +43,20 @@
  * factor of the game's own distances (1 as shipped; 3, or 3x1.5). An app bundle's FFXIDrawDistance
  * key is the default.
  *
- * Signing in (host/lsb_login.c): --user signs in on the LandSandBoat server's auth port first. The password comes from --pass, else FFXI_PASSWORD, else the
- *     sign-in screen; --otp is the two-factor code, if the account has one. --login-token is a
- *     launch token from the server's own launcher, in place of the password and code.
+ * Two ways in:
+ *   - a session value V the lobby checks (--session), from a launcher that signed in elsewhere
+ *     and keeps that sign-in open while the game runs. --auth is the 0x34-byte authCode block the
+ *     game sends its lobby with it (the core's slot 936), as that launcher made it; host64 only
+ *     carries the bytes. Without it the block is zeros, which LandSandBoat's lobby accepts.
+ *   - a LandSandBoat server (host/lsb_login.c): --user signs in on the server's auth port first.
+ *     The password comes from --pass, else FFXI_PASSWORD, else the sign-in screen; --otp is the
+ *     two-factor code, if the account has one. --login-token is a launch token from the server's
+ *     own launcher, in place of the password and code. --trust on is xiloader's "trust this
+ *     computer": signing in with the code then saves the token the server hands out (keychain.h,
+ *     per --server name and user), which stands in for the code for 30 days.
  *
- * Without --user, the sign-in screen (host/signin.c) comes first, in the game's own UI art, with the
- * server in its Settings; it remembers them in <data dir>/signin.cfg
+ * With neither, the sign-in screen (host/signin.c) comes first, in the game's own UI art, with the
+ * LandSandBoat server in its Settings; it remembers them in <data dir>/signin.cfg
  * (--data-dir, else the user's app data), the password in the keychain, and writes display
  * defaults to <data dir>/settings.reg, loaded when no --reg-final is given. Its window becomes the
  * game's. */
@@ -270,6 +281,43 @@ static int parse_draw_distance(const char* s, float* world, float* entities)
     return 1;
 }
 
+/* --session: 16 characters as they are, or 32 hex digits */
+static int parse_session(const char* s, uint8_t v[16])
+{
+    size_t n = strlen(s);
+    if (n == 16)
+    {
+        memcpy(v, s, 16);
+        return 1;
+    }
+    if (n != 32)
+        return 0;
+    for (int i = 0; i < 16; ++i)
+    {
+        unsigned b;
+        if (sscanf(s + 2 * i, "%2x", &b) != 1)
+            return 0;
+        v[i] = (uint8_t)b;
+    }
+    return 1;
+}
+
+/* --auth: exactly 2 * n hex digits -> n bytes */
+static int parse_hex(const char* s, uint8_t* out, size_t n)
+{
+    if (strlen(s) != 2 * n)
+        return 0;
+    for (size_t i = 0; i < 2 * n; ++i)
+    {
+        char c = s[i];
+        int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0)
+            return 0;
+        out[i / 2] = (uint8_t)(i % 2 ? out[i / 2] << 4 | d : d);
+    }
+    return 1;
+}
+
 /* w:h (16:9), wxh, w/h, or a ratio (1.778); 0 if it is none of those */
 static double parse_shape(const char* s)
 {
@@ -449,6 +497,7 @@ int main(int argc, char** argv)
     const char* user_dir = NULL;
     uint32_t game_server = DEFAULT_GAME_SERVER;
     LsbLogin lsb = { 0, 54231, 54230, 54001, NULL, NULL, "", NULL, NULL, NULL };
+    int have_session = 0; /* --session: a launcher signed in */
     static char base_reg[1100];
     const char* server_name = NULL; /* --server as given, for the sign-in screen */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0;
@@ -474,6 +523,27 @@ int main(int argc, char** argv)
             packs[npacks++] = argv[i + 1];
         else if (!strcmp(argv[i], "--user-dir"))
             user_dir = argv[i + 1];
+        else if (!strcmp(argv[i], "--session"))
+        {
+            uint8_t v[16];
+            if (!parse_session(argv[i + 1], v))
+            {
+                fprintf(stderr, "--session: 16 characters or 32 hex digits\n");
+                return 2;
+            }
+            gamecore_set_session(v);
+            have_session = 1;
+        }
+        else if (!strcmp(argv[i], "--auth"))
+        {
+            uint8_t block[0x34];
+            if (!parse_hex(argv[i + 1], block, sizeof block))
+            {
+                fprintf(stderr, "--auth: 104 hex digits (the 0x34-byte authCode block)\n");
+                return 2;
+            }
+            gamecore_set_auth_block(block);
+        }
         else if (!strcmp(argv[i], "--server") || !strcmp(argv[i], "--lobby"))
         {
             server_name = argv[i + 1];
@@ -491,6 +561,8 @@ int main(int argc, char** argv)
             lsb.otp = argv[i + 1];
         else if (!strcmp(argv[i], "--login-token"))
             lsb.login_token = argv[i + 1];
+        else if (!strcmp(argv[i], "--trust"))
+            lsb.trust = !strcmp(argv[i + 1], "on");
         else if (!strcmp(argv[i], "--loader-version"))
         {
             int v[3];
@@ -578,15 +650,15 @@ int main(int argc, char** argv)
     if (!game)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
-                        "[--server name] [--user name [--pass p] [--otp code] [--authport n] "
-                        "[--dataport n] [--viewport n]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k]\n");
+                        "[--server name] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
+                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k]\n");
         return 2;
     }
     if (!lsb.password)
         lsb.password = getenv("FFXI_PASSWORD");
     if (!addon_harness)
         discord_init();
-    if (!addon_harness && !(lsb.user && (lsb.password || lsb.login_token)))
+    if (!addon_harness && !have_session && !(lsb.user && (lsb.password || lsb.login_token)))
     {
         /* Nothing on the command line signs in: the sign-in screen, in the game's own art. Its
          * window becomes the game's. */
@@ -636,7 +708,7 @@ int main(int argc, char** argv)
         }
         else if (!lsb.user)
         {
-            fprintf(stderr, "no sign-in screen here: --user name for a LandSandBoat server\n");
+            fprintf(stderr, "no sign-in screen here: --session V, or --user name for a LandSandBoat server\n");
             return 2;
         }
     }
@@ -656,6 +728,7 @@ int main(int argc, char** argv)
             lsb.password = pw;
         }
         lsb.server = game_server;
+        lsb.trust_name = server_name; /* the saved trust token's key; none without --server */
         int ok = lsb_login(&lsb, err, sizeof err);
         memset(pw, 0, sizeof pw);
         if (!ok)
@@ -701,11 +774,20 @@ int main(int argc, char** argv)
     dinput_init();
     ws2_init();
     /* the game's hosts: the lobby through gamecore's resolver, every other one through
-     * gethostbyname */
-    ws2_set_game_server(game_server);
-    gamecore_set_lobby(game_server);
-    rt_log("[recomp] game hosts -> %u.%u.%u.%u\n", game_server >> 24, (game_server >> 16) & 255, (game_server >> 8) & 255,
-        game_server & 255);
+     * gethostbyname. With --session none is redirected: they resolve through DNS, as retail's. */
+    if (have_session)
+    {
+        ws2_set_game_server(0);
+        gamecore_set_lobby_resolver(ws2_resolve_ipv4);
+        rt_log("[recomp] game hosts through DNS (--session)\n");
+    }
+    else
+    {
+        ws2_set_game_server(game_server);
+        gamecore_set_lobby(game_server);
+        rt_log("[recomp] game hosts -> %u.%u.%u.%u\n", game_server >> 24, (game_server >> 16) & 255,
+            (game_server >> 8) & 255, game_server & 255);
+    }
     reg_init(regs, nregs, overlay);
     for (unsigned i = 0; i < nfinals; ++i)
         reg_load_final(finals[i]);

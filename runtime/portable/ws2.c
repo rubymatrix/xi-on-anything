@@ -34,6 +34,7 @@ static int host_errno(void) { return errno; }
 #endif
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "gthread.h"
@@ -301,6 +302,36 @@ static void sh_listen(Guest* g)
     RET(0, 2);
 }
 
+/* FFXI_NET_TRACE=1: every TCP connect (with its result) and the size and first bytes of every send
+ * and recv go to the log, for seeing what a server answered. Off by default: it logs what the
+ * game sends, sign-in hashes included. */
+static int net_trace(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_NET_TRACE");
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
+static void trace_bytes(const char* what, Sock* s, const uint8_t* p, int n)
+{
+    struct sockaddr_in peer;
+    socklen_t len = sizeof peer;
+    memset(&peer, 0, sizeof peer);
+    getpeername(s->h, (struct sockaddr*)&peer, &len);
+    uint32_t ip = ntohl(peer.sin_addr.s_addr);
+    char hex[3 * 64 + 1];
+    int k = n < 64 ? n : 64, o = 0;
+    for (int i = 0; i < k; ++i)
+        o += snprintf(hex + o, sizeof hex - (size_t)o, "%02x ", p[i]);
+    hex[o] = 0;
+    rt_log("[net] %s %u.%u.%u.%u:%u %d bytes: %s%s\n", what, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255,
+        ntohs(peer.sin_port), n, hex, n > 64 ? "..." : "");
+}
+
 static void sh_connect(Guest* g)
 {
     Sock* s = sock(ARG(0));
@@ -319,6 +350,12 @@ static void sh_connect(Guest* g)
     int e = host_errno();
     if (!nb)
         gt_lock();
+    if (net_trace())
+    {
+        uint32_t ip = ntohl(a.sin_addr.s_addr);
+        rt_log("[net] connect %u.%u.%u.%u:%u -> %d (errno %d)%s\n", ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255,
+            ntohs(a.sin_port), r, r ? e : 0, nb ? " non-blocking" : "");
+    }
     if (r != 0)
     {
         gt_set_error(wsa_error(e));
@@ -430,6 +467,8 @@ static void sh_send(Guest* g)
     int e = host_errno();
     if (!nb)
         gt_lock();
+    if (net_trace() && n > 0)
+        trace_bytes("send", s, (const uint8_t*)ARGP(1), n);
     if (n < 0)
     {
         gt_set_error(wsa_error(e));
@@ -474,6 +513,8 @@ static void sh_recv(Guest* g)
     if (!nb)
         gt_lock();
     io_done(s, FD_READ, 0);
+    if (net_trace() && n >= 0)
+        trace_bytes(n ? "recv" : "recv (closed)", s, (const uint8_t*)ARGP(1), n);
     if (n < 0)
     {
         gt_set_error(wsa_error(e));
@@ -746,6 +787,21 @@ static int is_game_host_name(const char* name)
         if ((char)tolower((unsigned char)tail[i]) != "pol.com"[i])
             return 0;
     return n == 7 || tail[-1] == '.';
+}
+
+int ws2_resolve_ipv4(const char* name, uint32_t* ipv4_host_order)
+{
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    gt_unlock();
+    int r = getaddrinfo(name, NULL, &hints, &res);
+    gt_lock();
+    if (r != 0 || !res)
+        return 0;
+    *ipv4_host_order = ntohl(((struct sockaddr_in*)res->ai_addr)->sin_addr.s_addr);
+    freeaddrinfo(res);
+    return 1;
 }
 
 /* gethostbyname(name): one hostent the guest reads before the next call, as Winsock's per-thread one */

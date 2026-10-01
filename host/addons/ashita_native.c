@@ -9,9 +9,14 @@
  *   play_sound(path) -> boolean               a WAV file through SDL's default playback device
  *   xpad(index) -> buttons, lt, rt, lx, ly, rx, ry | nil   an XInput pad as the game reads it
  *
+ * On Windows (no POSIX <regex.h>) regex_find is windower_regex.cpp's xi_regex_find: std::regex,
+ * ECMAScript as Ashita's own, so the translation below is not needed there.
+ *
  * Self-contained: nothing else in the host calls these. */
 #include <ctype.h>
+#ifndef _WIN32
 #include <regex.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +29,7 @@
 #include "lauxlib.h"
 #include "lua.h"
 
+#ifndef _WIN32
 /* --- regex ------------------------------------------------------------------------------------ */
 
 typedef struct Buf
@@ -258,6 +264,10 @@ static int n_regex_find(lua_State* L)
     regfree(&c.re);
     return 3;
 }
+#else
+int xi_regex_find(lua_State* L); /* windower_regex.cpp */
+#define n_regex_find xi_regex_find
+#endif
 
 /* --- clipboard, sound ------------------------------------------------------------------------- */
 

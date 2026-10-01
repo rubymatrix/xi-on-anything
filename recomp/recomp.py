@@ -491,6 +491,8 @@ def main():
             f.write('GuestFn rt_hook_%s; /* recomp.py --hooks */\n' % name)
         for e, name in sorted(prog.wraps.items()):
             orig = 'f_%08x_sel' % e if e in patched else 'f_%08x_body' % e
+            if e not in done:
+                orig = '0'  # outside a --functions slice: nothing to point at
             f.write('GuestFn rt_wrap_%s; /* recomp.py --wraps */\nconst GuestFn rt_orig_%s = %s;\n' % (name, name, orig))
         for group in sorted(prog.patches):
             f.write('volatile int rt_patch_%s; /* recomp.py --patches */\n' % group)

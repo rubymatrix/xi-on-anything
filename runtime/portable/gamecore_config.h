@@ -21,9 +21,17 @@ void gamecore_idle_tick(void);
 /* The session value V for this sign-in: 16 bytes, no NUL, byte-identical to the session value in
  * LSB's account table (LSB's lobby checks the passwords built from it). */
 void gamecore_set_session(const uint8_t v[16]);
+/* The 0x34-byte authCode block slot 936 hands the game (it goes into the lobby's RequestLobbyLogin
+ * and RequestSelectChr), as the launcher that signed in made it. Opaque bytes here; zeros when
+ * none is given. */
+void gamecore_set_auth_block(const uint8_t block[0x34]);
 /* The lobby's IPv4 address (host byte order), which the lobby's host name resolves to. Default
  * 127.0.0.1; the hosts set it to their account server (host64: --server). */
 void gamecore_set_lobby(uint32_t ipv4_host_order);
+/* Resolve the lobby's host name through this instead (a sign-in with --session: the name's real
+ * address, as retail does); NULL goes back to the address above. It is called with the guest lock
+ * held and returns 1 with the IPv4 in host byte order, 0 if the name does not resolve. */
+void gamecore_set_lobby_resolver(int (*resolve)(const char* name, uint32_t* ipv4_host_order));
 /* The command line gamecore reports (GetlpCmdLine): empty, or " /game eAZcFcB -net 3
  * -port <lobby view port>" for a LandSandBoat sign-in. Before gamecore_init. */
 void gamecore_set_cmdline(const char* text);
