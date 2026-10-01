@@ -45,8 +45,8 @@ static void config_path(const char* dir, const char* name, char* out, size_t n)
 }
 
 /* ---- the texture pack's font ----
- * host64 --textures (default <data dir>/textures) can hold a 4x drawing of the game's font: the
- * pack's entry for a 1024x2048 texture (the size of font/moji and of no other texture the game
+ * host64 --textures (default <data dir>/textures, then the packs that come with the game) can hold
+ * a 4x drawing of the game's font: the pack's entry for a 1024x2048 texture (the size of font/moji and of no other texture the game
  * uploads), a DXT5 DDS whose colour is premultiplied (tools/make_texpack.py --additive). This screen
  * uses it for both its fonts: the outlined one as it is, the dark text's cores from its brightness
  * (the fill is white and the outline black, so brightness is the fill's coverage). The metrics stay
@@ -90,11 +90,10 @@ static uint8_t* dxt5_decode(const uint8_t* src, uint32_t w, uint32_t h)
 
 /* The pack's entry for an uploaded texture of w by h (its name's "_<w>x<h>"; with hash, that
  * texture's alone), decoded, at its own size (a multiple of w by h). NULL when there is none. */
-static uint8_t* pack_image(const char* dir, const char* hash, uint32_t w, uint32_t h, uint32_t* pw, uint32_t* ph,
-    char* path, size_t n)
+static uint8_t* pack_folder_image(const char* folder, const char* hash, uint32_t w, uint32_t h, uint32_t* pw,
+    uint32_t* ph, char* path, size_t n)
 {
-    char folder[1100], size[32];
-    config_path(dir, "textures", folder, sizeof folder);
+    char size[32];
     snprintf(size, sizeof size, "_%ux%u", w, h);
     path[0] = 0;
     PlatDir* d = plat_dir_open(folder);
@@ -114,11 +113,21 @@ static uint8_t* pack_image(const char* dir, const char* hash, uint32_t w, uint32
     return px;
 }
 
-static void hires_font(UiTexSet* set, const char* dir)
+/* ... from <data dir>/textures, else the packs that come with the game (SigninSetup.textures) */
+static uint8_t* pack_image(const char* dir, const char* bundled, const char* hash, uint32_t w, uint32_t h,
+    uint32_t* pw, uint32_t* ph, char* path, size_t n)
+{
+    char folder[1100];
+    config_path(dir, "textures", folder, sizeof folder);
+    uint8_t* px = pack_folder_image(folder, hash, w, h, pw, ph, path, n);
+    return px || !bundled ? px : pack_folder_image(bundled, hash, w, h, pw, ph, path, n);
+}
+
+static void hires_font(UiTexSet* set, const char* dir, const char* bundled)
 {
     char path[1400];
     uint32_t w, h;
-    uint8_t* px = pack_image(dir, NULL, 1024, 2048, &w, &h, path, sizeof path);
+    uint8_t* px = pack_image(dir, bundled, NULL, 1024, 2048, &w, &h, path, sizeof path);
     if (!px)
         return;
     uint8_t* ink = malloc((size_t)w * h * 4);
@@ -139,11 +148,11 @@ static void hires_font(UiTexSet* set, const char* dir)
 
 /* "menu/gauge" drawn anew (the pack's entry for its upload: the track, the bookends' bead), its
  * alpha 0-255: the fields' tracks and bookends, the title strip */
-static void hires_gauge(UiTexSet* set, const char* dir)
+static void hires_gauge(UiTexSet* set, const char* dir, const char* bundled)
 {
     char path[1400];
     uint32_t w, h;
-    uint8_t* px = pack_image(dir, "62246ee7e150d7ba", 64, 64, &w, &h, path, sizeof path);
+    uint8_t* px = pack_image(dir, bundled, "62246ee7e150d7ba", 64, 64, &w, &h, path, sizeof path);
     if (px && uidraw_load_rgba_scaled(set, "gauge", px, w, h, 64, 64))
         fprintf(stderr, "[signin] gauge from %s (%ux%u)\n", path, w, h);
     free(px);
@@ -1438,8 +1447,8 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         u->ink.image = "mojiink";
         uidraw_load_rgba(&u->fonts.tex, "mojiink", moji.rgba, moji.w, moji.h);
         dat_image_free(&moji);
-        hires_font(&u->fonts.tex, dir);
-        hires_gauge(&u->menu.tex, dir);
+        hires_font(&u->fonts.tex, dir, setup->textures);
+        hires_gauge(&u->menu.tex, dir, setup->textures);
     }
     if (!ok)
     {

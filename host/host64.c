@@ -16,7 +16,8 @@
  *                [--authport 54231] [--dataport 54230] [--viewport 54001] [--trust on|off]]
  *               [--dats <folder>]...   DAT overlays, as XIPivot: the first folder given wins
  *               [--textures <folder>]...   texture packs: high-resolution replacements for the
- *                                      game's textures (tools/make_texpack.py); default <data dir>/textures
+ *                                      game's textures (tools/make_texpack.py); default <data dir>/textures;
+ *                                      the bundled ones (assets/textures) after these
  *               [--user-dir <folder>]  the game's USER folder (settings, macros) there instead of
  *                                      in the install, for installs that cannot be written (UWP)
  *
@@ -432,19 +433,20 @@ static void present_hook(void)
         wr32(object + 0x30, g_fps_divisor);
 }
 
-/* ffxi.reg, the base registry (--reg): beside host64, in an app bundle's
- * Resources, or at the top of the source tree host64 was built in (build/host64). */
-static int bundled_registry(const char* argv0, char* out, size_t n)
+/* A file or folder that comes with host64: beside it, in an app bundle's Resources, or in the
+ * source tree host64 was built in (build/host64), at its top or under assets/. ffxi.reg is the
+ * base registry (--reg); textures/ the texture packs loaded by default. */
+static int bundled_path(const char* argv0, const char* name, char* out, size_t n)
 {
     const char *end = argv0, *p;
     for (p = argv0; *p; ++p)
         if (*p == '/' || *p == '\\')
             end = p + 1;
-    static const char* const WHERE[] = { "ffxi.reg", "../Resources/ffxi.reg", "../ffxi.reg" };
+    static const char* const WHERE[] = { "", "../Resources/", "../", "../assets/" };
     for (size_t i = 0; i < sizeof WHERE / sizeof *WHERE; ++i)
     {
         PlatStat st;
-        snprintf(out, n, "%.*s%s", (int)(end - argv0), argv0, WHERE[i]);
+        snprintf(out, n, "%.*s%s%s", (int)(end - argv0), argv0, WHERE[i], name);
         if (plat_stat(out, &st))
             return 1;
     }
@@ -499,6 +501,12 @@ int main(int argc, char** argv)
     LsbLogin lsb = { 0, 54231, 54230, 54001, NULL, NULL, "", NULL, NULL, NULL };
     int have_session = 0; /* --session: a launcher signed in */
     static char base_reg[1100];
+    /* the texture packs that come with the game (assets/textures: the fonts drawn at 4x), after
+     * the player's own; FFXI_BUNDLED_TEXTURES=0 leaves them out */
+    static char bundled_tex[1100];
+    const char* bundled_tex_env = getenv("FFXI_BUNDLED_TEXTURES");
+    if ((bundled_tex_env && bundled_tex_env[0] == '0') || !bundled_path(argv[0], "textures", bundled_tex, sizeof bundled_tex))
+        bundled_tex[0] = 0;
     const char* server_name = NULL; /* --server as given, for the sign-in screen */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0;
     float ui_aspect = 0.0f;
@@ -668,6 +676,7 @@ int main(int argc, char** argv)
         /* an app bundle's first-run defaults (appdefaults.h) */
         su.default_mode = -1, su.default_space = -1;
         su.user_dir = user_dir;
+        su.textures = bundled_tex[0] ? bundled_tex : NULL;
         su.loader_version = lsb.version;
         if (app_default("FFXIFullscreenSpace", app_val, sizeof app_val))
             su.default_space = atoi(app_val) != 0;
@@ -702,7 +711,7 @@ int main(int argc, char** argv)
                     data_dir[0] && data_dir[strlen(data_dir) - 1] == '/' ? "" : "/");
                 overlay = strdup(o);
             }
-            if (!nregs && bundled_registry(argv[0], base_reg, sizeof base_reg))
+            if (!nregs && bundled_path(argv[0], "ffxi.reg", base_reg, sizeof base_reg))
                 regs[nregs++] = base_reg;
             lsb.user = NULL; /* signed in */
         }
@@ -819,7 +828,8 @@ int main(int argc, char** argv)
             rt_log("[recomp] dats: no ROM or sound files in %s\n", dats[i]);
     }
     {
-        /* texture packs: --textures, else <data dir>/textures if there is one */
+        /* texture packs: --textures, else <data dir>/textures if there is one; then the bundled
+         * ones (the first pack with an entry for a texture wins) */
         char def[1100];
         PlatStat st;
         if (!npacks && data_dir)
@@ -828,6 +838,8 @@ int main(int argc, char** argv)
             if (plat_stat(def, &st))
                 packs[npacks++] = def;
         }
+        if (bundled_tex[0] && npacks < sizeof packs / sizeof *packs)
+            packs[npacks++] = bundled_tex;
         for (unsigned i = 0; i < npacks; ++i)
             d3d8_texture_pack(packs[i]);
     }
