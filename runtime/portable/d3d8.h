@@ -23,3 +23,6 @@ void d3d8_screen_size(uint32_t* w, uint32_t* h);
 /* Adds a texture pack: <dir>/<hash>_<w>x<h>.dds replacements for the game's textures (see d3d8.c,
  * tools/make_texpack.py). Before the device is created. */
 void d3d8_texture_pack(const char* dir);
+/* The game is loading one of its water models (host64's hook on the model loader): 1 before, 0 after.
+ * The vertex buffers made meanwhile are the model's, and draws from them are drawn as water. */
+void d3d8_water_loading(int on);

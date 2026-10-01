@@ -59,6 +59,99 @@ static const char PRELUDE[] =
     "static inline int reg_offset(constant U& u, int r) { return u.offset[r >> 2][r & 3]; }\n"
     "static inline float4 ld_color(device const uchar* p) { uchar4 c = *(device const uchar4*)p; return float4(c.z, c.y, c.x, c.w) / 255.0; }\n";
 
+/* The back end's water (GfxFsKey.water), after the game's own color and fog: the scene behind it
+ * (wcol, a copy of the target made before the frame's first water draw) seen through the surface,
+ * bent by ripples, turning to the game's color the deeper the water is (wdep, the depth copy); the
+ * sky's color reflected at glancing angles; the sun's highlight; foam and a soft edge where it meets
+ * the shore. 2 and 3 only soften the edge: of the alpha, and of the color too (additive blends). */
+static const char WATER_MSL[] =
+    "struct WU {\n"
+    "  float4x4 iv, view; // view to world, world to view\n"
+    "  float4 zp;     // P22, P32, viewport MinZ, MaxZ\n"
+    "  float4 hand;   // P23, time (s), refraction (fraction of the target's height), foam\n"
+    "  float4 size;   // target width, height, 1 / width, 1 / height\n"
+    "  float4 sun;    // world, toward the light; w = 1 when there is one\n"
+    "  float4 suncol; // its color; a = highlight strength\n"
+    "  float4 sky;    // the sky's color (the fog's); a = reflection strength\n"
+    "  float4 p;      // depth where the game's color takes over, soft edge depth, ripple strength, waves per unit\n"
+    "  float4 p2;     // world up; w = foam depth\n"
+    "};\n"
+    "constexpr sampler wsamp(filter::linear, address::clamp_to_edge);\n"
+    "static float water_z(constant WU& w, float d) {\n"
+    "  d = (d - w.zp.z) / max(w.zp.w - w.zp.z, 1e-6);\n"
+    "  if (d >= 0.999999) return 0.0;\n"
+    "  float z = w.zp.y / (d * w.hand.x - w.zp.x);\n"
+    "  return z * w.hand.x > 0.0 ? z : 0.0;\n"
+    "}\n"
+    /* the scene's distance behind the surface at pixel px, along the view axis (far for the sky) */
+    "static float water_thick(constant WU& w, depth2d<float> dt, float2 px, float zw) {\n"
+    "  float zs = water_z(w, dt.read(uint2(clamp(px, float2(0.0), w.size.xy - 1.0))));\n"
+    "  return zs == 0.0 ? 1e4 : (zs - zw) * w.hand.x;\n"
+    "}\n"
+    /* a few waves across the world's ground plane: height, and its slope along x and z */
+    "static float3 water_waves(constant WU& w, float2 q) {\n"
+    "  const float2 dir[4] = { float2(0.96, 0.29), float2(-0.37, 0.93), float2(0.75, -0.66), float2(-0.98, -0.2) };\n"
+    "  const float4 f = float4(1.0, 1.7, 2.9, 4.3), a = float4(0.5, 0.3, 0.18, 0.1), v = float4(1.1, 1.5, 2.0, 2.6);\n"
+    "  float3 r = float3(0.0);\n"
+    "  for (int i = 0; i < 4; ++i) {\n"
+    "    float k = f[i] * w.p.w, ph = dot(dir[i], q) * k + w.hand.y * v[i];\n"
+    "    r += float3(a[i] * sin(ph), a[i] * k * cos(ph) * dir[i]);\n"
+    "  }\n"
+    "  return r;\n"
+    "}\n"
+    "static float water_noise(float2 p) {\n"
+    "  float2 i = floor(p), f = fract(p);\n"
+    "  f = f * f * (3.0 - 2.0 * f);\n"
+    "  float4 h = fract(sin(float4(dot(i, float2(127.1, 311.7)), dot(i + float2(1, 0), float2(127.1, 311.7)),\n"
+    "    dot(i + float2(0, 1), float2(127.1, 311.7)), dot(i + float2(1, 1), float2(127.1, 311.7)))) * 43758.5453);\n"
+    "  return mix(mix(h.x, h.y, f.x), mix(h.z, h.w, f.x), f.y);\n"
+    "}\n";
+
+/* the water over col (the game's color, fogged: f the fog factor when there is fog) */
+static void emit_water(Sb* b, const GfxFsKey* k, const char* col)
+{
+    sb_printf(b, "  {\n  float wfog = %s;\n  float2 px = in.pos.xy;\n  float zw = in.ez;\n"
+                 "  float thick0 = water_thick(wu, wdep, px, zw);\n  float soft = smoothstep(0.0, wu.p.y, thick0);\n",
+        k->fog ? "f" : "1.0");
+    if (k->water != 1)
+    {
+        sb_printf(b, "  %s%s *= soft;\n  }\n", col, k->water == 3 ? "" : ".a");
+        return;
+    }
+    sb_printf(b,
+        "  float3 pw = (wu.iv * float4(in.pv, 1.0)).xyz;\n"
+        "  float3 V = normalize((wu.iv * float4(0.0, 0.0, 0.0, 1.0)).xyz - pw);\n"
+        "  float3 Ng = cross(dfdx(pw), dfdy(pw));\n"
+        "  Ng = dot(Ng, Ng) > 1e-12 ? normalize(Ng) : wu.p2.xyz;\n"
+        "  if (dot(Ng, V) < 0.0) Ng = -Ng;\n"
+        /* ripples fade out with distance, before they shimmer */
+        "  float3 wv = water_waves(wu, pw.xz);\n"
+        "  float3 G = float3(wv.y, 0.0, wv.z) * (wu.p.z * saturate(1.0 - abs(zw) / 150.0));\n"
+        "  float3 N = normalize(Ng - (G - dot(G, Ng) * Ng));\n"
+        /* the scene behind, bent by the ripples - not where something in front of the water would show */
+        "  float2 bend = (wu.view * float4(N - Ng, 0.0)).xy * float2(1.0, -1.0);\n"
+        "  float2 pr = px + bend * (wu.hand.z * wu.size.y * saturate(thick0 * 0.5));\n"
+        "  float thick = water_thick(wu, wdep, pr, zw);\n"
+        "  if (thick < 0.0) { pr = px; thick = thick0; }\n"
+        "  float3 behind = wcol.sample(wsamp, pr * wu.size.zw).rgb;\n"
+        /* shallow: clear; deep: the game's water, no clearer than the game made it */
+        "  float deep = 1.0 - exp(-max(thick, 0.0) / max(wu.p.x, 1e-3));\n"
+        "  float3 c = mix(behind, %s.rgb, saturate(max(%s.a, deep)));\n"
+        "  float fres = 0.02 + 0.98 * pow(1.0 - saturate(dot(N, V)), 5.0);\n"
+        "  float3 R = reflect(-V, N);\n"
+        "  float hz = 1.0 - saturate(abs(dot(R, wu.p2.xyz)));\n"
+        "  c = mix(c, mix(wu.sky.rgb, wu.sky.rgb * 1.15 + 0.04, hz * hz), fres * wu.sky.a);\n"
+        "  float3 H = normalize(wu.sun.xyz + V);\n"
+        "  c += wu.suncol.rgb * (pow(saturate(dot(N, H)), 300.0) * wu.suncol.a * wu.sun.w * saturate(dot(Ng, wu.sun.xyz) * 4.0) * wfog);\n"
+        /* foam where it is shallow, broken up */
+        "  float edge = 1.0 - smoothstep(0.0, wu.p2.w, thick0);\n"
+        "  float n = water_noise(pw.xz * 1.7 + float2(wu.hand.y * 0.3, 0.0)) * 0.6 + water_noise(pw.xz * 4.1 - wu.hand.y * 0.5) * 0.4;\n"
+        "  float foam = saturate(edge * edge * wu.hand.w * smoothstep(0.35, 0.75, n + edge * 0.4)) * wfog;\n"
+        "  c = mix(c, mix(%s.rgb, float3(1.0), 0.75), foam);\n"
+        "  %s = float4(c, soft);\n  }\n",
+        col, col, col, col);
+}
+
 /* lit per pixel: the vertex function passes on what the lighting starts from (the normal, the
  * position and the material colors), and the fragment function lights - the same equations, but
  * a highlight no longer depends on where the vertices fall. pixel 1: the directional lights (the
@@ -87,6 +180,8 @@ static void emit_vout(Sb* b, const GfxVsKey* k)
             point_per_vertex(k) ? "  float4 pa [[user(pa)]];\n  float4 pd [[user(pd)]];\n  float4 ps [[user(ps)]];\n" : "");
     for (int i = 0; i < ntex; ++i)
         sb_printf(b, "  float4 t%d [[user(t%d)]];\n", i, i);
+    if (k->water)
+        sb_printf(b, "  float3 pv [[user(pv)]];\n");
     sb_printf(b, "  float fog [[user(fog)]];\n  float ez [[user(ez)]];\n  float psize [[point_size]];\n};\n");
 }
 
@@ -253,6 +348,8 @@ static void emit_ff_vs(Sb* b, const GfxVsKey* k)
             "  o.ez = pe.z;\n");
     }
     emit_fixup(b);
+    if (k->water)
+        sb_printf(b, "  o.pv = pe;\n");
     int need_normal = k->lighting || 0;
     for (int i = 0; i < k->ntex; ++i)
         need_normal |= (k->tci[i] >> 4) == 1 || (k->tci[i] >> 4) == 3;
@@ -409,6 +506,8 @@ static void emit_fs_signature(Sb* b, const GfxFsKey* k, const GfxVsKey* vk)
         else if (t == 2)
             sb_printf(b, ", texturecube<float> tx%d [[texture(%d)]], sampler sp%d [[sampler(%d)]]", i, i, i, i);
     }
+    if (k->water)
+        sb_printf(b, ", texture2d<float> wcol [[texture(8)]], depth2d<float> wdep [[texture(9)]], constant WU& wu [[buffer(5)]]");
     sb_printf(b, ") {\n");
     if (pix) /* the colors the vertex function would have given, lit here */
     {
@@ -441,6 +540,8 @@ static void emit_fs_tail(Sb* b, const GfxFsKey* k, const char* col)
         }
         sb_printf(b, "  %s.rgb = mix(u.fogcolor.rgb, %s.rgb, f);\n", col, col);
     }
+    if (k->water)
+        emit_water(b, k, col);
     sb_printf(b, "  return %s;\n}\n", col);
 }
 
@@ -496,6 +597,8 @@ char* gfx_msl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* v
 {
     Sb b = { 0 };
     sb_printf(&b, "%s", PRELUDE);
+    if (fk->water)
+        sb_printf(&b, "%s", WATER_MSL);
     emit_vout(&b, vk);
     if (vk->prog)
     {
