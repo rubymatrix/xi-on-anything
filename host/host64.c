@@ -48,6 +48,10 @@
  * (near, the default), or with the one the game picks for the distance (game). An app bundle's
  * FFXILod key is the default; the settings file's lod (1 near, 2 game) overrides it live.
  *
+ * --cexi off|items: client changes for a CatsEyeXI-style server (host/cexi.c), off by default.
+ * items: custom item ids 0x7800-0xDFFF and gear model ids up to 4095, which need the server's DATs
+ * in a --dats overlay. An app bundle's FFXICexi key is the default.
+ *
  * Two ways in:
  *   - a session value V the lobby checks (--session), from a launcher that signed in elsewhere
  *     and keeps that sign-in open while the game runs. --auth is the 0x34-byte authCode block the
@@ -80,6 +84,7 @@
 #include "signin.h"
 #include "appdefaults.h"
 #include "modern.h"
+#include "cexi.h"
 #include "discord.h"
 #include "addons/addons.h"
 #include "addons/game.h"
@@ -670,6 +675,7 @@ int main(int argc, char** argv)
         bundled_tex[0] = 0;
     const char* server_name = NULL; /* --server as given, for the sign-in screen */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0, lod_given = 0;
+    int cexi = CEXI_OFF, cexi_given = 0;
     float ui_aspect = 0.0f;
     for (int i = 1; i + 1 < argc; i += 2)
     {
@@ -800,6 +806,15 @@ int main(int argc, char** argv)
             g_lod_near = !strcmp(argv[i + 1], "near");
             lod_given = 1;
         }
+        else if (!strcmp(argv[i], "--cexi"))
+        {
+            if ((cexi = cexi_parse(argv[i + 1])) < 0)
+            {
+                fprintf(stderr, "--cexi: off (as the game ships) or items (a CatsEyeXI-style server's custom item and gear ids)\n");
+                return 2;
+            }
+            cexi_given = 1;
+        }
         else if (!strcmp(argv[i], "--authport") || !strcmp(argv[i], "--dataport") || !strcmp(argv[i], "--viewport"))
         {
             long port = strtol(argv[i + 1], NULL, 10);
@@ -828,11 +843,13 @@ int main(int argc, char** argv)
         g_draw_world = g_draw_entities = 1.0f;
     if (!lod_given && app_default("FFXILod", app_val, sizeof app_val))
         g_lod_near = !strcmp(app_val, "near");
+    if (!cexi_given && app_default("FFXICexi", app_val, sizeof app_val) && (cexi = cexi_parse(app_val)) < 0)
+        cexi = CEXI_OFF;
     if (!game)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
                         "[--server name] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
-                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game]\n");
+                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--cexi off|items]\n");
         return 2;
     }
     if (!lsb.password)
@@ -1080,6 +1097,7 @@ int main(int argc, char** argv)
     setup_nameplates();
     setup_water();
     setup_lod();
+    cexi_init(cexi);
     {
         /* the addon host: Ashita v4 and Windower 4 Lua addons, and our own (docs/addon-compat-design.md) */
         const char* off = getenv("FFXI_ADDONS");

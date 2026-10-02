@@ -46,7 +46,9 @@
       "version": "30260903_0",
       "addresses": {
         "chars_ptr": "0x104df770",
-        "present_site": "0x100035cb"
+        "present_site": "0x100035cb",
+        "cexi_item_ranges": "0x10372150",
+        "cexi_gear_groups": "0x1035d878"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
@@ -127,7 +129,8 @@
         "parse_input": "0x10080dc0",
         "write_line": "0x100767c0",
         "packet_decrypt": "0x100dd6c0",
-        "packet_encrypt": "0x100dd590"
+        "packet_encrypt": "0x100dd590",
+        "cexi_item_general": "0x1015c0a0"
       },
       "patches": {
         "XIUI": {
@@ -211,6 +214,10 @@
         },
         "trimspells": {
           "0x101aea26": "00"
+        },
+        "cexi_items": {
+          "0x101bb112": "3d00e00000",
+          "0x101d848f": "0fb7"
         }
       }
     },
