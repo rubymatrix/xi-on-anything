@@ -179,6 +179,7 @@ typedef struct Obj
     const struct PackEntry* repl_entry; /* ... and its glyph table, if it has one */
     uint32_t pw, ph;     /* render-target textures drawn at the screen's resolution (native_size): gpu's
                           * size, where the game sees width x height; 0 when they are the same */
+    uint8_t water;       /* vertex buffers: made while the game loaded a water model (d3d8_water_loading) */
 } Obj;
 
 static Obj* g_objs;
@@ -337,6 +338,20 @@ static void mark_dirty(Obj* s)
     Obj* t = s->container ? obj(s->container) : NULL;
     if (t)
         t->dirty = 1;
+}
+
+/* --- water ----------------------------------------------------------------------------------------------
+ * FFXI's water is map models (the effect directories mizu, umi1, taki ... of a zone's DAT) that the
+ * game places and tints through its effect generators. The host hooks the model loader and brackets
+ * each water model's load with d3d8_water_loading(1) and (0); the vertex buffers made in between are
+ * the model's, and a draw from one is the game's water (GfxDraw.water) for the back end's water. Per
+ * thread: a loader thread making the buffers of other models meanwhile is not caught up in it. */
+static RT_TLS int g_water_loading;
+static uint32_t g_water_buffers; /* made so far, for the log */
+
+void d3d8_water_loading(int on)
+{
+    g_water_loading = on;
 }
 
 /* --- texture packs -------------------------------------------------------------------------------------
@@ -1366,6 +1381,12 @@ static void IDirect3DDevice8_CreateVertexBuffer(Guest* g)
     uint32_t p = obj_new(O_VB);
     Obj* b = obj(p);
     b->size = ARG(1), b->usage = ARG(2), b->fvf = ARG(3), b->pool = ARG(4);
+    if (g_water_loading)
+    {
+        b->water = 1;
+        if (!(g_water_buffers++ & 63))
+            rt_log("[recomp] d3d8: water: %u vertex buffers of the game's water models so far\n", g_water_buffers);
+    }
     static_buffer_init(b);
     wr32(ARG(5), p);
     RET(D3D_OK, 6);
@@ -2579,6 +2600,11 @@ static int build_draw(GfxDraw* d)
     d->cull = (uint8_t)rs[22];
     d->fill = (uint8_t)rs[8];
     d->zbias = (int32_t)rs[47];
+    if (!d->vs.rhw)
+    {
+        Obj* vb = obj(s->stream[0]);
+        d->water = vb && vb->water;
+    }
     return 1;
 }
 
@@ -2917,8 +2943,8 @@ static void cap_draw(GfxDraw* d, uint32_t prim, uint32_t count, uint32_t first, 
         fprintf(f, " tex %08x %ux%u fmt %u filt %u/%u", g_dev.cur.tex[0], t->width, t->height, t->format, ct[16], ct[17]);
     fprintf(f, " up %u inset %d", up_data ? 1u : 0u, g_cap_inset);
     g_cap_inset = 0;
-    fprintf(f, " z %u/%u func %u fog %u/%u lit %u caster %u", d->depth.zenable, d->depth.zwrite, d->depth.zfunc, d->fs.fog, d->vs.fog_vertex,
-        d->vs.lighting, d->caster);
+    fprintf(f, " z %u/%u func %u fog %u/%u lit %u caster %u water %u", d->depth.zenable, d->depth.zwrite, d->depth.zfunc, d->fs.fog,
+        d->vs.fog_vertex, d->vs.lighting, d->caster, d->water);
     if (!d->vs.rhw)
     {
         const float* P = g_dev.cur.xf[3];
