@@ -21,6 +21,7 @@
 #include "build.h"
 #include "gthread.h"
 #include "gwin.h"
+#include "addons.h"
 #include "host.h"
 #include "plat.h"
 
@@ -527,6 +528,21 @@ static void record_last(int outgoing, const uint8_t* buf, size_t size)
 
 static uint8_t g_pbuf[2][0x4000];
 
+static void (*g_tap)(const uint8_t* p, size_t n);
+
+static void tap(const uint8_t* buf, size_t size)
+{
+    for (size_t off = 0x1C; off + 4 <= size;)
+    {
+        const uint8_t* p = buf + off;
+        size_t n = (size_t)((p[1] >> 1) & 0x7F) * 4;
+        if (n < 4 || off + n > size)
+            break;
+        g_tap(p, n);
+        off += n;
+    }
+}
+
 #if defined(FFXI_WRAP_PACKET_DECRYPT)
 static void wrap_packet_decrypt(Guest* g)
 {
@@ -541,6 +557,8 @@ static void wrap_packet_decrypt(Guest* g)
     int32_t n = (int32_t)g->eax;
     if (n <= 0x1C || (uint32_t)n > capacity || !xi_mapped(out, (uint32_t)n))
         return;
+    if (g_tap)
+        tap(GUEST_PTR(out), (size_t)n);
     if (!packets_wanted(0))
     {
         record_last(0, GUEST_PTR(out), (size_t)n);
@@ -580,6 +598,20 @@ static void wrap_packet_encrypt(Guest* g)
     wr32(g->esp + 16, size);
 }
 #endif
+
+void addons_packet_tap(void (*fn)(const uint8_t* p, size_t n))
+{
+    g_tap = fn;
+#if defined(FFXI_WRAP_PACKET_DECRYPT) && defined(FFXI_WRAP_PACKET_ENCRYPT)
+    rt_wrap_packet_decrypt = wrap_packet_decrypt;
+    rt_wrap_packet_encrypt = wrap_packet_encrypt;
+#endif
+}
+
+void addons_packet_send(const uint8_t* p, size_t n)
+{
+    xi_packet_inject(1, p, n);
+}
 
 /* --- setup and frame ------------------------------------------------------------------------- */
 

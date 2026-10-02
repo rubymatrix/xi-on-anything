@@ -14,7 +14,7 @@
  *   FFXIDrawDistance     "3", or "3x1.5" (world x characters): draw distance, times the game's
  *   FFXILod             "near" or "game": the world's most detailed models at every distance, or the game's pick
  *   FFXIDats             a DAT overlay folder (--dats), when the command line gives none
- *   FFXICexi             "off" or "items": a CatsEyeXI-style server's custom ids (--cexi)
+ *   FFXICexi             "off", "items" or "full": a CatsEyeXI-style server's custom ids (--cexi)
  *
  * They are defaults: what the player saved (signin.cfg, settings.reg) and the command line win.
  * Elsewhere, and outside a bundle, there are none. */
