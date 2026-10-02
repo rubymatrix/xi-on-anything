@@ -1,0 +1,71 @@
+FFXiMain.dll / FFXi.dll build 2025-11-12: R1 function discovery for static recompilation
+=====================================================================================
+
+Retail files  a private-server install's FINAL FANTASY XI folder (patch.ver present)
+  FFXiMain.dll  SHA-256 bda769e226d71a43335c105fd6f72ed19af0a3d815a079b367356de0731a0d9a
+                PE timestamp 0x69144fb9 (2025-11-12)
+  FFXi.dll      SHA-256 4ee15af61bbc94e886ce6a0f761f3c57d2a50a4c15b059a2a8a426e20fd07cd7
+                PE timestamp 0x69144fa8
+Version       30251101_2, decrypted from patch.ver
+Metadata      FFXiMain.2025-11-12.meta.json, FFXi.2025-11-12.meta.json (ffxi-recomp-meta/1)
+Label         the date of the PE timestamp. Older than every known build (2025-12-26 is next).
+
+What changed from 2025-12-26
+----------------------------
+Both DLLs' .text differ from every known build; the packer is the same (tools/unpack.py unchanged).
+
+Carrying addresses over
+-----------------------
+Not possible: no other build's retail DLLs were at hand, so `newbuild.py carry` had no images to
+map from. The verdicts were made from this build's own gate reports (below), and the one address
+the macOS host needs was found directly:
+  character table pointer       0x104dd500: the only global loaded within 8 instructions before an
+                                access at +0x1382x, 11 code sites (2025-12-26: 0x104dd600)
+Not mapped (each feature is off for this build, as the host's guards intend):
+  present_site (Windows bridge), the difftest CRT slice, the nameplate_scale hook, the addon wraps
+  (parse_input, write_line, packet_decrypt/encrypt) and the modern menu addresses.
+The frame-rate divisor and aspect signatures are found at run time (global 0x1045474c).
+
+Method
+------
+Ghidra 11.3.2 headless (tools/discover.py), JDK 21. The first run's gate failed with 4 conflicts,
+3 suspect functions and 4 switches to review; FFXi.dll's with 1 suspect function. Each site was
+read by disassembly and matched to a class the earlier builds record; one --reuse run each passed.
+
+Verdicts, FFXiMain.dll
+  NOT_CODE 0x10007670   the 21-case table of `jmp [ecx*4+0x10007670]` at 0x100063fc, after a ret
+                        ("0x1000769c falls into 0x100076a0", as in 2025-12-26)
+  NOT_CODE 0x100f4290   4-entry jump table after `ret; nop` (0x100f41b7, 0x100f41c5, 0x100f4273,
+                        0x100f41ac); the next function is `mov eax,[esp+8]; sub esp,0xb0` at 0x100f42a0
+  NOT_CODE 0x1015c1c0   4-entry jump table after a ret (0x1015c148, 0x1015c17f, 0x1015c188,
+                        0x1015c191); `push esi; mov esi,[esp+8]` follows at 0x1015c1d0
+  NOT_CODE 0x1015a8c0   aligned start inside `mov [edi+0xccc],esi`; REDECODE 0x1015a8bd
+  NOT_CODE 0x1030cd80, 0x1030cdf0   16-byte records {ptr, int, flags, 0} in .text
+  NOT_CODE 0x1030ed40   inside an 11-byte `mov eax,[0x1045487c]; jmp [eax+off]` stub; REDECODE 0x1030ed38
+  SWITCHES 0x100063fc: 21   cmp ecx,0xa / ja ; add ecx,0xa (64-bit compare above): -10..10
+  SWITCHES 0x10006fe1: 11   cmp edx,-5 / jb ; cmp edx,5 / ja ; add edx,5
+  SWITCHES 0x1022014d: 9    ecx = byte [ebx+0x10220380]; 9 entries, then the index bytes
+  SWITCHES 0x102a5118: 4    ecx = arg [esp+0x38]; entry 4 is 0x90909090 padding
+Verdicts, FFXi.dll
+  NOT_CODE 0x100067d0, REDECODE 0x100067c8   the stub false start every build has
+
+Results
+-------
+                                  auto-analysis   after discovery   2025-12-26 after discovery
+FFXiMain functions in .text       14,113          21,685            21,698
+instructions                      887,960         993,608           994,162
+instruction bytes                 83.3%           93.0%             93.0%
+instructions outside functions    151,564         0                 0
+scaled-index switches             856             942               943
+tail_jumps                        -               2,152             2,156
+FFXi.dll                          functions 374, switches 42, tail jumps 17 (as 2025-12-26)
+
+Verification (macOS arm64, M2 Max)
+----------------------------------
+tools/build_posix.py prepare -> build 2025-11-12.
+boot64: translated 21,816 functions (212 with unimplemented instructions, as 2025-12-26); BOOT64 OK.
+host64: built. Signed in to a local LandSandBoat server (it asked for loader 2.0.0), entered
+Bastok Mines and ran windowed at 1920x1080 and 60 fps without a translation fault (on ef145a0;
+after rebasing onto 639ef7a, prepare, boot64 and host64 were run again and pass).
+Not yet tested: a fight and a zone change. Not run: Windows targets (difftest, host, boot64 on
+x64), and the modern menu (no addresses).

@@ -304,6 +304,24 @@
         "packet_decrypt": "0x100dd410",
         "packet_encrypt": "0x100dd2e0"
       }
+    },
+    "2025-11-12": {
+      "FFXiMain.dll": {
+        "sha256": "bda769e226d71a43335c105fd6f72ed19af0a3d815a079b367356de0731a0d9a",
+        "meta": "FFXiMain.2025-11-12.meta.json"
+      },
+      "FFXi.dll": {
+        "sha256": "4ee15af61bbc94e886ce6a0f761f3c57d2a50a4c15b059a2a8a426e20fd07cd7",
+        "meta": "FFXi.2025-11-12.meta.json"
+      },
+      "version": "30251101_2",
+      "addresses": {
+        "chars_ptr": "0x104dd500"
+      },
+      "hooks": {},
+      "wraps": {},
+      "modern": {},
+      "crt": {}
     }
   }
 }
