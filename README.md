@@ -1,13 +1,13 @@
-<a href="https://discord.gg/4vUKPgyvEp"><img src="screenshots/discord_banner.webp" alt="XI on Mac: join the community on Discord"></a>
+<a href="https://discord.gg/4vUKPgyvEp"><img src="screenshots/discord_banner.webp" alt="XI on Anything: join the community on Discord"></a>
 
 > [!IMPORTANT]
-> ## ▶ To play, get the [XI on Mac launcher](https://github.com/rubymatrix/xi-on-mac-launcher)
+> ## ▶ To play, get the [XI on Anything launcher](#install-players)
 >
 > **The launcher installs and updates everything for you.** You don't need to build this repo
 > to play. Paste into Terminal:
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac-launcher/main/install.sh | bash
+> curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/install.sh | bash
 > ```
 >
 > Needs an Apple silicon Mac (M1 or later) and your own copy of FINAL FANTASY XI.
@@ -18,6 +18,7 @@ FINAL FANTASY XI running natively on Apple silicon Macs, with no Wine or Rosetta
 from your own install, and run on a platform layer written for macOS: Win32, Direct3D 8 on Metal,
 audio, input and sockets. This repo holds the recompiler, its runtime, that platform layer, and
 `host64`, the game host, with its own sign-in screen drawn in the game's UI art.
+XI on Anything runs on Apple silicon Macs today, with more platforms planned.
 
 **Works with [LandSandBoat](https://github.com/LandSandBoat/server) servers.** Sign in with a
 username, password and one-time code, or a server launcher's token; pick the server in the
@@ -69,7 +70,7 @@ sign-in screen's Settings.
 > but this hasn't been played in the live game yet.
 
 Ashita v4 and Windower 4 **Lua addons** run unmodified, with those projects' own libraries, on
-FFXI on Mac's own addon host: no DLL injection, no Windows. Each addon gets its own LuaJIT state;
+XI on Anything's own addon host: no DLL injection, no Windows. Each addon gets its own LuaJIT state;
 the host provides Ashita's and Windower's Lua APIs over the recompiled game, and draws their ImGui
 windows, text and images over the game's frame.
 
@@ -89,13 +90,29 @@ See [docs/addon-compat-design.md](docs/addon-compat-design.md) for how it works.
 
 ## Install (players)
 
-You need a Mac with Apple silicon (M1 or later), macOS 12 or later, about 3 GB free, and the
-game files your private server gives you: a `FINAL FANTASY XI` folder (with `FFXiMain.dll` and
+Paste into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/install.sh | bash
+```
+
+It downloads the launcher's latest release from this repo's
+[Releases](https://github.com/rubymatrix/xi-on-mac/releases), checks it against the release's
+checksums, installs **XI on Mac.app** into Applications and opens it. The launcher signs you in,
+builds the game from your own game files and keeps both up to date. Run the same line again to
+reinstall. The app is not signed with an Apple Developer ID yet, so a copy downloaded in a browser
+is blocked by macOS: use the line above instead.
+
+## Install from source
+
+To build the game straight from this repo without the launcher, you need a Mac with Apple silicon
+(M1 or later), macOS 12 or later, about 3 GB free, and the game files your private server gives
+you: a `FINAL FANTASY XI` folder (with `FFXiMain.dll` and
 `ROM` in it). Put that folder anywhere, e.g. in
 `~/Games`, then paste this into Terminal:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/tools/install-source.sh | bash
 ```
 
 It installs Apple's command line tools if they are missing (a dialog: click Install), finds the
@@ -112,16 +129,16 @@ Before building it asks:
 
 Each question starts from what you have now, so on an update Enter keeps it. The options
 `--server`, `--resolution WxH`, `--window-mode 0-3` and `--dats <folder>|none` answer instead, e.g.
-`curl -fsSL .../install.sh | bash -s -- --server play.example.net --resolution 2560x1440`.
+`curl -fsSL .../tools/install-source.sh | bash -s -- --server play.example.net --resolution 2560x1440`.
 
 Run the same line again to update, or after your server hands out a new game version. To name the
-folder yourself: `curl -fsSL .../install.sh | bash -s -- --game ~/Games/"FINAL FANTASY XI"`. The
+folder yourself: `curl -fsSL .../tools/install-source.sh | bash -s -- --game ~/Games/"FINAL FANTASY XI"`. The
 build's output is in `~/Library/Application Support/FFXIRecompile/source/build/setup.log`. From a
 clone of this repo, `./setup.command` does the same with the clone.
 
 To test the installer from a clone, uncommitted changes included, without touching your own app
 or settings: `python3 tests/setup_test.py` checks the questions and the saved files they update,
-and `tools/test_install.sh` runs `install.sh` as a player would, piped to bash, with everything in a
+and `tools/test_install.sh` runs `tools/install-source.sh` as a player would, piped to bash, with everything in a
 sandbox folder. By default it stops after the questions; `--full` builds and installs into the
 sandbox, `--saved` starts from copies of your saved settings (an update), `--sandbox <folder>`
 reuses one (`--help`).
@@ -437,7 +454,7 @@ tests/             difftest.c (original vs translation), boot.c (x86), boot64.c 
                    gfx_test.c (the Metal back end), d3d8_test.c (the D3D8 front end on it)
 tools/             prepare.py, buildinfo.py, unpack.py, build.py (MSVC), build_posix.py (clang),
                    install.py, trace_report.py; newbuild.py and discover.py (a new client version)
-                   setup.py (the player's install, run by install.sh and setup.command),
+                   setup.py (the source install, run by install-source.sh and setup.command),
                    thirdparty.py (builds third_party/ with clang), vendor.py (refreshes third_party/)
 third_party/       stb; SDL3 and mbedtls, trimmed to what the build uses, with manifest.json each
 discovery/         the discovery pass: Ghidra (Jython) post-scripts, verdicts.py (the manual verdicts

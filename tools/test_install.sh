@@ -1,11 +1,11 @@
 #!/bin/bash
-# Run install.sh the way a player does (piped to bash, questions on the terminal) against this
+# Run tools/install-source.sh the way a player does (piped to bash, questions on the terminal) against this
 # checkout, uncommitted changes included, with everything it touches in a sandbox folder:
 #
 #   tools/test_install.sh [--full] [--saved] [--sandbox <folder>] [-- <setup.py options>]
 #
 # The working tree (tracked and untracked files, not ignored ones) becomes a commit in a bare repo
-# in the sandbox; install.sh clones it from there (FFXI_REPO, FFXI_BRANCH) into <sandbox>/source
+# in the sandbox; install-source.sh clones it from there (FFXI_REPO, FFXI_BRANCH) into <sandbox>/source
 # (FFXI_SOURCE). The sign-in screen's saved files are <sandbox>/data (FFXI_DATA_DIR), the app goes
 # to <sandbox>/Applications, and it is not opened. Nothing in the player's own folders changes.
 #
@@ -62,10 +62,10 @@ case " $* " in
     *) [ -d "$here/../FINAL FANTASY XI" ] && args+=(--game "$(cd "$here/../FINAL FANTASY XI" && pwd)") ;;
 esac
 [ -n "$full" ] || args+=(--settings-only)
-# piped, as from curl: install.sh asks its questions on /dev/tty
+# piped, as from curl: install-source.sh asks its questions on /dev/tty
 status=0
 FFXI_REPO="file://$sandbox/repo.git" FFXI_BRANCH=install-test FFXI_SOURCE="$sandbox/source" \
-    FFXI_DATA_DIR="$sandbox/data" bash -s -- "${args[@]}" "$@" <"$here/install.sh" || status=$?
+    FFXI_DATA_DIR="$sandbox/data" bash -s -- "${args[@]}" "$@" <"$here/tools/install-source.sh" || status=$?
 
 echo
 app="$sandbox/Applications/Final Fantasy XI.app"

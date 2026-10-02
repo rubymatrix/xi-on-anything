@@ -18,7 +18,7 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "FileDescription", "FINAL FANTASY XI"
-            VALUE "ProductName", "FFXI on Mac"
+            VALUE "ProductName", "XI on Anything"
             VALUE "InternalName", "host64"
             VALUE "OriginalFilename", "host64.exe"
         END
