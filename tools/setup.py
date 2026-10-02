@@ -11,8 +11,8 @@ translates the game's code and compiles it (the vendored SDL3 and mbedtls too), 
 "Final Fantasy XI.app" with a code-signing certificate of this Mac's own (made on the first run),
 and copies the app to /Applications (~/Applications if that is not writable).
 
-On a terminal it asks for the server (127.0.0.1 when left blank), the window's resolution and mode
-(the menus' resolution and the interface's shape follow from them) and a folder of DAT overlays
+On a terminal it asks for the server (127.0.0.1 when left blank), the window's resolution (the
+desktop's the first time) and mode (the menus' resolution, 1x, and the interface's shape follow from them) and a folder of DAT overlays
 (none when left blank); the options above answer instead. Each question starts from what the player
 has now. The answers go into the app's Info.plist (host/appdefaults.h), and into the sign-in
 screen's saved files when there are some, so they hold on a run after the first too.
@@ -265,12 +265,25 @@ def aspect_name(w, h):
     return '%d:%d' % (w // g, h // g)
 
 
+def desktop_resolution():
+    """The main display's size as macOS lays out the desktop (points, as the game sees it through
+    SDL: 1512x982 on a 14" MacBook Pro at its default scaling); None when it cannot be read."""
+    try:
+        out = subprocess.run(['osascript', '-l', 'JavaScript', '-e',
+                              'ObjC.import("AppKit"); var f = $.NSScreen.screens.objectAtIndex(0).frame;'
+                              ' Math.round(f.size.width) + "x" + Math.round(f.size.height)'],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_resolution(out)
+
+
 def derive(w, h):
     """The menus' resolution and the interface's shape (--ui-aspect) for a w x h window. Wider than
     16:9, the interface keeps 16:9 in the middle; otherwise it has the window's shape. The menus are
-    half the window's height (384 at least, the game's smallest), at the interface's shape."""
+    the window's height (1x), at the interface's shape."""
     ui = 16 / 9 if w / h > 16 / 9 + 0.01 else w / h
-    menu_h = min(h, max(384, h // 2))
+    menu_h = h
     menu_w = max(512, int(round(menu_h * ui / 2)) * 2)
     return (menu_w, menu_h), ('16:9' if ui != w / h else 'off')
 
@@ -316,7 +329,8 @@ def choose_settings(a):
     res = parse_resolution(a.resolution) if a.resolution else None
     if a.resolution and not res:
         raise Failure('--resolution %s: a size like 1920x1080 (640x480 at least).' % a.resolution)
-    was = (w, h) if w and h and w >= 640 and h >= 480 else parse_resolution(prev.get('FFXIResolution')) or (1920, 1080)
+    was = ((w, h) if w and h and w >= 640 and h >= 480 else parse_resolution(prev.get('FFXIResolution'))
+           or desktop_resolution() or (1920, 1080))
     if not res:
         res = ask('Resolution', '%dx%d' % was, parse_resolution) if tty else was
 
@@ -508,7 +522,7 @@ def main():
     ap.add_argument('--find', action='store_true', help='list the game folders found on this Mac, and stop')
     ap.add_argument('--open', action='store_true', help='start the game when done')
     ap.add_argument('--server', help='the server to sign in to (asked when left out; 127.0.0.1 by default)')
-    ap.add_argument('--resolution', help='the window, as WxH (asked when left out; 1920x1080 by default)')
+    ap.add_argument('--resolution', help='the window, as WxH (asked when left out; the desktop\'s by default)')
     ap.add_argument('--window-mode', type=int, choices=[0, 1, 2, 3],
                     help='0 full screen, 1 windowed, 2 borderless, 3 borderless full screen (asked when left out)')
     ap.add_argument('--dats', help='a folder of DAT overlays, or none (asked when left out; none by default)')
