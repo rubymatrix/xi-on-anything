@@ -304,6 +304,7 @@ def host64(env):
     objs.append(host_resources(env, 'build\\host64'))
     run(['link', '/nologo', '/OUT:build\\host64.exe', '/MACHINE:X64', sdl_lib] + HOST_LIBS + objs, env)
     shutil.copy(os.path.join(SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, 'build'))
+    buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build\\host64.exe; run: build\\host64.exe --game "%s" ...' % BUILD['game'])
 
 

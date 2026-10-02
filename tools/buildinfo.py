@@ -1,17 +1,22 @@
-"""Which retail build this checkout is working on.
+"""Which retail build this checkout is working on, and which version of the client it makes.
 
 meta/builds.json lists every build the recompiler knows. tools/prepare.py matches the install's
 FFXiMain.dll against it and records the choice in generated/build.json; everything after that
 (build.py, install.py) reads the choice from there, so nothing depends on the install again.
+
+runtime.json is the client's own version. stamp() writes it, with the commit and the game build,
+beside what a build makes, so the launcher can tell a client built from older sources.
 """
 import hashlib
 import json
 import os
+import subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 METADIR = os.path.join(ROOT, 'meta')
 BUILDS = os.path.join(METADIR, 'builds.json')
 CHOSEN = os.path.join(ROOT, 'generated', 'build.json')
+RUNTIME = os.path.join(ROOT, 'runtime.json')
 
 
 def sha256(path):
@@ -67,3 +72,24 @@ def current(required=True):
         'modern': b.get('modern', {}),
         'modern_keys': sorted({k for other in known().values() for k in other.get('modern', {})}),
     }
+
+
+def runtime():
+    """{'version', 'commit', 'build'}: what a client built from this checkout is. commit is None
+    outside a git checkout, build None before tools/prepare.py."""
+    with open(RUNTIME) as f:
+        version = json.load(f)['version']
+    try:
+        commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True,
+                                check=True).stdout.strip() or None
+    except (OSError, subprocess.CalledProcessError):
+        commit = None
+    chosen = current(required=False)
+    return {'version': version, 'commit': commit, 'build': chosen['build'] if chosen else None}
+
+
+def stamp(path):
+    """runtime() as JSON at path (the launcher reads it to decide whether to rebuild)."""
+    with open(path, 'w') as f:
+        json.dump(dict(format='xi-runtime-stamp/1', **runtime()), f, indent=2)
+        f.write('\n')
