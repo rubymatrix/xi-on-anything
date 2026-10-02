@@ -14,16 +14,37 @@ BUILDS = {
     0x6a7297f5: '2026-08-22',
     0x6a995428: '2026-09-03',
     0x694e5965: '2025-12-26',
+    0x69144fb9: '2025-11-12',
     # FFXi.dll
     0x6a7297e3: '2026-08-22',
     0x6a995417: '2026-09-03',
     0x694e5955: '2025-12-26',
+    0x69144fa8: '2025-11-12',
 }
 
 # NOT_CODE: false function starts (data records decoded as code, or aligned starts inside a real
 # instruction). REDECODE: the real decode points those false starts were hiding.
 # SWITCHES: switches whose case count cannot be read from a guard in their own function.
 VERDICTS = {
+    # 2025-11-12: a private-server install; no earlier build's images to carry from, so the
+    # verdicts start empty and come from this build's own gate reports.
+    ('ffximain', '2025-11-12'): {
+        'NOT_CODE': [0x10007670,                          # 21-case table of the switch at 0x100063fc, after a ret
+                     0x100f4290,                          # 4-entry jump table after `ret; nop` (0x100f41b7, ...)
+                     0x1015c1c0,                          # 4-entry jump table after a ret (0x1015c148, ...)
+                     0x1015a8c0,                          # inside `mov [edi+0xccc],esi` at 0x1015a8bd
+                     0x1030cd80, 0x1030cdf0,              # 16-byte records {ptr, int, flags, 0} in .text
+                     0x1030ed40],                         # inside an 11-byte `mov eax,[0x1045487c]; jmp [eax+off]` stub
+        'REDECODE': [0x1015a8bd, 0x1030ed38],
+        'SWITCHES': {
+            0x100063fc: 21,  # cmp ecx,0xa / ja ; add ecx,0xa: ecx in -10..10 (64-bit compare above)
+            0x10006fe1: 11,  # cmp edx,-5 / jb ; cmp edx,5 / ja ; add edx,5
+            0x1022014d: 9,   # ecx = byte [ebx+0x10220380]; 9 entries, then the index bytes
+            0x102a5118: 4,   # ecx = arg [esp+0x38]; entry 4 is 0x90909090 padding
+        },
+    },
+    ('ffxi', '2025-11-12'): {'NOT_CODE': [0x100067d0],  # inside the 11-byte stub at 0x100067c8 (jmp [eax+0xe90])
+                             'REDECODE': [0x100067c8], 'SWITCHES': {}},
     ('ffximain', '2026-08-22'): {
         'NOT_CODE': [0x1030df80, 0x1030ef80, 0x1030eff0,  # 16-byte records {ptr, int, flags} in .text
                      0x10310f40,                          # inside an 11-byte `mov eax,[g]; jmp [eax+off]` stub
