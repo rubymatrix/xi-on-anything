@@ -33,6 +33,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import build  # noqa: E402  (constants and source lists; nothing Windows-only runs on import)
+import buildinfo  # noqa: E402
 import thirdparty  # noqa: E402
 
 ROOT = build.ROOT
@@ -209,6 +210,7 @@ def host64(game):
     # dlsym(RTLD_DEFAULT), so their symbols stay in the executable's export table
     export = ['-Wl,-export_dynamic'] if sys.platform == 'darwin' else ['-rdynamic']
     run(['clang', '-o', 'build/host64'] + objs + sdl_libs + tls_libs + addon_libs + GFX_LIBS + ['-lm', '-lpthread'] + export)
+    buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build/host64; run: build/host64 --game %s --server <name>' % shlex.quote(game))
 
 
@@ -293,6 +295,7 @@ def app(game, a):
     shutil.copy(os.path.join(ROOT, 'build', 'host64'), exe)
     shutil.copy(os.path.join(ROOT, 'ffxi.reg'), res)
     shutil.copy(os.path.join(ROOT, 'assets', 'icon.icns'), res)
+    shutil.copy(os.path.join(ROOT, 'build', 'runtime.json'), res)  # the launcher's rebuild check
     if os.path.isdir(os.path.join(ROOT, 'assets', 'textures')):
         shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(res, 'textures'))
     keys = {'FFXIGameFolder': game}
@@ -330,7 +333,8 @@ def app(game, a):
     extra = ''.join('\t<key>%s</key>%s\n' % (k, '<integer>%d</integer>' % v if isinstance(v, int)
                                               else '<string>%s</string>' % plist_escape(v)) for k, v in keys.items())
     with open(os.path.join(contents, 'Info.plist'), 'w') as f:
-        f.write(APP_INFO_PLIST.replace('@NAME@', APP_NAME).replace('@EXTRA@', extra))
+        f.write(APP_INFO_PLIST.replace('@NAME@', APP_NAME).replace('@VERSION@', buildinfo.runtime()['version'])
+                .replace('@EXTRA@', extra))
     libs = bundle_dylibs(exe, os.path.join(contents, 'Frameworks'))
     identity = signing_identity(a.sign_identity)
     run(['codesign', '--force', '--deep', '--sign', identity, bundle])
@@ -354,7 +358,7 @@ APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 	<key>CFBundleIconFile</key><string>icon</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-	<key>CFBundleShortVersionString</key><string>0.1</string>
+	<key>CFBundleShortVersionString</key><string>@VERSION@</string>
 	<key>CFBundleVersion</key><string>1</string>
 	<key>LSMinimumSystemVersion</key><string>12.0</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.role-playing-games</string>
