@@ -11,7 +11,7 @@
         parse checks, and renders in build/datui/ (tests/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
         [--menu-resolution WxH] [--window-mode 0-3] [--background picture] [--fullscreen-space 0|1]
-        [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--lod near|game] [--dats folder]
+        [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--lod near|game] [--cexi off|items] [--dats folder]
         [--sign-identity name]
         build/Final Fantasy XI.app: host64 with its libraries, ffxi.reg and the defaults above in
         its Info.plist (host/appdefaults.h), so it starts from Finder with no command line. The values
@@ -53,7 +53,7 @@ else:
     GFX_LIBS = []
 HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime/portable/dsound.c',
                 'runtime/portable/input.c', 'runtime/portable/dinput.c', 'runtime/portable/ws2.c', 'host/host64.c',
-                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/discord.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c'] + GFX_SOURCES
+                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/cexi.c', 'host/discord.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c'] + GFX_SOURCES
 # the addon host (host/addons/, docs/addon-compat-design.md): C, C++ (ImGui) and its embedded Lua
 ADDON_SOURCES = sorted('host/addons/' + f for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'host', 'addons'))
                        if f.endswith('.c') or f.endswith('.cpp')) + ['generated/addons_lua.c']
@@ -319,6 +319,8 @@ def app(game, a):
         keys['FFXIDrawDistance'] = a.draw_distance
     if a.lod:
         keys['FFXILod'] = a.lod
+    if a.cexi:
+        keys['FFXICexi'] = a.cexi
     if a.dats:
         keys['FFXIDats'] = os.path.abspath(os.path.expanduser(a.dats))
     if a.background:
@@ -384,6 +386,7 @@ def main():
     ap.add_argument('--nameplate-scale')
     ap.add_argument('--draw-distance')
     ap.add_argument('--lod', choices=['near', 'game'])
+    ap.add_argument('--cexi', choices=['off', 'items'])
     ap.add_argument('--ui-aspect')
     ap.add_argument('--dats')
     args = ap.parse_args()
