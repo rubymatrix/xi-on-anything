@@ -98,7 +98,7 @@ typedef struct GfxVsKey
                          * scene effects' light setting); the vertex function passes the normal on */
     uint8_t shadow;     /* drawn again from the sun (the back end's shadow map): the position the
                          * function makes goes through the matrix in buffer 5 */
-    uint8_t pad[1];
+    uint8_t water;      /* the back end's water (GfxFsKey.water): the view-space position is passed on */
 } GfxVsKey;
 
 typedef struct GfxStage
@@ -118,7 +118,9 @@ typedef struct GfxFsKey
     uint8_t fog;        /* D3DFOGMODE: pixel (table) fog; 4 = the vertex function's fog factor */
     uint8_t specular_add;
     uint8_t flat;
-    uint8_t pad[3];
+    uint8_t water; /* the back end's water (GfxDraw.water, the scene effects' water setting): 1 drawn
+                    * over the scene behind it (an alpha-blended draw), 2 only its edges softened */
+    uint8_t pad[2];
 } GfxFsKey;
 
 /* The render pipeline beyond the functions: blending and the color write mask. */
@@ -189,6 +191,7 @@ typedef struct GfxDraw
     GfxSampler samp[8];
     uint8_t cull;   /* D3DCULL */
     uint8_t caster; /* an opaque draw of the frame's 3D scene: it casts the sun's shadow */
+    uint8_t water;  /* a draw of the game's water: its vertices came from a water model (d3d8.c) */
     uint8_t fill;   /* D3DFILLMODE */
     int32_t zbias;  /* D3DRS_ZBIAS */
     uint32_t stencil_ref;

@@ -11,7 +11,7 @@
         parse checks, and renders in build/datui/ (tests/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
         [--menu-resolution WxH] [--window-mode 0-3] [--background picture] [--fullscreen-space 0|1]
-        [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--dats folder]
+        [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--lod near|game] [--dats folder]
         [--sign-identity name]
         build/Final Fantasy XI.app: host64 with its libraries, ffxi.reg and the defaults above in
         its Info.plist (host/appdefaults.h), so it starts from Finder with no command line. The values
@@ -314,6 +314,8 @@ def app(game, a):
         keys['FFXIUIAspect'] = a.ui_aspect
     if a.draw_distance:
         keys['FFXIDrawDistance'] = a.draw_distance
+    if a.lod:
+        keys['FFXILod'] = a.lod
     if a.dats:
         keys['FFXIDats'] = os.path.abspath(os.path.expanduser(a.dats))
     if a.background:
@@ -339,6 +341,8 @@ def app(game, a):
                                                     ', '.join('%s=%s' % kv for kv in keys.items())))
 
 
+# CFBundleIdentifier keeps the XI on Mac era id: changing it would reset Keychain "Always Allow"
+# answers and saved settings on every existing install.
 APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -375,6 +379,7 @@ def main():
     ap.add_argument('--nameplates', choices=['fix', 'off'])
     ap.add_argument('--nameplate-scale')
     ap.add_argument('--draw-distance')
+    ap.add_argument('--lod', choices=['near', 'game'])
     ap.add_argument('--ui-aspect')
     ap.add_argument('--dats')
     args = ap.parse_args()

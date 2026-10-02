@@ -44,6 +44,10 @@
  * factor of the game's own distances (1 as shipped; 3, or 3x1.5). An app bundle's FFXIDrawDistance
  * key is the default.
  *
+ * --lod near|game: the world's objects drawn with their most detailed model at every distance
+ * (near, the default), or with the one the game picks for the distance (game). An app bundle's
+ * FFXILod key is the default; the settings file's lod (1 near, 2 game) overrides it live.
+ *
  * Two ways in:
  *   - a session value V the lobby checks (--session), from a launcher that signed in elsewhere
  *     and keeps that sign-in open while the game runs. --auth is the 0x34-byte authCode block the
@@ -377,6 +381,149 @@ static void setup_nameplates(void)
 #endif
 }
 
+/* --- water ---------------------------------------------------------------------------------------------
+ * FFXiMain loads a map model (DAT chunk type 0x2e) in 0x10176ed0 (2026-09-03), with ecx the resource:
+ * its FourCC at +0x20, and at +0x28 its parent's handle (*handle is the parent resource). The zone
+ * DATs keep their water models under effect directories named for it - mizu, miz1, umi1, sea, taki
+ * (waterfalls), kawa (rivers) - so a model with one of those above it is water. The hooks bracket the
+ * load (meta/builds.json "water_model_load" at its start, "water_model_loaded" just after the call
+ * that makes the model's vertex buffers) and d3d8 marks the buffers made meanwhile (d3d8_water_loading).
+ * FFXI_WATERLOG=1 logs every model loaded with the directories above it, to find more. */
+#ifdef FFXI_HOOK_WATER_MODEL_LOAD
+extern GuestFn rt_hook_water_model_load;
+#endif
+#ifdef FFXI_HOOK_WATER_MODEL_LOADED
+extern GuestFn rt_hook_water_model_loaded;
+#endif
+static int g_water_log;
+
+static int water_dir(uint32_t cc)
+{
+    char n[5];
+    memcpy(n, &cc, 4), n[4] = 0;
+    static const char* const prefix[] = { "miz", "umi", "sea", "taki", "kawa", "wat" };
+    for (size_t i = 0; i < sizeof prefix / sizeof prefix[0]; ++i)
+        if (!strncmp(n, prefix[i], strlen(prefix[i])))
+            return 1;
+    return 0;
+}
+
+static void water_model_load(Guest* g)
+{
+    uint32_t res = g->ecx, cc = rd32(res + 0x20), up[4] = { 0 };
+    int water = 0, n = 0;
+    uint32_t h = rd32(res + 0x28);
+    for (; n < 4 && h; ++n)
+    {
+        uint32_t parent = rd32(h);
+        if (!parent)
+            break;
+        up[n] = rd32(parent + 0x20);
+        water |= water_dir(up[n]);
+        h = rd32(parent + 0x28);
+    }
+    if (g_water_log)
+        rt_log("[recomp] water: model %.4s in %.4s/%.4s/%.4s%s\n", (const char*)&cc, (const char*)&up[2], (const char*)&up[1],
+            (const char*)&up[0], water ? " - water" : "");
+    d3d8_water_loading(water);
+}
+
+static void water_model_loaded(Guest* g)
+{
+    (void)g;
+    d3d8_water_loading(0);
+}
+
+static void setup_water(void)
+{
+    const char* log = getenv("FFXI_WATERLOG");
+    g_water_log = log && log[0] && log[0] != '0';
+#if defined(FFXI_HOOK_WATER_MODEL_LOAD) && defined(FFXI_HOOK_WATER_MODEL_LOADED)
+    rt_hook_water_model_load = water_model_load;
+    rt_hook_water_model_loaded = water_model_loaded;
+#else
+    (void)water_model_load, (void)water_model_loaded;
+    rt_log("[recomp] water: build %s has no model-loader hook; its water is drawn as the game draws it\n", FFXI_BUILD);
+#endif
+}
+
+/* --- level of detail -----------------------------------------------------------------------------------
+ * Every map object (a zone's placed model, 0xf4 bytes, 2026-09-03) has three models: near at +0x18,
+ * middle at +0x14, far at +0x10, and two squared distances from the camera: past +0xcc it draws the
+ * far one, past +0xc8 the middle one, else the near one; an empty slot is not drawn at that range.
+ * Two passes pick this way: "lod_pick" (the object in ecx, its model in ebx) and "lod_pick2" (the
+ * object in edi, its model at [esp+0x54]), both hooked just after the pick. --lod near (the default)
+ * draws an object's near model at every distance when it has one; one without keeps the game's pick.
+ * FFXI_LODLOG=1 counts the objects each second: how many have no near model, how many have one
+ * model in every slot, how many really have levels, and how many picks were changed. */
+#ifdef FFXI_HOOK_LOD_PICK
+extern GuestFn rt_hook_lod_pick;
+#endif
+#ifdef FFXI_HOOK_LOD_PICK2
+extern GuestFn rt_hook_lod_pick2;
+#endif
+static int g_lod_near = 1; /* --lod: 1 near (the default), 0 as the game picks */
+static int g_lod_near_now; /* this frame's: the settings file's lod (1 near, 2 as the game picks) over --lod */
+static int g_lod_log;
+static uint32_t g_lod_count[4]; /* picks: no near model, one model in every slot, levels, changed */
+
+static uint32_t lod_pick_model(uint32_t obj, uint32_t model)
+{
+    uint32_t near = rd32(obj + 0x18);
+    if (g_lod_log)
+    {
+        uint32_t mid = rd32(obj + 0x14), far = rd32(obj + 0x10);
+        ++g_lod_count[!near ? 0 : near == mid && near == far ? 1 : 2];
+        if (g_lod_near_now && near && near != model)
+            ++g_lod_count[3];
+    }
+    return g_lod_near_now && near ? near : model;
+}
+
+static void lod_pick(Guest* g)
+{
+    g->ebx = lod_pick_model(g->ecx, g->ebx);
+}
+
+static void lod_pick2(Guest* g)
+{
+    wr32(g->esp + 0x54, lod_pick_model(g->edi, rd32(g->esp + 0x54)));
+}
+
+static void lod_frame(void)
+{
+    float live = gfx_fx_get("lod");
+    g_lod_near_now = live >= 0.5f && live < 1.5f ? 1 : live >= 1.5f ? 0 : g_lod_near;
+    if (!g_lod_log)
+        return;
+    static uint64_t last;
+    uint64_t now = rt_monotonic_ns();
+    if (!last)
+        last = now;
+    if (now - last < 1000000000ull)
+        return;
+    last = now;
+    rt_log("[recomp] lod: %u picks/s - %u no near model, %u one model, %u with levels; %u changed (%s)\n",
+        g_lod_count[0] + g_lod_count[1] + g_lod_count[2], g_lod_count[0], g_lod_count[1], g_lod_count[2], g_lod_count[3],
+        g_lod_near_now ? "near" : "as the game picks");
+    memset(g_lod_count, 0, sizeof g_lod_count);
+}
+
+static void setup_lod(void)
+{
+    const char* log = getenv("FFXI_LODLOG");
+    g_lod_log = log && log[0] && log[0] != '0';
+#if defined(FFXI_HOOK_LOD_PICK) && defined(FFXI_HOOK_LOD_PICK2)
+    rt_hook_lod_pick = lod_pick;
+    rt_hook_lod_pick2 = lod_pick2;
+    rt_log("[recomp] lod: %s\n", g_lod_near ? "near models at every distance" : "as the game picks");
+#else
+    (void)lod_pick, (void)lod_pick2;
+    if (g_lod_near)
+        rt_log("[recomp] lod: build %s has no level-of-detail hook; the game picks\n", FFXI_BUILD);
+#endif
+}
+
 /* s, or sx x sy (1.25, 1x1.2); 0 if it is neither */
 static int parse_scale(const char* s, float* sx, float* sy)
 {
@@ -432,6 +579,7 @@ static void present_hook(void)
     }
     fix_aspect();
     fix_draw_distance();
+    lod_frame();
     modern_frame();
     shadow_focus();
     if (g_addons_on)
@@ -521,7 +669,7 @@ int main(int argc, char** argv)
     if ((bundled_tex_env && bundled_tex_env[0] == '0') || !bundled_path(argv[0], "textures", bundled_tex, sizeof bundled_tex))
         bundled_tex[0] = 0;
     const char* server_name = NULL; /* --server as given, for the sign-in screen */
-    int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0;
+    int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0, lod_given = 0;
     float ui_aspect = 0.0f;
     for (int i = 1; i + 1 < argc; i += 2)
     {
@@ -642,6 +790,16 @@ int main(int argc, char** argv)
             }
             draw_given = 1;
         }
+        else if (!strcmp(argv[i], "--lod"))
+        {
+            if (strcmp(argv[i + 1], "near") && strcmp(argv[i + 1], "game"))
+            {
+                fprintf(stderr, "--lod: near (the world's most detailed models at every distance) or game (as the game picks)\n");
+                return 2;
+            }
+            g_lod_near = !strcmp(argv[i + 1], "near");
+            lod_given = 1;
+        }
         else if (!strcmp(argv[i], "--authport") || !strcmp(argv[i], "--dataport") || !strcmp(argv[i], "--viewport"))
         {
             long port = strtol(argv[i + 1], NULL, 10);
@@ -668,11 +826,13 @@ int main(int argc, char** argv)
     if (!draw_given && app_default("FFXIDrawDistance", app_val, sizeof app_val)
         && !parse_draw_distance(app_val, &g_draw_world, &g_draw_entities))
         g_draw_world = g_draw_entities = 1.0f;
+    if (!lod_given && app_default("FFXILod", app_val, sizeof app_val))
+        g_lod_near = !strcmp(app_val, "near");
     if (!game)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
                         "[--server name] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
-                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k]\n");
+                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game]\n");
         return 2;
     }
     if (!lsb.password)
@@ -918,6 +1078,8 @@ int main(int argc, char** argv)
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL };
     modern_init(&ms);
     setup_nameplates();
+    setup_water();
+    setup_lod();
     {
         /* the addon host: Ashita v4 and Windower 4 Lua addons, and our own (docs/addon-compat-design.md) */
         const char* off = getenv("FFXI_ADDONS");

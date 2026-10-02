@@ -151,7 +151,8 @@ static struct
 {
     float fx, ao, radius, grade, sat, contrast, sharpen, filter, aniso, fog, fog_falloff, fog_height, fog_max, fog_sun,
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft, sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw,
-        draw_entities, fps, aa, ao_quality, sun_detail;
+        draw_entities, fps, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple, water_scale,
+        water_reflect, water_spec, lod, aa, ao_quality, sun_detail;
 } g_fxs;
 
 /* --- small hash maps (key bytes -> object) ------------------------------------------------------------- */
@@ -1199,11 +1200,12 @@ static id<MTLRenderPipelineState> pipeline_for(const PipeKey* k, const uint32_t*
     return st && st != PIPE_FAILED ? (id)st : nil;
 }
 
-static id<MTLRenderPipelineState> pipeline(const GfxDraw* d)
+static id<MTLRenderPipelineState> pipeline(const GfxDraw* d, int* water)
 {
     PipeKey k;
     memset(&k, 0, sizeof k);
     k.lib.vs = d->vs, k.lib.fs = d->fs, k.pipe = d->pipe;
+    k.lib.vs.water = *water == 1, k.lib.fs.water = (uint8_t)*water; /* water_mode */
     /* the world's lit draws lit per pixel (gfx_msl.c pixel_lit) */
     if (g_fxs.fx != 0.0f && g_fxs.light != 0.0f && d->vs.lighting && !d->vs.rhw && !d->vs.prog && !d->vs.flat)
         k.lib.vs.pixel = g_fxs.light >= 2.0f ? 2 : 1; /* 1: the sun per pixel, the game's torches per vertex */
@@ -1218,6 +1220,12 @@ static id<MTLRenderPipelineState> pipeline(const GfxDraw* d)
         /* lit per pixel, still building: lit per vertex meanwhile (a new mix of the game's lights
          * would blink the object out for a few frames) */
         k.lib.vs.pixel = 0;
+        p = pipeline_for(&k, d->vs_tokens, d->ps_tokens);
+    }
+    if (!p && *water)
+    {
+        /* water still building: as the game drew it meanwhile */
+        k.lib.vs.water = k.lib.fs.water = 0, *water = 0;
         p = pipeline_for(&k, d->vs_tokens, d->ps_tokens);
     }
     return p;
@@ -1686,16 +1694,23 @@ void gfx_draw(const GfxDraw* d)
         g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws++;
 }
 
+static int water_mode(const GfxDraw* d);
+static int water_capture(void);
+static void water_bind(void);
+
 static void draw_encode(const GfxDraw* d)
 {
     @autoreleasepool
     {
+        int water = g_rt ? water_mode(d) : 0;
+        if (water && !water_capture())
+            water = 0;
         if (!begin_pass())
         {
             gfx_prof_skip(GFX_SKIP_NO_TARGET);
             return;
         }
-        id<MTLRenderPipelineState> p = pipeline(d);
+        id<MTLRenderPipelineState> p = pipeline(d, &water);
         if (!p)
         {
             gfx_prof_skip(GFX_SKIP_PIPELINE); /* still building (or failed) */
@@ -1797,6 +1812,8 @@ static void draw_encode(const GfxDraw* d)
                 rec->tex[i] = [view retain], rec->samp[i] = sk;
         }
 
+        if (water)
+            water_bind();
         uint32_t n = vertex_count(d->prim, d->count);
         MTLPrimitiveType mp = metal_prim(d->prim);
         if (rec)
@@ -2487,6 +2504,16 @@ static struct
     int fogc_set;
     struct { uint64_t serial; uint32_t live, cached, skipped, own, depth; float fog[3], dl, al, strength, day, sun[3], cam[3], across; } trace[1200];
     uint32_t ntrace;
+    /* the water (water_mode): the scene's camera and light as its draws need them (WaterU, set by
+     * gfx_scene_done the frame it was), and the copies of the target it draws over */
+    struct WaterU
+    {
+        float iv[16], view[16], zp[4], hand[4], size[4], sun[4], suncol[4], sky[4], p[4], p2[4];
+    } wu;
+    uint64_t wu_serial;
+    id<MTLTexture> wcol, wdep;
+    id<MTLTexture> w_from; /* the target they were copied from, and the frame */
+    uint64_t w_serial;
 } g_fx;
 
 /* a toward b by k; the first time, b */
@@ -2530,7 +2557,7 @@ static const struct
     { "rays", offsetof(__typeof__(g_fxs), rays), 0.6f },
     { "rays_decay", offsetof(__typeof__(g_fxs), rays_decay), 0.965f },
     { "rays_length", offsetof(__typeof__(g_fxs), rays_length), 0.85f },
-    { "light", offsetof(__typeof__(g_fxs), light), 1.0f },
+    { "light", offsetof(__typeof__(g_fxs), light), 0.0f },
     { "shadow", offsetof(__typeof__(g_fxs), shadow), 0.3f },
     { "shadow_length", offsetof(__typeof__(g_fxs), shadow_length), 0.6f },
     { "sun", offsetof(__typeof__(g_fxs), sun), 0.5f },
@@ -2557,6 +2584,23 @@ static const struct
     { "draw_entities", offsetof(__typeof__(g_fxs), draw_entities), 0.0f },
     /* not an effect either: the frame-rate overlay, shown (1) or hidden (0) */
     { "fps", offsetof(__typeof__(g_fxs), fps), 1.0f },
+    /* the game's water (gfx_msl.c WATER_MSL): on (1) or as the game drew it (0), how far the ripples bend
+     * what is behind it (a fraction of the height), the depth in world units where the game's color takes
+     * over, how deep its edge fades in, how much foam and down to what depth, the ripples' tilt and how
+     * many per unit, the sky's reflection, the sun's highlight */
+    { "water", offsetof(__typeof__(g_fxs), water), 1.0f },
+    { "water_refract", offsetof(__typeof__(g_fxs), water_refract), 0.015f },
+    { "water_clarity", offsetof(__typeof__(g_fxs), water_clarity), 3.0f },
+    { "water_soft", offsetof(__typeof__(g_fxs), water_soft), 0.15f },
+    { "water_foam", offsetof(__typeof__(g_fxs), water_foam), 0.6f },
+    { "water_foam_width", offsetof(__typeof__(g_fxs), water_foam_width), 0.8f },
+    { "water_ripple", offsetof(__typeof__(g_fxs), water_ripple), 0.25f },
+    { "water_scale", offsetof(__typeof__(g_fxs), water_scale), 0.6f },
+    { "water_reflect", offsetof(__typeof__(g_fxs), water_reflect), 0.6f },
+    { "water_spec", offsetof(__typeof__(g_fxs), water_spec), 2.0f },
+    /* not an effect: the host's level of detail (host64 --lod), 1 near models at every distance, 2 as the
+     * game picks, 0 as the command line says */
+    { "lod", offsetof(__typeof__(g_fxs), lod), 0.0f },
     /* not an effect: anti-aliasing of the finished scene, 0 none, 1 FXAA (scene_aa); with or without the effects */
     { "aa", offsetof(__typeof__(g_fxs), aa), 0.0f },
 };
@@ -3579,6 +3623,75 @@ void gfx_trace_dump(const char* path)
     fclose(f);
 }
 
+/* --- water -----------------------------------------------------------------------------------------------------
+ * The game's water draws (GfxDraw.water: vertices from its water models) come after the scene is done,
+ * so they have its camera and light (water_scene) and can be drawn over a copy of what is behind them
+ * (water_capture, once a frame, at the first water draw). */
+static void water_scene(const GfxScene* s, const float* vinv, const FxU* u, id<MTLTexture> ct)
+{
+    struct WaterU* w = &g_fx.wu;
+    memcpy(w->iv, vinv, 64), memcpy(w->view, s->view, 64);
+    memcpy(w->zp, u->zp, 16);
+    w->hand[0] = u->hand[0], w->hand[1] = (float)fmod(CACurrentMediaTime(), 3600.0);
+    w->hand[2] = g_fxs.water_refract, w->hand[3] = g_fxs.water_foam;
+    w->size[0] = (float)ct.width, w->size[1] = (float)ct.height, w->size[2] = 1.0f / (float)ct.width, w->size[3] = 1.0f / (float)ct.height;
+    memcpy(w->sun, g_fx.sunw, 12);
+    w->sun[3] = u->sun[3];
+    memcpy(w->suncol, u->suncol, 12);
+    w->suncol[3] = g_fxs.water_spec;
+    if (g_fxs.fog > 0.0f && g_fx.fogc_set)
+        memcpy(w->sky, g_fx.fogc, 12);
+    else
+        memcpy(w->sky, s->fogcolor, 12);
+    w->sky[3] = g_fxs.water_reflect;
+    w->p[0] = g_fxs.water_clarity, w->p[1] = fmaxf(g_fxs.water_soft, 1e-3f), w->p[2] = g_fxs.water_ripple, w->p[3] = g_fxs.water_scale;
+    /* world up: the view's up back into the world */
+    for (int j = 0; j < 3; ++j)
+        w->p2[j] = g_fx.up[0] * vinv[j] + g_fx.up[1] * vinv[4 + j] + g_fx.up[2] * vinv[8 + j];
+    normalize3(w->p2);
+    w->p2[3] = fmaxf(g_fxs.water_foam_width, 1e-3f);
+    g_fx.wu_serial = g_serial;
+}
+
+/* how a draw is drawn as water (GfxFsKey.water), 0 as the game drew it: over the scene behind it when
+ * it blends by its alpha, else only its edge softened */
+static int water_mode(const GfxDraw* d)
+{
+    if (!d->water || g_fxs.fx == 0.0f || g_fxs.water <= 0.0f || g_fx.wu_serial != g_serial || d->vs.rhw || d->vs.prog ||
+        d->fs.prog || !d->pipe.blend || g_rt_face || g_rt_level)
+        return 0;
+    if (d->pipe.src == 5 && d->pipe.dst == 6 && d->pipe.op == 1) /* SRCALPHA, INVSRCALPHA, ADD */
+        return 1;
+    return d->pipe.src == 2 ? 3 : 2; /* ONE: the color fades as well */
+}
+
+/* the target and its depth as they are, before the frame's first water draw into it: 0 if they cannot be */
+static int water_capture(void)
+{
+    id<MTLTexture> ct = g_rt->tex, depth = depth_attachment();
+    if (!depth || depth.width != ct.width || depth.height != ct.height || ct.sampleCount != 1 ||
+        ct.width != (NSUInteger)g_fx.wu.size[0] || ct.height != (NSUInteger)g_fx.wu.size[1])
+        return 0;
+    if (g_fx.w_serial == g_serial && g_fx.w_from == ct)
+        return 1;
+    if (!fx_tex(&g_fx.wcol, ct.pixelFormat, ct.width, ct.height) || !fx_tex(&g_fx.wdep, depth.pixelFormat, ct.width, ct.height))
+        return 0;
+    flush_pass();
+    id<MTLBlitCommandEncoder> b = [cmd() blitCommandEncoder];
+    [b copyFromTexture:ct sourceSlice:0 sourceLevel:0 toTexture:g_fx.wcol destinationSlice:0 destinationLevel:0 sliceCount:1 levelCount:1];
+    [b copyFromTexture:depth sourceSlice:0 sourceLevel:0 toTexture:g_fx.wdep destinationSlice:0 destinationLevel:0 sliceCount:1 levelCount:1];
+    [b endEncoding];
+    g_fx.w_from = ct, g_fx.w_serial = g_serial;
+    return 1;
+}
+
+static void water_bind(void)
+{
+    [g_enc setFragmentTexture:g_fx.wcol atIndex:8];
+    [g_enc setFragmentTexture:g_fx.wdep atIndex:9];
+    [g_enc setFragmentBytes:&g_fx.wu length:sizeof g_fx.wu atIndex:5];
+}
+
 /* The finished scene anti-aliased (g_fxs.aa: FXAA), within its viewport, before the interface goes on */
 static void scene_aa(GfxTex* color, const GfxScene* s)
 {
@@ -3777,6 +3890,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             }
             u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.bloom, u.bloom[2] = 0.25f;
             u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
+            if (g_fxs.water > 0.0f && have_v)
+                water_scene(s, vinv, &u, ct);
             if (fx_tex(&g_fx.src, ct.pixelFormat, ct.width, ct.height) && fx_tex(&g_fx.ao0, MTLPixelFormatRGBA16Float, aw, ah) &&
                 fx_tex(&g_fx.ao1, MTLPixelFormatRGBA16Float, aw, ah) && fx_tex(&g_fx.b1a, MTLPixelFormatRGBA16Float, bw, bh) &&
                 fx_tex(&g_fx.b1b, MTLPixelFormatRGBA16Float, bw, bh) &&

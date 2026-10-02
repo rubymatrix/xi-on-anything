@@ -300,7 +300,7 @@ static void test_pixel_lighting(void)
         else
             CHECK(c <= 40, "per-vertex point light (light %g): middle %u (want dark, from the corners)", modes[pass], c);
     }
-    gfx_fx_set("light", 1.0f);
+    gfx_fx_set("light", 0.0f);
 }
 
 static void test_fog(void)
@@ -924,6 +924,77 @@ static void test_large_target_mips(void)
     gfx_tex_destroy(rt);
 }
 
+/* The water (GfxDraw.water, drawn after the scene is done): a half-clear blue plane 1 above a red
+ * floor. As the game drew it, half and half; deep (clarity far under its depth) all blue; with an edge
+ * fading in over far more than its depth, the floor shows through; the game's own alpha stays the
+ * least it is covered by. */
+static void water_quad(float y, uint32_t color, float alpha, uint8_t src, uint8_t dst)
+{
+    GfxDraw d;
+    defaults(&d);
+    memcpy(d.u.wvp, g_sproj, 64);
+    d.u.vp[2] = d.u.vp[3] = SS;
+    memcpy(d.vp, SVP, sizeof SVP);
+    d.vs.el[0] = (GfxElem){ 1, 0, GFX_FLOAT3, 0 };
+    d.u.stride[0] = 12;
+    d.fs.st[0] = (GfxStage){ 2, 3, 1, 1, 2, 3, 1, 1, 1, 0, 0, 2 }; /* SELECTARG1(TFACTOR) */
+    d.u.tfactor[0] = ((color >> 16) & 255) / 255.0f, d.u.tfactor[1] = ((color >> 8) & 255) / 255.0f;
+    d.u.tfactor[2] = (color & 255) / 255.0f, d.u.tfactor[3] = alpha;
+    d.depth.zenable = 1, d.depth.zwrite = 0, d.depth.zfunc = 4;
+    d.pipe.blend = 1, d.pipe.src = src, d.pipe.dst = dst, d.pipe.op = 1;
+    d.water = 1;
+    float v[4][3] = { { -40, y, 40 }, { 40, y, 40 }, { -40, y, 0.6f }, { 40, y, 0.6f } };
+    for (int i = 0; i < 4; ++i)
+        v[i][2] *= g_sz; /* view space: the scene's view is the identity */
+    d.data[0] = v, d.size[0] = sizeof v;
+    d.prim = GFX_TRIANGLESTRIP, d.count = 2;
+    gfx_draw(&d);
+    gfx_tex_read(g_srt, 0, 0, g_spx, SS * 4);
+}
+
+static void water_frame(float water, float clarity, float soft)
+{
+    gfx_present(NULL); /* a frame of its own: its water is drawn after its scene */
+    gfx_fx_set("water", water), gfx_fx_set("water_clarity", clarity), gfx_fx_set("water_soft", soft);
+    scene_begin(1, 0xFF000000u);
+    float floor[4][3] = { { -40, -3, 40 }, { 40, -3, 40 }, { -40, -3, 0.6f }, { 40, -3, 0.6f } };
+    scene_quad(floor, 0xFFFF0000u);
+    scene_end(NULL, 0);
+    water_quad(-2, 0xFF0000FFu, 0.5f, 5, 6);
+}
+
+static void test_scene_water(void)
+{
+    fx_only(NULL, 0);
+    static const char* const calm[] = { "water_ripple", "water_foam", "water_reflect", "water_spec", "water_refract" };
+    for (size_t i = 0; i < sizeof calm / sizeof calm[0]; ++i)
+        gfx_fx_set(calm[i], 0.0f);
+    /* row 100: the water 3.6 ahead, the floor 1.8 behind it */
+    water_frame(0.0f, 3.0f, 0.15f);
+    uint32_t r = spx(64, 100, 16), b = spx(64, 100, 0);
+    CHECK(r >= 110 && r <= 145 && b >= 110 && b <= 145, "water off: %u red %u blue (want half and half)", r, b);
+    water_frame(1.0f, 0.01f, 0.15f);
+    r = spx(64, 100, 16), b = spx(64, 100, 0);
+    CHECK(r <= 10 && b >= 245, "water, deep: %u red %u blue (want blue)", r, b);
+    water_frame(1.0f, 1000.0f, 0.15f);
+    r = spx(64, 100, 16), b = spx(64, 100, 0);
+    CHECK(r >= 110 && r <= 145 && b >= 110 && b <= 145, "water, clear: %u red %u blue (want the game's half)", r, b);
+    water_frame(1.0f, 0.01f, 100.0f);
+    r = spx(64, 100, 16), b = spx(64, 100, 0);
+    CHECK(r >= 240 && b <= 15, "water, soft edge: %u red %u blue (want the floor)", r, b);
+    for (size_t i = 0; i < sizeof calm / sizeof calm[0]; ++i)
+        gfx_fx_set(calm[i], 1.0f);
+    gfx_fx_set("water_ripple", 0.25f), gfx_fx_set("water_foam", 0.6f), gfx_fx_set("water_reflect", 0.6f);
+    gfx_fx_set("water_spec", 2.0f), gfx_fx_set("water_refract", 0.015f);
+    /* all of it on (ripples, foam, sky, sun): it builds and draws; and additive water only fades in */
+    water_frame(1.0f, 3.0f, 0.15f);
+    water_frame(1.0f, 3.0f, 100.0f);
+    water_quad(-2, 0xFF0000FFu, 1.0f, 2, 2);
+    b = spx(64, 100, 0);
+    CHECK(b <= 60, "water, additive with a soft edge: %u blue (want little added)", b);
+    gfx_fx_set("water_clarity", 3.0f), gfx_fx_set("water_soft", 0.15f);
+}
+
 static void test_scene_effects(void)
 {
     test_large_target_mips();
@@ -939,6 +1010,7 @@ static void test_scene_effects(void)
     test_scene_temporal();
     test_scene_sun_hard();
     test_scene_sun_sharp();
+    test_scene_water();
     CHECK(gfx_failures() == 0, "scene effects: %u failures", gfx_failures());
     gfx_set_targets(g_rt, 0, 0, g_ds);
     test_scene_filter();
