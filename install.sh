@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install the XI on Anything launcher. Paste into Terminal:
 #
-#   curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-anything/main/install.sh | bash
 #
 # Run the same line again to update to the newest release.
 #
@@ -17,7 +17,7 @@
 # Everything is inside main, so a download cut short runs nothing.
 main() {
     set -e
-    local repo="rubymatrix/xi-on-mac"
+    local repo="rubymatrix/xi-on-anything"
     local asset="XI-on-Mac-macos-arm64.zip"
     local app_name="XI on Mac.app"
     local base="https://github.com/$repo/releases"

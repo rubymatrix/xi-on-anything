@@ -2,7 +2,7 @@
 # Build and install FINAL FANTASY XI on this Mac from this repo's sources (players use the launcher:
 # install.sh). Paste into Terminal:
 #
-#   curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/tools/install-source.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-anything/main/tools/install-source.sh | bash
 #
 # Run the same line again to update: it fetches the newest sources and rebuilds what changed.
 # Options go to tools/setup.py after `bash -s --`, e.g.
@@ -19,7 +19,7 @@
 # Everything is inside main, so a download cut short runs nothing.
 main() {
     set -e
-    local repo="${FFXI_REPO:-https://github.com/rubymatrix/xi-on-mac.git}"
+    local repo="${FFXI_REPO:-https://github.com/rubymatrix/xi-on-anything.git}"
     local branch="${FFXI_BRANCH:-main}"
     local src="${FFXI_SOURCE:-$HOME/Library/Application Support/FFXIRecompile/source}"
 

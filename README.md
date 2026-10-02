@@ -7,7 +7,7 @@
 > to play. Paste into Terminal:
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/install.sh | bash
+> curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-anything/main/install.sh | bash
 > ```
 >
 > Needs an Apple silicon Mac (M1 or later) and your own copy of FINAL FANTASY XI.
@@ -93,11 +93,11 @@ See [docs/addon-compat-design.md](docs/addon-compat-design.md) for how it works.
 Paste into Terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-anything/main/install.sh | bash
 ```
 
 It downloads the launcher's latest release from this repo's
-[Releases](https://github.com/rubymatrix/xi-on-mac/releases), checks it against the release's
+[Releases](https://github.com/rubymatrix/xi-on-anything/releases), checks it against the release's
 checksums, installs **XI on Mac.app** into Applications and opens it. The launcher signs you in,
 builds the game from your own game files and keeps both up to date. Run the same line again to
 reinstall. The app is not signed with an Apple Developer ID yet, so a copy downloaded in a browser
@@ -112,7 +112,7 @@ you: a `FINAL FANTASY XI` folder (with `FFXiMain.dll` and
 `~/Games`, then paste this into Terminal:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-mac/main/tools/install-source.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rubymatrix/xi-on-anything/main/tools/install-source.sh | bash
 ```
 
 It installs Apple's command line tools if they are missing (a dialog: click Install), finds the
