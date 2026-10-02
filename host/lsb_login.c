@@ -11,6 +11,8 @@
  *      on the server's profile service (src/profile), which xiloader 2.2 connects the game's
  *      friend list, presence and messages to. We do not connect there; the game and the lobby do
  *      not need it.
+ *      A launcher that has signed in already hands its account id and hash over in FFXI_LSB_SESSION
+ *      instead, and this step is skipped: a second sign-in would replace the hash.
  *   2. The login data connection (TCP 54230): we send 0xFE + the hash, then answer the server for
  *      the rest of the run - 0x01 with 0xA1 (account id, server address, hash), 0x02 / 0x15 with
  *      0xA2 and the server's fixed key, 0x03 (the character list) with nothing: our gamecore
@@ -741,12 +743,32 @@ static void trust_save(const LsbLogin* l, const char* reply)
     memset(token, 0, sizeof token), memset(v, 0, sizeof v);
 }
 
-int lsb_login(const LsbLogin* l, char* err, size_t errn)
+/* FFXI_LSB_SESSION, "<account id>:<the session hash in 32 hex digits>": a sign-in the launcher has
+ * made already. Signing in again would replace the hash, which is also the account's credential on
+ * the server's profile server, where the launcher keeps its friends session with it. */
+static int session_from_env(long long* account, uint8_t hash[16])
 {
-#if defined(_WIN32)
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
+    const char* v = getenv("FFXI_LSB_SESSION");
+    if (!v || !*v)
+        return 0;
+    char* end;
+    unsigned long long id = strtoull(v, &end, 10);
+    if (end == v || *end != ':' || id == 0 || id > 0xFFFFFFFFull || strlen(end + 1) != 32)
+        return 0;
+    for (int i = 0; i < 16; ++i)
+    {
+        char byte[3] = { end[1 + 2 * i], end[2 + 2 * i], 0 };
+        if (!isxdigit((unsigned char)byte[0]) || !isxdigit((unsigned char)byte[1]))
+            return 0;
+        hash[i] = (uint8_t)strtoul(byte, NULL, 16);
+    }
+    *account = (long long)id;
+    return 1;
+}
+
+/* The auth exchange: the account id and its new session hash. */
+static int lsb_auth(const LsbLogin* l, long long* account_out, uint8_t hash_out[16], char* err, size_t errn)
+{
     int version[3];
     const char* v = l->version && *l->version ? l->version : LSB_LOADER_VERSION;
     if (!lsb_parse_version(v, version))
@@ -775,8 +797,6 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         json_string(t, sizeof t, l->login_token);
         snprintf(token, sizeof token, "\"login_token\":%s,", t);
     }
-    if (l->version_used)
-        l->version_used[0] = 0;
     char reply[8192], message[512];
     int adopted = 0;
     for (int attempt = 0;; ++attempt)
@@ -890,6 +910,27 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         return 0;
     }
     trust_save(l, reply);
+    *account_out = account;
+    memcpy(hash_out, hash, 16);
+    if (adopted && l->version_used)
+        snprintf(l->version_used, 24, "%d.%d.%d", version[0], version[1], version[2]);
+    return 1;
+}
+
+int lsb_login(const LsbLogin* l, char* err, size_t errn)
+{
+#if defined(_WIN32)
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+    long long account = 0;
+    uint8_t hash[16];
+    if (l->version_used)
+        l->version_used[0] = 0;
+    if (session_from_env(&account, hash))
+        fprintf(stderr, "[lsb] signing in with the launcher's session for account %lld\n", account);
+    else if (!lsb_auth(l, &account, hash, err, errn))
+        return 0;
 
     /* the data connection, answered for the rest of the run */
     g_data.s = tcp_connect(l->server, l->data_port, 0, err, errn);
@@ -913,7 +954,5 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
     snprintf(cmd, sizeof cmd, " /game eAZcFcB -net 3 -port %u", l->view_port);
     gamecore_set_cmdline(cmd);
     fprintf(stderr, "[lsb] signed in to LSB as %s (account %lld)\n", l->user, account);
-    if (adopted && l->version_used)
-        snprintf(l->version_used, 24, "%d.%d.%d", version[0], version[1], version[2]);
     return 1;
 }
