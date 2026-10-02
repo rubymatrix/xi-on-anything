@@ -807,7 +807,7 @@ static void test_scene_sun_hard(void)
         fx_only("sun", 1.0f);
         gfx_fx_set("temporal", 0.0f);
         gfx_fx_set("sun_soft", k ? 0.0f : 0.03f);
-        gfx_fx_set("sun_detail", k ? 1.0f : 0.0f);
+        gfx_fx_set("sun_detail", k ? 8192.0f : 4096.0f);
         scene_begin(1, 0xFF000000u);
         scene_floor();
         float post[4][3] = { { -1, 0, 10 }, { 1, 0, 10 }, { -1, -3, 10 }, { 1, -3, 10 } };
@@ -823,7 +823,7 @@ static void test_scene_sun_hard(void)
     }
     CHECK(partial[1] <= 2 && partial[1] <= partial[0], "hard shadows: %d partly lit pixels at the edge (soft: %d; want 2 or fewer)",
         partial[1], partial[0]);
-    gfx_fx_set("sun_soft", 0.03f), gfx_fx_set("sun_detail", 0.0f), gfx_fx_set("temporal", 0.85f);
+    gfx_fx_set("sun_soft", 0.0f), gfx_fx_set("sun_detail", 4096.0f), gfx_fx_set("temporal", 0.85f);
 }
 
 /* Resolution: a pole 0.2 wide casts a thin shadow, dark in its middle and gone a few pixels beside

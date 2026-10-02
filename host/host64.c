@@ -61,6 +61,7 @@
  * (--data-dir, else the user's app data), the password in the keychain, and writes display
  * defaults to <data dir>/settings.reg, loaded when no --reg-final is given. Its window becomes the
  * game's. */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,6 +78,7 @@
 #include "modern.h"
 #include "discord.h"
 #include "addons/addons.h"
+#include "addons/game.h"
 #if defined(_WIN32)
 #include "sampler.h"
 #endif
@@ -406,6 +408,16 @@ static int parse_aspect(const char* s, float* aspect)
 static int g_profile_shims;
 static int g_addons_on; /* the addon host (host/addons/): off with FFXI_ADDONS=0 */
 
+/* The player's place for the sun's near shadow map (gfx_set_focus): entity_t.Movement.LocalPosition
+ * (+4 in Ashita's SDK), x, height, z, the world's own coordinates. */
+static void shadow_focus(void)
+{
+    int32_t pi = xi_game_player_index();
+    uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0;
+    float p[3];
+    gfx_set_focus(e && xi_game_rd(e + 4, p, sizeof p) && isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]) ? p : NULL);
+}
+
 static void present_hook(void)
 {
     if (g_profile_shims)
@@ -421,6 +433,7 @@ static void present_hook(void)
     fix_aspect();
     fix_draw_distance();
     modern_frame();
+    shadow_focus();
     if (g_addons_on)
         addons_frame();
     discord_frame();

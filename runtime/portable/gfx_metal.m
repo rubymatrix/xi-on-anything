@@ -2153,8 +2153,8 @@ static const char FX_MSL[] =
      * unless sun_soft is 0, which asks for the hard edge: half a texel */
     "  float pen = clamp((z - bs / bn) * p.z, hard ? 0.5 * tx : max(1.5 * tx, 0.02 / (p.x * sz)), 32.0 * tx);\n"
     /* casters nearer the surface than sun_min are its own neighbouring faces (a ledge of the same
-     * rock): no shadow from them */
-    "  float near = smoothstep(0.5 * minw, 1.5 * minw, (z - bs / bn) * du);\n"
+     * rock): no shadow from them. sun_min 0 keeps them all (smoothstep's edges must differ) */
+    "  float near = minw > 0.0 ? smoothstep(0.5 * minw, 1.5 * minw, (z - bs / bn) * du) : 1.0;\n"
     /* a wider filter reaches farther across the surface, to points of it nearer the sun: the bias
      * grows with it (a slope of one) */
     "  float zc = z - pen * p.w, s = 0.0;\n"
@@ -2462,7 +2462,9 @@ static struct
     uint64_t hist_serial;   /* the frame it was written (0: none) */
     float prev_view[16], prev_proj[16], prev_cam[3];
     id<MTLSamplerState> samp, cmp;
-    id<MTLTexture> smap, smapn, scol, scol8, sdummy; /* the sun's shadow maps (far, near), their (memoryless) color at 4096 and 8192, a stand-in */
+    id<MTLTexture> smap, smapn, scol, scol8, sdummy; /* the sun's shadow maps (far, near), their (memoryless) colors at the same sizes, a stand-in */
+    float focus[3]; /* the player's place in the world (gfx_set_focus) */
+    int has_focus;
     id<MTLDepthStencilState> sdepth;
     /* what the fog and rays follow, eased from frame to frame (fx_ease): the game's values can
      * change between frames, and the effects should not pop with them */
@@ -2532,17 +2534,19 @@ static const struct
     { "shadow", offsetof(__typeof__(g_fxs), shadow), 0.3f },
     { "shadow_length", offsetof(__typeof__(g_fxs), shadow_length), 0.6f },
     { "sun", offsetof(__typeof__(g_fxs), sun), 0.5f },
-    { "sun_distance", offsetof(__typeof__(g_fxs), sun_distance), 40.0f },
-    { "sun_soft", offsetof(__typeof__(g_fxs), sun_soft), 0.03f },
+    { "sun_distance", offsetof(__typeof__(g_fxs), sun_distance), 100.0f },
+    { "sun_soft", offsetof(__typeof__(g_fxs), sun_soft), 0.0f },
     { "sun_face", offsetof(__typeof__(g_fxs), sun_face), 0.0f },
     { "sun_min", offsetof(__typeof__(g_fxs), sun_min), 1.0f },
-    { "sun_direct", offsetof(__typeof__(g_fxs), sun_direct), 0.3f },
+    { "sun_direct", offsetof(__typeof__(g_fxs), sun_direct), 0.5f },
     /* who casts: 0 everything, 1 characters only (the zone's baked lighting has its shadows), 2 the
      * zone only (characters keep the game's own blob shadows) */
     { "sun_casters", offsetof(__typeof__(g_fxs), sun_casters), 1.0f },
-    { "sun_near", offsetof(__typeof__(g_fxs), sun_near), 15.0f },
-    /* the near map at 8192 rather than 4096 (1): half the texel, four times the memory (256 MB) */
-    { "sun_detail", offsetof(__typeof__(g_fxs), sun_detail), 0.0f },
+    /* the near map's reach past the player */
+    { "sun_near", offsetof(__typeof__(g_fxs), sun_near), 10.0f },
+    /* the near map's texels across, 512 to 8192 (64 MB at 4096, 256 MB at 8192); 0 and 1 are the
+     * old switch, 4096 and 8192 (sun_near_size) */
+    { "sun_detail", offsetof(__typeof__(g_fxs), sun_detail), 4096.0f },
     /* the occlusion's taps a frame: 0 low (6), 1 medium (10), 2 high (16); the temporal pass gathers
      * them over frames */
     { "ao_quality", offsetof(__typeof__(g_fxs), ao_quality), 0.0f },
@@ -2563,6 +2567,13 @@ static float* fx_setting(const char* key)
         if (!strcmp(FX_SETTINGS[i].key, key))
             return (float*)((char*)&g_fxs + FX_SETTINGS[i].at);
     return NULL;
+}
+
+void gfx_set_focus(const float* pos)
+{
+    g_fx.has_focus = pos != NULL;
+    if (pos)
+        memcpy(g_fx.focus, pos, sizeof g_fx.focus);
 }
 
 void gfx_fx_set(const char* key, float v)
@@ -3342,9 +3353,24 @@ static void sun_fit(const GfxScene* s, const float* invV, const float* L, float 
     mat_mul(k->lmat, invV, S);
     k->texel = tx, k->bias = 0.03f / range, k->range = range, k->across = 2.0f * R;
     /* the penumbra's radius grows by sun_soft for each unit from the caster: in the map's width
-     * (2R across) per unit of its depth (range deep) */
-    k->soft = g_fxs.sun_soft * range / (2.0f * R);
+     * (2R across) per unit of its depth (range deep). Never less than the sun's own half-degree disc
+     * (0.0047 a unit), even for hard edges: a character's shadow stays hard, a cliff's 30 units off
+     * no longer ends in its low-polygon outline */
+    k->soft = fmaxf(g_fxs.sun_soft, 0.0047f) * range / (2.0f * R);
     k->slope = 2.0f * R / range;
+}
+
+/* the near map's texels across: sun_detail, a power of two from 512 to 8192; 0 and 1 are the old
+ * switch (4096, 8192) */
+static int sun_near_size(void)
+{
+    float d = g_fxs.sun_detail;
+    if (d < 2.0f)
+        return d >= 0.5f ? 2 * SUN_MAP : SUN_MAP;
+    int n = 512;
+    while (n < 8192 && (float)n * 1.5f < d)
+        n *= 2;
+    return n;
 }
 
 static id<MTLTexture> sun_target(id<MTLTexture>* t, int size)
@@ -3359,7 +3385,9 @@ static id<MTLTexture> sun_target(id<MTLTexture>* t, int size)
         td.storageMode = MTLStorageModePrivate;
         *t = [g_dev newTextureWithDescriptor:td];
     }
-    id<MTLTexture>* col = size > SUN_MAP ? &g_fx.scol8 : &g_fx.scol;
+    id<MTLTexture>* col = t == &g_fx.smapn ? &g_fx.scol8 : &g_fx.scol;
+    if (*col && (*col).width != (NSUInteger)size)
+        [*col release], *col = nil;
     if (!*col)
     {
         MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
@@ -3382,7 +3410,7 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
     rp.depthAttachment.loadAction = MTLLoadActionClear;
     rp.depthAttachment.clearDepth = 1.0;
     rp.depthAttachment.storeAction = MTLStoreActionStore;
-    rp.colorAttachments[0].texture = k->size > SUN_MAP ? g_fx.scol8 : g_fx.scol;
+    rp.colorAttachments[0].texture = target == g_fx.smapn ? g_fx.scol8 : g_fx.scol;
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     rp.colorAttachments[0].storeAction = MTLStoreActionDontCare;
     ts_mark(rp, TS_SUN0, TS_SUN1);
@@ -3413,6 +3441,17 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
             Cached* ce = &g_cache[i - g_ncasters];
             if (ce->dead || ce->seen == g_serial || cached_expired(ce))
                 continue;
+            /* standing more than 96 units outside the map's sides: no shadow of it falls in the map
+             * (with a long draw distance the cache holds thousands, each drawn into both maps) */
+            if (ce->c.has_pos)
+            {
+                const float* q = ce->pos;
+                float mx = q[0] * k->S[0] + q[1] * k->S[4] + q[2] * k->S[8] + k->S[12];
+                float my = q[0] * k->S[1] + q[1] * k->S[5] + q[2] * k->S[9] + k->S[13];
+                float edge = 1.0f + 96.0f * 2.0f / k->across;
+                if (fabsf(mx) > edge || fabsf(my) > edge)
+                    continue;
+            }
             float m[16];
             mat_mul(m, ce->clip_world, k->S);
             [e setVertexBytes:m length:64 atIndex:5];
@@ -3473,7 +3512,7 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
     return drawn;
 }
 
-/* The sun's maps for the scene: a near cascade over the first sun_near units the camera sees, where
+/* The sun's maps for the scene: a near cascade out to sun_near units past the player, where
  * characters stand and shadows are looked at closely (a 4096 map over some 40 units: texels of a
  * centimetre), and a far one out to sun_distance. Fills the effects' uniforms for both; 0 when
  * nothing was drawn. */
@@ -3498,10 +3537,21 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     u->smap[1] = far.texel, u->smap[2] = far.bias, u->smap[3] = far.soft;
     u->smap2[0] = far.slope, u->smap2[3] = far.range;
     u->smapn2[1] = 0.0f;
-    int nsize = g_fxs.sun_detail >= 0.5f ? 2 * SUN_MAP : SUN_MAP;
-    if (dnear >= 2.0f && dnear < dfar && sun_target(&g_fx.smapn, nsize))
+    /* the near map reaches sun_near past the player, not the camera: the camera stands some units
+     * behind the character, and a reach from it left the far half of the player's own shadow in the
+     * coarse map. A player farther off than 40 units is not the one in view (a cutscene) */
+    float lead = 0.0f;
+    if (g_fx.has_focus)
     {
-        sun_fit(s, invV, L, 0.5f, dnear, nsize, &near);
+        float dx = g_fx.focus[0] - invV[12], dy = g_fx.focus[1] - invV[13], dz = g_fx.focus[2] - invV[14];
+        float d = sqrtf(dx * dx + dy * dy + dz * dz);
+        lead = d < 40.0f ? d : 0.0f;
+    }
+    float tnear = dnear + lead;
+    int nsize = sun_near_size();
+    if (dnear >= 2.0f && tnear < dfar && sun_target(&g_fx.smapn, nsize))
+    {
+        sun_fit(s, invV, L, 0.5f, tnear, nsize, &near);
         sun_draw(g_fx.smapn, invP, invV, &near, 1);
         memcpy(u->lmatn, near.lmat, 64);
         u->smapn[0] = near.texel, u->smapn[1] = near.bias, u->smapn[2] = near.soft, u->smapn[3] = near.slope;

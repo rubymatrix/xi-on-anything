@@ -2120,6 +2120,7 @@ void gfx_fx_set(const char* key, float v)
         g_overlay = v != 0.0f;
 }
 float gfx_fx_get(const char* key) { return !strcmp(key, "fps") ? (float)g_overlay : 0.0f; }
+void gfx_set_focus(const float* pos) { (void)pos; }
 void gfx_trace_dump(const char* path) { (void)path; }
 
 void gfx_present(GfxTex* bb)

@@ -268,6 +268,10 @@ void gfx_fx_set(const char* key, float v);
 float gfx_fx_get(const char* key);
 /* The scene effects' last frames (what the shadows were drawn from), one line each, to a file. */
 void gfx_trace_dump(const char* path);
+/* The local player's place in the world (world units, as the game's entity holds it), for effects
+ * that centre on the character: the sun's near shadow map. NULL when there is none (the lobby, a
+ * zone change). */
+void gfx_set_focus(const float* pos);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);
