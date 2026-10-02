@@ -48,9 +48,10 @@
  * (near, the default), or with the one the game picks for the distance (game). An app bundle's
  * FFXILod key is the default; the settings file's lod (1 near, 2 game) overrides it live.
  *
- * --cexi off|items: client changes for a CatsEyeXI-style server (host/cexi.c), off by default.
- * items: custom item ids 0x7800-0xDFFF and gear model ids up to 4095, which need the server's DATs
- * in a --dats overlay. An app bundle's FFXICexi key is the default.
+ * --cexi off|items|full: client changes for a CatsEyeXI-style server (host/cexi.c), off by default.
+ * items: custom item ids 0x7800-0xDFFF and gear model ids up to 4095; full: those, and spell and
+ * job-ability ids up to 0xFFF. They need the server's DATs in a --dats overlay. An app bundle's
+ * FFXICexi key is the default.
  *
  * Two ways in:
  *   - a session value V the lobby checks (--session), from a launcher that signed in elsewhere
@@ -586,6 +587,7 @@ static void present_hook(void)
     fix_draw_distance();
     lod_frame();
     modern_frame();
+    cexi_frame();
     shadow_focus();
     if (g_addons_on)
         addons_frame();
@@ -810,7 +812,7 @@ int main(int argc, char** argv)
         {
             if ((cexi = cexi_parse(argv[i + 1])) < 0)
             {
-                fprintf(stderr, "--cexi: off (as the game ships) or items (a CatsEyeXI-style server's custom item and gear ids)\n");
+                fprintf(stderr, "--cexi: off (as the game ships), items (a CatsEyeXI-style server's custom item and gear ids) or full (and its spells and abilities)\n");
                 return 2;
             }
             cexi_given = 1;
@@ -849,7 +851,7 @@ int main(int argc, char** argv)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
                         "[--server name] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
-                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--cexi off|items]\n");
+                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--cexi off|items|full]\n");
         return 2;
     }
     if (!lsb.password)
@@ -1097,7 +1099,7 @@ int main(int argc, char** argv)
     setup_nameplates();
     setup_water();
     setup_lod();
-    cexi_init(cexi);
+    cexi_init(cexi, game);
     {
         /* the addon host: Ashita v4 and Windower 4 Lua addons, and our own (docs/addon-compat-design.md) */
         const char* off = getenv("FFXI_ADDONS");

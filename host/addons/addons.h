@@ -1,6 +1,7 @@
 /* The addon host's interface to host64 (host/addons/). See docs/addon-compat-design.md. */
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -27,6 +28,12 @@ const struct ModernAddons* addons_menu(void);
 /* --addon-harness: runs a script of addon loads, commands, packets and frames with the game's image
  * mapped but the game not started (no window, no GPU), printing chat lines to stdout. The exit code. */
 int addons_harness(const char* script);
+
+/* For host code outside the addon host (host/cexi.c), on or off as the addon host is: tap sees each
+ * packet the game receives (header included), before the game and the addons; send queues one for
+ * the server with the next buffer the game sends. Setting a tap installs the packet hooks. */
+void addons_packet_tap(void (*tap)(const uint8_t* p, size_t n));
+void addons_packet_send(const uint8_t* p, size_t n);
 
 #ifdef __cplusplus
 }
