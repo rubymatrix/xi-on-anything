@@ -24,6 +24,8 @@
  * The scene effects (gfx_scene_done), the sun's shadow maps and the water are gfx_metal.m's, ported:
  * the same passes in GLSL (FX_GLSL), the same CPU side (gfx_scene.c). Not here: the GPU timestamps
  * per part of the frame in the profile. */
+#include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <glslang/Include/glslang_c_interface.h>
@@ -39,7 +41,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <vulkan/vulkan.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"
@@ -4426,6 +4427,11 @@ int gfx_init(void* window, int vsync)
     }
     g_window = (SDL_Window*)window;
     g_vsync = vsync;
+    if (volkInitialize() != VK_SUCCESS)
+    {
+        fprintf(stderr, "[recomp] gfx: no Vulkan loader (libvulkan.so.1)\n");
+        return 0;
+    }
     glslang_initialize_process();
 
     /* the instance: what SDL needs for the window's surface */
@@ -4455,6 +4461,7 @@ int gfx_init(void* window, int vsync)
         fprintf(stderr, "[recomp] gfx: no Vulkan instance (%d)\n", (int)r);
         return 0;
     }
+    volkLoadInstance(g_inst);
     if (g_window && !SDL_Vulkan_CreateSurface(g_window, g_inst, NULL, &g_surface))
     {
         fprintf(stderr, "[recomp] gfx: no Vulkan surface for the window: %s\n", SDL_GetError());
@@ -4510,10 +4517,15 @@ int gfx_init(void* window, int vsync)
         g_dev = VK_NULL_HANDLE;
         return 0;
     }
+    volkLoadDevice(g_dev);
     vkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
     p_push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(g_dev, "vkCmdPushDescriptorSetKHR");
 
+    VmaVulkanFunctions vf = { 0 };
+    vf.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vf.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
     VmaAllocatorCreateInfo ai = { 0 };
+    ai.pVulkanFunctions = &vf;
     ai.vulkanApiVersion = VK_API_VERSION_1_3;
     ai.physicalDevice = g_phys;
     ai.device = g_dev;
