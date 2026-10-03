@@ -3021,7 +3021,7 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
             if (cs->has_pos)
             {
                 float h[4];
-                xform4(h, cs->clip0, clip_world);
+                gfx_xform4(h, cs->clip0, clip_world);
                 if (fabsf(h[3]) > 1e-6f)
                 {
                     float q[3] = { h[0] / h[3], h[1] / h[3], h[2] / h[3] };
