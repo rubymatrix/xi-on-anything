@@ -18,3 +18,5 @@ RUN curl -fsSL https://github.com/libsdl-org/SDL/releases/download/release-$SDL/
  && cmake -S /tmp/SDL3-$SDL -B /tmp/sdlb -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang \
       -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_VULKAN=ON \
  && cmake --build /tmp/sdlb && cmake --install /tmp/sdlb && rm -rf /tmp/SDL3-$SDL /tmp/sdlb && ldconfig
+# screenshots of a window under Xvfb (xwd | xwdtopnm | pnmtopng) for smoke tests
+RUN apt-get update && apt-get install -y --no-install-recommends x11-apps netpbm && rm -rf /var/lib/apt/lists/*

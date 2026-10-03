@@ -213,6 +213,9 @@ typedef struct GfxDraw
     uint32_t vertex_start;
 } GfxDraw;
 
+/* The SDL_WindowFlags a window the back end draws into must be created with (SDL_WINDOW_VULKAN for
+ * Vulkan; 0 for the others). */
+uint64_t gfx_window_flags(void);
 /* Brings the device up on an SDL window. 0 on failure (nothing is drawn, nothing fails). */
 int gfx_init(void* sdl_window, int vsync);
 /* A window of this many pixels: the back buffer's new size after Reset. */

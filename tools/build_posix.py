@@ -45,14 +45,20 @@ if sys.platform != 'darwin':
 # the generated C: every label and local is emitted whether used or not
 GEN_WARNINGS = ['-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-set-variable', '-Wno-unused-function',
                 '-Wno-parentheses-equality', '-Wno-unreachable-code']
-# the graphics back end: Metal on macOS (R3.2), none elsewhere yet
+# the graphics back end: Metal on macOS (R3.2), Vulkan elsewhere
 if sys.platform == 'darwin':
-    GFX_SOURCES = ['runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c', 'runtime/portable/gfx_metal.m']
+    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
+                   'runtime/portable/gfx_metal.m']
     GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation',
                 '-framework', 'Security']  # Security: the sign-in screen's saved passwords
 else:
-    GFX_SOURCES = ['runtime/portable/gfx_null.c']
-    GFX_LIBS = []
+    # Vulkan 1.3 (gfx_vulkan.c), its shaders compiled with glslang, memory through VMA (third_party/vma)
+    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
+                   'runtime/portable/gfx_vulkan.c', 'runtime/portable/gfx_vma.cpp']
+    GFX_LIBS = ['-lvulkan', '-Wl,--start-group', '-lglslang-default-resource-limits', '-lglslang', '-lSPIRV',
+                '-lMachineIndependent', '-lGenericCodeGen', '-lOSDependent', '-lSPIRV-Tools-opt', '-lSPIRV-Tools',
+                '-Wl,--end-group', '-lstdc++', '-lpthread', '-lm']
+    CFLAGS += ['-I', 'third_party/vma']
 HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime/portable/dsound.c',
                 'runtime/portable/input.c', 'runtime/portable/dinput.c', 'runtime/portable/ws2.c', 'host/host64.c',
                 'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/cexi.c', 'host/discord.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c'] + GFX_SOURCES

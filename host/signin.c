@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "datui.h"
+#include "gfx.h"
 #include "keychain.h"
 #include "lsb_login.h"
 #include "plat.h"
@@ -1395,7 +1396,8 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         ww = 1280, wh = 720;
     int full = mode == 0 || mode == 3;
     /* a macOS Space is only for a window with a frame (full screen hides it) */
-    SDL_Window* win = SDL_CreateWindow("FINAL FANTASY XI", ww, wh, mode >= 2 && !(full && c->space) ? SDL_WINDOW_BORDERLESS : 0);
+    SDL_Window* win = SDL_CreateWindow("FINAL FANTASY XI", ww, wh,
+        (mode >= 2 && !(full && c->space) ? SDL_WINDOW_BORDERLESS : 0) | (SDL_WindowFlags)gfx_window_flags());
     if (win && full)
     {
         SDL_SetWindowFullscreenMode(win, NULL);

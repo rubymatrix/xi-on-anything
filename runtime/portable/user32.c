@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gfx.h"
 #include "gthread.h"
 #include "gwin.h"
 #include "input.h"
@@ -758,7 +759,7 @@ static void sh_CreateWindowExA(Guest* g)
     }
     else
     {
-        SDL_WindowFlags flags = SDL_WINDOW_HIDDEN;
+        SDL_WindowFlags flags = SDL_WINDOW_HIDDEN | (SDL_WindowFlags)gfx_window_flags();
 #if defined(_WIN32)
         if (popup)
             flags |= SDL_WINDOW_BORDERLESS;

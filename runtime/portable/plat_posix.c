@@ -4,7 +4,9 @@
  * __ulock calls libc++ uses); Linux has futex. Address space: one PROT_NONE reservation; commit
  * is mprotect, decommit maps fresh zero pages over the range, as Win32's decommit + commit gives
  * zeroed memory back. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>

@@ -4500,6 +4500,8 @@ static void make_swap_chain(SDL_Window* win)
 }
 #endif
 
+uint64_t gfx_window_flags(void) { return 0; }
+
 int gfx_init(void* window, int vsync)
 {
     if (g_dev)
