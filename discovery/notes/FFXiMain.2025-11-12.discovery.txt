@@ -18,13 +18,54 @@ Carrying addresses over
 -----------------------
 Not possible: no other build's retail DLLs were at hand, so `newbuild.py carry` had no images to
 map from. The verdicts were made from this build's own gate reports (below), and the one address
-the macOS host needs was found directly:
+the macOS host needs to run was found directly:
   character table pointer       0x104dd500: the only global loaded within 8 instructions before an
                                 access at +0x1382x, 11 code sites (2025-12-26: 0x104dd600)
-Not mapped (each feature is off for this build, as the host's guards intend):
-  present_site (Windows bridge), the difftest CRT slice, the nameplate_scale hook, the addon wraps
-  (parse_input, write_line, packet_decrypt/encrypt) and the modern menu addresses.
 The frame-rate divisor and aspect signatures are found at run time (global 0x1045474c).
+
+The rest of builds.json's entry (present_site, crt, hooks, wraps, modern) was mapped afterwards
+from the two builds' metadata alone, by function shape and then by how this build's code uses
+what was mapped:
+
+  Code addresses   the functions of both metas, ordered by address, each as (size, switch-case
+                   count), aligned with difflib's SequenceMatcher: 99.4% of 2025-12-26's functions
+                   pair with one of this build's. An address inside a paired function of the same
+                   size is carried at the same offset. Every hook, wrap and modern code address
+                   came this way, each from a pair inside a long run of consecutive pairs.
+                   The four wraps agree with an independent search for them.
+  crt              each 2025-12-26 address -0x780 (the CRT is one block, unchanged); every one
+                   checked against its prologue.
+  present_site     0x100035cb, after `call [ecx+0x3c]` (Present) as in 2025-12-26.
+  nameplate_scale  0x100861e6, after `fstp [esp+0x50]` and before the `jle`, as in 2025-12-26.
+
+  Data addresses, each from a use in this build's code and checked by a second one:
+    mgr, sheets          the `mov ecx, imm32` before calls to layout_find/menu_open and
+                         sheet_find/sheet_add (mgr: 470 such calls, all one value)
+    disp_gfx, log_inst   the `mov ecx, [abs]` before calls to disp_viewport/disp_rt and log_fit
+    page_vtbl            the immediate page_ctor stores at [this]
+    config_vtbl          the one .rdata table whose slots 0, 1, 4 and 6 hold config_slot0/1/4/6
+    lobby_vtbl           the one .rdata table whose slot 6 holds lobby_input
+    config_inst, lobby_inst, lobby_help, help_inst, log_inst, log2_inst
+                         the handler globals of the menu table's entries ("configwi", "lobycwin",
+                         "lobyhelp", "helpwind", "logwindo", "logwin2": 0x2c apart, the global's
+                         pointer 0x18 past the name); config_inst is also config_get's global +0x4c
+    menus_conf1win, menus_display, menus_addons, menus_end
+                         the menu table's entries "menu    conf1win" (the second), "tkdebug dbdelsel",
+                         "menu    oplev   " and the zero entry ending it
+    action_lists         the bytes 4,8,7,25,9,12,13,22,24,28, found once
+    disp_scene           the global the run-time aspect scan finds (0x1045474c)
+    disp_win_w/h, disp_mode, disp_menu_w/h, disp_device
+                         the globals referenced near 2025-12-26's addresses less this region's
+                         shift (-0x40 for the display globals, -0x44 for disp_device),
+                         each read where 2025-12-26 reads its own (disp_device: followed by
+                         +0x28, +0xc and +0x10)
+
+  In game (a local LandSandBoat server, signed in from the sign-in screen and with --user): the
+  nameplate fix; Config > Modern, its row in the Config list and a display size set there kept
+  over a restart; Ashita and Windower addons loaded from Config > Addons, the chat and packet
+  wraps running. The title screen's Config window gets no Display Settings row: in
+  this build it is older, 12 items with no Gamepad button (the row goes under Gamepad), and the
+  host says so and leaves it as it is.
 
 Method
 ------
