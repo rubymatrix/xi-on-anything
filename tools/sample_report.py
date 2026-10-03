@@ -1,7 +1,7 @@
 """Where the game thread's time goes: FFXI_SAMPLE's samples (runtime/portable/sampler_win.c) against
-the host executable's linker map (/MAP).
+the host executable's linker map (/MAP), or for a mingw build its llvm-nm listing.
 
-  python tools/sample_report.py <samples.bin> <exe.map> [--top 40] [--skip-seconds 0]
+  python tools/sample_report.py <samples.bin> <exe.map | exe.nm> [--top 40] [--skip-seconds 0]
 
 Self time is the function a sample stopped in; inclusive time counts every function on the sample's
 stack once. Recompiled game functions are f_<guest address>; everything else is the runtime, the
@@ -34,7 +34,24 @@ def load_map(path):
                 if va >= base:
                     syms.append((va - base, m.group(1)))
     if base is None:
-        sys.exit('%s: not an MSVC map file' % path)
+        return load_nm(path)
+    syms.sort()
+    return [s[0] for s in syms], [s[1] for s in syms]
+
+
+def load_nm(path):
+    """llvm-nm's listing of a mingw build (tools/build_mingw.py): `llvm-nm host64.exe > host64.nm`.
+    lld places the image at 0x140000000, as link does."""
+    base = 0x140000000
+    syms = []
+    sym = re.compile(r'^([0-9a-fA-F]{8,16}) [tT] (\S+)$')
+    with open(path, errors='replace') as f:
+        for line in f:
+            m = sym.match(line.strip())
+            if m and int(m.group(1), 16) >= base:
+                syms.append((int(m.group(1), 16) - base, m.group(2)))
+    if not syms:
+        sys.exit('%s: neither an MSVC map file nor an llvm-nm listing' % path)
     syms.sort()
     return [s[0] for s in syms], [s[1] for s in syms]
 
