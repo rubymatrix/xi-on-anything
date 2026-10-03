@@ -2746,7 +2746,7 @@ static const struct
     FXS(water_foam_width, 0.8f), FXS(water_ripple, 0.25f), FXS(water_scale, 0.6f), FXS(water_reflect, 0.6f), FXS(water_spec, 2.0f),
     /* not an effect: host64's level of detail (--lod), live while tuning */
     FXS(lod, 0.0f),
-    /* not an effect: the game's own character shadows (d3d8.c game_shadow_hidden): 0 off while the sun's are on, 1 always, 2 never */
+    /* not an effect: the game's own character shadows (d3d8.c game_shadow_hidden, modern.c game_shadows_follow): 0 off while the sun's are on, 1 always, 2 never */
     FXS(gameshadows, 0.0f),
     /* how much of the sun's shadows stay in a Mog House (gfx_set_moghouse), 0 none to 1 all */
     FXS(moghouse, 0.0f),

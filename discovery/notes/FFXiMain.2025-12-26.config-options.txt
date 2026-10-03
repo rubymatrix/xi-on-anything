@@ -48,4 +48,5 @@ through its three choices in game, and matching the values three characters' cnf
 The renderer's sun shadows make the game's own redundant (and they cost more): VanaCore calls
 changeConfig(58, 1) once a character's config has loaded (the load changes ~20 options in one
 frame), keeps the value the player had, and puts it back when its own shadows are off. The same
-call would suit host64 while its sun shadows are on.
+call is host64's (host/modern.c game_shadows_follow, builds.json modern.config_set) while its sun
+shadows are drawn and characters cast them.

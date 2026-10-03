@@ -91,6 +91,8 @@ enum
     LOG2_INST = FFXI_MODERN_LOG2_INST,     /* 0x10621940 ... the second log's ("logwin2") */
     LOG_FIT = FFXI_MODERN_LOG_FIT,         /* 0x10162d90 thiscall log handler (): its window to its width */
     CONFIG_GET = FFXI_MODERN_CONFIG_GET,   /* 0x10193850 cdecl (id): a setting of the game's Config */
+    CONFIG_SET = FFXI_MODERN_CONFIG_SET,   /* 0x10193830 cdecl (id, value): changed as the Config menu does, its
+                                            * callbacks run; 1 if it changed */
     HELP_INST = FFXI_MODERN_HELP_INST,     /* 0x105781f8 the global holding the help line's handler ("helpwind") */
     HELP_SETRECT = FFXI_MODERN_WIN_SETRECT, /* 0x1011a5a0 thiscall window (x, y, w, h, 1, 0, 0): its frame there, at once */
     SPRITE_DRAW = FFXI_MODERN_SPRITE_DRAW, /* 0x1011fb60 thiscall sprite (x, y, colour, 0, 0): drawn there (PAGE_MARK's) */
@@ -147,6 +149,7 @@ static char g_data_dir[1024], g_game[1024];
 static float g_ui_aspect;
 static unsigned g_hide;
 static void hide_apply(void);
+static int g_own_shadows = -1; /* the player's Config > Shadows while host64 holds it at Off (game_shadows_follow) */
 static int g_fx_touched, g_host_touched;
 static char g_fx_keys[32][24]; /* the scene settings changed, to write */
 static int g_nfx_keys;
@@ -539,6 +542,8 @@ static void save(void)
         {
             fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
                 (double)g_ui_aspect, g_hide);
+            if (g_own_shadows >= 0)
+                fprintf(f, "game_shadows=%d\n", g_own_shadows);
             fclose(f);
         }
         else
@@ -2232,6 +2237,45 @@ static void display_apply(void)
     fprintf(stderr, "[modern] display now: mode %d, %dx%d, menus %dx%d\n", g_mode, w, h, g_menu_w, g_menu_h);
 }
 
+/* The game's own character shadows, Config > Shadows (option 58: 0 Normal, the blob under each
+ * character; 1 Off; 2 High), Off while the sun's shadows are drawn and characters cast them - what
+ * gameshadows decides for the projected one draw by draw (d3d8.c game_shadow_hidden): 0 auto, 1 the
+ * game's always, 2 never. Put back after two seconds without them (night, a Mog House, the effects
+ * off), not to flip with each frame. The player's value is kept in modern.cfg while it is held: the
+ * game saves Off into cnf.dat at logout, and loads it with the character. */
+static void game_shadows_follow(void)
+{
+    enum { SHADOWS = 58, OFF = 1 };
+    static int idle;
+    float mode = gfx_fx_get("gameshadows");
+    int off = mode == 2.0f ||
+              (mode != 1.0f && gfx_fx_get("sun_casters") != 2.0f && gfx_sun_shadows_shown());
+    idle = off ? 0 : idle + 1;
+    if (!off && (g_own_shadows < 0 || idle < 4))
+        return;
+    int cur = (int)guest_call(CONFIG_GET, 1, (uint32_t[]){ SHADOWS });
+    if (cur < 0 || cur > 2) /* not yet: no config */
+        return;
+    int own = g_own_shadows;
+    if (off && cur != OFF)
+    {
+        guest_call(CONFIG_SET, 2, (uint32_t[]){ SHADOWS, OFF });
+        own = cur;
+    }
+    else if (!off)
+    {
+        if (cur == OFF)
+            guest_call(CONFIG_SET, 2, (uint32_t[]){ SHADOWS, (uint32_t)g_own_shadows });
+        own = -1;
+    }
+    if (own != g_own_shadows)
+    {
+        fprintf(stderr, "[modern] the game's shadows: %s\n", own >= 0 ? "off while the sun's are drawn" : "the player's again");
+        g_own_shadows = own, g_host_touched = 1;
+        save();
+    }
+}
+
 void modern_frame(void)
 {
     static int state; /* 0 waiting for the menus, 1 in, -1 not this build */
@@ -2267,6 +2311,7 @@ void modern_frame(void)
         install();
         state = 2;
     }
+    game_shadows_follow();
 }
 
 void modern_init(const ModernSetup* setup)
@@ -2309,5 +2354,11 @@ void modern_init(const ModernSetup* setup)
         g_hide = (unsigned)strtoul(buf, NULL, 10) & ((1u << NHIDE) - 1);
         if (g_hide >> HIDE_OLD_MAGIC_TRUST & 1)
             g_hide = (g_hide & ~(1u << HIDE_OLD_MAGIC_TRUST)) | 1u << HIDE_TRUST;
+    }
+    if (cfg_value(path, "game_shadows", buf, sizeof buf))
+    {
+        long v = strtol(buf, NULL, 10);
+        if (v == 0 || v == 2)
+            g_own_shadows = (int)v;
     }
 }

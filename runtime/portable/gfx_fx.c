@@ -62,8 +62,9 @@ static const struct
     { "sun_casters", offsetof(GfxFxSettings, sun_casters), 0.0f },
     /* long shadows kept at dawn and dusk, fading only in the sun's last three degrees (0: from fifteen) */
     { "sun_dusk", offsetof(GfxFxSettings, sun_dusk), 1.0f },
-    /* not an effect: the game's own character shadows (d3d8.c game_shadow_hidden): 0 off while the
-     * sun's are on, 1 always, 2 never */
+    /* not an effect: the game's own character shadows (d3d8.c game_shadow_hidden, and its Config >
+     * Shadows held at Off: host/modern.c game_shadows_follow): 0 off while the sun's are on, 1
+     * always, 2 never */
     { "gameshadows", offsetof(GfxFxSettings, gameshadows), 0.0f },
     /* how much of the sun's shadows stay in a Mog House (gfx_set_moghouse), 0 none to 1 all */
     { "moghouse", offsetof(GfxFxSettings, moghouse), 0.0f },
