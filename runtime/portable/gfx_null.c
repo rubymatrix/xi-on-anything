@@ -62,6 +62,8 @@ static void prof_frame(uint64_t present_start)
 }
 
 /* --- the device, which draws nothing ------------------------------------------------------------------ */
+uint64_t gfx_window_flags(void) { return 0; }
+
 int gfx_init(void* sdl_window, int vsync)
 {
     (void)sdl_window, (void)vsync;

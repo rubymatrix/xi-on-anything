@@ -1120,7 +1120,7 @@ int main(int argc, char** argv)
     SDL_Window* win = NULL;
     if (argc > 1 && !strcmp(argv[1], "--window"))
     {
-        if (!SDL_Init(SDL_INIT_VIDEO) || !(win = SDL_CreateWindow("gfx_test", 640, 360, 0)))
+        if (!SDL_Init(SDL_INIT_VIDEO) || !(win = SDL_CreateWindow("gfx_test", 640, 360, (SDL_WindowFlags)gfx_window_flags())))
         {
             printf("no window: %s\n", SDL_GetError());
             return 1;
