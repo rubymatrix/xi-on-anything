@@ -296,8 +296,7 @@ def app(game, a):
     shutil.copy(os.path.join(ROOT, 'ffxi.reg'), res)
     shutil.copy(os.path.join(ROOT, 'assets', 'icon.icns'), res)
     shutil.copy(os.path.join(ROOT, 'build', 'runtime.json'), res)  # the launcher's rebuild check
-    if os.path.isdir(os.path.join(ROOT, 'assets', 'textures')):
-        shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(res, 'textures'))
+    shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(res, 'textures'))  # bundled hi-res packs
     keys = {'FFXIGameFolder': game}
     if a.server:
         keys['FFXIServer'] = a.server
