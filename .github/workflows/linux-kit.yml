@@ -1,0 +1,36 @@
+# The Linux kit (tools/linux/kit.sh) for the launcher's Linux and Steam Deck installs: built from each
+# push to main and republished under the kit-linux pre-release, with the commit its sources are in
+# (kit.json), which the launcher downloads beside it.
+name: linux-kit
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  kit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config python3-pip \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            libvulkan-dev
+          pip3 install --break-system-packages capstone pefile
+          curl -fsSL https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz | sudo tar xJ -C /opt
+          sudo ln -s /opt/zig-x86_64-linux-0.14.1/zig /usr/local/bin/zig
+      - name: Kit
+        run: XI_COMMIT=${{ github.sha }} tools/linux/kit.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view kit-linux >/dev/null 2>&1 || \
+            gh release create kit-linux --prerelease --title "Linux kit" \
+              --notes "What the launcher builds the Linux client from (tools/linux/kit.sh). Replaced on every push to main."
+          gh release upload kit-linux build/xi-kit-linux-x86_64.tar.gz --clobber

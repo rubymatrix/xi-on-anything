@@ -103,6 +103,19 @@ builds the game from your own game files and keeps both up to date. Run the same
 reinstall. The app is not signed with an Apple Developer ID yet, so a copy downloaded in a browser
 is blocked by macOS: use the line above instead.
 
+### Steam Deck and Linux (x86_64)
+
+Once, in Desktop Mode (on a Deck: Steam menu, Power, Switch to Desktop; then open Konsole), paste the
+same line. It installs the launcher as an AppImage in `~/Applications`, adds **XI on Anything** to
+Steam (Library, Non-Steam) and to the applications menu. Back in Game Mode, everything else happens
+there, with the controller: pick your game folder (the launcher finds installs in your home folder,
+on an SD card and in Proton prefixes), and it builds the game for your Deck from your own files
+(a while, once per game update), keeps itself up to date, and starts the game full screen.
+
+Nothing to install first: the launcher fetches its compiler (zig) and the prebuilt rest of the client
+(the Linux kit, `tools/linux/kit.sh`) itself. Needs glibc 2.35 or later and Vulkan 1.3 (a Deck,
+and any current distribution with Mesa or NVIDIA's driver).
+
 ## Install from source
 
 To build the game straight from this repo without the launcher, you need a Mac with Apple silicon
@@ -199,6 +212,25 @@ build/gfx_test --window                  # the same, then two seconds of frames 
 
 Run `prepare` again whenever the install changes (a new game version); `host64` and `boot64`
 re-translate and rebuild what changed.
+
+### Linux (x86_64)
+
+Vulkan 1.3 (`runtime/portable/gfx_vulkan.c`), SDL3 from the system (3.2 or later, through
+pkg-config), glslang for the shaders. `tools/linux/Dockerfile` is a box with all of it, and Mesa's
+software Vulkan for the tests:
+
+```
+docker build -t xi-linux tools/linux
+docker run --rm -v "$PWD":/src -w /src xi-linux python3 tools/build_posix.py gfxtest
+docker run --rm -v "$PWD":/src -v "<FINAL FANTASY XI>":/game:ro -w /src xi-linux \
+    sh -c 'python3 tools/build_posix.py prepare --game /game && python3 tools/build_posix.py host64 --game /game'
+    # FFXI_VK_VALIDATION=1: the Khronos validation layer
+```
+
+The kit the launcher builds the Steam Deck's client from is `tools/linux/kit.sh` (zig, static SDL3
+and glslang; CI publishes it as the `kit-linux` pre-release): everything that is not the game,
+prebuilt, so the player's machine needs only zig and python3 to make `host64` from their files
+(`build_posix.py host64 --kit`).
 
 ### Windows
 

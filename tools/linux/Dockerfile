@@ -20,3 +20,8 @@ RUN curl -fsSL https://github.com/libsdl-org/SDL/releases/download/release-$SDL/
  && cmake --build /tmp/sdlb && cmake --install /tmp/sdlb && rm -rf /tmp/SDL3-$SDL /tmp/sdlb && ldconfig
 # screenshots of a window under Xvfb (xwd | xwdtopnm | pnmtopng) for smoke tests
 RUN apt-get update && apt-get install -y --no-install-recommends x11-apps netpbm && rm -rf /var/lib/apt/lists/*
+# zig: the kit's compilers (tools/linux/kit.sh), as the launcher's on the player's machine
+ARG ZIG=0.14.1
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL https://ziglang.org/download/$ZIG/zig-$(uname -m)-linux-$ZIG.tar.xz | tar xJ -C /opt \
+ && ln -s /opt/zig-$(uname -m)-linux-$ZIG/zig /usr/local/bin/zig
