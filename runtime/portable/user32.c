@@ -207,6 +207,8 @@ static void sdl_up(void)
      * (it starts SDL first, with the player's choice) */
     if (!SDL_GetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES))
         SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
+    /* a held key repeats, as on Windows, not macOS's accent menu (the game's text input is always on) */
+    SDL_SetHint(SDL_HINT_MAC_PRESS_AND_HOLD, "0");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD))
         rt_log("[recomp] SDL_Init: %s\n", SDL_GetError());
     g_sdl_up = 1;

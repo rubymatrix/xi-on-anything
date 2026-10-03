@@ -1367,6 +1367,8 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
      * move between it and the other desktops) or in place over the desktop. SDL reads this when it
      * starts, for the whole run: the game's window (user32) keeps it. */
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, c->space ? "1" : "0");
+    /* a held key repeats, not macOS's accent menu; read when SDL starts, so the game's window too */
+    SDL_SetHint(SDL_HINT_MAC_PRESS_AND_HOLD, "0");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
     {
         fprintf(stderr, "[signin] SDL_Init: %s\n", SDL_GetError());
