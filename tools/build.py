@@ -304,7 +304,8 @@ def host64(env):
     # real ones (win32_ffi.c is empty on Windows); ones in other DLLs (winmm's PlaySound, shell32) need
     # xi.lua to ffi.load the real DLL there rather than map it to ffi.C.
     objs.append(host_resources(env, 'build\\host64'))
-    run(['link', '/nologo', '/OUT:build\\host64.exe', '/MACHINE:X64', sdl_lib] + HOST_LIBS + objs, env)
+    # /MAP: tools/sample_report.py reads FFXI_SAMPLE's samples against it
+    run(['link', '/nologo', '/OUT:build\\host64.exe', '/MAP:build\\host64.map', '/MACHINE:X64', sdl_lib] + HOST_LIBS + objs, env)
     shutil.copy(os.path.join(SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, 'build'))
     buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build\\host64.exe; run: build\\host64.exe --game "%s" ...' % BUILD['game'])
