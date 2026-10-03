@@ -26,3 +26,5 @@ int gfx_hlsl_ps1(Sb* b, const GfxFsKey* k, const uint32_t* tokens);
 
 /* The utility functions every device needs (present, the frame-rate overlay), one source. */
 extern const char gfx_hlsl_util[];
+/* The scene effects' passes (fx_vs and a function per pass), one source. */
+extern const char gfx_hlsl_fx[];

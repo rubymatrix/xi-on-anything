@@ -222,6 +222,8 @@ void gfx_resize(uint32_t w, uint32_t h);
  * whole when it changes (into a fresh buffer when the GPU may still read the old contents). */
 GfxBuf* gfx_buf_create(uint32_t size);
 void gfx_buf_destroy(GfxBuf* b);
+/* data stays readable, holding what was uploaded or newer, until the next upload or the destroy: a
+ * back end may read it again on the CPU (Direct3D 12's sun shadows; d3d8.c passes the buffer's own memory) */
 void gfx_buf_upload(GfxBuf* b, const void* data, uint32_t size);
 
 GfxTex* gfx_tex_create(int type, uint32_t d3dfmt, uint32_t w, uint32_t h, uint32_t levels, int use);

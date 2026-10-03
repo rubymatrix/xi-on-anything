@@ -408,14 +408,19 @@ static void join(const char* dir, const char* name, char* out, size_t n)
     snprintf(out, n, "%s%s%s", dir, len && (dir[len - 1] == '/' || dir[len - 1] == '\\') ? "" : "/", name);
 }
 
-/* the scene effects' settings file, as gfx_metal.m finds it */
+/* the scene effects' settings file, as gfx_metal.m and gfx_d3d12.c find it */
 static int fx_file(char* out, size_t n)
 {
     const char* file = getenv("FFXI_FX_FILE");
     if (file && *file)
         return snprintf(out, n, "%s", file), 1;
+#if defined(_WIN32)
+    if (getenv("LOCALAPPDATA"))
+        return snprintf(out, n, "%s\\FFXI\\fx.txt", getenv("LOCALAPPDATA")), 1;
+#else
     if (getenv("HOME"))
         return snprintf(out, n, "%s/Library/Caches/FFXI/fx.txt", getenv("HOME")), 1;
+#endif
     return 0;
 }
 
@@ -427,7 +432,9 @@ static void save_fx(void)
     if (!fx_file(path, sizeof path))
         return;
     char* dir = SDL_strdup(path);
-    char* slash = strrchr(dir, '/');
+    char *slash = strrchr(dir, '/'), *back = strrchr(dir, '\\');
+    if (back > slash)
+        slash = back;
     if (slash)
         *slash = 0, SDL_CreateDirectory(dir);
     SDL_free(dir);
@@ -464,7 +471,7 @@ static void save_fx(void)
     for (int i = 0; i < g_nfx_keys; ++i)
         if (!written[i])
             fprintf(out, "%s=%g\n", g_fx_keys[i], (double)gfx_fx_get(g_fx_keys[i]));
-    if (fclose(out) || rename(tmp, path))
+    if (fclose(out) || !SDL_RenamePath(tmp, path)) /* SDL_RenamePath: rename() on Windows will not replace a file */
         fprintf(stderr, "[modern] cannot replace %s\n", path);
 }
 
@@ -478,8 +485,8 @@ static void save_display(void)
     if (!g_settings_reg[0])
         return;
     snprintf(tmp, sizeof tmp, "%s.new", g_settings_reg);
-    FILE* in = fopen(g_settings_reg, "r");
-    FILE* out = fopen(tmp, "w");
+    FILE* in = fopen(g_settings_reg, "rb"); /* bytes as they are: its line endings are kept (crlf) */
+    FILE* out = fopen(tmp, "wb");
     if (!out)
     {
         if (in)
@@ -512,7 +519,7 @@ static void save_display(void)
     for (int i = 0; i < 7; ++i)
         if (!written[i])
             fprintf(out, "\"%s\"=dword:%08x%s", NAMES[i], (unsigned)v[i], crlf ? "\r\n" : "\n");
-    if (fclose(out) || rename(tmp, g_settings_reg))
+    if (fclose(out) || !SDL_RenamePath(tmp, g_settings_reg))
         fprintf(stderr, "[modern] cannot replace %s\n", g_settings_reg);
     else
         fprintf(stderr, "[modern] display from the next start: mode %d, %dx%d, menus %dx%d, background %d\n", g_mode,
