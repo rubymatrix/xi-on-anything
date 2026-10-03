@@ -227,6 +227,8 @@ def luajit(env, uwp):
     text = open(bat).read()
     extra = ' /MD /DLUAJIT_DISABLE_JIT' if uwp else ' /MT'
     text = text.replace('@set LJCOMPILE=cl /nologo /c /O2 /W3', '@set LJCOMPILE=cl /nologo /c /O2 /W3' + extra, 1)
+    if uwp:  # the interpreter's DynASM source must be generated without the JIT too (buildvm_arch.h)
+        text = text.replace(' -D JIT ', ' ')
     open(bat, 'w').write(text)
     print('> msvcbuild.bat lua52compat static (%s)' % ('uwp' if uwp else 'win'))
     # msvcbuild.bat runs itself and the tools it builds (minilua, buildvm) from the current folder,

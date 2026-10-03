@@ -57,7 +57,12 @@ const char* SDL_GetHint(const char* name) { (void)name; return NULL; }
 bool SDL_GetHintBoolean(const char* name, bool default_value) { (void)name; return default_value; }
 bool SDL_Init(SDL_InitFlags flags) { (void)flags; return true; }
 bool SDL_InitSubSystem(SDL_InitFlags flags) { (void)flags; return true; }
+/* nothing is reported initialized: callers that check (modern.c's display modes, the addons' sounds)
+ * take their paths for no SDL */
+SDL_InitFlags SDL_WasInit(SDL_InitFlags flags) { (void)flags; return 0; }
 bool SDL_SetClipboardText(const char* text) { (void)text; return false; }
+bool SDL_HasClipboardText(void) { return false; }
+char* SDL_GetClipboardText(void) { return (char*)calloc(1, 1); } /* SDL's "" for none, freed with SDL_free */
 
 /* --- the event queue ------------------------------------------------------------------------------ */
 #define QUEUE 1024
@@ -138,6 +143,8 @@ SDL_Window* SDL_GetWindowFromEvent(const SDL_Event* e) { (void)e; return g_have_
 bool SDL_ShowWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_SetWindowTitle(SDL_Window* w, const char* title) { (void)w, (void)title; return true; } /* the app's */
 bool SDL_HideWindow(SDL_Window* w) { (void)w; return true; }
+bool SDL_SetWindowFullscreen(SDL_Window* w, bool on) { (void)w, (void)on; return true; } /* the view is the screen */
+bool SDL_SyncWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_RaiseWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; }
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window* w) { (void)w; return 0; }
@@ -461,3 +468,14 @@ bool SDL_PutAudioStreamData(SDL_AudioStream* s, const void* buf, int len)
         sink((const float*)buf, len / (int)(2 * sizeof(float)));
     return true;
 }
+
+/* The addons' sounds (Windower's and Ashita's play_sound): no WAV loads, so none plays and no stream
+ * of theirs is made; the game's own audio stream above is never destroyed. */
+bool SDL_LoadWAV(const char* path, SDL_AudioSpec* spec, Uint8** buf, Uint32* len)
+{
+    (void)path, (void)spec, (void)buf, (void)len;
+    return false;
+}
+int SDL_GetAudioStreamQueued(SDL_AudioStream* s) { (void)s; return 0; }
+bool SDL_FlushAudioStream(SDL_AudioStream* s) { (void)s; return true; }
+void SDL_DestroyAudioStream(SDL_AudioStream* s) { (void)s; }
