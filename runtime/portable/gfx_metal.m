@@ -152,7 +152,7 @@ static struct
     float fx, ao, radius, grade, sat, contrast, sharpen, filter, aniso, fog, fog_falloff, fog_height, fog_max, fog_sun,
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft, sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw,
         draw_entities, fps, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple, water_scale,
-        water_reflect, water_spec, lod, aa, ao_quality, sun_detail;
+        water_reflect, water_spec, lod, aa, ao_quality, sun_detail, sun_dusk, gameshadows;
 } g_fxs;
 
 /* --- small hash maps (key bytes -> object) ------------------------------------------------------------- */
@@ -2078,7 +2078,12 @@ static const char FX_MSL[] =
     "  float z = u.zp.y / (d * u.hand.x - u.zp.x);\n"
     "  return d >= 0.999999 || !(z * u.hand.x > 0.0) ? 0.0 : z;\n"
     "}\n"
+    /* px a pixel's centre in the target; every draw went through the position fixup (D3D's pixel
+     * centres onto Metal's: half a pixel right and down), so the point it shows is the one half a
+     * pixel up and left of it. Without that, a floor seen at a slant came back below itself - by a
+     * few centimetres a few units out, more farther - and fell into its own shadow. */
     "static float3 view_pos(constant FxU& u, float2 px, float z) {\n"
+    "  px -= 0.5;\n"
     "  float2 ndc = float2((px.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (px.y - u.vp.y) / u.vp.w * 2.0);\n"
     "  float w = z * u.hand.x;\n"
     "  return float3((ndc.x * w - u.proj.z * z) / u.proj.x, (ndc.y * w - u.proj.w * z) / u.proj.y, z);\n"
@@ -2129,7 +2134,7 @@ static const char FX_MSL[] =
     "    float2 ndc = float2(R.x * u.proj.x + R.z * u.proj.z, R.y * u.proj.y + R.z * u.proj.w) / rd;\n"
     "    float2 q = u.vp.xy + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
     "    if (any(q < u.vp.xy) || any(q >= u.vp.xy + u.vp.zw)) break;\n"
-    "    float sd = view_z(u, dt.read(uint2(q))) * u.hand.x;\n"
+    "    float sd = view_z(u, dt.read(uint2(q + 0.5))) * u.hand.x;\n" /* where the fixup drew it */
     "    float in_front = rd - sd;\n"
     /* weaker the farther along the hit: no hard edge where the ray ends */
     "    if (sd > 0.0 && in_front > 0.005 * rd + 0.02 && in_front < u.shadow.z + 0.01 * rd) return 1.0 - fade * (1.0 - a * a);\n"
@@ -2502,6 +2507,7 @@ static struct
     uint32_t tr_live, tr_cached, tr_skipped, tr_depth;
     float tr_strength, tr_day, tr_dl, tr_al, tr_fog[3];
     int fogc_set;
+    float last_cam[3]; /* where the camera was at the last scene (a jump is a new place) */
     struct { uint64_t serial; uint32_t live, cached, skipped, own, depth; float fog[3], dl, al, strength, day, sun[3], cam[3], across; } trace[1200];
     uint32_t ntrace;
     /* the water (water_mode): the scene's camera and light as its draws need them (WaterU, set by
@@ -2560,15 +2566,22 @@ static const struct
     { "light", offsetof(__typeof__(g_fxs), light), 0.0f },
     { "shadow", offsetof(__typeof__(g_fxs), shadow), 0.3f },
     { "shadow_length", offsetof(__typeof__(g_fxs), shadow_length), 0.6f },
-    { "sun", offsetof(__typeof__(g_fxs), sun), 0.5f },
+    { "sun", offsetof(__typeof__(g_fxs), sun), 0.45f },
     { "sun_distance", offsetof(__typeof__(g_fxs), sun_distance), 100.0f },
     { "sun_soft", offsetof(__typeof__(g_fxs), sun_soft), 0.0f },
     { "sun_face", offsetof(__typeof__(g_fxs), sun_face), 0.0f },
-    { "sun_min", offsetof(__typeof__(g_fxs), sun_min), 1.0f },
+    /* 0: no near-surface casters ignored - with positions rebuilt where the fixup drew them
+     * (view_pos), surfaces no longer shade themselves without it */
+    { "sun_min", offsetof(__typeof__(g_fxs), sun_min), 0.0f },
     { "sun_direct", offsetof(__typeof__(g_fxs), sun_direct), 0.5f },
     /* who casts: 0 everything, 1 characters only (the zone's baked lighting has its shadows), 2 the
      * zone only (characters keep the game's own blob shadows) */
-    { "sun_casters", offsetof(__typeof__(g_fxs), sun_casters), 1.0f },
+    { "sun_casters", offsetof(__typeof__(g_fxs), sun_casters), 0.0f },
+    /* long shadows kept at dawn and dusk, fading only in the sun's last three degrees (0: from fifteen) */
+    { "sun_dusk", offsetof(__typeof__(g_fxs), sun_dusk), 1.0f },
+    /* not an effect: the game's own character shadows (d3d8.c game_shadow_hidden): 0 off while the
+     * sun's are on, 1 always, 2 never */
+    { "gameshadows", offsetof(__typeof__(g_fxs), gameshadows), 0.0f },
     /* the near map's reach past the player */
     { "sun_near", offsetof(__typeof__(g_fxs), sun_near), 10.0f },
     /* the near map's texels across, 512 to 8192 (64 MB at 4096, 256 MB at 8192); 0 and 1 are the
@@ -3476,6 +3489,21 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
              * already, and the game tints them for the hour and the weather */
             if ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep))
                 continue;
+            /* this frame's too: more than 96 units outside the map's sides, no shadow of it falls in it */
+            if (cs->has_pos)
+            {
+                float h[4];
+                xform4(h, cs->clip0, clip_world);
+                if (fabsf(h[3]) > 1e-6f)
+                {
+                    float q[3] = { h[0] / h[3], h[1] / h[3], h[2] / h[3] };
+                    float mx = q[0] * k->S[0] + q[1] * k->S[4] + q[2] * k->S[8] + k->S[12];
+                    float my = q[0] * k->S[1] + q[1] * k->S[5] + q[2] * k->S[9] + k->S[13];
+                    float edge = 1.0f + 96.0f * 2.0f / k->across;
+                    if (fabsf(mx) > edge || fabsf(my) > edge)
+                        continue;
+                }
+            }
         }
         else
         {
@@ -3774,11 +3802,19 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
             /* world up in view space: the world's y axis through the inverse view matrix, pointing
              * the way the camera's own up does (FFXI's world y points down) */
+            int gap = g_fx.eased_serial && g_serial - g_fx.eased_serial > 30; /* half a second with no scene: a fade, a loading screen */
             g_fx.eased = g_fx.eased_serial && g_fx.eased_serial + 1 == g_serial;
             g_fx.eased_serial = g_serial;
             float inv[16], up[3];
             if (mat_inverse(inv, s->view))
             {
+                /* a new place (the camera jumped, or a gap: logging in, a zone change, a moghouse): what
+                 * is eased and the sun held take this one's at once - eased from the last place's, the
+                 * sun's strength outdoors shaded a room from its ceiling for the seconds it took to fade */
+                float jx = inv[12] - g_fx.last_cam[0], jy = inv[13] - g_fx.last_cam[1], jz = inv[14] - g_fx.last_cam[2];
+                if (gap || jx * jx + jy * jy + jz * jz > 50.0f * 50.0f)
+                    g_fx.eased = 0, g_fx.fogc_set = 0, g_fx.sunw_seen = 0;
+                memcpy(g_fx.last_cam, inv + 12, 12);
                 float sign = inv[5] < 0.0f ? -1.0f : 1.0f;
                 up[0] = inv[1] * sign, up[1] = inv[5] * sign, up[2] = inv[9] * sign;
                 normalize3(up);
@@ -3835,7 +3871,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 memcpy(u.suncol, g_fx.suncol, 12);
                 /* shadows while the sun (or moon) is up: fading as it nears the horizon */
                 float e = g_fx.sun[0] * g_fx.up[0] + g_fx.sun[1] * g_fx.up[1] + g_fx.sun[2] * g_fx.up[2];
-                float day = fminf(fmaxf((e - 0.05f) / 0.15f, 0.0f), 1.0f);
+                float day = g_fxs.sun_dusk != 0.0f ? fminf(fmaxf(e / 0.05f, 0.0f), 1.0f) : fminf(fmaxf((e - 0.05f) / 0.15f, 0.0f), 1.0f);
                 if (own)
                 {
                     float dl = 0.2126f * s->sun_color[0] + 0.7152f * s->sun_color[1] + 0.0722f * s->sun_color[2];

@@ -3020,7 +3020,7 @@ static struct
     /* the profile (FFXI_PROFILE): scenes by how they ended and where the camera came from, 3D draws
      * after the effects ran, and screen-space or undepth-tested draws onto the scene before them
      * (what the effects would shade) */
-    uint32_t st_frames, st_why[4], st_cam[3], st_late, st_over, st_over_rhw;
+    uint32_t st_frames, st_why[4], st_cam[3], st_late, st_over, st_over_rhw, st_game_shadows;
     /* the trace (scene_trace): what each of the last frames did with the world's scene */
     uint32_t frame, tr_late, tr_draws, tr_targets;
     char tr_why;
@@ -3035,9 +3035,33 @@ static struct
  * direction is its latest, so the sun still moves through the day. */
 static struct
 {
-    struct { float dir[3], color[4], score; } c[8];
+    struct { float dir[3], color[4], score, fresh; } c[8]; /* fresh: its votes in this scene alone */
     int cur, chal, chal_frames; /* the sun, the light overtaking it and for how many frames; -1 none */
+    float cam[3];               /* where the last scene's camera stood (a jump is a new place) */
+    int have_cam;
+    uint32_t idle;              /* frames since a world scene was last drawn (a gap is a new place too) */
 } g_sunv = { .cur = -1, .chal = -1 };
+
+/* A new place (the camera jumped, or half a second went by with no world drawn: the world after the
+ * lobby's character select and the fade in, a zone change, a moghouse): the votes from before are
+ * another place's lights - the lobby's, the last zone's sun - and scored over hundreds of frames, the
+ * new sun took seconds to outscore them, the shadows falling from the old light and swinging as the
+ * new ones overtook it. Only this scene's votes count, and the sun is chosen again. */
+static void sun_new_place(const float* view)
+{
+    float cam[3];
+    for (int j = 0; j < 3; ++j) /* the view's translation back through its rotation */
+        cam[j] = -(view[12] * view[j * 4] + view[13] * view[j * 4 + 1] + view[14] * view[j * 4 + 2]);
+    float dx = cam[0] - g_sunv.cam[0], dy = cam[1] - g_sunv.cam[1], dz = cam[2] - g_sunv.cam[2];
+    if (g_sunv.have_cam && (dx * dx + dy * dy + dz * dz > 50.0f * 50.0f || g_sunv.idle >= 30))
+    {
+        for (int i = 0; i < 8; ++i)
+            g_sunv.c[i].score = g_sunv.c[i].fresh;
+        g_sunv.cur = g_sunv.chal = -1;
+    }
+    memcpy(g_sunv.cam, cam, sizeof cam);
+    g_sunv.have_cam = 1;
+}
 
 static void sun_vote(const float* w, const float* color, float weight)
 {
@@ -3057,13 +3081,14 @@ static void sun_vote(const float* w, const float* color, float weight)
     {
         if (low < 0)
             return;
-        at = low, g_sunv.c[at].score = 0.0f;
+        at = low, g_sunv.c[at].score = g_sunv.c[at].fresh = 0.0f;
         if (g_sunv.chal == at)
             g_sunv.chal = -1;
     }
     memcpy(g_sunv.c[at].dir, w, 12);
     memcpy(g_sunv.c[at].color, color, 16);
     g_sunv.c[at].score += weight;
+    g_sunv.c[at].fresh += weight;
 }
 
 /* the frame's sun from the votes so far */
@@ -3126,8 +3151,11 @@ static void scene_finish(const char* why)
     {
         /* the sun the votes chose, into this scene's camera space; w = 1 when lit draws voted in this
          * scene (without, the back end holds the last sun) */
-        int sun = sun_pick();
         GfxScene* sc = &g_scene.s;
+        sun_new_place(sc->view);
+        int sun = sun_pick();
+        for (int i = 0; i < 8; ++i)
+            g_sunv.c[i].fresh = 0.0f;
         sc->sun_dir[3] = 0.0f;
         if (sun >= 0 && g_scene.sun_draw)
         {
@@ -3310,6 +3338,7 @@ static void scene_present(void)
         if (g_scene.tally[i].t && g_scene.tally[i].n > best)
             best = g_scene.tally[i].n, g_scene.world = g_scene.tally[i].t;
     scene_trace(world_before);
+    g_sunv.idle = g_scene.world_done ? 0 : g_sunv.idle + 1; /* frames with no world drawn (a fade, a loading screen) */
     g_scene.world_done = 0;
     for (int i = 0; i < 8; ++i)
         g_sunv.c[i].score *= 0.99f;
@@ -3318,12 +3347,12 @@ static void scene_present(void)
     if (gfx_profiling && ++g_scene.st_frames == 120)
     {
         fprintf(stderr, "[recomp] d3d8: scenes (120 frames, the last on %s): ended sampled %u, interface %u, present %u, switch %u; camera fogged %u, "
-            "unfogged %u, none %u; 3D after the effects %u; over the scene before them %u (%u screen-space)\n",
+            "unfogged %u, none %u; 3D after the effects %u; over the scene before them %u (%u screen-space); the game's own shadows left out %u\n",
             g_scene.rt == g_scene.world ? "the world's view" : "another target", g_scene.st_why[0], g_scene.st_why[1], g_scene.st_why[2],
             g_scene.st_why[3], g_scene.st_cam[2], g_scene.st_cam[1], g_scene.st_cam[0],
-            g_scene.st_late, g_scene.st_over, g_scene.st_over_rhw);
+            g_scene.st_late, g_scene.st_over, g_scene.st_over_rhw, g_scene.st_game_shadows);
         memset(g_scene.st_why, 0, sizeof g_scene.st_why), memset(g_scene.st_cam, 0, sizeof g_scene.st_cam);
-        g_scene.st_frames = g_scene.st_late = g_scene.st_over = g_scene.st_over_rhw = 0;
+        g_scene.st_frames = g_scene.st_late = g_scene.st_over = g_scene.st_over_rhw = g_scene.st_game_shadows = 0;
     }
     g_scene.done = 0;
     g_scene.cam_draw = g_scene.sun_draw = g_scene.cam_rank = 0;
@@ -3427,12 +3456,40 @@ static int menu_target(const Obj* o)
     return t && t->kind == O_TEXTURE && (t->usage & USAGE_RENDERTARGET) && ui_box_shape(t->width, t->height);
 }
 
+/* FFXI's own character shadow: the character drawn into a render target of the game's, then that
+ * texture projected onto the ground around it - a blended 3D draw sampling, through projected
+ * coordinates, a texture the game renders into. gameshadows (a scene-effect setting): 0 auto, off
+ * while the sun's own shadows are on and characters cast them (the two would double); 1 always the
+ * game's; 2 never. */
+static int game_shadow_hidden(const GfxDraw* d)
+{
+    if (d->vs.rhw || !d->pipe.blend || d->fs.prog)
+        return 0;
+    float mode = gfx_fx_get("gameshadows");
+    if (mode == 1.0f)
+        return 0;
+    if (mode != 2.0f && !(gfx_fx_get("fx") != 0.0f && gfx_fx_get("sun") > 0.0f && gfx_fx_get("sun_casters") != 2.0f))
+        return 0;
+    for (int i = 0; i < d->fs.nstages && i < 8; ++i)
+    {
+        const Obj* t = obj(g_dev.cur.tex[i]);
+        if (d->fs.st[i].tex == 1 && d->fs.st[i].projected && t && t->kind == O_TEXTURE && (t->usage & USAGE_RENDERTARGET))
+            return 1;
+    }
+    return 0;
+}
+
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
     uint32_t up_data, uint32_t up_stride, uint32_t n)
 {
     GfxDraw* d = &g_draw;
     if (!build_draw(d))
         return;
+    if (game_shadow_hidden(d))
+    {
+        g_scene.st_game_shadows++;
+        return;
+    }
     uint32_t first = start, nverts = n;
     if (indices)
     {
