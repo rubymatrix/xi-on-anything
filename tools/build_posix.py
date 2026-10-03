@@ -40,6 +40,8 @@ ROOT = build.ROOT
 GEN_FFXI_IMAGE = build.FFXI_IMAGE
 CFLAGS = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-fno-strict-aliasing', '-I', 'runtime', '-I', 'runtime/portable',
           '-I', 'generated', '-I', 'third_party/stb']
+if sys.platform != 'darwin':
+    CFLAGS.append('-D_GNU_SOURCE')  # glibc hides POSIX (strdup, getaddrinfo, sigaction) under -std=c11
 # the generated C: every label and local is emitted whether used or not
 GEN_WARNINGS = ['-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-set-variable', '-Wno-unused-function',
                 '-Wno-parentheses-equality', '-Wno-unreachable-code']
@@ -192,7 +194,7 @@ def addons():
         thirdparty.build(name)
         cflags += thirdparty.flags(name)
         libs += thirdparty.libs(name)
-    return cflags, libs + ['-lc++']
+    return cflags, libs + (['-lc++'] if sys.platform == 'darwin' else ['-lstdc++', '-ldl'])
 
 
 def host64(game):

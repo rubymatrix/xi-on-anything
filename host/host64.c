@@ -626,13 +626,18 @@ static void report_overlay(const char* name, unsigned files)
     rt_log("[recomp] dats: %s, %u files\n", name, files);
 }
 
-#ifdef __APPLE__
+#ifndef _WIN32
 #include <SDL3/SDL.h>
+#include <signal.h>
 #include <unistd.h>
 #endif
 
 int main(int argc, char** argv)
 {
+#ifndef _WIN32
+    /* a write to a closed socket (the game's, the sign-in's TLS, Discord's) is an error, not a signal */
+    signal(SIGPIPE, SIG_IGN);
+#endif
 #ifdef __APPLE__
     /* started from Finder or the Dock (an app bundle, no terminal): the log goes to host64.log
      * beside the sign-in screen's files */
@@ -1106,7 +1111,7 @@ int main(int argc, char** argv)
         if (!off || strcmp(off, "0"))
         {
             const char* where = data_dir;
-#ifdef __APPLE__
+#ifndef _WIN32
             char* pref = NULL;
             if (!where)
                 where = pref = SDL_GetPrefPath("FFXIRecompile", "FFXI");
@@ -1115,7 +1120,7 @@ int main(int argc, char** argv)
             addons_init(&as);
             modern_set_addons(addons_menu());
             g_addons_on = 1;
-#ifdef __APPLE__
+#ifndef _WIN32
             SDL_free(pref);
 #endif
         }

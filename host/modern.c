@@ -34,6 +34,7 @@
 #include <SDL3/SDL.h>
 
 #include "build.h"
+#include "cachedir.h"
 #include "d3d8.h"
 #include "datui.h"
 #include "gfx.h"
@@ -408,19 +409,15 @@ static void join(const char* dir, const char* name, char* out, size_t n)
     snprintf(out, n, "%s%s%s", dir, len && (dir[len - 1] == '/' || dir[len - 1] == '\\') ? "" : "/", name);
 }
 
-/* the scene effects' settings file, as gfx_metal.m and gfx_d3d12.c find it */
+/* the scene effects' settings file, as the graphics back ends find it (cachedir.h) */
 static int fx_file(char* out, size_t n)
 {
     const char* file = getenv("FFXI_FX_FILE");
+    char dir[900];
     if (file && *file)
         return snprintf(out, n, "%s", file), 1;
-#if defined(_WIN32)
-    if (getenv("LOCALAPPDATA"))
-        return snprintf(out, n, "%s\\FFXI\\fx.txt", getenv("LOCALAPPDATA")), 1;
-#else
-    if (getenv("HOME"))
-        return snprintf(out, n, "%s/Library/Caches/FFXI/fx.txt", getenv("HOME")), 1;
-#endif
+    if (cache_dir(dir, sizeof dir))
+        return snprintf(out, n, "%s/fx.txt", dir), 1;
     return 0;
 }
 
