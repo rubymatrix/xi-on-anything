@@ -15,6 +15,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -22,6 +23,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 NAMES = ('sdl3', 'mbedtls', 'luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
 MIN_MACOS = '12.0'
+# the compilers: clang, or what XI_CC / XI_CXX name (the Linux kit's zig cc, tools/linux/kit.sh)
+CC = shlex.split(os.environ.get('XI_CC', 'clang'))
+CXX = shlex.split(os.environ.get('XI_CXX', 'clang++'))
 
 
 def manifest(name):
@@ -40,7 +44,8 @@ def system(name):
 
 
 def pkg_config(name, what):
-    r = subprocess.run(['pkg-config', what, name], capture_output=True, text=True)
+    static = ['--static'] if os.environ.get('XI_STATIC') else []  # the kit: SDL3 linked in, with what it needs
+    r = subprocess.run(['pkg-config', what] + static + [name], capture_output=True, text=True)
     if r.returncode:
         raise SystemExit('%s: not found with pkg-config (install SDL 3.2 or later and its development files)' % name)
     return r.stdout.split()
@@ -79,7 +84,7 @@ def build_make(name, m, out, stamp, key):
         shutil.rmtree(work)
     shutil.copytree(os.path.join(ROOT, 'third_party', name), work)
     env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET=MIN_MACOS)
-    r = subprocess.run(['make', '-C', 'src', '-j%d' % (os.cpu_count() or 4), 'BUILDMODE=static', 'CC=clang',
+    r = subprocess.run(['make', '-C', 'src', '-j%d' % (os.cpu_count() or 4), 'BUILDMODE=static', 'CC=' + ' '.join(CC),
                         'XCFLAGS=-DLUAJIT_ENABLE_LUA52COMPAT', 'libluajit.a'],
                        cwd=work, env=env, capture_output=True, text=True)
     if r.returncode:
@@ -98,7 +103,8 @@ def build(name, progress=None):
     lib = os.path.join(ROOT, 'third_party', name)
     out = archive(name)
     stamp = out + '.stamp'
-    key = hashlib.sha256(json.dumps(m, sort_keys=True).encode() + MIN_MACOS.encode() + tree_stamp(name).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps(m, sort_keys=True).encode() + MIN_MACOS.encode() + tree_stamp(name).encode() +
+                         ' '.join(CC + CXX).encode()).hexdigest()
     if os.path.exists(out) and os.path.exists(stamp) and open(stamp).read() == key:
         return out
     os.makedirs(os.path.join(ROOT, 'build', 'third_party'), exist_ok=True)
@@ -108,7 +114,7 @@ def build(name, progress=None):
     os.makedirs(objdir, exist_ok=True)
     jobs = []
     for n, g in enumerate(m['groups']):
-        base = (['clang', '-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' else [])
+        base = (CC + ['-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' else [])
                 + g['flags']
                 + ['-I' + os.path.join(lib, d) for d in g['include']]
                 + sum((['-idirafter', os.path.join(lib, d)] for d in g['idirafter']), []))
@@ -117,7 +123,7 @@ def build(name, progress=None):
             arc = ['-fobjc-arc'] if src.endswith('.m') else []
             cmd = base + arc + ['-c', os.path.join(lib, src), '-o', obj]
             if src.endswith('.cpp'):
-                cmd[0] = 'clang++'
+                cmd = CXX + cmd[len(CC):]
             jobs.append((obj, cmd))
     done = 0
     with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as ex:
