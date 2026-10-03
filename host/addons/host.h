@@ -53,6 +53,8 @@ int xi_addon_load(const char* name, int kind);
 /* Unload now, or as soon as no Lua is running. */
 void xi_addon_unload(Addon* a);
 void xi_addon_reload(Addon* a);
+/* A built-in addon (xi kind) whose source is embedded: host/addons/lua/<name>.lua. */
+int xi_addon_load_builtin(const char* name);
 /* The addon whose Lua is running on this thread (NULL outside Lua). */
 Addon* xi_current(void);
 /* An error from an addon (Lua error text, first line to chat once, all to the log). */
@@ -135,6 +137,10 @@ int xi_unbind(const char* key);
 void xi_bind_list(void);
 /* DIK key state as the game last read it. */
 int xi_key_down(uint32_t dik);
+/* A key name as binds take it ("enter", "numpad5", "f1"; "0x1C" for a DIK code): its DIK code, or -1. */
+int xi_key_code(const char* name);
+/* Presses (down 1) or releases a key for the game, as the keyboard would (focus or not). */
+void xi_key_inject(uint32_t dik, int down);
 
 /* --- the overlay (gui.cpp) ------------------------------------------------------------------- */
 

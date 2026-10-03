@@ -648,6 +648,8 @@ static void addon_free(Addon* a)
     free(a);
 }
 
+static int g_builtin; /* xi_addon_load_builtin: the source is embedded (host/addons/lua/<name>.lua) */
+
 int xi_addon_load(const char* name, int kind)
 {
     if (!name || !*name || strchr(name, '/') || strchr(name, '\\') || strstr(name, ".."))
@@ -668,6 +670,20 @@ int xi_addon_load(const char* name, int kind)
     Addon* a = (Addon*)calloc(1, sizeof *a);
     snprintf(a->name, sizeof a->name, "%s", name);
     int found = 0;
+    size_t size = 0;
+    char* src = NULL;
+    if (g_builtin)
+    {
+        const char* e = xi_embedded(name, &size);
+        if (e && (src = (char*)malloc(size + 1)) != NULL)
+        {
+            memcpy(src, e, size);
+            src[size] = 0;
+            a->kind = XI_KIND_XI, found = 1;
+            snprintf(a->dir, sizeof a->dir, "%s", xi_kind_root(XI_KIND_XI));
+            snprintf(a->file, sizeof a->file, "%s(built in %s)", xi_kind_root(XI_KIND_XI), name);
+        }
+    }
     static const int ORDER[] = { XI_KIND_XI, XI_KIND_ASHITA, XI_KIND_WINDOWER };
     for (unsigned i = 0; i < 3 && !found; ++i)
         if (kind < 0 || kind == ORDER[i])
@@ -679,8 +695,8 @@ int xi_addon_load(const char* name, int kind)
         free(a);
         return 0;
     }
-    size_t size;
-    char* src = read_file(a->file, &size);
+    if (!src)
+        src = read_file(a->file, &size);
     if (!src)
     {
         chatf("addon: cannot read %s", a->file);
@@ -769,6 +785,14 @@ int xi_addon_load(const char* name, int kind)
     xi_log("loaded %s (%s) from %s", a->name, xi_kind_name[a->kind], a->file);
     chatf("addon: loaded %s (%s)", a->name, xi_kind_name[a->kind]);
     return 1;
+}
+
+int xi_addon_load_builtin(const char* name)
+{
+    g_builtin = 1;
+    int ok = xi_addon_load(name, XI_KIND_XI);
+    g_builtin = 0;
+    return ok;
 }
 
 static void unload_now(Addon* a)
@@ -998,6 +1022,13 @@ void addons_frame(void)
 {
     if (g_shut)
         return;
+    if (!g_started)
+    {
+        /* FFXI_CONTROL=<port> (1: the default): the control port (lua/control.lua, tools/xi_mcp.py) */
+        const char* c = getenv("FFXI_CONTROL");
+        if (c && *c && strcmp(c, "0"))
+            xi_addon_load_builtin("control");
+    }
     g_started = 1;
     xi_patch_watch();
     xi_cmd_frame();

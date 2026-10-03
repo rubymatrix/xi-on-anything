@@ -71,6 +71,22 @@ static const char* name_of_dik(uint8_t d)
     return "?";
 }
 
+int xi_key_code(const char* name)
+{
+    if (!name || !*name)
+        return -1;
+    int d = dik_of_name(name);
+    if (d < 0 && name[0] == '0' && (name[1] == 'x' || name[1] == 'X'))
+        d = (int)strtol(name, NULL, 16);
+    return d > 0 && d < 256 ? d : -1;
+}
+
+void xi_key_inject(uint32_t dik, int down)
+{
+    if (dik && dik < 256)
+        input_inject_key((uint8_t)dik, down);
+}
+
 /* --- binds ------------------------------------------------------------------------------------ */
 
 enum

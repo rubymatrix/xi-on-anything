@@ -1105,6 +1105,42 @@ static void apply_targets(void);
 static void (*g_after_present)(void);
 static int native_size(uint32_t w, uint32_t h, uint32_t* pw, uint32_t* ph);
 
+static char g_capture_path[1024];
+static uint32_t g_capture_serial, g_capture_w, g_capture_h, g_capture_fmt;
+static int g_capture_ok;
+
+void d3d8_capture(const char* path) { snprintf(g_capture_path, sizeof g_capture_path, "%s", path ? path : ""); }
+
+uint32_t d3d8_capture_result(uint32_t* w, uint32_t* h, uint32_t* format, int* ok)
+{
+    *w = g_capture_w, *h = g_capture_h, *format = g_capture_fmt, *ok = g_capture_ok;
+    return g_capture_serial;
+}
+
+static void capture_frame(Obj* bb)
+{
+    g_capture_ok = 0;
+    if (bb && bb->gpu && !fmt_block(bb->format))
+    {
+        uint32_t pitch = fmt_pitch(bb->format, bb->width);
+        uint8_t* px = (uint8_t*)malloc((size_t)pitch * bb->height);
+        FILE* f = px ? fopen(g_capture_path, "wb") : NULL;
+        if (f)
+        {
+            gfx_tex_read(bb->gpu, 0, 0, px, pitch);
+            uint32_t head[4] = { 0x31464958u /* "XIF1" */, bb->width, bb->height, bb->format };
+            g_capture_ok = fwrite(head, sizeof head, 1, f) == 1 && fwrite(px, (size_t)pitch * bb->height, 1, f) == 1;
+            g_capture_ok &= fclose(f) == 0;
+            g_capture_w = bb->width, g_capture_h = bb->height, g_capture_fmt = bb->format;
+        }
+        free(px);
+    }
+    if (!g_capture_ok)
+        rt_log("[recomp] d3d8: frame capture to %s failed\n", g_capture_path);
+    g_capture_path[0] = 0;
+    g_capture_serial++;
+}
+
 static void IDirect3DDevice8_Present(Guest* g)
 {
     cap_present();
@@ -1115,6 +1151,8 @@ static void IDirect3DDevice8_Present(Guest* g)
     Obj* bb = obj(g_dev.backbuffer);
     if (g_overlay && bb && bb->gpu)
         g_overlay(bb->gpu, bb->width, bb->height);
+    if (g_capture_path[0])
+        capture_frame(bb);
     gfx_present(bb ? bb->gpu : NULL);
     if (g_after_present)
         g_after_present();

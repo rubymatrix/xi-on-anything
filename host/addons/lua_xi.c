@@ -581,6 +581,23 @@ static int u_screen(lua_State* L)
     lua_pushnumber(L, h);
     return 2;
 }
+/* capture(path): the next frame to a file (d3d8_capture); capture_result() -> serial, ok, w, h, format */
+static int u_capture(lua_State* L)
+{
+    d3d8_capture(luaL_checkstring(L, 1));
+    return 0;
+}
+static int u_capture_result(lua_State* L)
+{
+    uint32_t w, h, f;
+    int ok;
+    lua_pushnumber(L, d3d8_capture_result(&w, &h, &f, &ok));
+    lua_pushboolean(L, ok);
+    lua_pushnumber(L, w);
+    lua_pushnumber(L, h);
+    lua_pushnumber(L, f);
+    return 5;
+}
 static int u_wants(lua_State* L)
 {
     lua_pushboolean(L, xi_gui_wants_mouse());
@@ -603,7 +620,7 @@ static const luaL_Reg UI[] = {
     { "prim_new", u_prim_new }, { "prim_delete", u_prim_delete }, { "prim_set", u_prim_set }, { "prim_get", u_prim_get },
     { "texture_file", u_texture_file }, { "texture_memory", u_texture_memory }, { "texture_free", u_texture_free },
     { "texture_size", u_texture_size }, { "screen", u_screen }, { "wants", u_wants }, { "in_frame", u_in_frame },
-    { "imgui", u_imgui }, { NULL, NULL },
+    { "imgui", u_imgui }, { "capture", u_capture }, { "capture_result", u_capture_result }, { NULL, NULL },
 };
 
 /* --- xi.packets ------------------------------------------------------------------------------- */
@@ -649,7 +666,25 @@ static int i_key_down(lua_State* L)
     lua_pushboolean(L, xi_key_down((uint32_t)luaL_checknumber(L, 1)));
     return 1;
 }
-static const luaL_Reg INPUT_FNS[] = { { "bind", i_bind }, { "unbind", i_unbind }, { "key_down", i_key_down }, { NULL, NULL } };
+/* code(name) -> DIK code or nil; inject(key, down): key is a DIK code or a name */
+static int i_code(lua_State* L)
+{
+    int d = xi_key_code(luaL_checkstring(L, 1));
+    if (d < 0)
+        return 0;
+    lua_pushinteger(L, d);
+    return 1;
+}
+static int i_inject(lua_State* L)
+{
+    int d = lua_type(L, 1) == LUA_TNUMBER ? (int)lua_tointeger(L, 1) : xi_key_code(luaL_checkstring(L, 1));
+    if (d <= 0 || d > 255)
+        return luaL_error(L, "inject: no key %s", lua_tostring(L, 1));
+    xi_key_inject((uint32_t)d, lua_toboolean(L, 2));
+    return 0;
+}
+static const luaL_Reg INPUT_FNS[] = { { "bind", i_bind }, { "unbind", i_unbind }, { "key_down", i_key_down },
+    { "code", i_code }, { "inject", i_inject }, { NULL, NULL } };
 
 /* --- xi.addons -------------------------------------------------------------------------------- */
 

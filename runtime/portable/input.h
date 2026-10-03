@@ -23,6 +23,9 @@ uint8_t input_dik(int sdl_scancode);
 void input_sdl_event(const void* sdl_event);
 /* The window lost focus: every key and button comes up. */
 void input_release_all(void);
+/* A key press or release that did not come from the keyboard (the control port, host/addons):
+ * the same state and event a real one makes, focus or not. */
+void input_inject_key(uint8_t dik, int down);
 
 /* Keyboard: 256 bytes indexed by DIK code (set-1 scan code, 0x80 for the E0 keys), 0x80 = down. */
 void input_keyboard(uint8_t state[256]);

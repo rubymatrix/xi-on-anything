@@ -208,6 +208,22 @@ void input_sdl_event(const void* ev)
         notify(kind);
 }
 
+void input_inject_key(uint8_t dik, int down)
+{
+    uint8_t v = down ? 0x80 : 0;
+    lock();
+    int changed = dik && g_keys[dik] != v;
+    if (changed)
+    {
+        g_keys[dik] = v;
+        push(INPUT_KEYBOARD, dik, v);
+    }
+    void (*notify)(int) = changed ? g_ring[INPUT_KEYBOARD].notify : NULL;
+    unlock();
+    if (notify)
+        notify(INPUT_KEYBOARD);
+}
+
 void input_release_all(void)
 {
     lock();

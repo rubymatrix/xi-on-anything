@@ -31,6 +31,11 @@ int d3d8_get_render_state(uint32_t rs, uint32_t* v);
  * draw). */
 typedef struct GfxTex GfxTex;
 void d3d8_set_overlay(void (*fn)(GfxTex* backbuffer, uint32_t w, uint32_t h));
+/* The next frame as shown (overlay included), written to path at its Present: "XIF1", then the
+ * width, height and D3DFORMAT as uint32s, then the rows, top first, in that format. A serial that
+ * goes up once the file is written; d3d8_capture_result says what came of the last request. */
+void d3d8_capture(const char* path);
+uint32_t d3d8_capture_result(uint32_t* w, uint32_t* h, uint32_t* format, int* ok);
 /* Adds a texture pack: <dir>/<hash>_<w>x<h>.dds replacements for the game's textures (see d3d8.c,
  * tools/make_texpack.py). Before the device is created. */
 void d3d8_texture_pack(const char* dir);
