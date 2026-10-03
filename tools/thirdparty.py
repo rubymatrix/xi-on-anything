@@ -33,12 +33,29 @@ def archive(name):
     return os.path.join(ROOT, 'build', 'third_party', name + '.a')
 
 
+# SDL3 is vendored for macOS only (its Cocoa, CoreAudio and Metal sources); elsewhere it is the
+# system's, found with pkg-config: Linux's video, audio and input back ends come with the distribution.
+def system(name):
+    return name == 'sdl3' and sys.platform != 'darwin'
+
+
+def pkg_config(name, what):
+    r = subprocess.run(['pkg-config', what, name], capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit('%s: not found with pkg-config (install SDL 3.2 or later and its development files)' % name)
+    return r.stdout.split()
+
+
 def flags(name):
     """What code that includes the library's headers compiles with."""
+    if system(name):
+        return pkg_config(name, '--cflags')
     return ['-I' + os.path.join(ROOT, 'third_party', name, d) for d in manifest(name)['public']]
 
 
 def libs(name):
+    if system(name):
+        return pkg_config(name, '--libs')
     m = manifest(name)
     return ([archive(name)] + sum((['-framework', f] for f in m['frameworks']), [])
             + sum((['-weak_framework', f] for f in m['weak_frameworks']), []))
@@ -75,6 +92,8 @@ def build_make(name, m, out, stamp, key):
 
 def build(name, progress=None):
     """Compile the library into build/third_party/<name>.a unless it is up to date."""
+    if system(name):
+        return None
     m = manifest(name)
     lib = os.path.join(ROOT, 'third_party', name)
     out = archive(name)
@@ -89,7 +108,8 @@ def build(name, progress=None):
     os.makedirs(objdir, exist_ok=True)
     jobs = []
     for n, g in enumerate(m['groups']):
-        base = (['clang', '-O2', '-DNDEBUG', '-w', '-mmacosx-version-min=' + MIN_MACOS] + g['flags']
+        base = (['clang', '-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' else [])
+                + g['flags']
                 + ['-I' + os.path.join(lib, d) for d in g['include']]
                 + sum((['-idirafter', os.path.join(lib, d)] for d in g['idirafter']), []))
         for src in g['sources']:

@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cachedir.h"
 #include "gfx.h"
 #include "gfx_msl.h"
 
@@ -1147,15 +1148,9 @@ static void queue_job(const PipeKey* k, const uint32_t* vs, uint32_t nvs, const 
 /* at start-up: the keys earlier sessions built, built again in the background */
 static void prewarm_pipelines(void)
 {
-    const char* dir = getenv("FFXI_CACHE_DIR");
     char path[900];
-    if (dir && *dir)
-        snprintf(path, sizeof path, "%s", dir);
-    else if (getenv("HOME"))
-        snprintf(path, sizeof path, "%s/Library/Caches/FFXI", getenv("HOME"));
-    else
+    if (!cache_dir(path, sizeof path))
         return;
-    mkdir(path, 0755);
     snprintf(g_pipe_cache, sizeof g_pipe_cache, "%s/pipelines.v1", path);
     FILE* f = fopen(g_pipe_cache, "rb");
     if (!f)
@@ -2032,7 +2027,7 @@ void gfx_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t c
  * per screen pixel skips rows of it - the edges crawl as the camera moves.
  *
  * Settings: FFXI_FX=1 and FFXI_FX_<KEY> (the table in fx_config), then while the game runs
- * FFXI_FX_FILE (default ~/Library/Caches/FFXI/fx.txt), lines of key=value. debug shows one part
+ * FFXI_FX_FILE (default fx.txt in the cache folder, cachedir.h), lines of key=value. debug shows one part
  * alone: 1 occlusion, 2 fog, 3 bloom, 4 god rays, 5 sun shadows (map and contact). light = 1 lights the world's
  * lit draws per pixel rather than per vertex (gfx_msl.c). */
 static const char FX_MSL[] =
@@ -2692,8 +2687,12 @@ static void fx_config(void)
     const char* file = getenv("FFXI_FX_FILE");
     if (file && *file)
         snprintf(g_fx_file, sizeof g_fx_file, "%s", file);
-    else if (getenv("HOME"))
-        snprintf(g_fx_file, sizeof g_fx_file, "%s/Library/Caches/FFXI/fx.txt", getenv("HOME"));
+    else
+    {
+        char dir[900];
+        if (cache_dir(dir, sizeof dir))
+            snprintf(g_fx_file, sizeof g_fx_file, "%s/fx.txt", dir);
+    }
 }
 
 static id<MTLRenderPipelineState> fx_pipeline(NSString* frag, MTLPixelFormat fmt)

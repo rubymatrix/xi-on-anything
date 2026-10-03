@@ -35,6 +35,7 @@
 #include "gfx.h"
 #include "gthread.h"
 #include "gwin.h"
+#include "cachedir.h"
 #include "plat.h"
 #include "thunk.h"
 #include "user32.h"
@@ -2860,10 +2861,11 @@ static void cap_present(void)
     if (!init)
     {
         init = 1, g_cap_path = getenv("FFXI_DRAWLOG");
-        /* without it, ~/Library/Caches/FFXI/draws.txt (still only while draws.txt.go exists) */
+        /* without it, draws.txt in the cache folder (still only while draws.txt.go exists) */
         static char def[1024];
-        if ((!g_cap_path || !*g_cap_path) && getenv("HOME"))
-            snprintf(def, sizeof def, "%s/Library/Caches/FFXI/draws.txt", getenv("HOME")), g_cap_path = def;
+        char dir[900];
+        if ((!g_cap_path || !*g_cap_path) && cache_dir(dir, sizeof dir))
+            snprintf(def, sizeof def, "%s/draws.txt", dir), g_cap_path = def;
     }
     if (!g_cap_path)
         return;
@@ -3284,7 +3286,7 @@ static void scene_note(GfxDraw* d)
 }
 
 /* Present: the scene ends here if nothing ended it before; the next frame starts over */
-/* The trace: while ~/Library/Caches/FFXI/trace.go exists (checked every 30 frames), the last 1200
+/* The trace: while trace.go exists in the cache folder (cachedir.h; checked every 30 frames), the last 1200
  * frames' scenes go to trace.txt beside it and the effects' own to trace_gfx.txt; then .go is
  * removed. For a flicker the eye catches: what the frame before and after it did. */
 static void scene_trace(GfxTex* world_before)
@@ -3299,8 +3301,8 @@ static void scene_trace(GfxTex* world_before)
     g_scene.tr_late = g_scene.tr_draws = 0, g_scene.tr_why = 0;
     g_scene.frame++;
     static char dir[900];
-    if (!dir[0] && getenv("HOME"))
-        snprintf(dir, sizeof dir, "%s/Library/Caches/FFXI", getenv("HOME"));
+    if (!dir[0])
+        cache_dir(dir, sizeof dir);
     if (!dir[0] || g_scene.frame % 30)
         return;
     char go[1024], out[1024];

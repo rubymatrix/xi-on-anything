@@ -1,4 +1,4 @@
-/* D3D8 shader token streams to MSL: vs.1.0/1.1 (the five programmable vertex shaders FFXiMain
+/* D3D8 shader token streams to MSL (or GLSL, Sb.glsl: gfx_msl.c): vs.1.0/1.1 (the five programmable vertex shaders FFXiMain
  * creates) and ps.1.0-1.3 (its one pixel shader, ps.1.1). The translation is instruction by
  * instruction onto float4 registers; what is not here returns 0, and the draw is skipped with a log
  * line naming the opcode, so a shader the game starts using shows up at once.
@@ -141,6 +141,7 @@ static void write_dst(Sb* b, uint32_t d, const char* value, int ps)
 static int arith(Sb* b, uint32_t op, const uint32_t* p, int ps)
 {
     char s0[160], s1[160], s2[160], e[800];
+    s0[0] = s1[0] = s2[0] = 0;
     if (nparams(op, ps) >= 2)
         src_expr(s0, sizeof s0, p[1], ps);
     if (nparams(op, ps) >= 3)
@@ -160,8 +161,8 @@ static int arith(Sb* b, uint32_t op, const uint32_t* p, int ps)
     case 9: snprintf(e, sizeof e, "float4(dot(%s, %s))", s0, s1); break;
     case 10: snprintf(e, sizeof e, "min(%s, %s)", s0, s1); break;
     case 11: snprintf(e, sizeof e, "max(%s, %s)", s0, s1); break;
-    case 12: snprintf(e, sizeof e, "select(float4(0), float4(1), %s < %s)", s0, s1); break;
-    case 13: snprintf(e, sizeof e, "select(float4(0), float4(1), %s >= %s)", s0, s1); break;
+    case 12: gfx_msl_select(e, sizeof e, b, "float4(0)", "float4(1)", s0, "<", s1); break;
+    case 13: gfx_msl_select(e, sizeof e, b, "float4(0)", "float4(1)", s0, ">=", s1); break;
     case 14: case 78: snprintf(e, sizeof e, "float4(exp2(%s.w))", s0); break;
     case 15: case 79: snprintf(e, sizeof e, "float4(%s.w == 0.0 ? -INFINITY : log2(abs(%s.w)))", s0, s0); break;
     case 16:
@@ -173,7 +174,7 @@ static int arith(Sb* b, uint32_t op, const uint32_t* p, int ps)
     case 18: snprintf(e, sizeof e, "mix(%s, %s, %s)", s2, s1, s0); break;
     case 19: snprintf(e, sizeof e, "fract(%s)", s0); break;
     case 80: snprintf(e, sizeof e, "(%s.w > 0.5 ? %s : %s)", s0, s1, s2); break; /* cnd: r0.a */
-    case 88: snprintf(e, sizeof e, "select(%s, %s, %s >= 0.0)", s2, s1, s0); break;
+    case 88: gfx_msl_select(e, sizeof e, b, s2, s1, s0, ">=", "float4(0.0)"); break;
     default: return 0;
     }
     write_dst(b, p[0], e, ps);
@@ -204,36 +205,12 @@ int gfx_msl_vs1(Sb* b, const GfxVsKey* k, const uint32_t* t)
 {
     if (!t || (t[0] & 0xFFFF0000u) != 0xFFFE0000u)
         return 0;
-    sb_printf(b, "vertex VOut vs_main(uint vid [[vertex_id]], constant U& u [[buffer(4)]]");
-    for (int s = 0; s < GFX_NSTREAMS; ++s)
-        sb_printf(b, ", device const uchar* s%d [[buffer(%d)]]", s, s);
-    gfx_msl_vs_params(b, k);
-    sb_printf(b, ") {\n  VOut o;\n  int vi = int(vid) + u.vofs.x;\n");
-    /* the inputs the declaration maps: v# is the declaration's register */
-    for (int r = 0; r < GFX_NREGS; ++r)
-    {
-        const GfxElem* e = &k->el[r];
-        if (!e->used)
-        {
-            sb_printf(b, "  float4 v%d = float4(0, 0, 0, 1);\n", r);
-            continue;
-        }
-        sb_printf(b, "  device const uchar* p%d = s%d + vi * u.stride[%d] + reg_offset(u, %d);\n", r, e->stream, e->stream, r);
-        switch (e->type)
-        {
-        case GFX_FLOAT1: sb_printf(b, "  float4 v%d = float4(((device const float*)p%d)[0], 0, 0, 1);\n", r, r); break;
-        case GFX_FLOAT2: sb_printf(b, "  float4 v%d = float4(((device const packed_float2*)p%d)[0], 0, 1);\n", r, r); break;
-        case GFX_FLOAT3: sb_printf(b, "  float4 v%d = float4(((device const packed_float3*)p%d)[0], 1);\n", r, r); break;
-        case GFX_FLOAT4: sb_printf(b, "  float4 v%d = float4(((device const packed_float4*)p%d)[0]);\n", r, r); break;
-        case GFX_D3DCOLOR: sb_printf(b, "  float4 v%d = ld_color(p%d);\n", r, r); break;
-        case GFX_UBYTE4: sb_printf(b, "  float4 v%d = float4(*(device const uchar4*)p%d);\n", r, r); break;
-        case GFX_SHORT2: sb_printf(b, "  float4 v%d = float4(float2(*(device const short2*)p%d), 0, 1);\n", r, r); break;
-        default: sb_printf(b, "  float4 v%d = float4(*(device const short4*)p%d);\n", r, r); break;
-        }
-    }
-    sb_printf(b, "  float4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0, r11 = 0, a0 = 0;\n"
+    gfx_msl_vs_begin(b, k); /* the inputs the declaration maps: v# is the declaration's register */
+    sb_printf(b, "  float4 r0 = float4(0), r1 = float4(0), r2 = float4(0), r3 = float4(0), r4 = float4(0), r5 = float4(0);\n"
+                 "  float4 r6 = float4(0), r7 = float4(0), r8 = float4(0), r9 = float4(0), r10 = float4(0), r11 = float4(0), a0 = float4(0);\n"
                  "  float4 oPos = float4(0, 0, 0, 1), oFog = float4(1), oPts = float4(1), oD0 = float4(0), oD1 = float4(0);\n"
-                 "  float4 oT0 = 0, oT1 = 0, oT2 = 0, oT3 = 0, oT4 = 0, oT5 = 0, oT6 = 0, oT7 = 0;\n");
+                 "  float4 oT0 = float4(0), oT1 = float4(0), oT2 = float4(0), oT3 = float4(0), oT4 = float4(0), oT5 = float4(0);\n"
+                 "  float4 oT6 = float4(0), oT7 = float4(0);\n");
     for (uint32_t i = 1; i < 65536;)
     {
         uint32_t tok = t[i], op = tok & 0xFFFF;
@@ -282,7 +259,8 @@ int gfx_msl_ps1(Sb* b, const GfxFsKey* k, const uint32_t* t)
         return 0;
     }
     (void)k;
-    sb_printf(b, "  float4 r0 = 0, r1 = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0;\n  float4 v0 = in.d, v1 = in.s;\n");
+    sb_printf(b, "  float4 r0 = float4(0), r1 = float4(0), t0 = float4(0), t1 = float4(0), t2 = float4(0), t3 = float4(0);\n"
+                 "  float4 v0 = in.d, v1 = in.s;\n");
     for (int c = 0; c < GFX_NPSC; ++c) /* def overrides these */
         sb_printf(b, "  float4 c%d = u.psc[%d];\n", c, c);
     for (uint32_t i = 1; i < 65536;)
@@ -307,19 +285,28 @@ int gfx_msl_ps1(Sb* b, const GfxFsKey* k, const uint32_t* t)
         {
         case 0: break;
         case 81: /* def c#, x, y, z, w */
-            sb_printf(b, "  c%u = float4(as_type<float>(%uu), as_type<float>(%uu), as_type<float>(%uu), as_type<float>(%uu));\n", n,
-                p[1], p[2], p[3], p[4]);
+            if (b->glsl)
+                sb_printf(b, "  c%u = uintBitsToFloat(uvec4(%uu, %uu, %uu, %uu));\n", n, p[1], p[2], p[3], p[4]);
+            else
+                sb_printf(b, "  c%u = float4(as_type<float>(%uu), as_type<float>(%uu), as_type<float>(%uu), as_type<float>(%uu));\n",
+                    n, p[1], p[2], p[3], p[4]);
             break;
         case 66: /* tex t# */
-            if (n < 8 && k->st[n].tex == 2)
-                sb_printf(b, "  t%u = tx%u.sample(sp%u, in.t%u.xyz);\n", n, n, n, n);
-            else if (n < 8 && k->st[n].tex == 1)
-                sb_printf(b, "  t%u = tx%u.sample(sp%u, in.t%u.xy);\n", n, n, n, n);
+            if (n < 8 && k->st[n].tex)
+            {
+                char coord[32], smp[96];
+                snprintf(coord, sizeof coord, "in.t%u.%s", n, k->st[n].tex == 2 ? "xyz" : "xy");
+                gfx_msl_sample(smp, sizeof smp, b, n, coord);
+                sb_printf(b, "  t%u = %s;\n", n, smp);
+            }
             else
                 sb_printf(b, "  t%u = float4(0, 0, 0, 1);\n", n);
             break;
         case 64: sb_printf(b, "  t%u = float4(saturate(in.t%u.xyz), 1.0);\n", n, n); break; /* texcoord */
-        case 65: sb_printf(b, "  if (any(in.t%u.xyz < 0.0)) discard_fragment();\n", n); break; /* texkill */
+        case 65: /* texkill */
+            sb_printf(b, b->glsl ? "  if (any(lessThan(in.t%u.xyz, float3(0.0)))) discard_fragment();\n"
+                                 : "  if (any(in.t%u.xyz < 0.0)) discard_fragment();\n", n);
+            break;
         default:
             if (!arith(b, op, p, 1))
             {
