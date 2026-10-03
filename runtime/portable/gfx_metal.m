@@ -115,6 +115,21 @@ static SDL_MetalView g_view;
 static SDL_Window* g_window;
 static id<MTLCommandBuffer> g_cmd;
 static id<MTLRenderCommandEncoder> g_enc;
+/* What g_enc has bound, so a draw sets only what changed (the game's draws mostly repeat the last
+ * one's state). Forgotten with each new encoder and after anything else sets state on it (clears).
+ * The command buffer retains what was bound, so an address here cannot come back as another object. */
+static struct
+{
+    id pipe, depth, vb[GFX_NSTREAMS + 1], ub, tex[8], samp[8]; /* vb: the streams, then the uniforms (4) */
+    NSUInteger voff[GFX_NSTREAMS + 1], uoff;
+    uint32_t stencil_ref;
+    int32_t zbias;
+    uint8_t cull, fill, valid, stencil_set; /* stencil_set: the reference is set only for stencil draws */
+    MTLViewport vp;
+    MTLScissorRect sc;
+} g_bound;
+
+static void bound_forget(void) { memset(&g_bound, 0, sizeof g_bound); }
 static dispatch_semaphore_t g_frames_sem;
 static Frame g_frames[FRAMES];
 static uint32_t g_frame;              /* index into g_frames */
@@ -639,21 +654,31 @@ void gfx_tex_upload_rect(GfxTex* t, uint32_t face, uint32_t level, uint32_t x, u
             h = lh - y;
         uint32_t rows = t->block ? (h + 3) / 4 : h;
         uint32_t row_bytes = t->block ? ((w + 3) / 4) * t->block : w * t->texel;
-        /* the bytes in Metal's layout: as given, or widened */
+        /* the bytes in Metal's layout: as given, or widened (16-bit formats) - into the ring when they go
+         * through it, else into a scratch kept between uploads */
         const uint8_t* data = (const uint8_t*)src;
-        uint8_t* conv = NULL;
-        uint32_t data_pitch = pitch;
-        if (t->conv)
-        {
-            conv = (uint8_t*)malloc((size_t)row_bytes * rows);
-            for (uint32_t r = 0; r < rows; ++r)
-                convert_row(t->conv, data + (size_t)r * pitch, conv + (size_t)r * row_bytes, w);
-            data = conv, data_pitch = row_bytes;
-        }
         MTLRegion region = MTLRegionMake2D(x, y, w, h);
         int busy = t->used > atomic_load(&g_completed);
         if (t->use == GFX_USE_SAMPLE && !busy)
+        {
+            uint32_t data_pitch = pitch;
+            if (t->conv)
+            {
+                static uint8_t* scratch;
+                static size_t scratch_cap;
+                size_t need = (size_t)row_bytes * rows;
+                if (need > scratch_cap)
+                {
+                    free(scratch);
+                    scratch_cap = need > 2 * scratch_cap ? need : 2 * scratch_cap;
+                    scratch = (uint8_t*)malloc(scratch_cap);
+                }
+                for (uint32_t r = 0; r < rows; ++r)
+                    convert_row(t->conv, data + (size_t)r * pitch, scratch + (size_t)r * row_bytes, w);
+                data = scratch, data_pitch = row_bytes;
+            }
             [t->tex replaceRegion:region mipmapLevel:level slice:face withBytes:data bytesPerRow:data_pitch bytesPerImage:0];
+        }
         else
         {
             /* in use by recorded or running work, or private: through the ring, in order */
@@ -661,7 +686,10 @@ void gfx_tex_upload_rect(GfxTex* t, uint32_t face, uint32_t level, uint32_t x, u
             NSUInteger off;
             uint8_t* dst = (uint8_t*)ring((size_t)row_bytes * rows, 256, &buf, &off);
             for (uint32_t r = 0; r < rows; ++r)
-                memcpy(dst + (size_t)r * row_bytes, data + (size_t)r * data_pitch, row_bytes);
+                if (t->conv)
+                    convert_row(t->conv, data + (size_t)r * pitch, dst + (size_t)r * row_bytes, w);
+                else
+                    memcpy(dst + (size_t)r * row_bytes, data + (size_t)r * pitch, row_bytes);
             flush_pass();
             id<MTLBlitCommandEncoder> blit = [cmd() blitCommandEncoder];
             [blit copyFromBuffer:buf sourceOffset:off sourceBytesPerRow:row_bytes sourceBytesPerImage:(NSUInteger)row_bytes * rows
@@ -670,7 +698,6 @@ void gfx_tex_upload_rect(GfxTex* t, uint32_t face, uint32_t level, uint32_t x, u
             [blit endEncoding];
             t->used = g_serial;
         }
-        free(conv);
     }
 }
 
@@ -894,6 +921,9 @@ static int begin_pass(void)
     }
     g_pending_clear = 0;
     g_enc = [[cmd() renderCommandEncoderWithDescriptor:p] retain];
+    bound_forget();
+    /* D3D's front faces are clockwise on screen; CULL_CCW (the default) culls the back ones */
+    [g_enc setFrontFacingWinding:MTLWindingClockwise];
     g_rt->used = g_serial;
     if (!g_rt_face && !g_rt_level)
         g_rt->scene = 0; /* drawn to: its mips are behind */
@@ -1019,17 +1049,43 @@ static uint32_t* copy_tok(const uint32_t* t, uint32_t* n)
     return c;
 }
 
+/* The functions for a pair of shader keys, compiled once: pipelines that differ only in blending or
+ * their attachments share them (the source is the keys' alone). Kept for the session, g_libs under
+ * g_lib_lock: the pipelines are built on a concurrent queue. nil if it did not compile. */
+static pthread_mutex_t g_lib_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static id<MTLLibrary> library(const LibKey* k, const uint32_t* vs, const uint32_t* ps)
+{
+    pthread_mutex_lock(&g_lib_lock);
+    id<MTLLibrary> lib = map_get(&g_libs, k, sizeof *k);
+    pthread_mutex_unlock(&g_lib_lock);
+    if (lib)
+        return lib != (id)PIPE_FAILED ? lib : nil;
+    char* src = gfx_msl_generate(&k->vs, &k->fs, vs, ps);
+    if (src)
+    {
+        lib = compile(src);
+        free(src);
+    }
+    else
+        __atomic_fetch_add(&g_failures, 1, __ATOMIC_RELAXED);
+    pthread_mutex_lock(&g_lib_lock);
+    id had = map_get(&g_libs, k, sizeof *k);
+    if (had) /* another job compiled it meanwhile */
+    {
+        [lib release];
+        lib = had;
+    }
+    else
+        map_put(&g_libs, k, sizeof *k, lib ? lib : (id)PIPE_FAILED);
+    pthread_mutex_unlock(&g_lib_lock);
+    return lib != (id)PIPE_FAILED ? lib : nil;
+}
+
 /* the pipeline for a key (retained), or nil */
 static id<MTLRenderPipelineState> build_pipeline(const PipeKey* k, const uint32_t* vs, const uint32_t* ps)
 {
-    char* src = gfx_msl_generate(&k->lib.vs, &k->lib.fs, vs, ps);
-    if (!src)
-    {
-        __atomic_fetch_add(&g_failures, 1, __ATOMIC_RELAXED);
-        return nil;
-    }
-    id<MTLLibrary> lib = compile(src);
-    free(src);
+    id<MTLLibrary> lib = library(&k->lib, vs, ps);
     if (!lib)
         return nil;
     id p = nil;
@@ -1072,7 +1128,6 @@ static id<MTLRenderPipelineState> build_pipeline(const PipeKey* k, const uint32_
         [ff release];
         [pd release];
     }
-    [lib release];
     return p;
 }
 
@@ -1408,7 +1463,11 @@ static void set_viewport(const uint32_t vp[6])
         vw = w - x;
     if (y + vh > h)
         vh = h - y;
-    [g_enc setViewport:(MTLViewport){ x, y, vw, vh, zmin, zmax }];
+    MTLViewport v = { x, y, vw, vh, zmin, zmax };
+    if (g_bound.valid && !memcmp(&v, &g_bound.vp, sizeof v))
+        return;
+    [g_enc setViewport:v];
+    g_bound.vp = v;
 }
 
 /* GfxDraw.scissor, clamped to the target (Metal rejects a rectangle outside it); none: all of it */
@@ -1432,7 +1491,24 @@ static void set_scissor(const int32_t sc[4])
         if (y1 < y0)
             y1 = y0;
     }
-    [g_enc setScissorRect:(MTLScissorRect){ (NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0) }];
+    MTLScissorRect r = { (NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0) };
+    if (g_bound.valid && !memcmp(&r, &g_bound.sc, sizeof r))
+        return;
+    [g_enc setScissorRect:r];
+    g_bound.sc = r;
+}
+
+/* a vertex stream's buffer: only its offset when the buffer is the one there */
+static void bind_vb(id<MTLBuffer> b, NSUInteger off, int s)
+{
+    if (g_bound.vb[s] == b)
+    {
+        if (g_bound.voff[s] != off)
+            [g_enc setVertexBufferOffset:off atIndex:(NSUInteger)s], g_bound.voff[s] = off;
+        return;
+    }
+    [g_enc setVertexBuffer:b offset:off atIndex:(NSUInteger)s];
+    g_bound.vb[s] = b, g_bound.voff[s] = off;
 }
 
 /* index count (Metal) for a D3D primitive count */
@@ -1529,20 +1605,26 @@ static void draw_encode(const GfxDraw* d)
             gfx_prof_skip(GFX_SKIP_PIPELINE); /* still building (or failed) */
             return;
         }
-        [g_enc setRenderPipelineState:p];
+        if (g_bound.pipe != p)
+            [g_enc setRenderPipelineState:p], g_bound.pipe = p;
         GfxDepthKey dk = d->depth;
         if (!depth_attachment())
             memset(&dk, 0, sizeof dk);
-        [g_enc setDepthStencilState:depth_state(&dk)];
-        if (dk.stencil)
-            [g_enc setStencilReferenceValue:d->stencil_ref];
-        /* D3D's front faces are clockwise on screen; CULL_CCW (the default) culls the back ones */
-        [g_enc setFrontFacingWinding:MTLWindingClockwise];
-        [g_enc setCullMode:d->cull == 3 ? MTLCullModeBack : d->cull == 2 ? MTLCullModeFront : MTLCullModeNone];
-        [g_enc setTriangleFillMode:d->fill == 2 ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
-        [g_enc setDepthBias:-(float)d->zbias slopeScale:-(float)d->zbias * 0.5f clamp:0];
+        id<MTLDepthStencilState> ds = depth_state(&dk);
+        if (g_bound.depth != ds)
+            [g_enc setDepthStencilState:ds], g_bound.depth = ds;
+        if (dk.stencil && (!g_bound.stencil_set || g_bound.stencil_ref != d->stencil_ref))
+            [g_enc setStencilReferenceValue:d->stencil_ref], g_bound.stencil_ref = d->stencil_ref, g_bound.stencil_set = 1;
+        uint8_t cull = d->cull == 3 ? 2 : d->cull == 2 ? 1 : 0, fill = d->fill == 2;
+        if (!g_bound.valid || g_bound.cull != cull)
+            [g_enc setCullMode:cull == 2 ? MTLCullModeBack : cull == 1 ? MTLCullModeFront : MTLCullModeNone], g_bound.cull = cull;
+        if (!g_bound.valid || g_bound.fill != fill)
+            [g_enc setTriangleFillMode:fill ? MTLTriangleFillModeLines : MTLTriangleFillModeFill], g_bound.fill = fill;
+        if (!g_bound.valid || g_bound.zbias != d->zbias)
+            [g_enc setDepthBias:-(float)d->zbias slopeScale:-(float)d->zbias * 0.5f clamp:0], g_bound.zbias = d->zbias;
         set_viewport(d->vp);
         set_scissor(d->scissor);
+        g_bound.valid = 1;
 
         id<MTLBuffer> buf;
         NSUInteger off;
@@ -1556,8 +1638,11 @@ static void draw_encode(const GfxDraw* d)
             need = sizeof(GfxU);
         void* u = ring(sizeof(GfxU), 256, &buf, &off);
         memcpy(u, &d->u, need);
-        [g_enc setVertexBuffer:buf offset:off atIndex:4];
-        [g_enc setFragmentBuffer:buf offset:off atIndex:4];
+        bind_vb(buf, off, 4);
+        if (g_bound.ub != buf)
+            [g_enc setFragmentBuffer:buf offset:off atIndex:4], g_bound.ub = buf, g_bound.uoff = off;
+        else if (g_bound.uoff != off)
+            [g_enc setFragmentBufferOffset:off atIndex:4], g_bound.uoff = off;
         if (d->caster && !g_rt_face && !g_rt_level)
         {
             id<MTLTexture> dw = depth_attachment();
@@ -1571,7 +1656,7 @@ static void draw_encode(const GfxDraw* d)
         {
             if (d->buf[s])
             {
-                [g_enc setVertexBuffer:d->buf[s]->b offset:d->buf_off[s] atIndex:(NSUInteger)s];
+                bind_vb(d->buf[s]->b, d->buf_off[s], s);
                 d->buf[s]->used = g_serial;
                 if (rec)
                 {
@@ -1584,13 +1669,13 @@ static void draw_encode(const GfxDraw* d)
             {
                 void* v = ring(d->size[s], 16, &buf, &off);
                 memcpy(v, d->data[s], d->size[s]);
-                [g_enc setVertexBuffer:buf offset:off atIndex:(NSUInteger)s];
+                bind_vb(buf, off, s);
                 if (rec)
                     rec->vb[s] = [buf retain], rec->voff[s] = off, rec->fixed = 0;
             }
             else
             {
-                [g_enc setVertexBuffer:g_dummy offset:0 atIndex:(NSUInteger)s];
+                bind_vb(g_dummy, 0, s);
                 if (rec)
                     rec->vb[s] = [g_dummy retain];
             }
@@ -1618,8 +1703,11 @@ static void draw_encode(const GfxDraw* d)
                 else if (t->scene && t->mipview)
                     sk.min = 3, sk.mag = 2, sk.mip = 2, sk.max_aniso = 16, sk.max_level = 0, view = t->mipview;
             }
-            [g_enc setFragmentTexture:view atIndex:(NSUInteger)i];
-            [g_enc setFragmentSamplerState:sampler(&sk) atIndex:(NSUInteger)i];
+            if (g_bound.tex[i] != view)
+                [g_enc setFragmentTexture:view atIndex:(NSUInteger)i], g_bound.tex[i] = view;
+            id<MTLSamplerState> ss = sampler(&sk);
+            if (g_bound.samp[i] != ss)
+                [g_enc setFragmentSamplerState:ss atIndex:(NSUInteger)i], g_bound.samp[i] = ss;
             t->used = g_serial;
             if (rec && alpha_tested(&d->fs))
                 rec->tex[i] = [view retain], rec->samp[i] = sk;
@@ -1822,6 +1910,7 @@ void gfx_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t c
             [g_enc setFragmentBytes:&cu length:sizeof cu atIndex:0];
             [g_enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         }
+        bound_forget(); /* its pipeline, depth state, viewport and buffer 0 in place of the draws' */
     }
 }
 

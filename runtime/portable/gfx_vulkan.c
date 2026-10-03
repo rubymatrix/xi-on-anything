@@ -1474,20 +1474,60 @@ static const VkDynamicState DRAW_DYNAMIC[] = {
     VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
 };
 
+/* The modules for a pair of shader keys, compiled once: pipelines that differ only in blending, their
+ * attachments or topology share them (the source is the keys' alone). Kept for the session, g_libs
+ * under g_lib_lock: the pipelines are built on several workers. */
+typedef struct Lib
+{
+    VkShaderModule vm, fm; /* fm VK_NULL_HANDLE for depth alone */
+    int ok;
+} Lib;
+
+static Map g_libs;
+static pthread_mutex_t g_lib_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static const Lib* library(const LibKey* k, const uint32_t* vs, const uint32_t* ps)
+{
+    pthread_mutex_lock(&g_lib_lock);
+    Lib* l = (Lib*)map_get(&g_libs, k, sizeof *k);
+    pthread_mutex_unlock(&g_lib_lock);
+    if (l)
+        return l;
+    l = (Lib*)calloc(1, sizeof *l);
+    char* src = gfx_glsl_generate(&k->vs, &k->fs, vs, ps);
+    if (src)
+    {
+        int depth_only = k->vs.shadow && !alpha_tested(&k->fs); /* nothing for the fragments to do */
+        l->vm = compile_glsl(src, 0);
+        l->fm = l->vm && !depth_only ? compile_glsl(src, 1) : VK_NULL_HANDLE;
+        l->ok = l->vm && (l->fm || depth_only);
+        free(src);
+    }
+    else
+        atomic_fetch_add(&g_failures, 1);
+    pthread_mutex_lock(&g_lib_lock);
+    Lib* had = (Lib*)map_get(&g_libs, k, sizeof *k);
+    if (had) /* another worker compiled it meanwhile */
+    {
+        if (l->vm)
+            vkDestroyShaderModule(g_dev, l->vm, NULL);
+        if (l->fm)
+            vkDestroyShaderModule(g_dev, l->fm, NULL);
+        free(l);
+        l = had;
+    }
+    else
+        map_put(&g_libs, k, sizeof *k, l);
+    pthread_mutex_unlock(&g_lib_lock);
+    return l;
+}
+
 static VkPipeline build_pipeline(const PipeKey* k, const uint32_t* vs, const uint32_t* ps)
 {
-    char* src = gfx_glsl_generate(&k->lib.vs, &k->lib.fs, vs, ps);
-    if (!src)
-    {
-        atomic_fetch_add(&g_failures, 1);
-        return VK_NULL_HANDLE;
-    }
-    VkShaderModule vm = compile_glsl(src, 0);
-    int depth_only = k->lib.vs.shadow && !alpha_tested(&k->lib.fs); /* nothing for the fragments to do */
-    VkShaderModule fm = depth_only ? VK_NULL_HANDLE : compile_glsl(src, 1);
-    free(src);
+    const Lib* l = library(&k->lib, vs, ps);
+    VkShaderModule vm = l->vm, fm = l->fm;
     VkPipeline p = VK_NULL_HANDLE;
-    if (vm && (fm || depth_only))
+    if (l->ok)
     {
         VkPipelineColorBlendAttachmentState b = { 0 };
         uint32_t wm = k->pipe.write_mask;
@@ -1515,10 +1555,6 @@ static VkPipeline build_pipeline(const PipeKey* k, const uint32_t* vs, const uin
         p = make_pipeline(vm, fm, g_layout, &b, (VkFormat)k->color, (VkFormat)k->depth, (VkFormat)k->stencil, TOPO[k->topo],
             k->fill ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL, DRAW_DYNAMIC, sizeof DRAW_DYNAMIC / sizeof DRAW_DYNAMIC[0]);
     }
-    if (vm)
-        vkDestroyShaderModule(g_dev, vm, NULL);
-    if (fm)
-        vkDestroyShaderModule(g_dev, fm, NULL);
     return p;
 }
 

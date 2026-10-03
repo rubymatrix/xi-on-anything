@@ -347,6 +347,7 @@ function events.on(name, fn, key, opts)
         if list[i].key == key then table.remove(list, i) end
     end
     list[#list + 1] = { key = key, fn = fn, co = opts and opts.coroutine }
+    if #list == 1 then native.listen(name, true) end -- the host raises only what has handlers
     return key
 end
 
@@ -356,6 +357,7 @@ function events.off(name, key)
     for i = #list, 1, -1 do
         if list[i].key == key or list[i].fn == key then
             table.remove(list, i)
+            if #list == 0 then native.listen(name, false) end
             return true
         end
     end
@@ -368,6 +370,9 @@ function events.has(name)
 end
 
 function events.clear()
+    for name, list in pairs(handlers) do
+        if #list > 0 then native.listen(name, false) end
+    end
     handlers = {}
 end
 

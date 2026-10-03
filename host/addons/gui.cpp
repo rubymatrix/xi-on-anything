@@ -804,10 +804,17 @@ static void render_draw_data(ImDrawData* dd, uint32_t w, uint32_t h)
             d->tex[0] = t && t->gpu ? t->gpu : g_white;
             d->scissor[0] = (int32_t)floorf(x0 < 0 ? 0 : x0), d->scissor[1] = (int32_t)floorf(y0 < 0 ? 0 : y0);
             d->scissor[2] = (int32_t)ceilf(x1) - d->scissor[0], d->scissor[3] = (int32_t)ceilf(y1) - d->scissor[1];
-            uint32_t first = cmd.VtxOffset;
+            /* the vertices this command's indices reach, not the rest of the list: the back end copies
+             * what it is given, once a command */
+            uint32_t first = cmd.VtxOffset, top = 0;
+            const ImDrawIdx* idx = cl->IdxBuffer.Data + cmd.IdxOffset;
+            for (unsigned k = 0; k < cmd.ElemCount; ++k)
+                top = idx[k] > top ? idx[k] : top;
+            if (first + top >= g_vtx.size())
+                continue;
             d->data[0] = &g_vtx[first];
-            d->size[0] = (uint32_t)((g_vtx.size() - first) * sizeof(Vtx));
-            d->indices = cl->IdxBuffer.Data + cmd.IdxOffset;
+            d->size[0] = (top + 1) * (uint32_t)sizeof(Vtx);
+            d->indices = idx;
             d->index_size = sizeof(ImDrawIdx);
             d->count = cmd.ElemCount / 3;
             d->u.vofs = 0;

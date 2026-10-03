@@ -886,6 +886,15 @@ static int x_error(lua_State* L)
     return 0;
 }
 
+/* native.listen(name, on): the addon has handlers for an event, or no longer (xi.lua events) */
+static int x_listen(lua_State* L)
+{
+    Addon* a = addon_of(L);
+    if (a)
+        xi_listen(a, luaL_checkstring(L, 1), lua_toboolean(L, 2));
+    return 0;
+}
+
 static int x_clock(lua_State* L)
 {
     lua_pushnumber(L, (double)rt_monotonic_ns() / 1e9);
@@ -1023,7 +1032,7 @@ static int x_embedded(lua_State* L)
     return 1;
 }
 
-static const luaL_Reg MISC[] = { { "log", x_log }, { "embedded", x_embedded }, { "error", x_error }, { "clock", x_clock }, { "time", x_time },
+static const luaL_Reg MISC[] = { { "log", x_log }, { "embedded", x_embedded }, { "error", x_error }, { "listen", x_listen }, { "clock", x_clock }, { "time", x_time },
     { "open_url", x_open_url }, { "sjis_to_utf8", x_sjis_to_utf8 }, { "utf8_to_sjis", x_utf8_to_sjis }, { NULL, NULL } };
 
 static void sub(lua_State* L, const char* name, const luaL_Reg* fns)

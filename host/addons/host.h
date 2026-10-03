@@ -36,6 +36,10 @@ typedef struct Addon
     uint64_t err_since, err_last;
     char err_text[256];
     unsigned err_repeats;
+    /* the events it has handlers for (xi.lua events.on / off: native.listen): the others are not
+     * raised to it. listen_all when there are more names than fit. */
+    char listen[24][24];
+    unsigned nlisten, listen_all;
 } Addon;
 
 /* --addon-harness: no game running (chat lines to stdout, commands routed directly, no GPU). */
@@ -57,6 +61,8 @@ void xi_addon_reload(Addon* a);
 int xi_addon_load_builtin(const char* name);
 /* The addon whose Lua is running on this thread (NULL outside Lua). */
 Addon* xi_current(void);
+/* An addon's handlers for an event: its first (on) or its last gone (off) - xi_raise skips the others. */
+void xi_listen(Addon* a, const char* name, int on);
 /* An error from an addon (Lua error text, first line to chat once, all to the log). */
 void xi_addon_error(Addon* a, const char* where, const char* msg);
 

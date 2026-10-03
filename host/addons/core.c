@@ -952,12 +952,39 @@ static void pull_event(lua_State* L, int t, XiEvent* e)
     }
 }
 
+/* Whether an addon has a handler for an event (native.listen keeps the list). */
+static int listens(const Addon* a, const char* name)
+{
+    if (a->listen_all)
+        return 1;
+    for (unsigned i = 0; i < a->nlisten; ++i)
+        if (!strcmp(a->listen[i], name))
+            return 1;
+    return 0;
+}
+
+void xi_listen(Addon* a, const char* name, int on)
+{
+    unsigned i = 0;
+    while (i < a->nlisten && strcmp(a->listen[i], name))
+        ++i;
+    if (on && i == a->nlisten)
+    {
+        if (a->nlisten == sizeof a->listen / sizeof a->listen[0] || strlen(name) >= sizeof a->listen[0])
+            a->listen_all = 1;
+        else
+            snprintf(a->listen[a->nlisten++], sizeof a->listen[0], "%s", name);
+    }
+    else if (!on && i < a->nlisten)
+        memmove(a->listen[i], a->listen[i + 1], (size_t)(--a->nlisten - i) * sizeof a->listen[0]);
+}
+
 void xi_raise_kind(XiEvent* e, int kind)
 {
     for (unsigned i = 0; i < g_naddons; ++i)
     {
         Addon* a = g_addons[i];
-        if (a->dead || a->unloading || (kind >= 0 && a->kind != kind))
+        if (a->dead || a->unloading || (kind >= 0 && a->kind != kind) || !listens(a, e->name))
             continue;
         lua_State* L = a->L;
         int top = lua_gettop(L);
