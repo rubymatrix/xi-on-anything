@@ -70,7 +70,7 @@ int plat_thread_start(void (*fn)(void*), void* arg)
  * allowed in UWP apps) wakes on time without touching the system's resolution. One per thread. */
 void plat_sleep_ms(uint32_t ms)
 {
-    static __declspec(thread) HANDLE timer;
+    static RT_TLS HANDLE timer;
     if (ms && ms != INFINITE)
     {
         if (!timer)
