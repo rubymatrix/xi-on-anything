@@ -632,8 +632,31 @@ static void report_overlay(const char* name, unsigned files)
 #include <unistd.h>
 #endif
 
+#if defined(_WIN32) && !defined(_MSC_VER)
+/* mingw-w64 (llvm-mingw's clang): the UCRT writes an unbuffered stderr a character at a time, a
+ * system call each - 0.5 ms a line, where MSVC's build buffers each fprintf whole (6 us) - and the
+ * game thread's log lines (the profile's, every 2 s) stalled it ~200 ms each time. So stdout and
+ * stderr get buffers, emptied every 100 ms: the launcher still sees the log as it is written, and a
+ * crash loses at most the last tenth of a second of it. */
+static void log_flusher(void* unused)
+{
+    (void)unused;
+    for (;;)
+    {
+        plat_sleep_ms(100);
+        fflush(stdout);
+        fflush(stderr);
+    }
+}
+#endif
+
 int main(int argc, char** argv)
 {
+#if defined(_WIN32) && !defined(_MSC_VER)
+    setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+    setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+    plat_thread_start(log_flusher, NULL);
+#endif
 #ifndef _WIN32
     /* a write to a closed socket (the game's, the sign-in's TLS, Discord's) is an error, not a signal */
     signal(SIGPIPE, SIG_IGN);

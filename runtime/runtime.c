@@ -179,6 +179,7 @@ void rt_fatal(Guest* g, uint32_t addr, const char* what)
     rt_log("\n");
     if (g_fatal_hook)
         g_fatal_hook(addr, what);
+    fflush(NULL); /* abort flushes nothing, and stderr may be buffered (host64.c) */
     abort();
 }
 

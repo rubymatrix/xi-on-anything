@@ -1,6 +1,6 @@
 {
   "format": "xi-runtime/1",
   "comment": "The recompiled client's (host64's) own version, apart from the launcher's releases and the retail game builds in meta/builds.json. Raise version whenever main changes what a built client does (runtime, host, recomp, build tools): the launcher reads this file from main, compares it with the stamp in the client it built (Contents/Resources/runtime.json in the app, build/runtime.json beside host64), and rebuilds when they differ. Docs-only and test-only changes leave it alone. min_launcher: the oldest launcher that can build this version; older ones say to update the launcher first.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "min_launcher": "0.1.1"
 }

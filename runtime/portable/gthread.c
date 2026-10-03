@@ -1,4 +1,5 @@
 /* Guest threads, the guest lock, host->guest calls. See gthread.h. */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -85,6 +86,7 @@ GThread* gt_self(void)
     if (!t || !stack || !teb)
     {
         rt_log("[recomp] out of memory creating a guest thread\n");
+        fflush(NULL);
         abort();
     }
     t->stack_lo = stack;
