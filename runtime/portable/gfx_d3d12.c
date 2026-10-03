@@ -448,9 +448,11 @@ static int heap_init(Heap* h, D3D12_DESCRIPTOR_HEAP_TYPE type, uint32_t n, int v
     D3D12_DESCRIPTOR_HEAP_DESC d = { type, n, visible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE : D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
     if (FAILED(ID3D12Device_CreateDescriptorHeap(g_dev, &d, &IID_ID3D12DescriptorHeap, (void**)&h->heap)))
         return 0;
-    ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(h->heap, &h->cpu);
+    // through the vtable: the Windows SDK's C macro takes the out-parameter, mingw-w64's (WIDL) has only
+    // an inline wrapper that returns the handle; the vtable entry is the same in both
+    h->heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(h->heap, &h->cpu);
     if (visible)
-        ID3D12DescriptorHeap_GetGPUDescriptorHandleForHeapStart(h->heap, &h->gpu);
+        h->heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(h->heap, &h->gpu);
     h->inc = ID3D12Device_GetDescriptorHandleIncrementSize(g_dev, type);
     h->free_slots = (int32_t*)malloc(sizeof(int32_t) * n);
     h->nfree = 0;

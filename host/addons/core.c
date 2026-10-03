@@ -399,6 +399,37 @@ static void guard_altstack(void)
     if (ss.ss_sp)
         sigaltstack(&ss, NULL);
 }
+#elif !defined(_MSC_VER)
+/* mingw-w64 (clang): no __try, so the POSIX guard's shape over a vectored handler. A hardware fault
+ * while guarded resumes in guard_escape, off the handler, which jumps back to guarded_pcall; LuaJIT's
+ * own errors and C++ exceptions pass through, as the MSVC build's __except filter lets them. */
+static RT_TLS void** t_guard; /* __builtin_setjmp's five words */
+static RT_TLS volatile DWORD t_fault_code;
+
+static void guard_escape(void)
+{
+    __builtin_longjmp(t_guard, 1);
+}
+
+static LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep)
+{
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (!t_guard || (code & 0xFFFFFF00u) == 0xE24C4A00u /* LuaJIT (lj_err.c) */ || code == 0xE06D7363u /* C++ */ ||
+        (code & 0xF0000000u) != 0xC0000000u /* not an error: debug output, breakpoints, ... */)
+        return EXCEPTION_CONTINUE_SEARCH;
+    t_fault_code = code;
+    ep->ContextRecord->Rip = (DWORD64)(uintptr_t)guard_escape;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static void guard_install(void)
+{
+    static int done;
+    if (done)
+        return;
+    done = 1;
+    AddVectoredExceptionHandler(1, on_fault);
+}
 #endif
 
 /* lua_pcall under the crash guard; returns the pcall status, or -1 when the addon faulted (its
@@ -419,6 +450,20 @@ static int guarded_pcall(Addon* a, lua_State* L, int nargs, int nres, int errfun
         return -1;
     }
     t_guard = &jb;
+    int r = lua_pcall(L, nargs, nres, errfunc);
+    t_guard = saved;
+    return r;
+#elif !defined(_MSC_VER)
+    void *jb[5], **saved = t_guard;
+    if (__builtin_setjmp(jb))
+    {
+        t_guard = saved;
+        a->dead = 1;
+        xi_log("%s: native fault %08lx: the addon is stopped", a->name, (unsigned long)t_fault_code);
+        chatf("[%s] crashed in native code and was stopped (the game carries on)", a->name);
+        return -1;
+    }
+    t_guard = jb;
     int r = lua_pcall(L, nargs, nres, errfunc);
     t_guard = saved;
     return r;
@@ -938,7 +983,7 @@ void addons_init(const AddonsSetup* s)
         snprintf(p, sizeof p, "%sscripts", g_kind_root[k]);
         make_dirs(p);
     }
-#if !defined(_WIN32)
+#if !defined(_MSC_VER)
     guard_install();
 #endif
     extern void xi_res_setup(const char* game_dir, const char* const* overlays, unsigned n);
