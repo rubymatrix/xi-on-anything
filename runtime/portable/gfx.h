@@ -280,6 +280,12 @@ void gfx_trace_dump(const char* path);
  * that centre on the character: the sun's near shadow map. NULL when there is none (the lobby, a
  * zone change). */
 void gfx_set_focus(const float* pos);
+/* Whether the player is in a Mog House, where the sun's shadows are scaled by the moghouse setting
+ * (0 by default: none - the room's ceiling would shade all of it). */
+void gfx_set_moghouse(int in);
+/* Whether the sun's shadows were drawn, at least a quarter as dark as by full day, within the last 30
+ * frames: the game's own character shadows stand aside only then (d3d8.c game_shadow_hidden). */
+int gfx_sun_shadows_shown(void);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);

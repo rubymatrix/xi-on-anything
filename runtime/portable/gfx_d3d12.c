@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cachedir.h"
 #include "gfx.h"
 #include "gfx_hlsl.h"
 
@@ -256,7 +257,7 @@ typedef struct FxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft,
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
-        water_scale, water_reflect, water_spec, lod, gameshadows;
+        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -1739,15 +1740,9 @@ static void queue_job(const PipeKey* k, const uint32_t* vs, uint32_t nvs, const 
 /* at start-up: the keys earlier sessions built, built again in the background */
 static void prewarm_pipelines(void)
 {
-    const char* dir = getenv("FFXI_CACHE_DIR");
     char path[900];
-    if (dir && *dir)
-        snprintf(path, sizeof path, "%s", dir);
-    else if (getenv("LOCALAPPDATA"))
-        snprintf(path, sizeof path, "%s\\FFXI", getenv("LOCALAPPDATA"));
-    else
+    if (!cache_dir(path, sizeof path))
         return;
-    CreateDirectoryA(path, NULL);
     snprintf(g_pipe_cache, sizeof g_pipe_cache, "%s\\pipelines.d3d12.v1", path);
     FILE* f = fopen(g_pipe_cache, "rb");
     if (!f)
@@ -2223,6 +2218,30 @@ static int draw_clip0(const GfxDraw* d, float out[4])
     return isfinite(out[0]) && isfinite(out[1]) && isfinite(out[2]) && isfinite(out[3]);
 }
 
+/* a shader's tokens as casters hold them: the game's own are freed by DeleteVertexShader, but an entry
+ * of the sun's cache may build its shadow pipeline from them long after. One copy per program (its
+ * hash, as the pipelines' keys have it), kept for the session. */
+static const uint32_t* tokens_kept(uint32_t prog, int pixel, const uint32_t* t)
+{
+    static Map kept;
+    static uint32_t last_prog[2];
+    static const uint32_t* last[2];
+    if (!prog || !t)
+        return t;
+    if (last[pixel] && last_prog[pixel] == prog)
+        return last[pixel];
+    uint64_t key = (uint64_t)prog << 1 | (uint64_t)pixel;
+    uint32_t* c = (uint32_t*)map_get(&kept, &key, sizeof key);
+    if (!c)
+    {
+        uint32_t n;
+        c = copy_tok(t, &n);
+        map_put(&kept, &key, sizeof key, c);
+    }
+    last_prog[pixel] = prog, last[pixel] = c;
+    return c;
+}
+
 /* a caster for the draw being encoded: what draw_encode binds it fills in */
 static Caster* caster_new(const GfxDraw* d)
 {
@@ -2234,7 +2253,7 @@ static Caster* caster_new(const GfxDraw* d)
     Caster* c = &g_casters[g_ncasters++];
     memset(c, 0, sizeof *c);
     c->lib.vs = d->vs, c->lib.fs = d->fs;
-    c->vs = d->vs_tokens, c->ps = d->ps_tokens;
+    c->vs = tokens_kept(d->vs.prog, 0, d->vs_tokens), c->ps = tokens_kept(d->fs.prog, 1, d->ps_tokens);
     c->fixed = d->prim != GFX_TRIANGLEFAN && (!d->indices || d->ibuf);
     c->has_pos = (uint8_t)draw_clip0(d, c->clip0);
     memcpy(c->wv, d->u.wv, 64);
@@ -2248,6 +2267,56 @@ static Caster* caster_new(const GfxDraw* d)
         c->uidx = (int32_t)g_ncaster_u++;
     }
     return c;
+}
+
+/* A caster's vertices and indices from a buffer the game is rewriting (uploaded this frame already, or
+ * often), copied into the ring as they are now: the game may upload it again before the scene is done
+ * (the next tree of a kind, swayed through the same buffer), and the map would then draw this one
+ * with that one's vertices - so the upload took it out (sun_cache_forget), and only the last of them
+ * cast. The CPU's copy is the guest's own memory, rewritten in place: it can only be taken here. Up
+ * to 1 MB a stream; past that it stays the buffer's. No longer the game's buffers, it is not fixed. */
+static void caster_snapshot(Caster* c, const GfxDraw* d)
+{
+    enum { MOST = 1 << 20 };
+    long hi = (long)c->vstart + (long)c->n - 1;
+    if (c->itype)
+    {
+        hi = -1;
+        if (c->icpu)
+            for (uint32_t i = 0; i < c->n; ++i)
+            {
+                long x = c->itype == 2 ? ((const uint16_t*)c->icpu)[i] : (long)((const uint32_t*)c->icpu)[i];
+                hi = x > hi ? x : hi;
+            }
+    }
+    if (hi >= 0)
+        hi += d->u.vofs;
+    for (int s = 0; s < GFX_NSTREAMS; ++s)
+    {
+        GfxBuf* b = c->vb[s];
+        if (!b || !c->vcpu[s] || !(b->up_last == g_serial || buf_volatile(b)))
+            continue;
+        uint32_t stride = d->u.stride[s];
+        size_t need = hi >= 0 && stride ? (size_t)(hi + 1) * stride + 16 : c->vlen[s];
+        if (need > c->vlen[s])
+            need = c->vlen[s];
+        if (!need || need > MOST)
+            continue;
+        Alloc a = ring(need + 16, 16);
+        if (!a.cpu)
+            continue;
+        memcpy(a.cpu, c->vcpu[s], need);
+        c->vb[s] = NULL, c->va[s] = a.gpu, c->vcpu[s] = a.cpu, c->vlen[s] = (uint32_t)need, c->fixed = 0;
+    }
+    if (c->ib && c->icpu && (c->ib->up_last == g_serial || buf_volatile(c->ib)) && (size_t)c->n * c->itype <= MOST)
+    {
+        Alloc a = ring((size_t)c->n * c->itype, 16);
+        if (a.cpu)
+        {
+            memcpy(a.cpu, c->icpu, (size_t)c->n * c->itype);
+            c->ib = NULL, c->iva = a.gpu, c->icpu = a.cpu, c->fixed = 0;
+        }
+    }
 }
 
 /* The scene filter (gfx_metal.m's): a large render target drawn smaller onto a large target (FFXI's
@@ -2491,6 +2560,8 @@ static void draw_encode(const GfxDraw* d)
     }
     else
         ID3D12GraphicsCommandList_DrawInstanced(l, n, 1, d->vertex_start, 0);
+    if (rec)
+        caster_snapshot(rec, d);
     g_cmd_draws++;
 }
 
@@ -2653,7 +2724,7 @@ static void draw_overlay(uint32_t w, uint32_t h)
 
 /* --- scene effects' settings ------------------------------------------------------------------------------------
  * gfx_metal.m's, key for key (its FX_SETTINGS has what each does): FFXI_FX=1 and FFXI_FX_<KEY> at start,
- * then while the game runs FFXI_FX_FILE (default %LOCALAPPDATA%\FFXI\fx.txt), lines of key=value, which
+ * then while the game runs FFXI_FX_FILE (default fx.txt in the cache folder, cachedir.h), lines of key=value, which
  * Config > Modern writes. */
 #define FXS(k, d) { #k, offsetof(FxSettings, k), d }
 static const struct
@@ -2677,10 +2748,13 @@ static const struct
     FXS(lod, 0.0f),
     /* not an effect: the game's own character shadows (d3d8.c game_shadow_hidden): 0 off while the sun's are on, 1 always, 2 never */
     FXS(gameshadows, 0.0f),
+    /* how much of the sun's shadows stay in a Mog House (gfx_set_moghouse), 0 none to 1 all */
+    FXS(moghouse, 0.0f),
 };
 #undef FXS
 
-/* sun_detail: the near map's texels across, a power of two from 512 to 8192 - or, as it once was, 0 for\n * 4096 and 1 for 8192 (gfx_metal.m's sun_near_size) */
+/* sun_detail: the near map's texels across, a power of two from 512 to 8192 - or, as it once was, 0 for
+ * 4096 and 1 for 8192 (gfx_metal.m's sun_near_size) */
 static int sun_near_size(void)
 {
     float d = g_fxs.sun_detail;
@@ -2715,6 +2789,16 @@ void gfx_fx_set(const char* key, float v)
         *p = v;
 }
 
+/* In a Mog House (host64.c, from the zone-in packet): the room's ceiling stands between the sun and
+ * everything in it, so the sun's shadows would black the room out; they are scaled by the moghouse
+ * setting there (0, the default: none, the room as the game lights it). */
+static volatile int g_moghouse;
+void gfx_set_moghouse(int in) { g_moghouse = in; }
+
+/* the last frame the sun's shadows were drawn a quarter or more of a day's strength (scene_fx) */
+static uint64_t g_sun_shown;
+int gfx_sun_shadows_shown(void) { return g_sun_shown && g_serial - g_sun_shown <= 30; }
+
 float gfx_fx_get(const char* key)
 {
     float* p = fx_setting(key);
@@ -2723,6 +2807,9 @@ float gfx_fx_get(const char* key)
 
 static char g_fx_file[1024];
 static uint64_t g_fx_mtime;
+#define FX_NSETTINGS (sizeof FX_SETTINGS / sizeof FX_SETTINGS[0])
+static float g_fx_start[FX_NSETTINGS];      /* each setting as the environment and defaults gave it */
+static uint8_t g_fx_from_file[FX_NSETTINGS]; /* set by the file's last read */
 
 /* the settings file, when it changed since the last look (from Present, twice a second) */
 static void fx_reload(void)
@@ -2743,11 +2830,21 @@ static void fx_reload(void)
     if (!f)
         return;
     char line[256], key[64];
-    float v, *p;
+    float v;
+    uint8_t seen[FX_NSETTINGS] = { 0 };
     while (fgets(line, sizeof line, f))
-        if (sscanf(line, " %63[a-z_] = %f", key, &v) == 2 && (p = fx_setting(key)))
-            *p = v;
+        if (sscanf(line, " %63[a-z_] = %f", key, &v) == 2)
+            for (size_t i = 0; i < FX_NSETTINGS; ++i)
+                if (!strcmp(FX_SETTINGS[i].key, key))
+                    *(float*)((char*)&g_fxs + FX_SETTINGS[i].at) = v, seen[i] = 1;
     fclose(f);
+    /* a line taken out of the file: its key back to what it was at start, not the file's last word */
+    for (size_t i = 0; i < FX_NSETTINGS; ++i)
+    {
+        if (g_fx_from_file[i] && !seen[i])
+            *(float*)((char*)&g_fxs + FX_SETTINGS[i].at) = g_fx_start[i];
+        g_fx_from_file[i] = seen[i];
+    }
     fprintf(stderr, "[recomp] gfx: scene effects %s from %s\n", g_fxs.fx != 0.0f ? "on" : "off", g_fx_file);
 }
 
@@ -2767,11 +2864,15 @@ static void fx_config(void)
     if (dbg)
         g_fxs.debug = !strcmp(dbg, "ao") ? 1.0f : !strcmp(dbg, "fog") ? 2.0f : !strcmp(dbg, "bloom") ? 3.0f
             : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f : (float)atof(dbg);
+    for (size_t i = 0; i < FX_NSETTINGS; ++i)
+        g_fx_start[i] = *(float*)((char*)&g_fxs + FX_SETTINGS[i].at);
+    /* where Config > Modern writes it (host/modern.c fx_file): FFXI_CACHE_DIR's when that is set */
     const char* file = getenv("FFXI_FX_FILE");
+    char dir[900];
     if (file && *file)
         snprintf(g_fx_file, sizeof g_fx_file, "%s", file);
-    else if (getenv("LOCALAPPDATA"))
-        snprintf(g_fx_file, sizeof g_fx_file, "%s\\FFXI\\fx.txt", getenv("LOCALAPPDATA"));
+    else if (cache_dir(dir, sizeof dir))
+        snprintf(g_fx_file, sizeof g_fx_file, "%s\\fx.txt", dir);
 }
 
 /* --- scene effects (gfx_scene_done) ----------------------------------------------------------------------------
@@ -3177,9 +3278,10 @@ typedef struct Cached
 {
     Caster c;            /* c.vb[] / c.ib: the game's buffers (fixed), or NULL with c.va / c.iva into copy */
     GfxU u;              /* its uniforms when last seen */
-    ID3D12Resource* copy; /* a copy's vertices and indices (upload heap, mapped at copy_cpu) */
-    uint8_t* copy_cpu;
-    uint32_t copy_bytes;
+    int32_t copy;         /* a copy's vertices and indices: its chunk (g_copy) + 1, 0 none */
+    uint8_t* copy_cpu;    /* where they are in it */
+    D3D12_GPU_VIRTUAL_ADDRESS copy_gpu;
+    uint32_t copy_bytes;  /* the room it holds there */
     float clip_world[16];
     float pos[3], cam[3]; /* where it stood and where the camera was, when last seen */
     uint64_t seen, replayed;
@@ -3213,10 +3315,31 @@ static void cache_map_free(void)
     memset(&g_cache_map, 0, sizeof g_cache_map);
 }
 
+/* The copies live in 4 MB chunks of the upload heap, at most SUN_COPY_BYTES of them, each copy within
+ * one; a chunk is filled again from its start once every copy in it is gone and no frame in flight
+ * reads them. (A buffer of each copy's own took 64 KB at the least: 48 MB of small meshes was a
+ * gigabyte and more.) */
+enum { COPY_CHUNK = 4u << 20, COPY_CHUNKS = SUN_COPY_BYTES / COPY_CHUNK };
+typedef struct CopyChunk
+{
+    ID3D12Resource* res;
+    uint8_t* cpu;
+    D3D12_GPU_VIRTUAL_ADDRESS gpu;
+    uint32_t used, live; /* bytes handed out since it was last empty, and those still held */
+    uint64_t emptied;    /* the frame its last copy went */
+} CopyChunk;
+static CopyChunk g_copy[COPY_CHUNKS];
+
 static void cached_release(Cached* ce)
 {
     if (ce->copy)
-        defer((IUnknown*)ce->copy, NULL, -1), ce->copy = NULL, ce->copy_cpu = NULL;
+    {
+        CopyChunk* k = &g_copy[ce->copy - 1];
+        k->live -= ce->copy_bytes;
+        if (!k->live)
+            k->emptied = g_serial;
+        ce->copy = 0, ce->copy_cpu = NULL, ce->copy_gpu = 0;
+    }
     g_copy_bytes -= ce->copy_bytes, ce->copy_bytes = 0;
 }
 
@@ -3344,24 +3467,63 @@ static Cached* cache_slot(const CacheKey* k, const Caster* c, const float* pos, 
     return ce;
 }
 
-/* makes room for a copy of `need` bytes: the copies seen longest ago go (not `keep`'s) */
-static int copy_room(uint32_t need, const Cached* keep)
+/* room for a copy of `need` bytes (a multiple of 256) in a chunk: its index in *at and its offset in
+ * *off; 0 when there is none this frame. With every chunk made and full, the copies of the chunk
+ * seen longest ago go (none seen this frame, not `keep`'s), and it is filled again once no frame in
+ * flight reads them. */
+static int copy_take(uint32_t need, const Cached* keep, int* at, uint32_t* off)
 {
-    if (need > SUN_COPY_BYTES / 4)
+    if (!need || need > COPY_CHUNK)
         return 0;
-    while (g_copy_bytes + need > SUN_COPY_BYTES)
+    int empty = -1;
+    for (int i = 0; i < COPY_CHUNKS; ++i)
     {
-        Cached* old = NULL;
-        for (uint32_t i = 0; i < g_ncache; ++i)
-            if (&g_cache[i] != keep && g_cache[i].copy_bytes && !g_cache[i].dead && g_cache[i].seen != g_serial &&
-                (!old || g_cache[i].seen < old->seen))
-                old = &g_cache[i];
-        if (!old)
-            return 0;
-        old->dead = 1;
-        cached_release(old);
+        CopyChunk* k = &g_copy[i];
+        if (!k->res)
+        {
+            if (empty < 0)
+                empty = i;
+            continue;
+        }
+        if (!k->live && k->used && k->emptied + FRAMES < g_serial)
+            k->used = 0;
+        if (k->used + need <= COPY_CHUNK)
+        {
+            *at = i, *off = k->used;
+            k->used += need, k->live += need;
+            return 1;
+        }
     }
-    return 1;
+    if (empty >= 0)
+    {
+        CopyChunk* k = &g_copy[empty];
+        k->res = make_buffer(COPY_CHUNK, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        if (!k->res)
+            return 0;
+        ID3D12Resource_Map(k->res, 0, NULL, (void**)&k->cpu);
+        k->gpu = ID3D12Resource_GetGPUVirtualAddress(k->res);
+        *at = empty, *off = 0;
+        k->used = k->live = need;
+        return 1;
+    }
+    /* all made and full: empty the stalest */
+    uint64_t newest[COPY_CHUNKS] = { 0 };
+    for (uint32_t i = 0; i < g_ncache; ++i)
+    {
+        const Cached* ce = &g_cache[i];
+        uint64_t seen = ce == keep ? g_serial : ce->seen;
+        if (ce->copy && seen > newest[ce->copy - 1])
+            newest[ce->copy - 1] = seen;
+    }
+    int old = -1;
+    for (int i = 0; i < COPY_CHUNKS; ++i)
+        if (g_copy[i].live && newest[i] != g_serial && (old < 0 || newest[i] < newest[old]))
+            old = i;
+    if (old >= 0)
+        for (uint32_t i = 0; i < g_ncache; ++i)
+            if (g_cache[i].copy == old + 1)
+                g_cache[i].dead = 1, cached_release(&g_cache[i]);
+    return 0;
 }
 
 /* the vertices and indices caster c draws, copied into ce's own buffer: only the vertices its indices
@@ -3405,18 +3567,18 @@ static int cache_copy(Cached* ce, const Caster* c, GfxU* ub)
     total += (ilen + 15) & ~15u;
     if (!total)
         return 0;
-    /* the copy's buffer again when it fits and no frame in flight reads it */
-    if (!(ce->copy && ce->copy_bytes == total && ce->replayed + FRAMES < g_serial))
+    /* the copy's room again when it fits and no frame in flight reads it (the slack: a last element read whole) */
+    uint32_t room = (total + 16 + 255) & ~255u;
+    if (!(ce->copy && room <= ce->copy_bytes && ce->replayed + FRAMES < g_serial))
     {
-        if (!copy_room(total, ce))
-            return 0;
-        ID3D12Resource* r = make_buffer(total + 16, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-        if (!r)
+        int at;
+        uint32_t at_off;
+        if (!copy_take(room, ce, &at, &at_off))
             return 0;
         cached_release(ce);
-        ce->copy = r;
-        ID3D12Resource_Map(r, 0, NULL, (void**)&ce->copy_cpu);
-        ce->copy_bytes = total, g_copy_bytes += total;
+        ce->copy = at + 1;
+        ce->copy_cpu = g_copy[at].cpu + at_off, ce->copy_gpu = g_copy[at].gpu + at_off;
+        ce->copy_bytes = room, g_copy_bytes += room;
     }
     for (int s = 0; s < GFX_NSTREAMS; ++s)
         if (len[s])
@@ -3424,7 +3586,7 @@ static int cache_copy(Cached* ce, const Caster* c, GfxU* ub)
     if (ilen)
         memcpy(ce->copy_cpu + ioff, c->icpu, ilen);
     /* the copy's own buffers in place of the caster's */
-    D3D12_GPU_VIRTUAL_ADDRESS gpu = ID3D12Resource_GetGPUVirtualAddress(ce->copy);
+    D3D12_GPU_VIRTUAL_ADDRESS gpu = ce->copy_gpu;
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
         ce->c.vb[s] = NULL, ce->c.vcpu[s] = NULL;
@@ -3504,14 +3666,10 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
         if (fresh || copy)
         {
             /* what it draws with as of this frame (a copy's buffers are its own: cache_copy) */
-            ID3D12Resource* keep_copy = ce->copy;
-            uint8_t* keep_cpu = ce->copy_cpu;
-            uint32_t keep_bytes = ce->copy_bytes;
             Caster was = ce->c;
             ce->c = *c;
             if (copy && !fresh)
                 memcpy(ce->c.va, was.va, sizeof was.va), ce->c.iva = was.iva;
-            ce->copy = keep_copy, ce->copy_cpu = keep_cpu, ce->copy_bytes = keep_bytes;
         }
         ce->u = g_caster_u[c->uidx]; /* the uniforms as of this frame */
         if (copy && !cache_copy(ce, c, &ce->u))
@@ -3670,15 +3828,16 @@ static int beyond_map(const SunCascade* k, const float* p)
     return (fmaxf(fabsf(m[0]), fabsf(m[1])) - 1.0f) * 0.5f * k->across > 96.0f;
 }
 
-/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache) */
-static uint32_t sun_draw(SunTex* t, const float* invP, const float* invV, const SunCascade* k, int cache)
+/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). How many
+ * were drawn; -1 when the map was not even cleared (it still holds an earlier frame's) */
+static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCascade* k, int cache)
 {
     float clip_world[16], M[16];
     mat_mul(clip_world, invP, invV);
     mat_mul(M, clip_world, k->S); /* the camera's clip space -> the map */
     D3D12_GPU_VIRTUAL_ADDRESS mlive = ring_bytes(M, 64), dummy = ID3D12Resource_GetGPUVirtualAddress(g_dummy);
     if (!mlive)
-        return 0;
+        return -1;
     ID3D12GraphicsCommandList* l = list();
     sun_state(t, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = heap_cpu(&g_dsv, t->dsv);
@@ -3689,8 +3848,8 @@ static uint32_t sun_draw(SunTex* t, const float* invP, const float* invV, const 
     ID3D12GraphicsCommandList_RSSetViewports(l, 1, &v);
     ID3D12GraphicsCommandList_RSSetScissorRects(l, 1, &sc);
     ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(l, ROOT_SHADOW, mlive);
-    int live_m = 1;
-    uint32_t drawn = 0, total = g_ncasters + (cache ? g_ncache : 0);
+    int live_m = 1, drawn = 0;
+    uint32_t total = g_ncasters + (cache ? g_ncache : 0);
     for (uint32_t i = 0; i < total; ++i)
     {
         const Caster* cs;
@@ -3839,7 +3998,9 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     /* the near map reaches sun_near past the player, not the camera (gfx_metal.m's): the camera stands
      * some units behind the character, and a reach from it left the far half of the player's own
      * shadow in the coarse map. A player farther off than 40 units is not the one in view (a cutscene) */
-    float dfar = fmaxf(g_fxs.sun_distance, 4.0f), dnear = fminf(fmaxf(g_fxs.sun_near, 0.0f), dfar), lead = 0.0f;
+    /* sun_near 3 to 80 (0 or less: no near map); past the far map's reach it stops at it */
+    float dfar = fmaxf(g_fxs.sun_distance, 4.0f), dnear = g_fxs.sun_near > 0.0f ? fminf(fmaxf(g_fxs.sun_near, 3.0f), 80.0f) : 0.0f;
+    float lead = 0.0f;
     g_fx.st_focus = -1.0f;
     if (g_focus_serial && g_focus_serial + 2 >= g_serial)
     {
@@ -3848,28 +4009,30 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
         lead = d < 40.0f ? d : 0.0f;
         g_fx.st_focus = d;
     }
-    float tnear = dnear + lead;
+    float tnear = fminf(dnear + lead, dfar);
     SunCascade far_k, near_k;
     sun_fit(s, invV, L, 0.5f, dfar, SUN_MAP, &far_k);
     if (!sun_target(&g_fx.smap, SUN_MAP))
         return 0;
-    uint32_t drawn = sun_draw(&g_fx.smap, invP, invV, &far_k, 1);
+    int drawn = sun_draw(&g_fx.smap, invP, invV, &far_k, 1);
     memcpy(u->lmat, far_k.lmat, 64);
     u->smap[1] = far_k.texel, u->smap[2] = far_k.bias, u->smap[3] = far_k.soft;
     u->smap2[0] = far_k.slope, u->smap2[3] = far_k.range;
     u->smapn2[1] = 0.0f;
     int nsize = sun_near_size();
-    if (dnear >= 2.0f && tnear < dfar && sun_target(&g_fx.smapn, nsize))
+    if (dnear > 0.0f && sun_target(&g_fx.smapn, nsize))
     {
         sun_fit(s, invV, L, 0.5f, tnear, nsize, &near_k);
-        sun_draw(&g_fx.smapn, invP, invV, &near_k, 1);
-        memcpy(u->lmatn, near_k.lmat, 64);
-        u->smapn[0] = near_k.texel, u->smapn[1] = near_k.bias, u->smapn[2] = near_k.soft, u->smapn[3] = near_k.slope;
-        u->smapn2[0] = near_k.range, u->smapn2[1] = 1.0f;
+        if (sun_draw(&g_fx.smapn, invP, invV, &near_k, 1) >= 0) /* not an earlier frame's map through this one's matrix */
+        {
+            memcpy(u->lmatn, near_k.lmat, 64);
+            u->smapn[0] = near_k.texel, u->smapn[1] = near_k.bias, u->smapn[2] = near_k.soft, u->smapn[3] = near_k.slope;
+            u->smapn2[0] = near_k.range, u->smapn2[1] = 1.0f;
+        }
     }
     g_fx.st_across = far_k.across;
     g_fx.st_cached = g_ncache;
-    return drawn != 0;
+    return drawn > 0;
 }
 
 /* The finished scene anti-aliased (g_fxs.aa: FXAA), within its viewport, before the interface goes on */
@@ -3923,8 +4086,11 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
     memcpy(&maxz, &s->vp[5], 4);
     if (maxz <= minz)
         minz = 0, maxz = 1;
-    /* the occlusion at about 2000 pixels across, bloom and rays (soft anyway) at about 1000 */
-    uint32_t div = vw > 2048 ? 2 : 1, bdiv = vw > 2048 ? 4 : vw > 1024 ? 2 : 1;
+    /* the occlusion at 2048 pixels across or fewer (halved until it is: the background's 4096, 6144,
+     * 8192), bloom and rays (soft anyway) at about 1000 */
+    uint32_t div = 1, bdiv = vw > 2048 ? 4 : vw > 1024 ? 2 : 1;
+    while (vw > 2048.0f * (float)div)
+        div *= 2;
     uint32_t aw = (uint32_t)((vw + div - 1) / div), ah = (uint32_t)((vh + div - 1) / div);
     uint32_t bw = (uint32_t)((vw + bdiv - 1) / bdiv), bh = (uint32_t)((vh + bdiv - 1) / bdiv);
     float hand = s->proj[11] < 0.0f ? -1.0f : 1.0f;
@@ -4018,10 +4184,16 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.direct = g_fx.eased && g_fx.direct >= 0.0f ? g_fx.direct + (want - g_fx.direct) * 0.05f : want;
         }
         day *= g_fxs.sun_direct > 0.0f ? g_fx.direct : 1.0f;
+        if (g_moghouse)
+            day *= fminf(fmaxf(g_fxs.moghouse, 0.0f), 1.0f);
         u.shadow[0] = g_fxs.shadow * day;
         u.shadow[1] = g_fxs.shadow_length, u.shadow[2] = 0.3f, u.shadow[3] = 40.0f;
         if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
+        {
             u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+            if (day >= 0.25f)
+                g_sun_shown = g_serial;
+        }
         u.smap2[1] = fminf(fmaxf(g_fxs.sun_face, 0.0f), 1.0f), u.smap2[2] = fmaxf(g_fxs.sun_min, 0.0f);
         /* the sun's place on screen: far along its direction, through the projection */
         const float* sd = g_fx.sun;
@@ -4120,8 +4292,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
     if (u.bloom[1] > 0.0f)
     {
         float f2w = (float)b2w, f2h = (float)b2h;
-        in[0] = fx_in(&g_fx.src, 0);
-        fx_pass(fx_out(&g_fx.b1a, 0), g_fx.bright, 0, 0, fbw, fbh, ua, in, 1, 0, 0);
+        in[0] = fx_in(&g_fx.src, 0), in[1] = ao_out ? fx_in(ao_out, 0) : SRV_NULL_2D; /* shaded as fx_comp shades */
+        fx_pass(fx_out(&g_fx.b1a, 0), g_fx.bright, 0, 0, fbw, fbh, ua, in, 2, 0, 0);
         in[0] = fx_in(&g_fx.b1a, 0);
         fx_pass(fx_out(&g_fx.b1b, 0), g_fx.gauss, 0, 0, fbw, fbh, ua, in, 1, 2, 0);
         in[0] = fx_in(&g_fx.b1b, 0);

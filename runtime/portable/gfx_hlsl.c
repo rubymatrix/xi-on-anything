@@ -641,7 +641,7 @@ const char gfx_hlsl_fx[] =
     "    if (rd <= 0.05) break;\n"
     "    float2 ndc = float2(R.x * u.proj.x + R.z * u.proj.z, R.y * u.proj.y + R.z * u.proj.w) / rd;\n"
     "    float2 q = u.vp.xy + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
-    "    if (any(q < u.vp.xy) || any(q >= u.vp.xy + u.vp.zw)) break;\n"
+    "    if (any(q < u.vp.xy) || any(q + 0.5 >= u.vp.xy + u.vp.zw)) break;\n" /* the pixel read within the viewport, not just q */
     "    float sd = view_z(depth_at(dt, q + 0.5)) * u.hand.x;\n" /* where the fixup drew it */
     "    float in_front = rd - sd;\n"
     "    if (sd > 0.0 && in_front > 0.005 * rd + 0.02 && in_front < u.shadow.z + 0.01 * rd) return 1.0 - fade * (1.0 - a * a);\n"
@@ -682,15 +682,18 @@ const char gfx_hlsl_fx[] =
     "float sun_map(Texture2D sm, Texture2D smn, float3 P, float3 N, float dist, float k) {\n"
     "  float nl = dot(N, u.sun.xyz);\n"
     "  float face = lerp(1.0 - 0.6 * u.smap2.y, 1.0, smoothstep(-0.3, 0.25, nl)), use = smoothstep(-0.05, 0.15, nl);\n"
-    "  if (use <= 0.0) return face;\n"
+    /* turned from the sun: looked up as well, but shaded only by casters a unit or more away (a wall, a
+     * roof) - not by the body's own front, whose shade the game's lighting has already. Skipped, a
+     * character in a building's shadow was lit where it faced away and dark where it faced the sun. */
+    "  float mw = lerp(max(u.smap2.z, 1.0), u.smap2.z, use);\n"
     "  float en = 0.0, ef = 0.0, s = 1.0;\n"
     "  if (u.smapn2.y > 0.0)\n"
-    "    s = sun_look(smn, u.lmatn, u.smapn, u.smapn2.x, u.smap2.z, P, N, dist, k, u.smapn2.z > 0.0, en);\n"
+    "    s = sun_look(smn, u.lmatn, u.smapn, u.smapn2.x, mw, P, N, dist, k, u.smapn2.z > 0.0, en);\n"
     "  if (en < 1.0) {\n"
-    "    float sf = sun_look(sm, u.lmat, float4(u.smap.yzw, u.smap2.x), u.smap2.w, u.smap2.z, P, N, dist, k, u.smapn2.z > 0.0, ef);\n"
+    "    float sf = sun_look(sm, u.lmat, float4(u.smap.yzw, u.smap2.x), u.smap2.w, mw, P, N, dist, k, u.smapn2.z > 0.0, ef);\n"
     "    s = lerp(sf, s, en);\n"
     "  }\n"
-    "  return lerp(1.0, min(lerp(1.0, s, use), face), max(en, ef));\n"
+    "  return min(lerp(1.0, s, max(en, ef)), face);\n" /* the face's shade with a map or without */
     "}\n"
     "static const uint BAYER[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };\n"
     /* the depth at t0, the sun's maps at t1 and t2, the occlusion's depth levels at t3 */
@@ -701,8 +704,11 @@ const char gfx_hlsl_fx[] =
     "  if (dist <= 0.0) return float4(1.0, 0.0, 1.0, 1.0);\n"
     "  float3 r = pos_at(TX(0), px + float2(1, 0)) - P, l = P - pos_at(TX(0), px - float2(1, 0));\n"
     "  float3 d = pos_at(TX(0), px + float2(0, 1)) - P, t = P - pos_at(TX(0), px - float2(0, 1));\n"
-    "  float3 dx = abs(r.z) < abs(l.z) ? r : l, dy = abs(d.z) < abs(t.z) ? d : t;\n"
-    "  float3 N = normalize(cross(dx, dy));\n"
+    /* at the viewport's edge one side is the pixel itself (pos_at clamps to it): zero, its cross a NaN */
+    "  float3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  float3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  float3 nc = cross(dx, dy);\n"
+    "  float3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
     "  if (dot(N, P) > 0.0) N = -N;\n"
     "  int2 cell = int2(fi.pos.xy) & 3;\n"
     "  float k = frac((float(BAYER[cell.y * 4 + cell.x]) + 0.5) / 16.0 + u.hist.y);\n"
@@ -785,6 +791,12 @@ const char gfx_hlsl_fx[] =
     "float4 fx_bright(FO fi) : SV_Target {\n"
     "  float2 uv = (u.vp.xy + fi.uv * u.vp.zw) / u.size.xy, t = 1.0 / u.size.xy;\n"
     "  float3 c = 0.25 * (s0(uv + t * float2(-1, -1)) + s0(uv + t * float2(1, -1)) + s0(uv + t * float2(-1, 1)) + s0(uv + t * float2(1, 1)));\n"
+    /* as fx_comp will shade it: the scene is copied before the occlusion and the sun's shadows, and a
+     * character in a cliff's shadow, drawn dark, still glowed as bright as in the open */
+    "  if (u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0) {\n"
+    "    float4 os = TX(1).SampleLevel(LIN, fi.uv, 0);\n"
+    "    c *= lerp(1.0, os.x, u.ao.y) * lerp(1.0, os.z, u.smap.x) * lerp(1.0, os.w, u.shadow.x);\n"
+    "  }\n"
     "  float l = max(c.r, max(c.g, c.b)), k = u.bloom.z;\n"
     "  float soft = clamp(l - u.bloom.x + k, 0.0, 2.0 * k);\n"
     "  soft = soft * soft / (4.0 * k + 1e-5);\n"

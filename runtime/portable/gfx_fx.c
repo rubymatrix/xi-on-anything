@@ -65,6 +65,8 @@ static const struct
     /* not an effect: the game's own character shadows (d3d8.c game_shadow_hidden): 0 off while the
      * sun's are on, 1 always, 2 never */
     { "gameshadows", offsetof(GfxFxSettings, gameshadows), 0.0f },
+    /* how much of the sun's shadows stay in a Mog House (gfx_set_moghouse), 0 none to 1 all */
+    { "moghouse", offsetof(GfxFxSettings, moghouse), 0.0f },
     /* the near map's reach past the player */
     { "sun_near", offsetof(GfxFxSettings, sun_near), 10.0f },
     /* the near map's texels across, 512 to 8192 (64 MB at 4096, 256 MB at 8192); 0 and 1 are the
@@ -124,6 +126,9 @@ float gfx_fx_get(const char* key)
 
 static char g_fx_file[1024];
 static struct timespec g_fx_mtime;
+#define FX_NSETTINGS (sizeof FX_SETTINGS / sizeof FX_SETTINGS[0])
+static float g_fx_start[FX_NSETTINGS];      /* each setting as the environment and defaults gave it */
+static uint8_t g_fx_from_file[FX_NSETTINGS]; /* set by the file's last read */
 
 void fx_reload(void)
 {
@@ -140,11 +145,21 @@ void fx_reload(void)
     if (!f)
         return;
     char line[256], key[64];
-    float v, *p;
+    float v;
+    uint8_t seen[FX_NSETTINGS] = { 0 };
     while (fgets(line, sizeof line, f))
-        if (sscanf(line, " %63[a-z_] = %f", key, &v) == 2 && (p = fx_setting(key)))
-            *p = v;
+        if (sscanf(line, " %63[a-z_] = %f", key, &v) == 2)
+            for (size_t i = 0; i < FX_NSETTINGS; ++i)
+                if (!strcmp(FX_SETTINGS[i].key, key))
+                    *(float*)((char*)&g_fxs + FX_SETTINGS[i].at) = v, seen[i] = 1;
     fclose(f);
+    /* a line taken out of the file: its key back to what it was at start, not the file's last word */
+    for (size_t i = 0; i < FX_NSETTINGS; ++i)
+    {
+        if (g_fx_from_file[i] && !seen[i])
+            *(float*)((char*)&g_fxs + FX_SETTINGS[i].at) = g_fx_start[i];
+        g_fx_from_file[i] = seen[i];
+    }
     fprintf(stderr, "[recomp] gfx: scene effects %s from %s\n", g_fxs.fx != 0.0f ? "on" : "off", g_fx_file);
 }
 
@@ -164,6 +179,8 @@ void fx_config(void)
     if (dbg)
         g_fxs.debug = !strcmp(dbg, "ao") ? 1.0f : !strcmp(dbg, "fog") ? 2.0f : !strcmp(dbg, "bloom") ? 3.0f
             : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f : (float)atof(dbg);
+    for (size_t i = 0; i < FX_NSETTINGS; ++i)
+        g_fx_start[i] = *(float*)((char*)&g_fxs + FX_SETTINGS[i].at);
     const char* file = getenv("FFXI_FX_FILE");
     if (file && *file)
         snprintf(g_fx_file, sizeof g_fx_file, "%s", file);

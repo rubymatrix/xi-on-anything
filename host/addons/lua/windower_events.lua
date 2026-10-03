@@ -471,7 +471,7 @@ P[0x00A] = function(d)
     local zone = u16(d, 0x30)
     local old = S.zone
     S.zone = zone
-    S.mog_house = u8(d, 0x80) ~= 0
+    S.mog_house = u8(d, 0x80) == 1 -- 1 in it, 2 elsewhere
     S.status = u8(d, 0x1F)
     set_weather(u16(d, 0x68))
     for j = 0, 15 do

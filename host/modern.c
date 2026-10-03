@@ -357,6 +357,8 @@ static const Row MODERN_ROWS[] = {
         "Hard edges that soften only far from the caster, or soft ones." },
     { "Shadow Detail", "sun_detail", CHOICE, 3, { "Low", "Normal", "High" }, { 2048, 4096, 8192 }, 0, 0,
         "Sharper shadows close up. High uses more video memory." },
+    { "Mog House Shadows", "moghouse", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f,
+        "How much of the sun's shadows reach into your Mog House. Off lights it as the game does." },
     { "Per-Pixel Lighting", "light", CHOICE, 3, { "Off", "Sun", "All" }, { 0, 1, 2 }, 0, 0,
         "Smooth light across surfaces: the sun's, or every light's." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },

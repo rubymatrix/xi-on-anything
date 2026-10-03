@@ -1988,6 +1988,30 @@ static int draw_clip0(const GfxDraw* d, float out[4])
     return gfx_clip0(d, base, have, out);
 }
 
+/* a shader's tokens as casters hold them: the game's own are freed by DeleteVertexShader, but an entry
+ * of the sun's cache may build its shadow pipeline from them long after. One copy per program (its
+ * hash, as the pipelines' keys have it), kept for the session. */
+static const uint32_t* tokens_kept(uint32_t prog, int pixel, const uint32_t* t)
+{
+    static Map kept;
+    static uint32_t last_prog[2];
+    static const uint32_t* last[2];
+    if (!prog || !t)
+        return t;
+    if (last[pixel] && last_prog[pixel] == prog)
+        return last[pixel];
+    uint64_t key = (uint64_t)prog << 1 | (uint64_t)pixel;
+    uint32_t* c = (uint32_t*)map_get(&kept, &key, sizeof key);
+    if (!c)
+    {
+        uint32_t n;
+        c = copy_tok(t, &n);
+        map_put(&kept, &key, sizeof key, c);
+    }
+    last_prog[pixel] = prog, last[pixel] = c;
+    return c;
+}
+
 static Caster* caster_new(const GfxDraw* d)
 {
     if (g_ncasters == g_casters_cap)
@@ -1998,7 +2022,7 @@ static Caster* caster_new(const GfxDraw* d)
     Caster* c = &g_casters[g_ncasters++];
     memset(c, 0, sizeof *c);
     c->lib.vs = d->vs, c->lib.fs = d->fs;
-    c->vs = d->vs_tokens, c->ps = d->ps_tokens;
+    c->vs = tokens_kept(d->vs.prog, 0, d->vs_tokens), c->ps = tokens_kept(d->fs.prog, 1, d->ps_tokens);
     c->zbias = d->zbias;
     c->fixed = d->prim != GFX_TRIANGLEFAN && (!d->indices || d->ibuf);
     c->has_pos = (uint8_t)draw_clip0(d, c->clip0);
@@ -2429,7 +2453,7 @@ static const char FX_GLSL[] =
     "    if (rd <= 0.05) break;\n"
     "    vec2 ndc = vec2(R.x * u.proj.x + R.z * u.proj.z, R.y * u.proj.y + R.z * u.proj.w) / rd;\n"
     "    vec2 q = u.vp.xy + vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
-    "    if (outside(q)) break;\n"
+    "    if (outside(q) || outside(q + 0.5)) break;\n" /* the pixel read within the viewport, not just q */
     "    float sd = view_z(depth_at(t0, q + 0.5)) * u.hand.x;\n" /* where the fixup drew it */
     "    float in_front = rd - sd;\n"
     "    if (sd > 0.0 && in_front > 0.005 * rd + 0.02 && in_front < u.shadow.z + 0.01 * rd) return 1.0 - fade * (1.0 - a * a);\n"
@@ -2467,15 +2491,16 @@ static const char FX_GLSL[] =
     "float sun_map(vec3 P, vec3 N, float dist, float k) {\n"
     "  float nl = dot(N, u.sun.xyz);\n"
     "  float face = mix(1.0 - 0.6 * u.smap2.y, 1.0, smoothstep(-0.3, 0.25, nl)), use = smoothstep(-0.05, 0.15, nl);\n"
-    "  if (use <= 0.0) return face;\n"
+    /* turned from the sun: looked up too, shaded only by casters a unit or more away (gfx_hlsl.c) */
+    "  float mw = mix(max(u.smap2.z, 1.0), u.smap2.z, use);\n"
     "  float en = 0.0, ef = 0.0, s = 1.0;\n"
     "  if (u.smapn2.y > 0.0)\n"
-    "    s = sun_look(t2, smnc, u.lmatn, u.smapn, u.smapn2.x, u.smap2.z, P, N, dist, k, u.smapn2.z > 0.0, en);\n"
+    "    s = sun_look(t2, smnc, u.lmatn, u.smapn, u.smapn2.x, mw, P, N, dist, k, u.smapn2.z > 0.0, en);\n"
     "  if (en < 1.0) {\n"
-    "    float sf = sun_look(t1, smc, u.lmat, vec4(u.smap.yzw, u.smap2.x), u.smap2.w, u.smap2.z, P, N, dist, k, u.smapn2.z > 0.0, ef);\n"
+    "    float sf = sun_look(t1, smc, u.lmat, vec4(u.smap.yzw, u.smap2.x), u.smap2.w, mw, P, N, dist, k, u.smapn2.z > 0.0, ef);\n"
     "    s = mix(sf, s, en);\n"
     "  }\n"
-    "  return mix(1.0, min(mix(1.0, s, use), face), max(en, ef));\n"
+    "  return min(mix(1.0, s, max(en, ef)), face);\n" /* the face's shade with a map or without */
     "}\n"
     "void main() {\n"
     "  vec2 px = floor(u.vp.xy + vuv * u.vp.zw) + 0.5;\n"
@@ -2484,8 +2509,11 @@ static const char FX_GLSL[] =
     "  if (dist <= 0.0) { oc = vec4(1.0, 0.0, 1.0, 1.0); return; }\n"
     "  vec3 r = pos_at(t0, px + vec2(1, 0)) - P, l = P - pos_at(t0, px - vec2(1, 0));\n"
     "  vec3 d = pos_at(t0, px + vec2(0, 1)) - P, t = P - pos_at(t0, px - vec2(0, 1));\n"
-    "  vec3 dx = abs(r.z) < abs(l.z) ? r : l, dy = abs(d.z) < abs(t.z) ? d : t;\n"
-    "  vec3 N = normalize(cross(dx, dy));\n"
+    /* at the viewport's edge one side is the pixel itself (pos_at clamps to it): zero, its cross a NaN */
+    "  vec3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  vec3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  vec3 nc = cross(dx, dy);\n"
+    "  vec3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
     "  if (dot(N, P) > 0.0) N = -N;\n"
     "  const int BAYER[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);\n"
     "  ivec2 cell = ivec2(gl_FragCoord.xy) & 3;\n"
@@ -2563,6 +2591,12 @@ static const char FX_GLSL[] =
     "  vec2 uv = (u.vp.xy + vuv * u.vp.zw) / u.size.xy, t = 1.0 / u.size.xy;\n"
     "  vec3 c = 0.25 * (texture(t0, uv + t * vec2(-1, -1)).rgb + texture(t0, uv + t * vec2(1, -1)).rgb +\n"
     "                   texture(t0, uv + t * vec2(-1, 1)).rgb + texture(t0, uv + t * vec2(1, 1)).rgb);\n"
+    /* as the composite will shade it: the scene is copied before the occlusion and the sun's shadows,
+     * and a character in a cliff's shadow, drawn dark, still glowed as bright as in the open */
+    "  if (u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0) {\n"
+    "    vec4 os = textureLod(t1, vuv, 0.0);\n"
+    "    c *= mix(1.0, os.x, u.ao.y) * mix(1.0, os.z, u.smap.x) * mix(1.0, os.w, u.shadow.x);\n"
+    "  }\n"
     "  float l = max(c.r, max(c.g, c.b)), k = u.bloom.z;\n"
     "  float soft = clamp(l - u.bloom.x + k, 0.0, 2.0 * k);\n"
     "  soft = soft * soft / (4.0 * k + 1e-5);\n"
@@ -2773,6 +2807,16 @@ static void fx_ease(float* a, const float* b, int n, float k)
     for (int i = 0; i < n; ++i)
         a[i] = g_fx.eased ? a[i] + (b[i] - a[i]) * k : b[i];
 }
+
+/* In a Mog House (host64.c, from the zone-in packet): the room's ceiling stands between the sun and
+ * everything in it, so the sun's shadows would black the room out; they are scaled by the moghouse
+ * setting there (0, the default: none, the room as the game lights it). */
+static volatile int g_moghouse;
+void gfx_set_moghouse(int in) { g_moghouse = in; }
+
+/* the last frame the sun's shadows were drawn a quarter or more of a day's strength (scene_fx) */
+static uint64_t g_sun_shown;
+int gfx_sun_shadows_shown(void) { return g_sun_shown && g_serial - g_sun_shown <= 30; }
 
 void gfx_set_focus(const float* pos)
 {
@@ -3053,6 +3097,18 @@ static void sun_cache_forget(VkBuffer buf)
             hit |= c->vb[s] == buf;
         if (hit)
             g_cache[i].dead = 1;
+    }
+    /* this frame's casters from it still draw (the buffer they read goes to the trash, kept until the
+     * frame is done, and gfx_buf_upload renames it), but none may go into the cache as drawn from the
+     * game's buffer, whose handle would outlive it: kept, they are kept as copies */
+    for (uint32_t i = 0; i < g_ncasters; ++i)
+    {
+        Caster* c = &g_casters[i];
+        int hit = c->ib == buf;
+        for (int s = 0; s < GFX_NSTREAMS; ++s)
+            hit |= c->vb[s] == buf;
+        if (hit)
+            c->fixed = 0;
     }
 }
 
@@ -3558,7 +3614,8 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     gfx_mat_mul(clip_world, invP, invV);
     gfx_mat_mul(vp, s->view, s->proj);
     sun_cache_update(clip_world, s->view, vp, invV + 12);
-    float dfar = fmaxf(g_fxs.sun_distance, 4.0f), dnear = fminf(fmaxf(g_fxs.sun_near, 0.0f), dfar);
+    /* sun_near 3 to 80 (0 or less: no near map); past the far map's reach it stops at it */
+    float dfar = fmaxf(g_fxs.sun_distance, 4.0f), dnear = g_fxs.sun_near > 0.0f ? fminf(fmaxf(g_fxs.sun_near, 3.0f), 80.0f) : 0.0f;
     SunCascade far, near;
     gfx_sun_fit(s, invV, L, 0.5f, dfar, GFX_SUN_MAP, &far);
     if (!sun_target(&g_fx.smap, GFX_SUN_MAP))
@@ -3576,9 +3633,9 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
         float d = sqrtf(dx * dx + dy * dy + dz * dz);
         lead = d < 40.0f ? d : 0.0f;
     }
-    float tnear = dnear + lead;
+    float tnear = fminf(dnear + lead, dfar);
     int nsize = gfx_sun_near_size();
-    if (dnear >= 2.0f && tnear < dfar && sun_target(&g_fx.smapn, nsize))
+    if (dnear > 0.0f && sun_target(&g_fx.smapn, nsize))
     {
         gfx_sun_fit(s, invV, L, 0.5f, tnear, nsize, &near);
         sun_draw(g_fx.smapn, invP, invV, &near, 1);
@@ -3755,8 +3812,11 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         memcpy(&maxz, &s->vp[5], 4);
         if (maxz <= minz)
             minz = 0, maxz = 1;
-        /* the occlusion at about 2000 pixels across; bloom and rays, soft anyway, at about 1000 */
-        uint32_t div = vw > 2048 ? 2 : 1, bdiv = vw > 2048 ? 4 : vw > 1024 ? 2 : 1;
+        /* the occlusion at 2048 pixels across or fewer (halved until it is: the background's 4096, 6144,
+         * 8192); bloom and rays, soft anyway, at about 1000 */
+        uint32_t div = 1, bdiv = vw > 2048 ? 4 : vw > 1024 ? 2 : 1;
+        while (vw > 2048.0f * (float)div)
+            div *= 2;
         uint32_t aw = (uint32_t)((vw + div - 1) / div), ah = (uint32_t)((vh + div - 1) / div);
         uint32_t bw = (uint32_t)((vw + bdiv - 1) / bdiv), bh = (uint32_t)((vh + bdiv - 1) / bdiv);
         float hand = s->proj[11] < 0.0f ? -1.0f : 1.0f;
@@ -3846,10 +3906,16 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 g_fx.tr_dl = dl, g_fx.tr_al = al;
             }
             day *= g_fxs.sun_direct > 0.0f ? g_fx.direct : 1.0f;
+            if (g_moghouse)
+                day *= fminf(fmaxf(g_fxs.moghouse, 0.0f), 1.0f);
             u.shadow[0] = g_fxs.shadow * day;
             u.shadow[1] = g_fxs.shadow_length, u.shadow[2] = 0.3f, u.shadow[3] = 40.0f;
             if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
+            {
                 u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+                if (day >= 0.25f)
+                    g_sun_shown = g_serial;
+            }
             g_fx.tr_strength = u.smap[0], g_fx.tr_day = day;
             u.smap2[1] = fminf(fmaxf(g_fxs.sun_face, 0.0f), 1.0f), u.smap2[2] = fmaxf(g_fxs.sun_min, 0.0f);
             /* the sun's place on screen: far along its direction, through the projection */
@@ -3947,7 +4013,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     fx_uniforms(&u);
                 if (u.bloom[1] > 0.0f)
                 {
-                    fx_pass(g_fx.b1a, 0, 0, g_fx.bright_pipe, NULL, &g_fx.src->view, 1, NULL, NULL);
+                    VkImageView b_in[2] = { g_fx.src->view, ao_out->view }; /* shaded as the composite shades */
+                    fx_pass(g_fx.b1a, 0, 0, g_fx.bright_pipe, NULL, b_in, 2, NULL, NULL);
                     fx_pass(g_fx.b1b, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.b1a->view, 1, NULL, across2);
                     fx_pass(g_fx.b1a, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.b1b->view, 1, NULL, down2);
                     fx_pass(g_fx.b2a, 0, 0, g_fx.down_pipe, NULL, &g_fx.b1a->view, 1, NULL, NULL);

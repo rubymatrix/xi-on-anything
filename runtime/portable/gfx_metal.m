@@ -1946,7 +1946,7 @@ static const char FX_MSL[] =
     "    if (rd <= 0.05) break;\n"
     "    float2 ndc = float2(R.x * u.proj.x + R.z * u.proj.z, R.y * u.proj.y + R.z * u.proj.w) / rd;\n"
     "    float2 q = u.vp.xy + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
-    "    if (any(q < u.vp.xy) || any(q >= u.vp.xy + u.vp.zw)) break;\n"
+    "    if (any(q < u.vp.xy) || any(q + 0.5 >= u.vp.xy + u.vp.zw)) break;\n" /* the pixel read within the viewport, not just q */
     "    float sd = view_z(u, dt.read(uint2(q + 0.5))) * u.hand.x;\n" /* where the fixup drew it */
     "    float in_front = rd - sd;\n"
     /* weaker the farther along the hit: no hard edge where the ray ends */
@@ -2004,15 +2004,16 @@ static const char FX_MSL[] =
     /* turned from the sun: shaded by the angle only as much as sun_face asks (FFXI's own lighting
      * shades its rock already; per face, low-polygon rock turns into a patchwork) */
     "  float face = mix(1.0 - 0.6 * u.smap2.y, 1.0, smoothstep(-0.3, 0.25, nl)), use = smoothstep(-0.05, 0.15, nl);\n"
-    "  if (use <= 0.0) return face;\n"
+    /* turned from the sun: looked up too, shaded only by casters a unit or more away (gfx_hlsl.c) */
+    "  float mw = mix(max(u.smap2.z, 1.0), u.smap2.z, use);\n"
     "  float en = 0.0, ef = 0.0, s = 1.0;\n"
     "  if (u.smapn2.y > 0.0)\n"
-    "    s = sun_look(smn, cmp, u.lmatn, u.smapn, u.smapn2.x, u.smap2.z, P, N, dist, k, u.smapn2.z > 0.0, en);\n"
+    "    s = sun_look(smn, cmp, u.lmatn, u.smapn, u.smapn2.x, mw, P, N, dist, k, u.smapn2.z > 0.0, en);\n"
     "  if (en < 1.0) {\n"
-    "    float sf = sun_look(sm, cmp, u.lmat, float4(u.smap.yzw, u.smap2.x), u.smap2.w, u.smap2.z, P, N, dist, k, u.smapn2.z > 0.0, ef);\n"
+    "    float sf = sun_look(sm, cmp, u.lmat, float4(u.smap.yzw, u.smap2.x), u.smap2.w, mw, P, N, dist, k, u.smapn2.z > 0.0, ef);\n"
     "    s = mix(sf, s, en);\n"
     "  }\n"
-    "  return mix(1.0, min(mix(1.0, s, use), face), max(en, ef));\n"
+    "  return min(mix(1.0, s, max(en, ef)), face);\n" /* the face's shade with a map or without */
     "}\n"
     /* occlusion in x (1 open, 0 closed), distance in y (0: sky), the sun by the map in z and by
      * contact in w (1 lit, 0 shaded) */
@@ -2026,8 +2027,11 @@ static const char FX_MSL[] =
     /* the surface normal from the neighbors on the side nearer in depth (no smearing across edges) */
     "  float3 r = pos_at(u, dt, px + float2(1, 0)) - P, l = P - pos_at(u, dt, px - float2(1, 0));\n"
     "  float3 d = pos_at(u, dt, px + float2(0, 1)) - P, t = P - pos_at(u, dt, px - float2(0, 1));\n"
-    "  float3 dx = abs(r.z) < abs(l.z) ? r : l, dy = abs(d.z) < abs(t.z) ? d : t;\n"
-    "  float3 N = normalize(cross(dx, dy));\n"
+    /* at the viewport's edge one side is the pixel itself (pos_at clamps to it): zero, its cross a NaN */
+    "  float3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  float3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  float3 nc = cross(dx, dy);\n"
+    "  float3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
     "  if (dot(N, P) > 0.0) N = -N;\n"
     "  const uchar BAYER[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };\n"
     "  int2 cell = int2(in.pos.xy) & 3;\n"
@@ -2139,10 +2143,16 @@ static const char FX_MSL[] =
     /* bloom's source: the scene at a quarter size (four bilinear taps), what is over the threshold,
      * with a soft knee */
     "fragment float4 fx_bright(FO in [[stage_in]], constant FxU& u [[buffer(0)]], texture2d<float> src [[texture(0)]],\n"
-    "                          sampler s [[sampler(0)]]) {\n"
+    "                          texture2d<float> ao [[texture(1)]], sampler s [[sampler(0)]]) {\n"
     "  float2 uv = (u.vp.xy + in.uv * u.vp.zw) / u.size.xy, t = 1.0 / u.size.xy;\n"
     "  float3 c = 0.25 * (src.sample(s, uv + t * float2(-1, -1)).rgb + src.sample(s, uv + t * float2(1, -1)).rgb +\n"
     "                     src.sample(s, uv + t * float2(-1, 1)).rgb + src.sample(s, uv + t * float2(1, 1)).rgb);\n"
+    /* as fx_comp will shade it: the scene is copied before the occlusion and the sun's shadows, and a
+     * character in a cliff's shadow, drawn dark, still glowed as bright as in the open */
+    "  if (u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0) {\n"
+    "    float4 os = ao.sample(s, in.uv);\n"
+    "    c *= mix(1.0, os.x, u.ao.y) * mix(1.0, os.z, u.smap.x) * mix(1.0, os.w, u.shadow.x);\n"
+    "  }\n"
     "  float l = max(c.r, max(c.g, c.b)), k = u.bloom.z;\n"
     "  float soft = clamp(l - u.bloom.x + k, 0.0, 2.0 * k);\n"
     "  soft = soft * soft / (4.0 * k + 1e-5);\n"
@@ -2337,6 +2347,16 @@ static void fx_ease(float* a, const float* b, int n, float k)
         a[i] = g_fx.eased ? a[i] + (b[i] - a[i]) * k : b[i];
 }
 
+
+/* In a Mog House (host64.c, from the zone-in packet): the room's ceiling stands between the sun and
+ * everything in it, so the sun's shadows would black the room out; they are scaled by the moghouse
+ * setting there (0, the default: none, the room as the game lights it). */
+static volatile int g_moghouse;
+void gfx_set_moghouse(int in) { g_moghouse = in; }
+
+/* the last frame the sun's shadows were drawn a quarter or more of a day's strength (scene_fx) */
+static uint64_t g_sun_shown;
+int gfx_sun_shadows_shown(void) { return g_sun_shown && g_serial - g_sun_shown <= 30; }
 
 void gfx_set_focus(const float* pos)
 {
@@ -3410,10 +3430,16 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     g_fx.tr_dl = dl, g_fx.tr_al = al;
                 }
                 day *= g_fxs.sun_direct > 0.0f ? g_fx.direct : 1.0f;
+                if (g_moghouse)
+                    day *= fminf(fmaxf(g_fxs.moghouse, 0.0f), 1.0f);
                 u.shadow[0] = g_fxs.shadow * day;
                 u.shadow[1] = g_fxs.shadow_length, u.shadow[2] = 0.3f, u.shadow[3] = 40.0f;
                 if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
+                {
                     u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+                    if (day >= 0.25f)
+                        g_sun_shown = g_serial;
+                }
                 g_fx.tr_strength = u.smap[0], g_fx.tr_day = day;
                 u.smap2[1] = fminf(fmaxf(g_fxs.sun_face, 0.0f), 1.0f), u.smap2[2] = fmaxf(g_fxs.sun_min, 0.0f);
                 /* the sun's place on screen: far along its direction, through the projection */
@@ -3508,7 +3534,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     }
                     if (u.bloom[1] > 0.0f)
                     {
-                        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.bright_pipe, qb, &u, &g_fx.src, 1, NULL);
+                        id<MTLTexture> b_in[2] = { g_fx.src, ao_out }; /* shaded as fx_comp shades */
+                        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.bright_pipe, qb, &u, b_in, 2, NULL);
                         fx_pass(g_fx.b1b, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1a, 1, across2);
                         fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1b, 1, down2);
                         fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.down_pipe, e, &u, &g_fx.b1a, 1, NULL);

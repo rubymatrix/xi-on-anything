@@ -530,6 +530,26 @@ static void setup_lod(void)
 #endif
 }
 
+/* --- the Mog House --------------------------------------------------------------------------------
+ * The zone-in packet (0x00A) says whether the player is in their Mog House: the byte at 0x80 is 1
+ * there and 2 elsewhere, on logging in and on zoning alike (the zone id is the city's either way; as
+ * a LandSandBoat server sends it). The next zone-in, leaving it, clears it. The graphics back end
+ * scales the sun's shadows there (gfx_set_moghouse), which the room's ceiling would otherwise cast
+ * over all of it. */
+static void moghouse_tap(const uint8_t* p, size_t n)
+{
+    static int in = -1;
+    if (((p[0] | p[1] << 8) & 0x1FF) != 0x00A || n <= 0x80)
+        return;
+    int now = p[0x80] == 1; /* 1 in it, 2 elsewhere: not merely nonzero */
+    if (now != in)
+    {
+        in = now;
+        gfx_set_moghouse(now);
+        rt_log("[recomp] %s a Mog House\n", now ? "in" : "out of");
+    }
+}
+
 /* s, or sx x sy (1.25, 1x1.2); 0 if it is neither */
 static int parse_scale(const char* s, float* sx, float* sy)
 {
@@ -1128,6 +1148,7 @@ int main(int argc, char** argv)
     setup_water();
     setup_lod();
     cexi_init(cexi, game);
+    addons_packet_tap(moghouse_tap);
     {
         /* the addon host: Ashita v4 and Windower 4 Lua addons, and our own (docs/addon-compat-design.md) */
         const char* off = getenv("FFXI_ADDONS");

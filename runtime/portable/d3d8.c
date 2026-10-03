@@ -3461,8 +3461,9 @@ static int menu_target(const Obj* o)
 /* FFXI's own character shadow: the character drawn into a render target of the game's, then that
  * texture projected onto the ground around it - a blended 3D draw sampling, through projected
  * coordinates, a texture the game renders into. gameshadows (a scene-effect setting): 0 auto, off
- * while the sun's own shadows are on and characters cast them (the two would double); 1 always the
- * game's; 2 never. */
+ * while the sun's own shadows are drawn and characters cast them (the two would double) - drawn, not
+ * merely on: by night, in a Mog House, while the effects' pipelines build, the game's stay; 1 always
+ * the game's; 2 never. */
 static int game_shadow_hidden(const GfxDraw* d)
 {
     if (d->vs.rhw || !d->pipe.blend || d->fs.prog)
@@ -3470,7 +3471,7 @@ static int game_shadow_hidden(const GfxDraw* d)
     float mode = gfx_fx_get("gameshadows");
     if (mode == 1.0f)
         return 0;
-    if (mode != 2.0f && !(gfx_fx_get("fx") != 0.0f && gfx_fx_get("sun") > 0.0f && gfx_fx_get("sun_casters") != 2.0f))
+    if (mode != 2.0f && !(gfx_fx_get("sun_casters") != 2.0f && gfx_sun_shadows_shown()))
         return 0;
     for (int i = 0; i < d->fs.nstages && i < 8; ++i)
     {

@@ -744,6 +744,40 @@ static void test_scene_sun_map(void)
     }
 }
 
+/* The game's own character shadows stand aside only while the sun's are drawn (d3d8.c
+ * game_shadow_hidden): after a frame with the post's shadow, gfx_sun_shadows_shown; in a Mog House
+ * (moghouse 0: none of the sun's there) the shadow goes and, 30 frames on, so does the claim. */
+static void test_scene_shown(void)
+{
+    const float beyond[3] = { 0, 0.5f, 1 };
+    float floor[4][3] = { { -8, -3, 30 }, { 8, -3, 30 }, { -8, -3, 0.6f }, { 8, -3, 0.6f } };
+    float post[4][3] = { { -1, 0, 10 }, { 1, 0, 10 }, { -1, -3, 10 }, { 1, -3, 10 } };
+    fx_only("sun", 1.0f);
+    gfx_fx_set("moghouse", 0.0f);
+    for (int k = 0; k < 2; ++k)
+    {
+        gfx_set_moghouse(k);
+        for (int f = 0; f < (k ? 32 : 1); ++f)
+        {
+            scene_begin(1, 0xFF000000u);
+            scene_quad(floor, 0xFFFFFFFFu);
+            scene_quad(post, 0xFFFFFFFFu);
+            scene_end(beyond, 0);
+            if (f + 1 < (k ? 32 : 1))
+                gfx_present(NULL);
+        }
+        uint32_t before = spx(64, 91, 0);
+        if (k == 0)
+            CHECK(gfx_sun_shadows_shown() && before <= 160, "sun shown: %d, the post's shadow %u (want shown, shaded)",
+                gfx_sun_shadows_shown(), before);
+        else
+            CHECK(!gfx_sun_shadows_shown() && before >= 245, "sun shown in a Mog House: %d, the floor %u (want not, lit)",
+                gfx_sun_shadows_shown(), before);
+        gfx_present(NULL);
+    }
+    gfx_set_moghouse(0);
+}
+
 /* A new place takes its own light at once: frames under a strong sun (the post's shadow at full
  * strength), then the camera jumps 200 units into a room lit mostly by its ambient (a moghouse) - the
  * shadows fade with how much of the light is the sun's, and there that is next to none: the floor
@@ -838,7 +872,7 @@ static void test_scene_sun_cache(void)
             CHECK(b_sh >= 245, "sun cache: floor behind the card in view the game stopped drawing %u (want lit: it went)", b_sh);
         gfx_present(NULL);
     }
-    /* characters alone cast (sun_casters 1, the default): the zone's cards, drawn again, do not */
+    /* characters alone cast (sun_casters 1; the default, 0, is everything): the zone's cards, drawn again, do not */
     gfx_fx_set("sun_casters", 1.0f);
     fx_only("sun", 1.0f);
     scene_begin(1, 0xFF000000u);
@@ -1102,6 +1136,7 @@ static void test_scene_effects(void)
     test_scene_shadow();
     test_scene_no_acne();
     test_scene_sun_map();
+    test_scene_shown();
     test_scene_new_place();
     test_scene_sun_cache();
     test_scene_temporal();

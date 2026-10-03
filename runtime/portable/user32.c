@@ -854,6 +854,12 @@ static int show_window(Wnd* w, int show)
         {
             SDL_ShowWindow(w->sdl);
             SDL_RaiseWindow(w->sdl);
+            /* text input for the game's chat (WM_CHAR), but no on-screen keyboard over the game: with no
+             * physical keyboard SDL shows one (a Steam Deck, Steam's under X11) the moment it starts.
+             * The game has its own; SDL_ENABLE_SCREEN_KEYBOARD in the environment still wins. The
+             * sign-in screen (host/signin.c) keeps it, for the password. */
+            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
+            SDL_SetHint(SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD, "0");
             SDL_StartTextInput(w->sdl);
         }
         call_wndproc(w, WM_SHOWWINDOW, 1, 0);

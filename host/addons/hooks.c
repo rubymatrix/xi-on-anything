@@ -528,7 +528,8 @@ static void record_last(int outgoing, const uint8_t* buf, size_t size)
 
 static uint8_t g_pbuf[2][0x4000];
 
-static void (*g_tap)(const uint8_t* p, size_t n);
+static void (*g_taps[4])(const uint8_t* p, size_t n); /* addons_packet_tap's: cexi.c's, host64.c's */
+static unsigned g_ntaps;
 
 static void tap(const uint8_t* buf, size_t size)
 {
@@ -538,7 +539,8 @@ static void tap(const uint8_t* buf, size_t size)
         size_t n = (size_t)((p[1] >> 1) & 0x7F) * 4;
         if (n < 4 || off + n > size)
             break;
-        g_tap(p, n);
+        for (unsigned i = 0; i < g_ntaps; ++i)
+            g_taps[i](p, n);
         off += n;
     }
 }
@@ -557,7 +559,7 @@ static void wrap_packet_decrypt(Guest* g)
     int32_t n = (int32_t)g->eax;
     if (n <= 0x1C || (uint32_t)n > capacity || !xi_mapped(out, (uint32_t)n))
         return;
-    if (g_tap)
+    if (g_ntaps)
         tap(GUEST_PTR(out), (size_t)n);
     if (!packets_wanted(0))
     {
@@ -601,7 +603,8 @@ static void wrap_packet_encrypt(Guest* g)
 
 void addons_packet_tap(void (*fn)(const uint8_t* p, size_t n))
 {
-    g_tap = fn;
+    if (g_ntaps < sizeof g_taps / sizeof g_taps[0])
+        g_taps[g_ntaps++] = fn;
 #if defined(FFXI_WRAP_PACKET_DECRYPT) && defined(FFXI_WRAP_PACKET_ENCRYPT)
     rt_wrap_packet_decrypt = wrap_packet_decrypt;
     rt_wrap_packet_encrypt = wrap_packet_encrypt;
