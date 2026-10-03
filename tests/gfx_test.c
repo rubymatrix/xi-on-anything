@@ -455,6 +455,7 @@ static void run_window(SDL_Window* win)
 enum { SS = 128 };
 static GfxTex *g_srt, *g_sds;
 static float g_sproj[16], g_sz;
+static float g_scam_x; /* scene_quad's camera: at x in the world (its quads given in view space, placed in the world) */
 static uint32_t g_spx[SS * SS];
 static const uint32_t SVP[6] = { 0, 0, SS, SS, 0, 0x3F800000u };
 
@@ -485,8 +486,13 @@ static void scene_quad(float q[4][3], uint32_t color)
 {
     GfxDraw d;
     defaults(&d);
-    memcpy(d.u.wvp, g_sproj, 64);
-    identity(d.u.wv); /* the world matrix the identity, as a character's is */
+    /* the world matrix the identity, as a character's is: the vertices in the world, wv the view */
+    identity(d.u.wv);
+    d.u.wv[12] = -g_scam_x;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            d.u.wvp[i * 4 + j] = d.u.wv[i * 4] * g_sproj[j] + d.u.wv[i * 4 + 1] * g_sproj[4 + j] + d.u.wv[i * 4 + 2] * g_sproj[8 + j] +
+                d.u.wv[i * 4 + 3] * g_sproj[12 + j];
     d.u.vp[2] = d.u.vp[3] = SS;
     memcpy(d.vp, SVP, sizeof SVP);
     d.vs.el[0] = (GfxElem){ 1, 0, GFX_FLOAT3, 0 };
@@ -498,10 +504,33 @@ static void scene_quad(float q[4][3], uint32_t color)
     d.caster = 1;
     float v[4][3];
     for (int i = 0; i < 4; ++i)
-        v[i][0] = q[i][0], v[i][1] = q[i][1], v[i][2] = q[i][2] * g_sz;
+        v[i][0] = q[i][0] + g_scam_x, v[i][1] = q[i][1], v[i][2] = q[i][2] * g_sz;
     d.data[0] = v, d.size[0] = sizeof v;
     d.prim = GFX_TRIANGLESTRIP, d.count = 2;
     gfx_draw(&d);
+}
+
+/* scene_end's, with the camera at x = cam_x in the world (the view a translation: what is drawn, in
+ * view space, stays put) and the light's color and the ambient given */
+static void scene_end_at(const float* sun, uint32_t fog, float cam_x, float sun_light, float ambient)
+{
+    GfxScene sc;
+    memset(&sc, 0, sizeof sc);
+    memcpy(sc.proj, g_sproj, 64);
+    identity(sc.view);
+    sc.view[12] = -cam_x;
+    memcpy(sc.vp, SVP, sizeof SVP);
+    sc.ambient[0] = sc.ambient[1] = sc.ambient[2] = ambient;
+    if (sun)
+    {
+        float l = sqrtf(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
+        sc.sun_dir[0] = sun[0] / l, sc.sun_dir[1] = sun[1] / l, sc.sun_dir[2] = sun[2] / l * g_sz, sc.sun_dir[3] = 1;
+        sc.sun_color[0] = sc.sun_color[1] = sc.sun_color[2] = sun_light;
+    }
+    sc.fog[2] = 1.0f; /* the game fogged its world */
+    sc.fogcolor[0] = ((fog >> 16) & 255) / 255.0f, sc.fogcolor[1] = ((fog >> 8) & 255) / 255.0f, sc.fogcolor[2] = (fog & 255) / 255.0f;
+    gfx_scene_done(g_srt, &sc);
+    gfx_tex_read(g_srt, 0, 0, g_spx, SS * 4);
 }
 
 /* the scene done, with a directional light toward sun (view space, left-handed; NULL for none) and
@@ -673,6 +702,26 @@ static void test_scene_shadow(void)
 /* The sun's shadow map: a post 10 ahead, 3 high, the sun beyond it and up at about 27 degrees - its
  * shadow reaches 6 along the floor toward the camera, far past what contact shadows see; beside it
  * the floor is lit, and with the sun behind the camera the floor before it is lit too. */
+/* No acne: a floor alone, under a low sun, casts no shadow on itself anywhere out to 20 units, with
+ * nothing (sun_min 0) to ignore near-surface casters. A position rebuilt from depth without undoing
+ * the half-pixel fixup sat below the floor by centimetres that grew with distance, and the floor past
+ * a few units went black. */
+static void test_scene_no_acne(void)
+{
+    const float beyond[3] = { 0, 0.5f, 1 };
+    fx_only("sun", 1.0f);
+    gfx_fx_set("temporal", 0.0f);
+    gfx_fx_set("sun_min", 0.0f);
+    scene_begin(1, 0xFF000000u);
+    float floor[4][3] = { { -8, -3, 30 }, { 8, -3, 30 }, { -8, -3, 0.6f }, { 8, -3, 0.6f } };
+    scene_quad(floor, 0xFFFFFFFFu);
+    scene_end(beyond, 0);
+    for (int y = 127; y >= 73; y -= 6) /* the floor from about 1.5 to 20 units ahead */
+        CHECK(spx(64, y, 0) >= 245, "no acne: the floor alone at row %d %u (want lit)", y, spx(64, y, 0));
+    gfx_present(NULL);
+    gfx_fx_set("temporal", 0.85f);
+}
+
 static void test_scene_sun_map(void)
 {
     const float beyond[3] = { 0, 0.5f, 1 }, behind[3] = { 0, 0.5f, -1 };
@@ -693,6 +742,38 @@ static void test_scene_sun_map(void)
         else
             CHECK(before >= 245, "sun map: sun behind the camera, floor before the post %u (want lit)", before);
     }
+}
+
+/* A new place takes its own light at once: frames under a strong sun (the post's shadow at full
+ * strength), then the camera jumps 200 units into a room lit mostly by its ambient (a moghouse) - the
+ * shadows fade with how much of the light is the sun's, and there that is next to none: the floor
+ * before the post is lit in the first frame, not black for the seconds an ease would take. */
+static void test_scene_new_place(void)
+{
+    const float beyond[3] = { 0, 0.5f, 1 };
+    float floor[4][3] = { { -8, -3, 30 }, { 8, -3, 30 }, { -8, -3, 0.6f }, { 8, -3, 0.6f } };
+    float post[4][3] = { { -1, 0, 10 }, { 1, 0, 10 }, { -1, -3, 10 }, { 1, -3, 10 } };
+    uint32_t before = 0;
+    for (int frame = 0; frame < 4; ++frame)
+    {
+        fx_only("sun", 1.0f);
+        gfx_fx_set("temporal", 0.0f);
+        g_scam_x = frame < 3 ? 0.0f : 200.0f;
+        scene_begin(1, 0xFF000000u);
+        scene_quad(floor, 0xFFFFFFFFu);
+        scene_quad(post, 0xFFFFFFFFu); /* a character: it casts with sun_casters 1 */
+        if (frame < 3)
+            scene_end_at(beyond, 0, g_scam_x, 1.0f, 0.1f); /* outdoors: the sun's light */
+        else
+            scene_end_at(beyond, 0, g_scam_x, 0.1f, 1.0f); /* the room: its ambient */
+        g_scam_x = 0.0f;
+        before = spx(64, 91, 0);
+        if (frame == 2)
+            CHECK(before <= 160, "new place: the post's shadow outdoors %u (want shaded)", before);
+        gfx_present(NULL);
+    }
+    CHECK(before >= 235, "new place: the floor before the post in a room lit by its ambient %u (want lit at once)", before);
+    gfx_fx_set("temporal", 0.85f);
 }
 
 /* a card from buffer b (x -1..1, y -3..0 at z 0: strip order) placed at t (view space, right-handed)
@@ -995,6 +1076,20 @@ static void test_scene_water(void)
     gfx_fx_set("water_clarity", 3.0f), gfx_fx_set("water_soft", 0.15f);
 }
 
+/* The settings Config > Modern reads and writes: FFXI_FX from the environment, the rest at their
+ * defaults, each kept as set; a key no back end knows reads as 0 */
+static void test_fx_settings(void)
+{
+    CHECK(gfx_fx_get("fx") == 1.0f, "fx settings: fx %g (want 1, from FFXI_FX)", gfx_fx_get("fx"));
+    CHECK(gfx_fx_get("aniso") == 16.0f, "fx settings: aniso %g (want its default, 16)", gfx_fx_get("aniso"));
+    float was = gfx_fx_get("bloom");
+    gfx_fx_set("bloom", 1.25f);
+    CHECK(gfx_fx_get("bloom") == 1.25f, "fx settings: bloom %g after setting 1.25", gfx_fx_get("bloom"));
+    gfx_fx_set("bloom", was);
+    gfx_fx_set("no_such_setting", 3.0f);
+    CHECK(gfx_fx_get("no_such_setting") == 0.0f, "fx settings: an unknown key reads %g", gfx_fx_get("no_such_setting"));
+}
+
 static void test_scene_effects(void)
 {
     test_large_target_mips();
@@ -1005,7 +1100,9 @@ static void test_scene_effects(void)
     test_scene_bloom();
     test_scene_rays();
     test_scene_shadow();
+    test_scene_no_acne();
     test_scene_sun_map();
+    test_scene_new_place();
     test_scene_sun_cache();
     test_scene_temporal();
     test_scene_sun_hard();
@@ -1040,6 +1137,7 @@ int main(int argc, char** argv)
     g_rt = gfx_tex_create(GFX_TEX_2D, 21, W, H, 1, GFX_USE_RT);
     g_ds = gfx_tex_create(GFX_TEX_2D, 75, W, H, 1, GFX_USE_DEPTH);
     gfx_set_targets(g_rt, 0, 0, g_ds);
+    test_fx_settings();
     test_clear();
     test_rhw_edges();
     test_texture();

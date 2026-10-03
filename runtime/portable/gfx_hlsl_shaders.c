@@ -15,6 +15,7 @@
 
 void gfx_hlsl_fetch(Sb* b, const GfxVsKey* k, int reg);
 void gfx_hlsl_sample(Sb* b, const char* dst, int i, int cube, const char* coord);
+void gfx_hlsl_vs_return(Sb* b, const GfxVsKey* k);
 
 enum
 {
@@ -247,7 +248,7 @@ int gfx_hlsl_vs1(Sb* b, const GfxVsKey* k, const uint32_t* t)
     sb_printf(b, "  o.d = saturate(oD0);\n  o.s = saturate(oD1);\n  o.fog = oFog.x;\n  o.ez = oPos.w;\n");
     for (int i = 0; i < k->ntex; ++i)
         sb_printf(b, "  o.t%d = oT%d;\n", i, i);
-    sb_printf(b, "  return o;\n}\n");
+    gfx_hlsl_vs_return(b, k);
     return 1;
 }
 
