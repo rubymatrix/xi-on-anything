@@ -32,6 +32,7 @@
 #include "gfx.h"
 #include "gfx_fx.h"
 #include "gfx_msl.h"
+#include "gfx_scene.h"
 
 #if __has_feature(objc_arc)
 #error gfx_metal.m manages its references by hand: build it with -fno-objc-arc
@@ -1260,195 +1261,20 @@ static void casters_clear(void)
     g_ncasters = 0;
 }
 
-/* --- a draw's first vertex through its vertex function, on the CPU ---
- * FFXI draws every copy of a zone mesh (all the trees of one kind) from the same buffers, each placed
- * by its vertex shader's constants: the buffers say nothing of where a copy stands. Its first
- * vertex's clip position, through the frame's camera back into the world, does. A small vs.1.x
- * interpreter over the draw's constants and vertex bytes, the same arithmetic gfx_msl_shaders.c
- * writes out as MSL; fixed function is P * WVP. */
-static void vs_src(float out[4], uint32_t t, const float (*r)[4], const float (*v)[4], const float (*c)[4], const float* a0)
-{
-    uint32_t type = (t >> 28) & 7, num = t & 0x7FF, mod = (t >> 24) & 0xF, sw = (t >> 16) & 0xFF;
-    static const float zero[4] = { 0, 0, 0, 0 };
-    const float* reg = zero;
-    if (type == 0 && num < 12)
-        reg = r[num];
-    else if (type == 1 && num < GFX_NREGS)
-        reg = v[num];
-    else if (type == 2)
-    {
-        int i = (int)num + ((t & 0x2000) ? (int)a0[0] : 0);
-        reg = c[i < 0 ? 0 : i >= GFX_NVSC ? GFX_NVSC - 1 : i];
-    }
-    else if (type == 3)
-        reg = a0;
-    for (int i = 0; i < 4; ++i)
-    {
-        float x = reg[(sw >> (2 * i)) & 3];
-        switch (mod)
-        {
-        case 1: x = -x; break;
-        case 2: x = x - 0.5f; break;
-        case 3: x = 0.5f - x; break;
-        case 4: x = (x - 0.5f) * 2.0f; break;
-        case 5: x = -(x - 0.5f) * 2.0f; break;
-        case 6: x = 1.0f - x; break;
-        case 7: x = x * 2.0f; break;
-        case 8: x = -x * 2.0f; break;
-        }
-        out[i] = x;
-    }
-}
-
-/* the input registers of vertex vi as the declaration maps them */
-static int vs_fetch(const GfxDraw* d, int vi, float v[GFX_NREGS][4])
-{
-    for (int r = 0; r < GFX_NREGS; ++r)
-    {
-        v[r][0] = v[r][1] = v[r][2] = 0, v[r][3] = 1;
-        const GfxElem* e = &d->vs.el[r];
-        if (!e->used)
-            continue;
-        int s = e->stream;
-        const uint8_t* base;
-        size_t have;
-        if (d->buf[s])
-            base = (const uint8_t*)[d->buf[s]->b contents] + d->buf_off[s], have = d->buf[s]->size > d->buf_off[s] ? d->buf[s]->size - d->buf_off[s] : 0;
-        else if (d->data[s])
-            base = (const uint8_t*)d->data[s], have = d->size[s];
-        else
-            return 0;
-        long at = (long)vi * d->u.stride[s] + d->u.offset[r];
-        static const uint8_t SIZE[8] = { 4, 8, 12, 16, 4, 4, 4, 8 };
-        if (at < 0 || (size_t)at + SIZE[e->type & 7] > have)
-            return 0;
-        const uint8_t* p = base + at;
-        switch (e->type)
-        {
-        case GFX_FLOAT1: memcpy(v[r], p, 4); break;
-        case GFX_FLOAT2: memcpy(v[r], p, 8); break;
-        case GFX_FLOAT3: memcpy(v[r], p, 12); break;
-        case GFX_FLOAT4: memcpy(v[r], p, 16); break;
-        case GFX_D3DCOLOR: v[r][0] = p[2] / 255.0f, v[r][1] = p[1] / 255.0f, v[r][2] = p[0] / 255.0f, v[r][3] = p[3] / 255.0f; break;
-        case GFX_UBYTE4: for (int i = 0; i < 4; ++i) v[r][i] = p[i]; break;
-        case GFX_SHORT2: { int16_t h[2]; memcpy(h, p, 4); v[r][0] = h[0], v[r][1] = h[1]; break; }
-        default: { int16_t h[4]; memcpy(h, p, 8); for (int i = 0; i < 4; ++i) v[r][i] = h[i]; break; }
-        }
-    }
-    return 1;
-}
-
-/* clip-space position of the draw's first vertex in out; 0 when it cannot be had */
+/* clip-space position of the draw's first vertex in out (gfx_clip0); 0 when it cannot be had */
 static int draw_clip0(const GfxDraw* d, float out[4])
 {
-    if (d->vs.rhw)
-        return 0;
-    long idx = d->vertex_start;
-    if (d->indices)
-        idx = d->index_size == 2 ? ((const uint16_t*)d->indices)[0] : (long)((const uint32_t*)d->indices)[0];
-    float v[GFX_NREGS][4];
-    if (!vs_fetch(d, (int)(idx + d->u.vofs), v))
-        return 0;
-    if (!d->vs.prog)
+    const uint8_t* base[GFX_NSTREAMS];
+    size_t have[GFX_NSTREAMS];
+    for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
-        const float* m = d->u.wvp;
-        for (int j = 0; j < 4; ++j)
-            out[j] = v[0][0] * m[j] + v[0][1] * m[4 + j] + v[0][2] * m[8 + j] + m[12 + j];
-        return 1;
+        base[s] = NULL, have[s] = 0;
+        if (d->buf[s])
+            base[s] = (const uint8_t*)[d->buf[s]->b contents] + d->buf_off[s], have[s] = d->buf[s]->size > d->buf_off[s] ? d->buf[s]->size - d->buf_off[s] : 0;
+        else if (d->data[s])
+            base[s] = (const uint8_t*)d->data[s], have[s] = d->size[s];
     }
-    const uint32_t* t = d->vs_tokens;
-    if (!t || (t[0] & 0xFFFF0000u) != 0xFFFE0000u)
-        return 0;
-    float r[12][4], a0[4] = { 0, 0, 0, 0 }, opos[4] = { 0, 0, 0, 1 };
-    memset(r, 0, sizeof r);
-    const float(*c)[4] = (const float(*)[4])d->u.vsc;
-    for (uint32_t i = 1; i < 65536;)
-    {
-        uint32_t tok = t[i], op = tok & 0xFFFF;
-        if (tok == 0x0000FFFFu)
-            break;
-        if (op == 0xFFFE)
-        {
-            i += 1 + ((tok >> 16) & 0x7FFF);
-            continue;
-        }
-        const uint32_t* p = &t[i + 1];
-        float s0[4], s1[4], s2[4], res[4] = { 0, 0, 0, 0 };
-        int np;
-        switch (op)
-        {
-        case 0: case 81: np = op ? 5 : 0; break;
-        case 1: case 6: case 7: case 14: case 15: case 16: case 19: case 78: case 79: np = 2; break;
-        case 2: case 3: case 5: case 8: case 9: case 10: case 11: case 12: case 13: case 17: np = 3; break;
-        case 20: case 21: case 22: case 23: case 24: np = 3; break;
-        case 4: case 18: np = 4; break;
-        default: return 0; /* not vs.1.x */
-        }
-        if (op == 0 || op == 81)
-        {
-            i += 1 + (uint32_t)np;
-            continue;
-        }
-        if (np >= 2)
-            vs_src(s0, p[1], r, v, c, a0);
-        if (np >= 3 && !(op >= 20 && op <= 24))
-            vs_src(s1, p[2], r, v, c, a0);
-        if (np >= 4)
-            vs_src(s2, p[3], r, v, c, a0);
-        switch (op)
-        {
-        case 1: memcpy(res, s0, 16); break;
-        case 2: for (int k = 0; k < 4; ++k) res[k] = s0[k] + s1[k]; break;
-        case 3: for (int k = 0; k < 4; ++k) res[k] = s0[k] - s1[k]; break;
-        case 4: for (int k = 0; k < 4; ++k) res[k] = s0[k] * s1[k] + s2[k]; break;
-        case 5: for (int k = 0; k < 4; ++k) res[k] = s0[k] * s1[k]; break;
-        case 6: res[0] = res[1] = res[2] = res[3] = s0[3] == 0.0f ? INFINITY : 1.0f / s0[3]; break;
-        case 7: res[0] = res[1] = res[2] = res[3] = s0[3] == 0.0f ? INFINITY : 1.0f / sqrtf(fabsf(s0[3])); break;
-        case 8: res[0] = res[1] = res[2] = res[3] = s0[0] * s1[0] + s0[1] * s1[1] + s0[2] * s1[2]; break;
-        case 9: res[0] = res[1] = res[2] = res[3] = s0[0] * s1[0] + s0[1] * s1[1] + s0[2] * s1[2] + s0[3] * s1[3]; break;
-        case 10: for (int k = 0; k < 4; ++k) res[k] = fminf(s0[k], s1[k]); break;
-        case 11: for (int k = 0; k < 4; ++k) res[k] = fmaxf(s0[k], s1[k]); break;
-        case 12: for (int k = 0; k < 4; ++k) res[k] = s0[k] < s1[k] ? 1.0f : 0.0f; break;
-        case 13: for (int k = 0; k < 4; ++k) res[k] = s0[k] >= s1[k] ? 1.0f : 0.0f; break;
-        case 14: case 78: res[0] = res[1] = res[2] = res[3] = exp2f(s0[3]); break;
-        case 15: case 79: res[0] = res[1] = res[2] = res[3] = s0[3] == 0.0f ? -INFINITY : log2f(fabsf(s0[3])); break;
-        case 16:
-            res[0] = 1.0f, res[1] = fmaxf(s0[0], 0.0f), res[3] = 1.0f;
-            res[2] = s0[0] > 0.0f && s0[1] > 0.0f ? powf(s0[1], fminf(fmaxf(s0[3], -127.9961f), 127.9961f)) : 0.0f;
-            break;
-        case 17: res[0] = 1.0f, res[1] = s0[1] * s1[1], res[2] = s0[2], res[3] = s1[3]; break;
-        case 18: for (int k = 0; k < 4; ++k) res[k] = s2[k] + (s1[k] - s2[k]) * s0[k]; break;
-        case 19: for (int k = 0; k < 4; ++k) res[k] = s0[k] - floorf(s0[k]); break;
-        default:
-        {
-            /* m4x4, m4x3, m3x4, m3x3, m3x2: dot products against consecutive constant rows */
-            int rows = op == 20 ? 4 : op == 21 ? 3 : op == 22 ? 4 : op == 23 ? 3 : 2, three = op >= 22;
-            for (int k = 0; k < rows; ++k)
-            {
-                float row[4];
-                vs_src(row, p[2] + (uint32_t)k, r, v, c, a0);
-                res[k] = s0[0] * row[0] + s0[1] * row[1] + s0[2] * row[2] + (three ? 0.0f : s0[3] * row[3]);
-            }
-            break;
-        }
-        }
-        uint32_t dt = p[0], type = (dt >> 28) & 7, num = dt & 0x7FF, mask = (dt >> 16) & 0xF;
-        if (op >= 20 && op <= 24)
-            mask = op == 20 || op == 22 ? 0xF : op == 24 ? 0x3 : 0x7;
-        if (mask == 0)
-            mask = 0xF;
-        if ((dt >> 20) & 1)
-            for (int k = 0; k < 4; ++k)
-                res[k] = fminf(fmaxf(res[k], 0.0f), 1.0f);
-        float* dst = type == 0 && num < 12 ? r[num] : type == 3 ? a0 : type == 4 && num == 0 ? opos : NULL;
-        if (dst)
-            for (int k = 0; k < 4; ++k)
-                if (mask & (1u << k))
-                    dst[k] = res[k];
-        i += 1 + (uint32_t)np;
-    }
-    memcpy(out, opos, 16);
-    return isfinite(out[0]) && isfinite(out[1]) && isfinite(out[2]) && isfinite(out[3]);
+    return gfx_clip0(d, base, have, out);
 }
 
 static Caster* caster_new(const GfxDraw* d)
@@ -2448,11 +2274,6 @@ static const char FX_MSL[] =
     "  return c;\n"
     "}\n";
 
-typedef struct FxU
-{
-    float proj[4], zp[4], vp[4], size[4], ao[4], grade[4], hand[4], up[4], sun[4], suncol[4], sunuv[4], fogc[4], fogp[4],
-        bloom[4], rays[4], shadow[4], lmat[16], smap[4], smap2[4], reproj[16], hist[4], lmatn[16], smapn[4], smapn2[4], aop[4];
-} FxU;
 
 static struct
 {
@@ -2516,12 +2337,6 @@ static void fx_ease(float* a, const float* b, int n, float k)
         a[i] = g_fx.eased ? a[i] + (b[i] - a[i]) * k : b[i];
 }
 
-static void normalize3(float* v)
-{
-    float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (l > 0.0f)
-        v[0] /= l, v[1] /= l, v[2] /= l;
-}
 
 void gfx_set_focus(const float* pos)
 {
@@ -2748,44 +2563,7 @@ static id<MTLTexture> fx_lz(NSUInteger w, NSUInteger h)
     return g_fx.lz;
 }
 
-/* the inverse of a 4x4 matrix (row-major); 0 when it has none */
-static int mat_inverse(float* out, const float* m)
-{
-    float inv[16];
-    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
-    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
-    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
-    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
-    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
-    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
-    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
-    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
-    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
-    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
-    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
-    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
-    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
-    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
-    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
-    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
-    float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-    if (det == 0.0f)
-        return 0;
-    for (int i = 0; i < 16; ++i)
-        out[i] = inv[i] / det;
-    return 1;
-}
-
-static void mat_mul(float* o, const float* a, const float* b)
-{
-    float t[16];
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-            t[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + a[i * 4 + 3] * b[12 + j];
-    memcpy(o, t, sizeof t);
-}
-
-enum { SUN_MAP = 4096, SUN_CACHE_FRAMES = 60 * 30 };
+enum { SUN_CACHE_FRAMES = 60 * 30 };
 #define SUN_CACHE_NEAR 40.0f                  /* what was seen within this of the camera stays past SUN_CACHE_FRAMES */
 #define SUN_COPY_BYTES (48u * 1024 * 1024)    /* the copies' vertices and indices, all told */
 
@@ -2915,14 +2693,6 @@ static void sun_cache_trim(int all)
     }
 }
 
-/* row vector p (x, y, z, w) through a row-major matrix */
-static void xform4(float* o, const float* p, const float* m)
-{
-    float t[4];
-    for (int j = 0; j < 4; ++j)
-        t[j] = p[0] * m[j] + p[1] * m[4 + j] + p[2] * m[8 + j] + p[3] * m[12 + j];
-    memcpy(o, t, 16);
-}
 
 /* the entry for caster c (its key k) this frame: the nearest of its key within a unit not yet updated
  * this frame, else one at the very same place (the same thing drawn twice), else a new one */
@@ -3068,7 +2838,7 @@ static int cache_copy(Cached* ce, const Caster* c, GfxU* ub)
 static int in_plain_view(const float* p, const float* vp)
 {
     float q[4] = { p[0], p[1], p[2], 1.0f }, c[4];
-    xform4(c, q, vp);
+    gfx_xform4(c, q, vp);
     return c[3] >= 1.0f && fabsf(c[0]) <= 0.9f * c[3] && fabsf(c[1]) <= 0.9f * c[3];
 }
 
@@ -3093,7 +2863,7 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
      * character (not kept: its vertices are in the world already, and it moves). A fixed-function
      * draw whose world matrix is the identity is a character; a vertex shader's draw is the zone's. */
     float invView[16];
-    int have_iv = mat_inverse(invView, view);
+    int have_iv = gfx_mat_inverse(invView, view);
     for (uint32_t i = 0; i < g_ncasters; ++i)
     {
         Caster* c = &g_casters[i];
@@ -3104,7 +2874,7 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
         {
             const GfxU* src = (const GfxU*)((const uint8_t*)[c->ub contents] + c->uoff);
             float w[16], off = 0.0f;
-            mat_mul(w, src->wv, invView);
+            gfx_mat_mul(w, src->wv, invView);
             for (int j = 0; j < 16; ++j)
                 off = fmaxf(off, fabsf(w[j] - ((j % 5) == 0 ? 1.0f : 0.0f)));
             c->keep = off > 1e-3f;
@@ -3122,7 +2892,7 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
         if (c->has_pos)
         {
             float h[4];
-            xform4(h, c->clip0, clip_world);
+            gfx_xform4(h, c->clip0, clip_world);
             if (fabsf(h[3]) < 1e-6f)
                 continue;
             pos[0] = h[0] / h[3], pos[1] = h[1] / h[3], pos[2] = h[2] / h[3];
@@ -3188,82 +2958,6 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
     }
 }
 
-/* The sun's shadow map for the scene: an orthographic view along the sun over a sphere around the
- * first sun_distance units the camera sees, its center snapped to whole texels (the shadows' edges
- * hold still as the camera moves), the casters drawn into it. Gives the matrix from the camera's view
- * space to the map (lmat) and a texel's size in world units; 0 when there is no map. */
-/* One cascade of the sun's map: an orthographic view along the sun over a sphere around the slice
- * [t0, t1] of what the camera sees, its center snapped to whole texels (the shadows' edges hold still
- * as the camera moves). */
-typedef struct SunCascade
-{
-    float S[16];    /* the world to the map */
-    float lmat[16]; /* view space to the map: x, y -1..1, z 0..1 */
-    float texel, bias, soft, slope, range, across;
-    int size; /* the map's texels across */
-} SunCascade;
-
-static void sun_fit(const GfxScene* s, const float* invV, const float* L, float t0, float t1, int size, SunCascade* k)
-{
-    float hand = s->proj[11] < 0.0f ? -1.0f : 1.0f, p[8][3], c[3] = { 0, 0, 0 };
-    for (int i = 0; i < 8; ++i)
-    {
-        float t = i < 4 ? t0 : t1, z = t * hand, nx = (i & 1) ? 1.0f : -1.0f, ny = (i & 2) ? 1.0f : -1.0f;
-        float v[4] = { (nx * t - s->proj[8] * z) / s->proj[0], (ny * t - s->proj[9] * z) / s->proj[5], z, 1.0f };
-        for (int j = 0; j < 3; ++j)
-            p[i][j] = v[0] * invV[j] + v[1] * invV[4 + j] + v[2] * invV[8 + j] + invV[12 + j], c[j] += p[i][j] / 8.0f;
-    }
-    float R = 0.0f;
-    for (int i = 0; i < 8; ++i)
-    {
-        float dx = p[i][0] - c[0], dy = p[i][1] - c[1], dz = p[i][2] - c[2];
-        R = fmaxf(R, sqrtf(dx * dx + dy * dy + dz * dz));
-    }
-    R = ceilf(R); /* whole units: the texel's size holds still */
-    /* the sun's axes: f the way its light goes, r and u across */
-    float f[3] = { -L[0], -L[1], -L[2] }, up[3] = { 0, 1, 0 };
-    if (fabsf(f[1]) > 0.9f)
-        up[0] = 1, up[1] = 0;
-    float r[3] = { up[1] * f[2] - up[2] * f[1], up[2] * f[0] - up[0] * f[2], up[0] * f[1] - up[1] * f[0] };
-    normalize3(r);
-    float u[3] = { f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0] };
-    float tx = 2.0f * R / (float)size;
-    k->size = size;
-    float cx = floorf((c[0] * r[0] + c[1] * r[1] + c[2] * r[2]) / tx) * tx;
-    float cy = floorf((c[0] * u[0] + c[1] * u[1] + c[2] * u[2]) / tx) * tx;
-    float cz = c[0] * f[0] + c[1] * f[1] + c[2] * f[2];
-    /* casters stand up to 200 units sunward of the sphere (a cliff over the camera) */
-    float back = 200.0f, range = 2.0f * R + back, z0 = cz - R - back;
-    float S[16] = {
-        r[0] / R, u[0] / R, f[0] / range, 0,
-        r[1] / R, u[1] / R, f[1] / range, 0,
-        r[2] / R, u[2] / R, f[2] / range, 0,
-        -cx / R, -cy / R, -z0 / range, 1,
-    };
-    memcpy(k->S, S, sizeof S);
-    mat_mul(k->lmat, invV, S);
-    k->texel = tx, k->bias = 0.03f / range, k->range = range, k->across = 2.0f * R;
-    /* the penumbra's radius grows by sun_soft for each unit from the caster: in the map's width
-     * (2R across) per unit of its depth (range deep). Never less than the sun's own half-degree disc
-     * (0.0047 a unit), even for hard edges: a character's shadow stays hard, a cliff's 30 units off
-     * no longer ends in its low-polygon outline */
-    k->soft = fmaxf(g_fxs.sun_soft, 0.0047f) * range / (2.0f * R);
-    k->slope = 2.0f * R / range;
-}
-
-/* the near map's texels across: sun_detail, a power of two from 512 to 8192; 0 and 1 are the old
- * switch (4096, 8192) */
-static int sun_near_size(void)
-{
-    float d = g_fxs.sun_detail;
-    if (d < 2.0f)
-        return d >= 0.5f ? 2 * SUN_MAP : SUN_MAP;
-    int n = 512;
-    while (n < 8192 && (float)n * 1.5f < d)
-        n *= 2;
-    return n;
-}
-
 static id<MTLTexture> sun_target(id<MTLTexture>* t, int size)
 {
     if (*t && (*t).width != (NSUInteger)size)
@@ -3294,8 +2988,8 @@ static id<MTLTexture> sun_target(id<MTLTexture>* t, int size)
 static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* invV, const SunCascade* k, int cache)
 {
     float clip_world[16], M[16];
-    mat_mul(clip_world, invP, invV);
-    mat_mul(M, clip_world, k->S); /* the camera's clip space -> the map */
+    gfx_mat_mul(clip_world, invP, invV);
+    gfx_mat_mul(M, clip_world, k->S); /* the camera's clip space -> the map */
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.depthAttachment.texture = target;
     rp.depthAttachment.loadAction = MTLLoadActionClear;
@@ -3359,7 +3053,7 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
                     continue;
             }
             float m[16];
-            mat_mul(m, ce->clip_world, k->S);
+            gfx_mat_mul(m, ce->clip_world, k->S);
             [e setVertexBytes:m length:64 atIndex:5];
             ce->replayed = g_serial;
             cs = &ce->c;
@@ -3427,16 +3121,16 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     if (!g_ncasters && !g_ncache)
         return 0;
     float invP[16], invV[16];
-    if (!mat_inverse(invP, s->proj) || !mat_inverse(invV, s->view))
+    if (!gfx_mat_inverse(invP, s->proj) || !gfx_mat_inverse(invV, s->view))
         return 0;
     float clip_world[16], vp[16];
-    mat_mul(clip_world, invP, invV);
-    mat_mul(vp, s->view, s->proj);
+    gfx_mat_mul(clip_world, invP, invV);
+    gfx_mat_mul(vp, s->view, s->proj);
     sun_cache_update(clip_world, s->view, vp, invV + 12);
     float dfar = fmaxf(g_fxs.sun_distance, 4.0f), dnear = fminf(fmaxf(g_fxs.sun_near, 0.0f), dfar);
     SunCascade far, near;
-    sun_fit(s, invV, L, 0.5f, dfar, SUN_MAP, &far);
-    if (!sun_target(&g_fx.smap, SUN_MAP))
+    gfx_sun_fit(s, invV, L, 0.5f, dfar, GFX_SUN_MAP, &far);
+    if (!sun_target(&g_fx.smap, GFX_SUN_MAP))
         return 0;
     uint32_t drawn = sun_draw(g_fx.smap, invP, invV, &far, 1);
     memcpy(u->lmat, far.lmat, 64);
@@ -3454,10 +3148,10 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
         lead = d < 40.0f ? d : 0.0f;
     }
     float tnear = dnear + lead;
-    int nsize = sun_near_size();
+    int nsize = gfx_sun_near_size();
     if (dnear >= 2.0f && tnear < dfar && sun_target(&g_fx.smapn, nsize))
     {
-        sun_fit(s, invV, L, 0.5f, tnear, nsize, &near);
+        gfx_sun_fit(s, invV, L, 0.5f, tnear, nsize, &near);
         sun_draw(g_fx.smapn, invP, invV, &near, 1);
         memcpy(u->lmatn, near.lmat, 64);
         u->smapn[0] = near.texel, u->smapn[1] = near.bias, u->smapn[2] = near.soft, u->smapn[3] = near.slope;
@@ -3510,7 +3204,7 @@ static void water_scene(const GfxScene* s, const float* vinv, const FxU* u, id<M
     /* world up: the view's up back into the world */
     for (int j = 0; j < 3; ++j)
         w->p2[j] = g_fx.up[0] * vinv[j] + g_fx.up[1] * vinv[4 + j] + g_fx.up[2] * vinv[8 + j];
-    normalize3(w->p2);
+    gfx_normalize3(w->p2);
     w->p2[3] = fmaxf(g_fxs.water_foam_width, 1e-3f);
     g_fx.wu_serial = g_serial;
 }
@@ -3640,7 +3334,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.eased = g_fx.eased_serial && g_fx.eased_serial + 1 == g_serial;
             g_fx.eased_serial = g_serial;
             float inv[16], up[3];
-            if (mat_inverse(inv, s->view))
+            if (gfx_mat_inverse(inv, s->view))
             {
                 /* a new place (the camera jumped, or a gap: logging in, a zone change, a moghouse): what
                  * is eased and the sun held take this one's at once - eased from the last place's, the
@@ -3651,7 +3345,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 memcpy(g_fx.last_cam, inv + 12, 12);
                 float sign = inv[5] < 0.0f ? -1.0f : 1.0f;
                 up[0] = inv[1] * sign, up[1] = inv[5] * sign, up[2] = inv[9] * sign;
-                normalize3(up);
+                gfx_normalize3(up);
                 /* fog where the game fogs its world (its fog color is the zone's), fading in and out */
                 float on = s->fog[2] != 0.0f ? 1.0f : 0.0f;
                 fx_ease(&g_fx.fog_on, &on, 1, 0.1f);
@@ -3667,7 +3361,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         g_fx.fogc[j] += (s->fogcolor[j] - g_fx.fogc[j]) * 0.04f;
                 memcpy(g_fx.tr_fog, s->fogcolor, 12);
                 fx_ease(g_fx.up, up, 3, 0.2f);
-                normalize3(g_fx.up);
+                gfx_normalize3(g_fx.up);
                 memcpy(u.up, g_fx.up, 12);
                 memcpy(u.fogc, g_fx.fogc, 12);
                 u.fogc[3] = g_fxs.fog * g_fx.fog_on * expf(-g_fxs.fog_falloff * g_fxs.fog_height);
@@ -3678,13 +3372,13 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
              * only when a lit draw (a character) is in view - the shadows hold the last one rather
              * than come and go with what the camera sees */
             float vinv[16];
-            int have_v = mat_inverse(vinv, s->view), own = s->sun_dir[3] != 0.0f && have_v;
+            int have_v = gfx_mat_inverse(vinv, s->view), own = s->sun_dir[3] != 0.0f && have_v;
             if (own)
             {
                 float w[3];
                 for (int j = 0; j < 3; ++j)
                     w[j] = s->sun_dir[0] * vinv[j] + s->sun_dir[1] * vinv[4 + j] + s->sun_dir[2] * vinv[8 + j];
-                normalize3(w);
+                gfx_normalize3(w);
                 /* the sun moves on in steps of a quarter degree: the shadows' edges hold still
                  * between them, rather than crawl a little every frame */
                 float dot = w[0] * g_fx.sunw[0] + w[1] * g_fx.sunw[1] + w[2] * g_fx.sunw[2];
@@ -3699,7 +3393,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 /* back into this frame's view */
                 for (int j = 0; j < 3; ++j)
                     g_fx.sun[j] = g_fx.sunw[0] * s->view[j] + g_fx.sunw[1] * s->view[4 + j] + g_fx.sunw[2] * s->view[8 + j];
-                normalize3(g_fx.sun);
+                gfx_normalize3(g_fx.sun);
                 memcpy(u.sun, g_fx.sun, 12);
                 u.sun[3] = 1.0f;
                 memcpy(u.suncol, g_fx.suncol, 12);
@@ -3739,7 +3433,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             {
                 float vinv2[16], m[16];
                 int ok = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0] &&
-                    g_fx.hist[0].width == aw && g_fx.hist[0].height == ah && mat_inverse(vinv2, s->view);
+                    g_fx.hist[0].width == aw && g_fx.hist[0].height == ah && gfx_mat_inverse(vinv2, s->view);
                 if (ok)
                 {
                     float dx = vinv2[12] - g_fx.prev_cam[0], dy = vinv2[13] - g_fx.prev_cam[1], dz = vinv2[14] - g_fx.prev_cam[2];
@@ -3747,15 +3441,15 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 }
                 if (ok)
                 {
-                    mat_mul(m, vinv2, g_fx.prev_view);
-                    mat_mul(u.reproj, m, g_fx.prev_proj);
+                    gfx_mat_mul(m, vinv2, g_fx.prev_view);
+                    gfx_mat_mul(u.reproj, m, g_fx.prev_proj);
                     u.hist[0] = 1.0f;
                 }
                 /* the pattern's turn: a golden-ratio step each frame */
                 u.hist[1] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
                 u.hist[2] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f);
                 memcpy(g_fx.prev_view, s->view, 64), memcpy(g_fx.prev_proj, s->proj, 64);
-                if (mat_inverse(vinv2, s->view))
+                if (gfx_mat_inverse(vinv2, s->view))
                     memcpy(g_fx.prev_cam, vinv2 + 12, 12);
             }
             u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.bloom, u.bloom[2] = 0.25f;
@@ -3860,7 +3554,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             memcpy(t->fog, g_fx.tr_fog, 12);
             t->own = s->sun_dir[3] != 0.0f, t->depth = g_fx.tr_depth, t->dl = g_fx.tr_dl, t->al = g_fx.tr_al, t->strength = g_fx.tr_strength, t->day = g_fx.tr_day;
             memcpy(t->sun, g_fx.sunw, 12);
-            if (mat_inverse(inv, s->view))
+            if (gfx_mat_inverse(inv, s->view))
                 memcpy(t->cam, inv + 12, 12);
             t->across = g_fx.st_across;
             g_fx.tr_live = g_fx.tr_cached = g_fx.tr_skipped = 0, g_fx.tr_strength = g_fx.tr_day = 0;

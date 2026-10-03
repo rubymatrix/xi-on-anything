@@ -47,13 +47,13 @@ GEN_WARNINGS = ['-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-se
                 '-Wno-parentheses-equality', '-Wno-unreachable-code']
 # the graphics back end: Metal on macOS (R3.2), Vulkan elsewhere
 if sys.platform == 'darwin':
-    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
+    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_scene.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
                    'runtime/portable/gfx_metal.m']
     GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation',
                 '-framework', 'Security']  # Security: the sign-in screen's saved passwords
 else:
     # Vulkan 1.3 (gfx_vulkan.c), its shaders compiled with glslang, memory through VMA (third_party/vma)
-    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
+    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_scene.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
                    'runtime/portable/gfx_vulkan.c', 'runtime/portable/gfx_vma.cpp']
     GFX_LIBS = ['-lvulkan', '-Wl,--start-group', '-lglslang-default-resource-limits', '-lglslang', '-lSPIRV',
                 '-lMachineIndependent', '-lGenericCodeGen', '-lOSDependent', '-lSPIRV-Tools-opt', '-lSPIRV-Tools',
