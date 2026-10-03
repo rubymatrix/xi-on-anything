@@ -2378,7 +2378,11 @@ static const char FX_GLSL[] =
     "  float z = u.zp.y / (d * u.hand.x - u.zp.x);\n"
     "  return d >= 0.999999 || !(z * u.hand.x > 0.0) ? 0.0 : z;\n"
     "}\n"
+    "// px a pixel's centre in the target; every draw went through the position fixup (D3D's pixel\n"
+    "// centres onto Vulkan's: half a pixel right and down), so the point it shows is the one half a\n"
+    "// pixel up and left of it (gfx_metal.m's view_pos)\n"
     "vec3 view_pos(vec2 px, float z) {\n"
+    "  px -= 0.5;\n"
     "  vec2 ndc = vec2((px.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (px.y - u.vp.y) / u.vp.w * 2.0);\n"
     "  float w = z * u.hand.x;\n"
     "  return vec3((ndc.x * w - u.proj.z * z) / u.proj.x, (ndc.y * w - u.proj.w * z) / u.proj.y, z);\n"
@@ -2426,7 +2430,7 @@ static const char FX_GLSL[] =
     "    vec2 ndc = vec2(R.x * u.proj.x + R.z * u.proj.z, R.y * u.proj.y + R.z * u.proj.w) / rd;\n"
     "    vec2 q = u.vp.xy + vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
     "    if (outside(q)) break;\n"
-    "    float sd = view_z(depth_at(t0, q)) * u.hand.x;\n"
+    "    float sd = view_z(depth_at(t0, q + 0.5)) * u.hand.x;\n" /* where the fixup drew it */
     "    float in_front = rd - sd;\n"
     "    if (sd > 0.0 && in_front > 0.005 * rd + 0.02 && in_front < u.shadow.z + 0.01 * rd) return 1.0 - fade * (1.0 - a * a);\n"
     "  }\n"
@@ -2724,6 +2728,7 @@ static struct
     int hist_at;          /* which of hist[] the frame before wrote */
     uint64_t hist_serial; /* the frame it was written (0: none) */
     float prev_view[16], prev_proj[16], prev_cam[3];
+    float last_cam[3]; /* where the camera was at the last scene (a jump is a new place) */
     VkSampler samp, cmp;
     GfxTex *smap, *smapn, *sdummy; /* the sun's shadow maps (far, near), a stand-in */
     float focus[3];                /* the player's place in the world (gfx_set_focus) */
@@ -3396,6 +3401,21 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
             /* sun_casters 1: characters alone cast; 2: the zone alone */
             if ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep))
                 continue;
+            /* more than 96 units outside the map's sides: no shadow of it falls in it */
+            if (cs->has_pos)
+            {
+                float h[4];
+                gfx_xform4(h, cs->clip0, clip_world);
+                if (fabsf(h[3]) > 1e-6f)
+                {
+                    float q[3] = { h[0] / h[3], h[1] / h[3], h[2] / h[3] };
+                    float mx = q[0] * k->S[0] + q[1] * k->S[4] + q[2] * k->S[8] + k->S[12];
+                    float my = q[0] * k->S[1] + q[1] * k->S[5] + q[2] * k->S[9] + k->S[13];
+                    float edge = 1.0f + 96.0f * 2.0f / k->across;
+                    if (fabsf(mx) > edge || fabsf(my) > edge)
+                        continue;
+                }
+            }
         }
         else
         {
@@ -3753,11 +3773,18 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
         /* world up in view space: the world's y axis through the inverse view matrix, pointing the way
          * the camera's own up does (FFXI's world y points down) */
+        int gap = g_fx.eased_serial && g_serial - g_fx.eased_serial > 30; /* half a second with no scene: a fade, a loading screen */
         g_fx.eased = g_fx.eased_serial && g_fx.eased_serial + 1 == g_serial;
         g_fx.eased_serial = g_serial;
         float inv[16], up[3];
         if (gfx_mat_inverse(inv, s->view))
         {
+            /* a new place (the camera jumped, or a gap: logging in, a zone change, a moghouse): what is
+             * eased and the sun held take this one's at once (gfx_metal.m) */
+            float jx = inv[12] - g_fx.last_cam[0], jy = inv[13] - g_fx.last_cam[1], jz = inv[14] - g_fx.last_cam[2];
+            if (gap || jx * jx + jy * jy + jz * jz > 50.0f * 50.0f)
+                g_fx.eased = 0, g_fx.fogc_set = 0, g_fx.sunw_seen = 0;
+            memcpy(g_fx.last_cam, inv + 12, 12);
             float sign = inv[5] < 0.0f ? -1.0f : 1.0f;
             up[0] = inv[1] * sign, up[1] = inv[5] * sign, up[2] = inv[9] * sign;
             gfx_normalize3(up);
@@ -3808,7 +3835,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             memcpy(u.suncol, g_fx.suncol, 12);
             /* shadows while the sun (or moon) is up: fading as it nears the horizon */
             float e = g_fx.sun[0] * g_fx.up[0] + g_fx.sun[1] * g_fx.up[1] + g_fx.sun[2] * g_fx.up[2];
-            float day = fminf(fmaxf((e - 0.05f) / 0.15f, 0.0f), 1.0f);
+            float day = g_fxs.sun_dusk != 0.0f ? fminf(fmaxf(e / 0.05f, 0.0f), 1.0f) : fminf(fmaxf((e - 0.05f) / 0.15f, 0.0f), 1.0f);
             if (own)
             {
                 float dl = 0.2126f * s->sun_color[0] + 0.7152f * s->sun_color[1] + 0.0722f * s->sun_color[2];

@@ -1,6 +1,6 @@
 /* The host's cache folder for its own files (fx.txt, pipelines, traces): FFXI_CACHE_DIR, else
  * ~/Library/Caches/FFXI on macOS, $XDG_CACHE_HOME/FFXI (~/.cache/FFXI) on Linux and
- * %LOCALAPPDATA%\FFXI\Cache on Windows. Made if missing; no trailing separator. 0 when there is none.
+ * %LOCALAPPDATA%\FFXI on Windows. Made if missing; no trailing separator. 0 when there is none.
  * A header so the graphics back end and its tests need nothing else. */
 #pragma once
 
@@ -27,8 +27,6 @@ static inline int cache_dir(char* out, size_t n)
         if (!base || !*base)
             return 0;
         snprintf(out, n, "%s\\FFXI", base);
-        cachedir_mkdir(out);
-        snprintf(out, n, "%s\\FFXI\\Cache", base);
 #elif defined(__APPLE__)
         const char* home = getenv("HOME");
         if (!home || !*home)
