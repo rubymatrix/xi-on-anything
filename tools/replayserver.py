@@ -56,6 +56,7 @@ from replayscene import Scene, transform  # noqa: E402
 
 HOME = -1   # the home scene's index
 TAIL = 2.0  # seconds after a scene's end before the zone change
+MAX_PAYLOAD = 1300 - ss.HDR - 16  # a packet's compressed messages and their bit count
 MAX_MESSAGES = 32                 # in one packet, at most
 AUTH_PORT, DATA_PORT, VIEW_PORT, ZONE_PORT = 55231, 55230, 55001, 55232  # beside a LandSandBoat server's
 
@@ -275,7 +276,8 @@ class ReplaySession(ss.ZoneSession):
                 ss.log('replay', 'all requested scenes played')
                 if srv.home is None:
                     self.state = 'finished'
-        self.queue += self.events
+        # events go ahead of scene packets still waiting, so a marker is not late behind a backlog
+        self.queue[:0] = self.events
         self.events = []
         if self.state == 'playing':
             while self.next < len(sc.packets) and sc.packets[self.next][0] <= now:
@@ -292,6 +294,27 @@ class ReplaySession(ss.ZoneSession):
     def build(self, client_hdr, next_id=True):
         self.due()
         return super().build(client_hdr, next_id)
+
+    def pack(self):
+        """As staticserver.py's, but as many messages as fit once compressed (up to MAX_MESSAGES in the 1300
+        bytes the client takes, less the header and the MD5): a zone-in's burst of recorded packets
+        reaches the client at the pace the recording had, not behind a backlog."""
+        body = bytearray()
+        data, nbits = self.srv.huff.compress(b'')
+        zone_out = False
+        taken = 0
+        while self.queue and taken < MAX_MESSAGES:
+            p = self.queue[0]
+            struct.pack_into('<H', p, 2, self.server_id)
+            more = self.srv.huff.compress(bytes(body + p))
+            if len(more[0]) + 4 > MAX_PAYLOAD and body:
+                break
+            body += p
+            data, nbits = more
+            self.queue.pop(0)
+            taken += 1
+            zone_out = zone_out or p.zone_out
+        return data, nbits, zone_out
 
 
 ReplayServer.session_class = ReplaySession

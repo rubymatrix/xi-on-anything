@@ -10,9 +10,12 @@ import struct
 import sys
 import tempfile
 import unittest
+import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
 import replayscene  # noqa: E402
+import replay  # noqa: E402
+import replayreport  # noqa: E402
 import replayserver  # noqa: E402
 
 ME = 1  # the recorded character's id
@@ -291,6 +294,55 @@ class SceneFlags(Folder):
                       '--weather fog-bank', '--mob-spells no-such-spell'):
             with self.subTest(flags=flags), self.assertRaises(ValueError):
                 self.load(flags)
+
+
+class Report(Folder):
+    def frames(self, lines):
+        return replayreport.compute(*replayreport.load(self.write('frames.csv', '\n'.join(lines) + '\n')))
+
+    def test_phases_from_the_frame_log(self):
+        lines = ['m,0,begin|1|crowd|crowd|106', 'm,1000000,mark|1|crowd|start']
+        lines += [f'f,{1000000 + 20000 * i}' for i in range(101)]  # 50 fps for 2 s
+        lines += ['m,3000000,mark|1|crowd|end', 'm,3100000,end|1|crowd', 'm,3100001,done|1']
+        phases = self.frames(lines)
+        self.assertEqual([p['phase'] for p in phases], ['measured'])
+        m = phases[0]
+        self.assertEqual((m['from_s'], m['to_s'], m['frames']), (1.0, 3.0, 100))
+        self.assertAlmostEqual(m['fps'], 50.0)
+        self.assertEqual(m['frames_over_33ms'], 0)
+
+    def test_a_scene_played_twice_is_measured_twice(self):
+        lines = []
+        for begin, ms in ((0, 20), (10000000, 40)):
+            lines += [f'm,{begin},begin|1|rain|weather|109', f'm,{begin + 1000000},mark|1|rain|start']
+            lines += [f'f,{begin + 1000000 + ms * 1000 * i}' for i in range(2000000 // (ms * 1000) + 1)]
+            lines += [f'm,{begin + 3000000},mark|1|rain|end', f'm,{begin + 3100000},end|1|rain']
+        fps = [round(p['fps']) for p in self.frames(lines)]
+        self.assertEqual(fps, [50, 25])
+
+
+class Runner(Folder):
+    def test_events_are_read_once_and_whole(self):
+        path = self.write('frames.csv', 'f,1\nm,2,begin|1|rain|weather|109\nm,3,mark|1|ra')
+        events = replay.Events(path)
+        self.assertEqual(events.new(), ['begin|1|rain|weather|109'])
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write('in|start\nf,4\n')
+        self.assertEqual(events.new(), ['mark|1|rain|start'])
+        self.assertEqual(events.new(), [])
+
+    def test_a_capture_becomes_a_png(self):
+        raw = self.write('shot.raw', '')
+        with open(raw, 'wb') as f:
+            f.write(b'XIF1' + struct.pack('<III', 2, 1, 22) + bytes([1, 2, 3, 255, 4, 5, 6, 255]))  # B, G, R, X
+        self.assertTrue(replay.png(raw, os.path.join(self.dir, 'shot.png')))
+        with open(os.path.join(self.dir, 'shot.png'), 'rb') as f:
+            data = f.read()
+        self.assertEqual(data[:8], b'\x89PNG\r\n\x1a\n')
+        idat = data.index(b'IDAT')
+        size = struct.unpack_from('>I', data, idat - 4)[0]
+        self.assertEqual(zlib.decompress(data[idat + 4:idat + 4 + size]), bytes([0, 3, 2, 1, 6, 5, 4]))
+        self.assertFalse(replay.png(self.write('other.raw', 'not a capture'), os.path.join(self.dir, 'x.png')))
 
 
 if __name__ == '__main__':

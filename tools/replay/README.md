@@ -74,8 +74,38 @@ each as one line:
 
     [17:18:37] xireplay BEGIN #2 mines (city) zone 234
     [17:18:46] xireplay READY #2 mines
-    [17:19:18] xireplay END   #2 mines: played
+    [17:19:18] xireplay END   #2 mines: 1751 frames, 58.4 fps, p99 22.3 ms, max 23.3 ms
     [17:19:18] xireplay DONE  1 scenes played
     [17:19:21] xireplay HOME  waiting: !replay <#|name|group|all|list|stop>
 
 QUEUE, SCENE (from `!replay list`), PHASE (a recorded marker), INFO and ERROR have the same shape.
+READY (the scene's start marker) means it is loaded and settled: the time for a screenshot.
+
+END carries the scene's numbers, measured from its start marker to its end. `/xireplay quiet on`
+leaves only these lines in the chat log; `/xireplay frames on` also logs every frame's time and every
+event to `frames-<date>.csv`.
+
+The latest event is also in `state.json` beside the recordings (`{"event":"READY","scene":2,...}`)
+for a script to poll; it holds only the latest, so a script that must see every event reads the
+frame log's `m,` lines.
+
+## Measure
+
+    python3 tools/replayreport.py frames-20261003-165743.csv [--json]
+
+prints each scene's phases (one marker to the next) and its measured window (start marker to end
+marker): frames, fps, mean, p50/p95/p99, max, frames over 33 ms.
+
+## Unattended
+
+`tools/replay.py` runs it all with nobody at the screen: the server, host64 with its control port
+(`FFXI_CONTROL`) to get through the lobby (Enter, as each choice is the default) and to load the
+addon, the frame log, and the report.
+
+    python3 tools/replay.py run suite.txt [--play "city effects"]   # then generated/runs/<date>-suite/report.txt
+    python3 tools/replay.py shots suite.txt                          # a frame capture at each READY
+    python3 tools/replay.py play suite.txt                           # a session to watch: !replay in chat
+
+`--game` (or `FFXI_GAME`), `--huffman` (or `FFXI_HUFFMAN`), `--client` (default `build/host64`),
+`--data-dir` (default host64's); arguments after `--` go to host64. The game's own frame cap and
+display settings are what it measures under.
