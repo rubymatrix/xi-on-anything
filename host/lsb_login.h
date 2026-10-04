@@ -42,6 +42,8 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn);
 
 /* A server name or dotted quad as an IPv4 address (host byte order); 0 if it does not resolve. */
 int net_resolve_ipv4(const char* name, uint32_t* out);
+/* net_resolve_ipv4 asks this DNS server (IPv4, host byte order) instead of the host's; 0: the host's */
+void net_set_dns(uint32_t ipv4_host_order);
 /* Reads a line from the terminal without echoing it (the password prompt); 0 when there is no
  * terminal. */
 int read_secret(const char* prompt, char* out, size_t n);

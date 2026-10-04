@@ -10,6 +10,7 @@
  *               [--reg-final <file.reg>]...   loaded after the overlay: a launcher's settings
  *               [--data-dir <folder>]   where host64 writes its own files (default: beside it)
  *               [--server <name or a.b.c.d>]
+ *               [--dns <a.b.c.d>]      a DNS server to ask for every name instead of the system's
  *               [--session <V: 16 characters, or 32 hex digits>]                   a launcher's sign-in
  *                [--auth <the authCode block: 104 hex digits>]
  *               [--user <name> [--pass <password>] [--otp <code>] [--login-token <t>]   LandSandBoat servers
@@ -25,6 +26,10 @@
  * domain resolve to it instead of through DNS. Default 127.0.0.1 (this machine); --lobby is an
  * older name for it. With --session the game's hosts resolve through DNS, as retail's do, unless
  * --server is also given: then they go to it, for a PlayOnline server of one's own.
+ *
+ * --dns: every name (--server's, the lobby's and the game's own) is asked of that DNS server, for a
+ * PlayOnline server whose DNS answers the game's names (Project Crystal's). --server still wins
+ * for the game's hosts when both are given.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped.
  *
@@ -727,6 +732,17 @@ int main(int argc, char** argv)
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0, lod_given = 0;
     int cexi = CEXI_OFF, cexi_given = 0;
     float ui_aspect = 0.0f;
+    uint32_t dns_server = 0; /* --dns; read first, so that --server's name goes to it too */
+    for (int i = 1; i + 1 < argc; i += 2)
+        if (!strcmp(argv[i], "--dns"))
+        {
+            if (!net_resolve_ipv4(argv[i + 1], &dns_server))
+            {
+                fprintf(stderr, "--dns: cannot resolve %s\n", argv[i + 1]);
+                return 2;
+            }
+            net_set_dns(dns_server);
+        }
     for (int i = 1; i + 1 < argc; i += 2)
     {
         if (!strcmp(argv[i], "--game"))
@@ -769,6 +785,8 @@ int main(int argc, char** argv)
             }
             gamecore_set_auth_block(block);
         }
+        else if (!strcmp(argv[i], "--dns"))
+            ; /* read above */
         else if (!strcmp(argv[i], "--server") || !strcmp(argv[i], "--lobby"))
         {
             server_name = argv[i + 1];
@@ -898,7 +916,7 @@ int main(int argc, char** argv)
     if (!game)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
-                        "[--server name] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
+                        "[--server name] [--dns a.b.c.d] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
                         "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--cexi off|items|full]\n");
         return 2;
     }
@@ -1022,6 +1040,7 @@ int main(int argc, char** argv)
     dsound_init();
     dinput_init();
     ws2_init();
+    ws2_set_dns(dns_server);
     /* the game's hosts: the lobby through gamecore's resolver, every other one through
      * gethostbyname. With --session and no --server none is redirected: they resolve through DNS,
      * as retail's. */

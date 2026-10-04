@@ -43,6 +43,7 @@ static int host_errno(void) { return errno; }
 #include "plat.h"
 #include "thunk.h"
 #include "ws2.h"
+#include "dnsq.h"
 
 #define WSAEINTR 10004u
 #define WSAEBADF 10009u
@@ -768,10 +769,16 @@ static void sh_inet_ntoa(Guest* g)
 }
 
 static uint32_t g_game_server; /* host byte order; 0: the game's names go to DNS */
+static uint32_t g_dns; /* host byte order; 0: the host's own DNS */
 
 void ws2_set_game_server(uint32_t ipv4_host_order)
 {
     g_game_server = ipv4_host_order;
+}
+
+void ws2_set_dns(uint32_t ipv4_host_order)
+{
+    g_dns = ipv4_host_order;
 }
 
 /* the game's domain or a name under it, any case, with or without the root's trailing dot */
@@ -791,6 +798,13 @@ static int is_game_host_name(const char* name)
 
 int ws2_resolve_ipv4(const char* name, uint32_t* ipv4_host_order)
 {
+    if (g_dns)
+    {
+        gt_unlock();
+        int ok = dnsq_a(g_dns, name, ipv4_host_order);
+        gt_lock();
+        return ok;
+    }
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;
@@ -814,19 +828,33 @@ static void sh_gethostbyname(Guest* g)
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;
     int from_dns = 1;
+    uint32_t ip = 0;
     if (g_game_server && is_game_host_name(name))
+        ip = g_game_server; /* the game's hosts are ours: one answer, no DNS */
+    else if (g_dns)
     {
-        /* the game's hosts are ours: one answer, no DNS */
+        /* --dns: that server's answer, or none */
+        gt_unlock();
+        int ok = dnsq_a(g_dns, name, &ip);
+        gt_lock();
+        if (!ok)
+        {
+            rt_log("[recomp] ws2: %s: the DNS server has no answer\n", name);
+            gt_set_error(WSAHOST_NOT_FOUND);
+            RET(0, 1);
+        }
+    }
+    if (ip)
+    {
         memset(&fixed, 0, sizeof fixed);
         memset(&fixed_addr, 0, sizeof fixed_addr);
         fixed_addr.sin_family = AF_INET;
-        fixed_addr.sin_addr.s_addr = htonl(g_game_server);
+        fixed_addr.sin_addr.s_addr = htonl(ip);
         fixed.ai_family = AF_INET;
         fixed.ai_addr = (struct sockaddr*)&fixed_addr;
         res = &fixed;
         from_dns = 0;
-        rt_log("[recomp] ws2: %s -> %u.%u.%u.%u\n", name, g_game_server >> 24, (g_game_server >> 16) & 255,
-            (g_game_server >> 8) & 255, g_game_server & 255);
+        rt_log("[recomp] ws2: %s -> %u.%u.%u.%u\n", name, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255);
     }
     else
     {
