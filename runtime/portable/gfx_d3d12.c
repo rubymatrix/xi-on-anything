@@ -4184,8 +4184,9 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.direct = g_fx.eased && g_fx.direct >= 0.0f ? g_fx.direct + (want - g_fx.direct) * 0.05f : want;
         }
         day *= g_fxs.sun_direct > 0.0f ? g_fx.direct : 1.0f;
-        if (g_moghouse)
-            day *= fminf(fmaxf(g_fxs.moghouse, 0.0f), 1.0f);
+        /* in a Mog House, or under a zone's fixed light (GfxScene.indoors, easing out once the sun moves) */
+        float room = fminf(fmaxf(g_fxs.moghouse, 0.0f), 1.0f);
+        day *= g_moghouse ? room : 1.0f - fminf(fmaxf(s->indoors, 0.0f), 1.0f) * (1.0f - room);
         u.shadow[0] = g_fxs.shadow * day;
         u.shadow[1] = g_fxs.shadow_length, u.shadow[2] = 0.3f, u.shadow[3] = 40.0f;
         if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))

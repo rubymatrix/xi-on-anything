@@ -66,7 +66,8 @@ static const struct
      * Shadows held at Off: host/modern.c game_shadows_follow): 0 off while the sun's are on, 1
      * always, 2 never */
     { "gameshadows", offsetof(GfxFxSettings, gameshadows), 0.0f },
-    /* how much of the sun's shadows stay in a Mog House (gfx_set_moghouse), 0 none to 1 all */
+    /* how much of the sun's shadows stay indoors - a Mog House (gfx_set_moghouse), a zone with no sky
+     * (GfxScene.indoors) - 0 none to 1 all; the key keeps its old name for the fx.txt files that have it */
     { "moghouse", offsetof(GfxFxSettings, moghouse), 0.0f },
     /* the near map's reach past the player */
     { "sun_near", offsetof(GfxFxSettings, sun_near), 10.0f },

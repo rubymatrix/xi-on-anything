@@ -455,6 +455,7 @@ static void run_window(SDL_Window* win)
 enum { SS = 128 };
 static GfxTex *g_srt, *g_sds;
 static float g_sproj[16], g_sz;
+static int g_sindoors;  /* scene_end's GfxScene.indoors: a zone's fixed light, not the sky's sun */
 static float g_scam_x; /* scene_quad's camera: at x in the world (its quads given in view space, placed in the world) */
 static uint32_t g_spx[SS * SS];
 static const uint32_t SVP[6] = { 0, 0, SS, SS, 0, 0x3F800000u };
@@ -550,6 +551,7 @@ static void scene_end(const float* sun, uint32_t fog)
     }
     sc.fog[2] = 1.0f; /* the game fogged its world */
     sc.fogcolor[0] = ((fog >> 16) & 255) / 255.0f, sc.fogcolor[1] = ((fog >> 8) & 255) / 255.0f, sc.fogcolor[2] = (fog & 255) / 255.0f;
+    sc.indoors = g_sindoors;
     gfx_scene_done(g_srt, &sc);
     gfx_tex_read(g_srt, 0, 0, g_spx, SS * 4);
 }
@@ -746,7 +748,8 @@ static void test_scene_sun_map(void)
 
 /* The game's own character shadows stand aside only while the sun's are drawn (d3d8.c
  * game_shadow_hidden): after a frame with the post's shadow, gfx_sun_shadows_shown; in a Mog House
- * (moghouse 0: none of the sun's there) the shadow goes and, 30 frames on, so does the claim. */
+ * (moghouse 0: none of the sun's there) the shadow goes and, 30 frames on, so does the claim. So too
+ * under a zone's fixed light (GfxScene.indoors: Ru'Hmet, a cave), which the moghouse setting scales. */
 static void test_scene_shown(void)
 {
     const float beyond[3] = { 0, 0.5f, 1 };
@@ -754,9 +757,10 @@ static void test_scene_shown(void)
     float post[4][3] = { { -1, 0, 10 }, { 1, 0, 10 }, { -1, -3, 10 }, { 1, -3, 10 } };
     fx_only("sun", 1.0f);
     gfx_fx_set("moghouse", 0.0f);
-    for (int k = 0; k < 2; ++k)
+    for (int k = 0; k < 3; ++k)
     {
-        gfx_set_moghouse(k);
+        gfx_set_moghouse(k == 1);
+        g_sindoors = k == 2;
         for (int f = 0; f < (k ? 32 : 1); ++f)
         {
             scene_begin(1, 0xFF000000u);
@@ -771,11 +775,22 @@ static void test_scene_shown(void)
             CHECK(gfx_sun_shadows_shown() && before <= 160, "sun shown: %d, the post's shadow %u (want shown, shaded)",
                 gfx_sun_shadows_shown(), before);
         else
-            CHECK(!gfx_sun_shadows_shown() && before >= 245, "sun shown in a Mog House: %d, the floor %u (want not, lit)",
-                gfx_sun_shadows_shown(), before);
+            CHECK(!gfx_sun_shadows_shown() && before >= 245, "sun shown %s: %d, the floor %u (want not, lit)",
+                k == 1 ? "in a Mog House" : "under a fixed light", gfx_sun_shadows_shown(), before);
         gfx_present(NULL);
+        if (k == 1) /* back under the sun between the two: the shadow returns */
+        {
+            gfx_set_moghouse(0);
+            scene_begin(1, 0xFF000000u);
+            scene_quad(floor, 0xFFFFFFFFu);
+            scene_quad(post, 0xFFFFFFFFu);
+            scene_end(beyond, 0);
+            CHECK(spx(64, 91, 0) <= 160, "out of the Mog House: the post's shadow %u (want shaded)", spx(64, 91, 0));
+            gfx_present(NULL);
+        }
     }
     gfx_set_moghouse(0);
+    g_sindoors = 0;
 }
 
 /* A new place takes its own light at once: frames under a strong sun (the post's shadow at full

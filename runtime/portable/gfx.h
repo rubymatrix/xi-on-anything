@@ -263,6 +263,9 @@ typedef struct GfxScene
     float fogcolor[4];
     float fog[4];        /* fog start, end; z = 1 when fog was on */
     uint32_t vp[6];      /* the viewport the 3D draws used (D3DVIEWPORT8) */
+    float indoors;       /* 1 while the sun has not been seen to move with the clock in this place (d3d8.c
+                          * sun_sky): a zone's fixed light, not the sky's, whose shadows are scaled as a
+                          * Mog House's are; easing to 0 once it is seen to */
 } GfxScene;
 
 /* The frame's 3D scene is finished in color (a render target's first level, drawn with depth
