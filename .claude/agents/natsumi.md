@@ -51,6 +51,65 @@ Read `tools/replay/README.md` first; it is the reference for everything below.
 - Scene events come back as chat lines from "xireplay" (BEGIN, READY, END with fps/p99/max, DONE,
   HOME) and the latest one in `state.json` beside the recordings.
 
+## Signing in
+
+The client never waits at a login screen for you: it signs in to the local fake server on its own,
+the way `tools/replay.py` does (`session()`, `launch()`, `through_lobby()`; import them rather than
+re-implementing them). Start host64 with `FFXI_CONTROL=<port>` and `FFXI_DISCORD=0`, and the args
+
+    --game <game> --data-dir <data> --server 127.0.0.1 --user replay --pass replay
+    --authport <auth> --dataport <data port> --viewport <view>
+
+where the ports are the ones the server you started listens on (`tools/replayserver.py`: 55231
+auth, 55230 data, 55001 lobby, 55232 zone). The fake server takes any sign-in; `replay`/`replay` are
+throwaway values for it, never a real account. Then press Enter through the control port every ~2 s
+until `state` reports a zone id. A client already stuck at the login screen can't take `/shutdown`:
+terminate it, kill it if it doesn't exit, and start again this way.
+
+## Test settings
+
+Every run uses the standard settings unless the user asks for others, in a scratch `--data-dir` so the
+user's own settings are never touched. Say in the report what you used.
+
+- **1920x1080, windowed.** Pass `--reg-final <data>/natsumi.reg`, loaded last, so it wins over the
+  data dir's `settings.reg`:
+
+      REGEDIT4
+
+      [HKEY_LOCAL_MACHINE\SOFTWARE\PlayOnlineUS\SquareEnix\FinalFantasyXI]
+      "0001"=dword:00000780
+      "0002"=dword:00000438
+      "0003"=dword:00001000
+      "0004"=dword:00001000
+      "0034"=dword:00000001
+      "0037"=dword:00000780
+      "0038"=dword:00000438
+
+  Keep `0003`/`0004` (the background resolution, 4096): with `--reg-final` the data dir's
+  `settings.reg` is not loaded, and without them the world is drawn into a 512x512 target that is not
+  taken for the scene, so no effects or sun shadows run and the trace comes out empty.
+
+- **Every effect on, every shadow feature at its fullest.** The game reads `fx.txt` from its cache
+  dir (`FFXI_CACHE_DIR`, default `~/Library/Caches/FFXI`), not the data dir: set
+  `FFXI_CACHE_DIR=<data>` so `<data>/fx.txt` is the one used and the user's own is untouched.
+  `<data>/fx.txt` (`key = value`, one per line; the keys and defaults are in
+  `runtime/portable/gfx_fx.c`):
+
+      fx = 1
+      light = 2
+      ao_quality = 2
+      sun_detail = 8192
+      sun_casters = 0
+
+  Modern Effects is off by default (`fx = 0`), so without this file you test the game's own look.
+  The rest stay at their defaults, which are on. Change a slider (like `sun`) only when the test calls
+  for it, and name it in the report.
+
+To stand somewhere no scene goes (a zone, a spot) without recordings, `tools/staticserver.py
+--huffman <res> --zone Z --pos x,y,z,rot` is the same server with no recordings; give it the replay
+ports (`--auth-port 55231 --data-port 55230 --view-port 55001 --zone-port 55232`) and sign in the
+same way.
+
 Recordings live in `generated/replay/` and are not part of the repository. If they are missing, stop
 and tell the user; recording needs their own server (`tools/replay.py record all ...`).
 

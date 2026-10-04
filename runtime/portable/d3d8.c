@@ -3082,6 +3082,45 @@ static struct
     uint32_t idle;              /* frames since a world scene was last drawn (a gap is a new place too) */
 } g_sunv = { .cur = -1, .chal = -1 };
 
+/* The sky's sun, or a zone's fixed light. Outdoors the game's sun never stands still: it turns with
+ * the clock a little every scene (d2 3.5e-10 and up between scenes, eased faster at each Vana'diel
+ * minute), always the same way, in the world's x-y plane (z = 0). A zone with no sky (Ru'Hmet,
+ * Garlaige Citadel, Ordelle's Caves, the Necropolis) lights everything from one light that never
+ * moves - straight down, or slanted, often with z != 0; its direction changes by rounding alone (d2
+ * 1e-13 or less, turning the camera) - and the sun's shadows from it are those of a ceiling over
+ * everything: the zone goes black. After a zone change the light counts as fixed until the sun has
+ * moved like the sky's for half a second: every scene, by more than rounding and less than about 3
+ * degrees (more is another light winning the vote), the same way as the scene before. Then the sun's
+ * shadows ease in over a third of a second, not all at once over the scene the zone came in with. */
+static struct
+{
+    float dir[3], step[2]; /* the sun's world direction at the last scene, and its last move */
+    int have, moved;
+    uint32_t moving;       /* scenes in a row it has moved like the sky's sun */
+    float indoors;         /* GfxScene.indoors: 1 at a zone change, easing to 0 once it has */
+} g_sky;
+
+static float sun_sky(const float* w)
+{
+    if (g_sky.have && !g_sky.moved)
+    {
+        float dx = w[0] - g_sky.dir[0], dy = w[1] - g_sky.dir[1];
+        float d2 = dx * dx + dy * dy;
+        int sky = d2 > 1e-11f && d2 < 0.05f * 0.05f && fabsf(w[2]) < 1e-3f && fabsf(g_sky.dir[2]) < 1e-3f &&
+                  dx * g_sky.step[0] + dy * g_sky.step[1] >= 0.0f;
+        g_sky.moving = sky ? g_sky.moving + 1 : 0;
+        g_sky.moved = g_sky.moving >= 30;
+        g_sky.step[0] = dx, g_sky.step[1] = dy;
+    }
+    memcpy(g_sky.dir, w, sizeof g_sky.dir);
+    if (!g_sky.have)
+        g_sky.indoors = 1.0f;
+    g_sky.have = 1;
+    if (g_sky.moved)
+        g_sky.indoors = fmaxf(g_sky.indoors - 0.05f, 0.0f);
+    return g_sky.indoors;
+}
+
 /* A new place (the camera jumped, or half a second went by with no world drawn: the world after the
  * lobby's character select and the fade in, a zone change, a moghouse): the votes from before are
  * another place's lights - the lobby's, the last zone's sun - and scored over hundreds of frames, the
@@ -3093,6 +3132,8 @@ static void sun_new_place(const float* view)
     for (int j = 0; j < 3; ++j) /* the view's translation back through its rotation */
         cam[j] = -(view[12] * view[j * 4] + view[13] * view[j * 4 + 1] + view[14] * view[j * 4 + 2]);
     float dx = cam[0] - g_sunv.cam[0], dy = cam[1] - g_sunv.cam[1], dz = cam[2] - g_sunv.cam[2];
+    if (g_sunv.have_cam && g_sunv.idle >= 30)
+        memset(&g_sky, 0, sizeof g_sky); /* a zone change: its sun is still to be seen moving */
     if (g_sunv.have_cam && (dx * dx + dy * dy + dz * dz > 50.0f * 50.0f || g_sunv.idle >= 30))
     {
         for (int i = 0; i < 8; ++i)
@@ -3200,6 +3241,7 @@ static void scene_finish(const char* why)
         if (sun >= 0 && g_scene.sun_draw)
         {
             const float* w = g_sunv.c[sun].dir;
+            sc->indoors = sun_sky(w);
             for (int j = 0; j < 3; ++j)
                 sc->sun_dir[j] = w[0] * sc->view[j] + w[1] * sc->view[4 + j] + w[2] * sc->view[8 + j];
             float l = sqrtf(sc->sun_dir[0] * sc->sun_dir[0] + sc->sun_dir[1] * sc->sun_dir[1] + sc->sun_dir[2] * sc->sun_dir[2]);

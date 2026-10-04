@@ -27,6 +27,7 @@ recorded as one file per zone visit. It has seven (`home`, `markets`, `mines`, `
 | `home` | | GM Home, where a session waits |
 | `markets`, `mines` | city | Bastok Markets and the Mines plaza at noon, a fixed vantage |
 | `dawn`, `noon`, `dusk`, `midnight` | lighting | one North Gustaberg vantage at four times of day |
+| `garden` | indoors | the Garden of Ru'Hmet at noon: no sky, so no sun shadows should reach it |
 | `hot-spell`, `heat-wave`, `sand-storm`, `sunshine`, `dust-storm`, `wind`, `gales`, `rain`, `squall`, `snow`, `blizzards`, `thunder`, `thunderstorms`, `clouds`, `gloom`, `darkness`, `auroras`, `stellar-glare` | weather | an open spot in a zone whose own weather includes it (Western Altepa, West Sarutabaruta, Konschtat, La Theine, Cape Teriggan, Pashhow, Yuhtunga, Xarcabard, Beaucedine, Zi'Tah, Jugner Forest, Lufaise Meadows, Castle Zvahl Baileys, Ru'Aun Gardens, Qufim Island), in that weather from the zone-in |
 | `mob-crowd` | crowd | about forty mobs held around the character, each made four (about 170), all named Monster |
 | `player-crowd` | crowd | 150 geared characters in a city |
