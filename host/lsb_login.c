@@ -51,6 +51,7 @@ typedef SOCKET sock_t;
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <termios.h>
@@ -77,6 +78,7 @@ typedef int sock_t;
 #include "gamecore_config.h"
 #include "keychain.h"
 #include "ws2.h"
+#include "dnsq.h"
 
 int lsb_parse_version(const char* s, int out[3])
 {
@@ -585,12 +587,21 @@ static void data_thread(void* arg)
     }
 }
 
+static uint32_t g_net_dns;
+
+void net_set_dns(uint32_t ipv4_host_order)
+{
+    g_net_dns = ipv4_host_order;
+}
+
 int net_resolve_ipv4(const char* name, uint32_t* out)
 {
 #if defined(_WIN32)
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
+    if (g_net_dns)
+        return dnsq_a(g_net_dns, name, out);
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;
