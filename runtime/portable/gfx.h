@@ -289,6 +289,11 @@ void gfx_set_moghouse(int in);
 /* Whether the sun's shadows were drawn, at least a quarter as dark as by full day, within the last 30
  * frames: the game's own character shadows stand aside only then (d3d8.c game_shadow_hidden). */
 int gfx_sun_shadows_shown(void);
+/* Whether the sun's shadows want the zone round the camera drawn this frame, out of view as well (the
+ * map renderer's culling set aside for it: host64's cull_test): the radius in world units, and in
+ * center where round, or 0 for the game's own culling. A frame or two after the casters kept from
+ * before were let go (a zone-in) and as the camera moves on, so what stands behind it casts. */
+float gfx_sun_prime(float* center);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);

@@ -2675,6 +2675,8 @@ static id<MTLTexture> fx_lz(NSUInteger w, NSUInteger h)
 enum { SUN_CACHE_FRAMES = 60 * 30 };
 #define SUN_CACHE_NEAR 40.0f                  /* what was seen within this of the camera stays past SUN_CACHE_FRAMES */
 #define SUN_COPY_BYTES (48u * 1024 * 1024)    /* the copies' vertices and indices, all told */
+enum { SUN_PRIME_FRAMES = 3 };          /* frames the game draws the zone round the camera (gfx_sun_prime) */
+#define SUN_PRIME_MOVE 20.0f              /* and again once the camera is this far from where it last did */
 
 /* The zone's casters, kept after they leave the view: the game draws only what the camera sees, but
  * a low sun throws the shadows of what is behind and beside the camera into it. Each caster drawn
@@ -2714,6 +2716,22 @@ static Cached* g_cache;
 static uint32_t g_ncache, g_cache_cap, g_copy_bytes;
 static Map g_cache_map; /* CacheKey -> the first entry's index + 1 */
 static float g_cache_cam[3];
+/* What the cache holds is only what the game drew, and it draws only what the camera sees: until the
+ * camera had looked their way, the trees behind it cast nothing (at a low sun the character stood lit
+ * in their shadow). So after the cache is cleared, and as the camera moves on, the game is asked for
+ * a few frames to draw the zone round the camera, out of view as well (gfx_sun_prime, host64's
+ * cull_test); out of view it shows nothing, and the cache keeps it. */
+static int g_prime_set;
+static uint64_t g_prime_serial; /* the frame it was asked for */
+static float g_prime_at[3];
+
+float gfx_sun_prime(float* center)
+{
+    if (!g_prime_set || g_serial - g_prime_serial >= SUN_PRIME_FRAMES || g_fxs.fx == 0.0f || g_fxs.sun_prime <= 0.0f || g_fxs.sun_casters == 1.0f)
+        return 0.0f;
+    memcpy(center, g_prime_at, sizeof g_prime_at);
+    return g_fxs.sun_prime;
+}
 
 static void cache_key(CacheKey* k, const Caster* c, int copy)
 {
@@ -2964,8 +2982,18 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
                 sqrtf(dx * dx + dy * dy + dz * dz), (unsigned long long)g_serial);
         sun_cache_trim(1);
         g_fx.fogc_set = 0;
+        g_prime_set = 0;
     }
     memcpy(g_cache_cam, cam, 12);
+    float px = cam[0] - g_prime_at[0], py = cam[1] - g_prime_at[1], pz = cam[2] - g_prime_at[2];
+    if (!g_prime_set || px * px + py * py + pz * pz > SUN_PRIME_MOVE * SUN_PRIME_MOVE)
+    {
+        if (gfx_profiling && g_fxs.sun_prime > 0.0f)
+            fprintf(stderr, "[recomp] gfx: shadows: the zone within %.0f units of (%.1f %.1f %.1f) asked for (frame %llu)\n",
+                g_fxs.sun_prime, cam[0], cam[1], cam[2], (unsigned long long)g_serial);
+        memcpy(g_prime_at, cam, 12);
+        g_prime_set = 1, g_prime_serial = g_serial;
+    }
     if (!(g_serial & 255))
         sun_cache_trim(0);
     /* what is not drawn from the zone's own buffers: a placed object (keep: kept as a copy) or a
