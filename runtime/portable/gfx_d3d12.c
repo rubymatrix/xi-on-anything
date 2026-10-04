@@ -2738,7 +2738,7 @@ static const struct
     FXS(fog_height, 2.0f), FXS(fog_max, 0.5f), FXS(fog_sun, 0.5f), FXS(fog_g, 0.6f), FXS(bloom, 0.3f),
     FXS(threshold, 0.75f), FXS(rays, 0.6f), FXS(rays_decay, 0.965f), FXS(rays_length, 0.85f), FXS(light, 0.0f),
     FXS(shadow, 0.3f), FXS(shadow_length, 0.6f), FXS(sun, 0.45f), FXS(sun_distance, 100.0f), FXS(sun_soft, 0.0f),
-    FXS(sun_face, 0.0f), FXS(sun_min, 0.0f), FXS(sun_direct, 0.5f), FXS(sun_casters, 0.0f), FXS(sun_near, 10.0f),
+    FXS(sun_face, 0.0f), FXS(sun_min, 0.15f), FXS(sun_direct, 0.5f), FXS(sun_casters, 0.0f), FXS(sun_near, 10.0f),
     FXS(sun_detail, 4096.0f), FXS(ao_quality, 0.0f), FXS(temporal, 0.85f), FXS(debug, 0.0f), FXS(draw, 0.0f),
     FXS(draw_entities, 0.0f), FXS(fps, 1.0f), FXS(aa, 0.0f), FXS(sun_dusk, 1.0f),
     /* gfx_metal.m's water pass (GfxDraw.water): kept, read back and saved here, not drawn yet */

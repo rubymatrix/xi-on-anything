@@ -3287,9 +3287,13 @@ static void scene_note(GfxDraw* d)
         /* the effects over the world - flames, glows, spells: blended, writing no depth, and unfogged
          * (the zone's own blended decals among its draws are fogged). The effects go under them: fog
          * read from the depth behind a flame took it for the wall there, and fogged it more or less as
-         * it flickered. */
+         * it flickered. Not the sky's layers drawn after the world - its clouds, the sun, the moon -
+         * which are blended and unfogged too, but drawn round the camera (a view with no translation):
+         * ended at them, the effects ran before the sun was drawn and the god rays had none to start
+         * from. */
         else if (!d->vs.rhw && c == g_scene.rt && d->depth.zenable && !d->depth.zwrite && d->pipe.blend &&
-            !d->fs.fog && !d->vs.fog_vertex)
+            !d->fs.fog && !d->vs.fog_vertex &&
+            (g_dev.cur.xf[2][12] != 0.0f || g_dev.cur.xf[2][13] != 0.0f || g_dev.cur.xf[2][14] != 0.0f))
             scene_finish("effects");
     }
     if (c == g_scene.rt && g_scene.draws && !g_scene.done && (d->vs.rhw || !d->depth.zenable))
