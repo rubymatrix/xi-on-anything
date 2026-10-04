@@ -13,6 +13,10 @@
 ../../generated/replay/lighting-3.jsonl --label dusk --group lighting
 ../../generated/replay/lighting-4.jsonl --label midnight --group lighting
 
+# indoors: a zone with no sky, at noon, where the sun's shadows would black it out (the lighting visit
+# moved there; the clock stays pinned to noon)
+../../generated/replay/lighting-2.jsonl --label garden --group indoors --zone 35 --at -322.43,5.0,-362.77,219
+
 # weather: each in a zone whose own weather includes it (the client draws effects only there),
 # set at the zone-in (the client starts a weather's effects only when it arrives)
 ../../generated/replay/weather-1.jsonl --label hot-spell --group weather --weather hot-spell
