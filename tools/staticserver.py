@@ -298,6 +298,8 @@ def cstr(s, n):
 
 
 class Server:
+    session_class = None  # ZoneSession (set below); a subclass of it for a server built on this one
+
     def __init__(self, args, char, zones, huff):
         self.args = args
         self.char = char
@@ -353,7 +355,7 @@ class Server:
 
     def prepare_zone_in(self):
         c = self.char
-        s = ZoneSession(self, None)
+        s = self.session_class(self, None)
         s.zone = c['zone']
         s.pos = list(c['pos']) if c['pos'] else list(self.zones.position(c['zone']))
         s.set_key(self.key)
@@ -424,7 +426,7 @@ class Server:
             data, addr = sock.recvfrom(4096)
             try:
                 s = self.sessions.get(addr)
-                out = ZoneSession.incoming(self, s, addr, bytearray(data))
+                out = self.session_class.incoming(self, s, addr, bytearray(data))
                 if out:
                     sock.sendto(out, addr)
             except Exception as e:  # one bad packet must not stop the zone
@@ -489,7 +491,7 @@ class ZoneSession:
             cid = struct.unpack_from('<I', buf, HDR + 12)[0]
             s = srv.by_char.pop(cid, None) or (s if s and s.key else None)
             if s is None:
-                s = ZoneSession(srv, addr)
+                s = srv.session_class(srv, addr)
                 s.zone = srv.char['zone']
                 s.pos = list(srv.zones.position(s.zone))
                 s.set_key(srv.key)
@@ -791,17 +793,7 @@ class ZoneSession:
         h = bytearray(client_hdr[:HDR])
         struct.pack_into('<HH', h, 0, self.server_id, self.client_id)
         struct.pack_into('<I', h, 8, int(time.time()))
-        body = bytearray()
-        zone_out = False
-        while self.queue:
-            p = self.queue[0]
-            if len(body) + len(p) > 700 and body:  # Huffman can grow it; the client takes 1300
-                break
-            self.queue.pop(0)
-            struct.pack_into('<H', p, 2, self.server_id)
-            body += p
-            zone_out = zone_out or p.zone_out
-        data, nbits = self.srv.huff.compress(bytes(body))
+        data, nbits, zone_out = self.pack()
         data += struct.pack('<I', nbits)
         data += md5(data)
         out = h + data
@@ -813,11 +805,30 @@ class ZoneSession:
             self.queue.clear()
         return bytes(out)
 
+    def pack(self):
+        """The queued messages the next packet takes, compressed (bytes and bit count), and whether one of
+        them is the zone-out."""
+        body = bytearray()
+        zone_out = False
+        while self.queue:
+            p = self.queue[0]
+            if len(body) + len(p) > 700 and body:  # Huffman can grow it; the client takes 1300
+                break
+            self.queue.pop(0)
+            struct.pack_into('<H', p, 2, self.server_id)
+            body += p
+            zone_out = zone_out or p.zone_out
+        data, nbits = self.srv.huff.compress(bytes(body))
+        return data, nbits, zone_out
+
     def resend(self):
         """The last packet again, its header brought up to date (the header is not enciphered)."""
         struct.pack_into('<H', self.last, 2, self.client_id)
         struct.pack_into('<I', self.last, 8, int(time.time()))
         return bytes(self.last)
+
+
+Server.session_class = ZoneSession
 
 
 # --- start --------------------------------------------------------------------------------------

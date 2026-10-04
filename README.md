@@ -488,7 +488,9 @@ tests/             difftest.c (original vs translation), boot.c (x86), boot64.c 
 tools/             prepare.py, buildinfo.py, unpack.py, build.py (MSVC), build_posix.py (clang),
                    install.py, trace_report.py; newbuild.py and discover.py (a new client version)
                    setup.py (the source install, run by install-source.sh and setup.command),
-                   thirdparty.py (builds third_party/ with clang), vendor.py (refreshes third_party/)
+                   thirdparty.py (builds third_party/ with clang), vendor.py (refreshes third_party/),
+                   staticserver.py (a fixed-data server); replayserver.py, replay.py and replayreport.py
+                   (recorded scenes for performance tests: tools/replay/)
 third_party/       stb; SDL3 and mbedtls, trimmed to what the build uses, with manifest.json each
 discovery/         the discovery pass: Ghidra (Jython) post-scripts, verdicts.py (the manual verdicts
                    per build), notes/ (what each build's run found)
