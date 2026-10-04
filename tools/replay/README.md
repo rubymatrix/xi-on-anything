@@ -16,6 +16,37 @@ Every zone visit is then recorded to Ashita's `config/addons/xireplay/`, one JSO
 visit (the packets the client got, with their times). Nothing recorded is part of this repository:
 recordings are yours, made on your server.
 
+## Scenes
+
+The addon also directs scenes: a fixed list of GM commands, with markers for the measured window,
+recorded as one file per zone visit. It has seven (`home`, `markets`, `mines`, `lighting`, `weather`,
+`crowd`, `effects`); `default.txt` makes these from their recordings, with scene flags:
+
+| scene | group | what it shows |
+| --- | --- | --- |
+| `home` | | GM Home, where a session waits |
+| `markets`, `mines` | city | Bastok Markets and the Mines plaza at noon, a fixed vantage |
+| `dawn`, `noon`, `dusk`, `midnight` | lighting | one North Gustaberg vantage at four times of day |
+| `hot-spell`, `heat-wave`, `sand-storm`, `sunshine`, `dust-storm`, `wind`, `gales`, `rain`, `squall`, `snow`, `blizzards`, `thunder`, `thunderstorms`, `clouds`, `gloom`, `darkness`, `auroras`, `stellar-glare` | weather | an open spot in a zone whose own weather includes it (Western Altepa, West Sarutabaruta, Konschtat, La Theine, Cape Teriggan, Pashhow, Yuhtunga, Xarcabard, Beaucedine, Zi'Tah, Jugner Forest, Lufaise Meadows, Castle Zvahl Baileys, Ru'Aun Gardens, Qufim Island), in that weather from the zone-in |
+| `mob-crowd` | crowd | about forty mobs held around the character, each made four (about 170), all named Monster |
+| `player-crowd` | crowd | 150 geared characters in a city |
+| `effects` | effects | a red mage's Chainspell, spikes and barriers, echoed by thirty characters casting about thirty different self spells, staggered |
+| `mob-spells` | effects | the mob crowd, every mob casting spells at its neighbour: about 33 spell effects a second |
+
+To record them on a LandSandBoat server of yours, with a GM account and the two commands in
+`lsb/` copied to its `scripts/commands/` (`!perftime` pins the clock, `!perfcrowd` brings a
+zone's mobs to the character):
+
+    python3 tools/replay.py record all --server <your server> --user <GM account> --password ...
+
+A client signs in (Enter through the lobby, by the control port), runs `/xireplay run all` and quits
+when it is done; the recordings land in `generated/replay/`, where `default.txt` finds them.
+`--revive-container <database container>` first gives a character left K.O. its HP back, in a
+LandSandBoat Docker setup's database (a K.O. character can't run GM commands). Every scene but home
+pins the clock and clears the weather at its zone-in.
+
+    python3 tools/replay.py run tools/replay/default.txt
+
 ## Play
 
 A suite names the scenes to play, one per line: a recording, then its scene flags.

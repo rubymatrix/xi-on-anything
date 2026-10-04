@@ -7,6 +7,7 @@ frame log, and tools/replayreport.py's report.
   python3 tools/replay.py run suite.txt --play "weather crowd"  some
   python3 tools/replay.py play suite.txt                        a session to watch: !replay in chat
   python3 tools/replay.py shots suite.txt                       a frame capture at each scene's READY
+  python3 tools/replay.py record all --server <yours> --user <a GM>   the addon's scenes, recorded
 
 Results go to --out (default generated/runs/<date>-<suite>/): server.log, client.log, frames.csv,
 report.txt, report.json, and for shots the captures. The addon (tools/replay/xireplay) is copied into
@@ -17,6 +18,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -288,6 +290,58 @@ class Shots:
                 print(f'  captured {path}.raw (not a format this converts)', flush=True)
 
 
+def revive(container, user):
+    """A character left K.O. (a scene gone wrong) can't run GM commands: its HP back while it is logged
+    out, in the server's database (a LandSandBoat Docker setup's container)."""
+    if not re.fullmatch(r'[A-Za-z0-9_]+', user):
+        raise SystemExit(f'--revive-container: {user!r} is not an account name this can quote')
+    sql = ("UPDATE char_stats s JOIN chars c USING(charid) JOIN accounts a ON a.id=c.accid "
+           f"SET s.hp=GREATEST(s.hp,9999), s.death=0 WHERE a.login='{user}'")
+    r = subprocess.run(['docker', 'exec', container, 'sh', '-c', 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" xidb -e "$1"',
+                        'sh', sql])
+    if r.returncode != 0:
+        print(f'warning: reviving {user} in {container} failed ({r.returncode})', flush=True)
+
+
+def record(a):
+    """The xireplay addon's scenes, recorded on a LandSandBoat server of yours by a GM character, with
+    nobody at the screen; the recordings land in --out (default generated/replay/)."""
+    out = a.out or os.path.join(ROOT, 'generated', 'replay')
+    os.makedirs(out, exist_ok=True)
+    data = os.path.abspath(a.data_dir)
+    install_addon(data)
+    rec_dir = os.path.join(data, 'ashita', 'config', 'addons', 'xireplay')
+    done = os.path.join(rec_dir, 'last-run.txt')
+    if os.path.exists(done):
+        os.remove(done)
+    if a.revive_container:
+        revive(a.revive_container, a.user)
+    started = time.time()
+    client, ctl = launch(a, data, os.path.join(out, 'record-client.log'), ['--server', a.server, '--user', a.user],
+                         {'FFXI_PASSWORD': a.password} if a.password else None)
+    try:
+        for line in ('/addon load xireplay', '/xireplay quiet off', '/xireplay record on',
+                     '/xireplay run ' + ' '.join(a.scenes)):
+            ctl('chat_send', line=line)
+        through_lobby(ctl)
+        print('in the world: recording ' + ' '.join(a.scenes), flush=True)
+        deadline = time.time() + RUN_TIMEOUT
+        while not os.path.exists(done):
+            if client.poll() is not None:
+                raise SystemExit('the client exited before the scenes were done')
+            if time.time() > deadline:
+                raise SystemExit(f'the scenes took over {RUN_TIMEOUT} s')
+            time.sleep(1)
+        time.sleep(2)
+    finally:
+        ctl.close()
+        stop(client)
+    for path in sorted(glob.glob(os.path.join(rec_dir, '*-*.jsonl'))):
+        if os.path.getmtime(path) >= started and not os.path.basename(path).startswith('capture-'):
+            shutil.copy2(path, out)
+            print(f'recorded {os.path.basename(path)}')
+
+
 def main():
     argv = sys.argv[1:]
     client_args = []
@@ -295,8 +349,14 @@ def main():
         i = argv.index('--')
         argv, client_args = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('what', choices=['run', 'play', 'shots'])
-    ap.add_argument('suite', help='a suite file')
+    ap.add_argument('what', choices=['run', 'play', 'shots', 'record'])
+    ap.add_argument('suite', nargs='+', metavar='SUITE|SCENE',
+                    help='a suite file; for record, the addon scenes to record (or all)')
+    ap.add_argument('--server', help='with record: your LandSandBoat server')
+    ap.add_argument('--user', help='with record: a GM account on it')
+    ap.add_argument('--password', default=os.environ.get('FFXI_PASSWORD'), help='with record: its password (or FFXI_PASSWORD)')
+    ap.add_argument('--revive-container',
+                    help="with record: the server's database container (Docker), to revive a K.O. character first")
     ap.add_argument('--play', default='all', help='with run and shots: what to play, as !replay words')
     ap.add_argument('--client', default=os.path.join(ROOT, 'build', 'host64'), help='host64')
     ap.add_argument('--game', default=os.environ.get('FFXI_GAME'), help='the FINAL FANTASY XI folder (or FFXI_GAME)')
@@ -308,6 +368,14 @@ def main():
     a.client_args = client_args
     if not a.game:
         ap.error('--game (or FFXI_GAME): the FINAL FANTASY XI folder')
+    if a.what == 'record':
+        if not (a.server and a.user):
+            ap.error('record: --server and --user (a GM account on your LandSandBoat server)')
+        a.scenes = a.suite
+        return record(a)
+    if len(a.suite) > 1:
+        ap.error(f'{a.what}: one suite file')
+    a.suite = a.suite[0]
     if not a.huffman:
         ap.error('--huffman (or FFXI_HUFFMAN): the folder holding compress.dat')
     if a.what == 'run':
