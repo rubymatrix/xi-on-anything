@@ -32,6 +32,28 @@ A suite names the scenes to play, one per line: a recording, then its scene flag
 | `--home` | the home scene, where a session waits |
 | `--chat` | keep the recorded chat, battle-log and other text (dropped by default) |
 
+What reshapes a scene, applied in this order whatever the order on the line:
+
+| flag | |
+| --- | --- |
+| `--length S` | end the scene S seconds after its start marker |
+| `--zone Z --at x,y,z,r` | the scene plays in zone Z instead, the character at x,y,z facing r, with none of the recorded zone's NPCs, mobs or actions (and no zone music) |
+| `--turn D` | turn the character, and so the camera, by D degrees |
+| `--my-actions` | keep only the character's own actions: nobody else attacks or casts |
+| `--hold` | every NPC and mob stays where it first appears: no walking off, no despawns |
+| `--clone N` | each mob becomes N mobs, on a ring around it |
+| `--mob-spells a,b --mob-spells-every S` | every mob casts these spells (names like `fire-iv`, `drain`, `bio-ii`, ids, or `all`) in turn at the next mob, one every S seconds, the mobs' turns spread so effects are always under way |
+| `--mob-name NAME` | every mob shows NAME (they move to the client's dynamic entities, which take their name from the packet) |
+| `--players N` | N geared characters in rings around the zone-in, looks copied from recorded NPCs (`--looks a.jsonl,b.jsonl`) |
+| `--echo` | with `--players`: they repeat what the character does to itself (`--echo-spread S` staggers them over S seconds; `--echo-spells a,b` or `all`: each casts these self spells, like `haste`, `regen-iii` or `enfire`, in place of the recorded ones, so they cast different spells at a time) |
+| `--weather W` | the zone is in weather W (a name or id) when the character arrives: the client starts a weather's effects only at a zone-in, and only in a zone that has that weather |
+
+A flag that needs another (`--echo` without `--players`, `--at` without `--zone`) is an error in its
+line, as is an unknown flag, weather or spell.
+
+A server's AI walks a spawned crowd home, so crowds need `--hold`; it can't put many players in one
+place, so `--players` makes them.
+
     python3 tools/replayserver.py --huffman <dir with compress.dat> --suite suite.txt
     build/host64 --game "<FINAL FANTASY XI>" --server 127.0.0.1 --user replay --pass x \
         --authport 55231 --dataport 55230 --viewport 55001

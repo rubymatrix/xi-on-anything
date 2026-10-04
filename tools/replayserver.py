@@ -25,8 +25,14 @@ Each scene is reached by a zone change to this server and the next zone-in; the 
 after the last one asked for. --autoplay queues scenes at the first zone-in, for unattended runs. A
 suite without a home scene plays its scenes in order.
 
-A suite file has one scene per line: a recording, then its scene flags (--label, --group, --home,
---chat); blank lines and # comments are skipped, and paths are relative to the suite's folder.
+A suite file has one scene per line: a recording, then its scene flags; blank lines and # comments
+are skipped, and paths are relative to the suite's folder. Scene flags: --label, --group, --home,
+--chat, and what reshapes a scene, applied in this order: --length (seconds after its start marker),
+--zone with --at (the scene moved to another zone, empty), --turn (degrees), --my-actions (no one
+else's actions), --hold (NPCs and mobs stay put), --clone N (mobs), --mob-spells with
+--mob-spells-every (the mobs cast spells at each other), --mob-name, --players N with --looks
+(geared characters around the zone-in), --echo with --echo-spread and --echo-spells (they repeat the
+character's actions on itself, with spells of their own), --weather (the zone's weather at the zone-in).
 
 Events travel in-band as chat lines from "xireplay" ("begin|3|rain|weather|109",
 "mark|3|rain|start", "end|3|rain", "done|3", "home", "queue|rain,ice", "list|3|rain|weather",
@@ -46,7 +52,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import staticserver as ss  # noqa: E402
-from replayscene import Scene  # noqa: E402
+from replayscene import Scene, transform  # noqa: E402
 
 HOME = -1   # the home scene's index
 TAIL = 2.0  # seconds after a scene's end before the zone change
@@ -75,6 +81,22 @@ def scene_flags():
     ap.add_argument('--group', default='', help='a group !replay can ask for it by')
     ap.add_argument('--home', action='store_true', help='the home scene, where a session waits')
     ap.add_argument('--chat', action='store_true', help='keep the recorded chat and other text')
+    ap.add_argument('--length', type=float, help='end the scene this many seconds after its start marker')
+    ap.add_argument('--turn', type=float, help='turn the character (and so the camera) by this many degrees')
+    ap.add_argument('--hold', action='store_true', help='every NPC and mob stays where it first appears')
+    ap.add_argument('--clone', type=int, default=1, help='each mob becomes this many, on a ring around it')
+    ap.add_argument('--mob-name', help='every mob shows this name')
+    ap.add_argument('--players', type=int, default=0, help='this many geared characters around the zone-in')
+    ap.add_argument('--looks', help='with --players: recordings to copy their looks from (comma-separated)')
+    ap.add_argument('--echo', action='store_true', help='with --players: they repeat what the character does to itself')
+    ap.add_argument('--echo-spread', type=float, default=0, help='with --echo: stagger their copies over this many seconds')
+    ap.add_argument('--echo-spells', help='with --echo: they cast these self spells (names, or all) instead, each its own')
+    ap.add_argument('--my-actions', action='store_true', help="only the character's own actions")
+    ap.add_argument('--mob-spells', help='every mob casts these spells (names, ids, or all) in turn at the next mob')
+    ap.add_argument('--mob-spells-every', type=float, default=5, help="with --mob-spells: seconds between a mob's casts")
+    ap.add_argument('--zone', type=int, help='the scene plays in this zone instead, with nothing of the recorded one')
+    ap.add_argument('--at', help='with --zone: where the character stands, x,y,z[,rotation]')
+    ap.add_argument('--weather', help='the zone is in this weather (a name or id) when the character arrives')
     return ap
 
 
@@ -89,6 +111,7 @@ def load_scene(words, name, base):
     notes = []
     if not a.chat:
         notes.append(f'{s.quiet()} text packets dropped')
+    notes += transform(s, a, base)
     ss.log('scene', f'{s.label}: {len(s.packets)} packets over {s.duration():.1f} s' +
            (f' ({", ".join(notes)})' if notes else ''))
     return s

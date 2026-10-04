@@ -116,5 +116,182 @@ class Server(Folder):
         self.assertIn('suite.txt:1: unrecognized arguments: --no-such-flag', str(e.exception))
 
 
+def entity(eid, index, mask, x=0.0, alive=True, look=0):
+    d = bytearray(0x44)
+    struct.pack_into('<IHB', d, 0, eid, index, mask)
+    struct.pack_into('<f', d, 0x08, x)
+    d[0x21] = 0x08 if alive else 0
+    struct.pack_into('<H', d, 0x2C, look)
+    d[0x2F] = 3  # race, for a geared character
+    return packet(0x00E, d)
+
+
+def action(actor, target, message=100):
+    """An action with one target and one result: actor, target and message where the stream puts them."""
+    d = packet(replayscene.ACTION, bytes(56))
+    sc = replayscene
+    sc.set_bits(d, sc.ACTOR_BIT, 32, actor)
+    sc.set_bits(d, sc.TARGETS_BIT, 6, 1)
+    sc.set_bits(d, sc.FIRST_TARGET_BIT, 32, target)
+    sc.set_bits(d, sc.FIRST_TARGET_BIT + 32, 4, 1)
+    sc.set_bits(d, sc.FIRST_TARGET_BIT + 36 + sc.RESULT_MESSAGE, 10, message)
+    return d
+
+
+def actions(s):
+    return [(at, d) for at, d in s.packets if replayscene.ptype(d) == replayscene.ACTION]
+
+
+def field(d, bit, n=32):
+    return replayscene.get_bits(d, bit, n)
+
+
+class Transforms(unittest.TestCase):
+    def scene(self, packets, marks=(), zone=106):
+        s = replayscene.Scene('made up')
+        s.meta = {'zone': zone}
+        s.character = ME
+        s.packets = [[0.0, zone_in(zone=zone)]] + [[t, p] for t, p in packets]
+        s.marks = [list(m) for m in marks]
+        return s
+
+    def test_length_ends_the_scene_after_its_start(self):
+        s = self.scene([(3, packet(0x037, b'in')), (9, packet(0x037, b'out'))], [(2, 'start'), (30, 'end')])
+        replayscene._length(s, 5)
+        self.assertEqual(len(s.packets), 2)
+        self.assertEqual(s.marks, [[2, 'start'], [7, 'end']])
+
+    def test_turn_turns_the_character_at_the_zone_in(self):
+        s = self.scene([])
+        replayscene._turn(s, 90)
+        self.assertEqual(s.packets[0][1][0x0B], 64)
+
+    def test_my_actions_drops_everyone_elses(self):
+        s = self.scene([(5, action(0x0106A001, ME)), (6, action(ME, ME))])
+        self.assertEqual(replayscene._my_actions(s), 1)
+        self.assertEqual([field(d, replayscene.ACTOR_BIT) for _, d in actions(s)], [ME])
+
+    def test_hold_keeps_position_and_drops_despawn(self):
+        s = self.scene([(1, entity(0x0106A001, 1, 0x1F, x=10)), (2, entity(0x0106A001, 1, 0x01, x=20)),
+                        (3, entity(0x0106A001, 1, 0x30, x=20))])
+        self.assertEqual(replayscene._hold(s), 2)
+        self.assertEqual(len(s.packets), 3)
+        self.assertEqual(struct.unpack_from('<f', s.packets[2][1], 0x0C)[0], 10)
+
+    def test_clone_uses_free_indices_in_the_zone(self):
+        s = self.scene([(1, entity(0x0106A001, 1, 0x1F))])
+        self.assertEqual(replayscene._clone(s, 3), 2)
+        ids = [replayscene.entity_id(d) for _, d in s.packets[1:]]
+        idx = [struct.unpack_from('<H', d, 8)[0] for _, d in s.packets[1:]]
+        self.assertEqual(len(set(idx)), 3)
+        for eid, i in zip(ids, idx):
+            self.assertEqual((eid & ~0xFFF, eid & 0x3FF), (0x0106A000, i))
+
+    def test_mob_spells_every_mob_casts_at_the_next(self):
+        mobs = [entity(0x0106A000 + i, i, 0x1F, x=float(i)) for i in range(1, 5)]
+        s = self.scene([(1, m) for m in mobs], [(2, 'start'), (12, 'end')])
+        fire, drain = replayscene.spell('fire-iv'), replayscene.spell('drain')
+        self.assertEqual(replayscene._mob_spells(s, [fire, drain], 4), 8)  # 4 mobs, twice each in 10 s
+        sc = replayscene
+        starts = [(at, field(d, sc.ACTOR_BIT) & 0xFFF) for at, d in actions(s) if field(d, sc.CATEGORY_BIT, 4) == sc.CAST_START]
+        self.assertEqual(starts[:4], [(3, 1), (4, 2), (5, 3), (6, 4)])  # turns spread over the 4 s
+        finishes = [d for _, d in actions(s) if field(d, sc.CATEGORY_BIT, 4) == sc.CAST_FINISH]
+        first = finishes[0]
+        targets, messages = sc.action_walk(first)
+        self.assertEqual((field(first, sc.ACTOR_BIT) & 0xFFF, [field(first, o) & 0xFFF for o in targets]), (1, [2]))
+        self.assertEqual((field(first, sc.ARG_BIT), field(first, messages[0], 10)), (147, 2))
+        self.assertEqual(field(finishes[1], sc.ARG_BIT), 245)  # the next mob starts one further down the list
+
+    def test_mob_name_moves_actions_with_the_mobs(self):
+        s = self.scene([(1, entity(0x0106A005, 5, 0x1F)), (2, action(ME, 0x0106A005))])
+        replayscene._mob_name(s, 'Monster')
+        mob = s.packets[1][1]
+        self.assertEqual(struct.unpack_from('<H', mob, 8)[0], 0x700)
+        self.assertEqual(bytes(mob[0x34:0x3B]), b'Monster')
+        self.assertEqual(field(s.packets[2][1], replayscene.FIRST_TARGET_BIT), replayscene.entity_id(mob))
+
+    def test_players_echo_what_the_character_does_to_itself(self):
+        s = self.scene([(1, entity(0x010EA001, 1, 0x1F, look=1)), (2, action(ME, ME))], zone=234)
+        looks = replayscene.humanoids(s)
+        self.assertEqual(len(looks), 1)
+        self.assertEqual(replayscene._players(s, 3, looks), 3)
+        self.assertEqual(replayscene._echo(s, 1.0), 3)
+        acts = actions(s)
+        self.assertEqual(len(acts), 4)
+        for _, d in acts:
+            self.assertEqual(field(d, replayscene.ACTOR_BIT), field(d, replayscene.FIRST_TARGET_BIT))
+        self.assertEqual(len({at for at, _ in acts}), 4)  # staggered
+
+    def test_echo_spells_give_each_character_its_own(self):
+        sc = replayscene
+        blaze = 249
+        start = sc.action_packet(ME, sc.CAST_START, sc.CAST_BEGINS, [(ME, [(0, blaze, sc.BEGINS_CASTING)])])
+        finish = sc.action_packet(ME, sc.CAST_FINISH, blaze, [(ME, [(blaze, 34, 230)])])
+        s = self.scene([(1, entity(0x010EA001, 1, 0x1F, look=1)), (2, start), (4, finish)], zone=234)
+        sc._players(s, 3, sc.humanoids(s))
+        spells = [sc.spell(n, sc.SELF_SPELLS) for n in ('haste', 'regen-iii', 'cure-iv')]
+        self.assertEqual(sc._echo(s, 0, spells), 6)
+        result = sc.FIRST_TARGET_BIT + 36
+        cast = {}  # character -> (the spell its start names, the spell its finish casts, the finish's animation)
+        for _, d in actions(s):
+            who = field(d, sc.ACTOR_BIT)
+            if who == ME:
+                continue
+            if field(d, sc.CATEGORY_BIT, 4) == sc.CAST_START:
+                cast[who] = (field(d, result + sc.RESULT_VALUE, 17),)
+            else:
+                cast[who] += (field(d, sc.ARG_BIT), field(d, result + sc.RESULT_ANIMATION, 12))
+        self.assertEqual(sorted(cast.values()), [(4, 4, 4), (57, 57, 57), (111, 111, 140)])
+
+    def test_silence_zeroes_message_ids(self):
+        s = self.scene([(2, action(ME, ME))])
+        self.assertEqual(replayscene._silence(s), 1)
+        d = actions(s)[0][1]
+        self.assertEqual(field(d, replayscene.action_walk(d)[1][0], 10), 0)
+
+    def test_zone_moves_the_zone_in_and_drops_the_old_zone(self):
+        s = self.scene([(1, entity(0x0106A001, 1, 0x1F)), (2, action(0x0106A001, ME)), (3, packet(0x037, b'me'))],
+                       [(2, 'start'), (12, 'end')])
+        self.assertEqual(replayscene._zone(s, 104, (49.5, 0.25, 3.5, 64)), 2)
+        d = s.packets[0][1]
+        self.assertEqual((struct.unpack_from('<I', d, 0x30)[0], struct.unpack_from('<H', d, 0x42)[0], s.zone),
+                         (104, 104, 104))
+        self.assertEqual((struct.unpack_from('<fff', d, 0x0C), d[0x0B]), ((49.5, 0.25, 3.5), 64))
+        self.assertEqual([replayscene.ptype(p) for _, p in s.packets], [0x00A, 0x037])
+        self.assertEqual(s.marks, [[2, 'start'], [12, 'end']])
+
+    def test_weather_rides_the_zone_in(self):
+        s = self.scene([(1, packet(0x057, struct.pack('<IHH', 1000000, 0, 8)))])
+        struct.pack_into('<I', s.packets[0][1], 0x3C, 2000000)  # the zone-in's clock
+        self.assertEqual(replayscene._weather(s, replayscene.weather_id('squall')), 1)  # its 0x057 goes
+        w, before, began = struct.unpack_from('<HHI', s.packets[0][1], 0x68)
+        self.assertEqual((w, before, began), (7, 7, 2000000 - 300 * 25))
+
+
+class SceneFlags(Folder):
+    """Suite lines: flags parsed, checked and applied by tools/replayserver.py's load_scene."""
+
+    def setUp(self):
+        super().setUp()
+        self.write('scene.jsonl', recording([(0, zone_in()), (500, packet(0x037, b'x'))], [(100, 'start'), (900, 'end')]))
+
+    def load(self, flags):
+        return replayserver.load_scene(['scene.jsonl'] + flags.split(), 'Replay', self.dir)
+
+    def test_flags_reach_the_scene(self):
+        s = self.load('--label rain --group weather --zone 104 --at 1,2,3 --weather hot-spell --length 0.5')
+        d = s.packets[0][1]
+        self.assertEqual((s.label, s.group, s.zone), ('rain', 'weather', 104))
+        self.assertEqual(struct.unpack_from('<fff', d, 0x0C), (1, 2, 3))
+        self.assertEqual(struct.unpack_from('<H', d, 0x68)[0], replayscene.WEATHERS.index('hot spell'))
+        self.assertEqual(s.marks[-1], [0.6, 'end'])
+
+    def test_flags_that_need_another(self):
+        for flags in ('--echo', '--looks a.jsonl', '--echo-spells haste', '--at 1,2,3', '--zone 104', '--zone 104 --at 1,2',
+                      '--weather fog-bank', '--mob-spells no-such-spell'):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                self.load(flags)
+
+
 if __name__ == '__main__':
     unittest.main()
