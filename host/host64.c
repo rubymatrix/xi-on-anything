@@ -23,8 +23,8 @@
  *
  * --server is where the game's servers are: the lobby and every other host under the game's
  * domain resolve to it instead of through DNS. Default 127.0.0.1 (this machine); --lobby is an
- * older name for it. With --session nothing is redirected: the game's hosts resolve through DNS,
- * as retail's do, and --server is not used.
+ * older name for it. With --session the game's hosts resolve through DNS, as retail's do, unless
+ * --server is also given: then they go to it, for a PlayOnline server of one's own.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped.
  *
@@ -1023,8 +1023,9 @@ int main(int argc, char** argv)
     dinput_init();
     ws2_init();
     /* the game's hosts: the lobby through gamecore's resolver, every other one through
-     * gethostbyname. With --session none is redirected: they resolve through DNS, as retail's. */
-    if (have_session)
+     * gethostbyname. With --session and no --server none is redirected: they resolve through DNS,
+     * as retail's. */
+    if (have_session && !server_name)
     {
         ws2_set_game_server(0);
         gamecore_set_lobby_resolver(ws2_resolve_ipv4);
