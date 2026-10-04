@@ -53,9 +53,10 @@ static const struct
     { "sun_distance", offsetof(GfxFxSettings, sun_distance), 100.0f },
     { "sun_soft", offsetof(GfxFxSettings, sun_soft), 0.0f },
     { "sun_face", offsetof(GfxFxSettings, sun_face), 0.0f },
-    /* 0: no near-surface casters ignored - with positions rebuilt where the fixup drew them
-     * (view_pos), surfaces no longer shade themselves without it */
-    { "sun_min", offsetof(GfxFxSettings, sun_min), 0.0f },
+    /* casters nearer the surface than this ignored: a character's clothes are shells a few
+     * centimetres over its body (collar, sleeves, hood), and at 0 they shaded it in blocks, cut along
+     * its polygons where the face turned from the sun. The ground's shadow of the feet stays */
+    { "sun_min", offsetof(GfxFxSettings, sun_min), 0.15f },
     { "sun_direct", offsetof(GfxFxSettings, sun_direct), 0.5f },
     /* who casts: 0 everything, 1 characters only (the zone's baked lighting has its shadows), 2 the
      * zone only (characters keep the game's own blob shadows) */

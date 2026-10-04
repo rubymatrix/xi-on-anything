@@ -307,6 +307,8 @@ class Server:
         self.huff = huff
         self.host_ip = args.public_ip
         self.hash = bytes.fromhex(args.session_hash)
+        hour = getattr(args, 'hour', None)
+        self.clock = vana_offset(hour) if hour is not None else 0  # added to the game clock (--hour, !time)
         # The key the client's zone cipher starts from: 16 bytes of the account service's session
         # value (zero without one), then the view key with the client's own adjustment (+9).
         # A login data connection that sends 0xA2 replaces it with what the client said.
@@ -438,6 +440,12 @@ class Server:
 HDR = 28  # the zone protocol's packet header
 TARGID = 0x400  # the character's index among the zone's entities
 VANA_EPOCH = 1009810800  # the game clock counts Earth seconds from here
+VANA_HOUR, VANA_DAY = 144, 3456  # in Earth seconds: Vana'diel's clock runs 25 times as fast
+
+
+def vana_offset(hour):
+    """Earth seconds to add to the clock so that it is now this Vana'diel hour (0-23, fractions too)"""
+    return int(hour * VANA_HOUR - (time.time() - VANA_EPOCH)) % VANA_DAY
 
 
 class Msg(bytearray):
@@ -611,8 +619,11 @@ class ZoneSession:
             elif words and words[0] == 'where':
                 self.say(f'{self.srv.zones.name(self.zone)} ({self.zone}): {self.pos[0]:.2f} {self.pos[1]:.2f} '
                          f'{self.pos[2]:.2f} rot {self.pos[3]}')
+            elif words and words[0] == 'time' and len(words) >= 2:
+                self.srv.clock = vana_offset(float(words[1]))  # the client reads the clock at a zone-in
+                self.change_zone(self.zone, list(self.pos))
             else:
-                self.say('commands: !zone <id> [x y z [rot]], !pos <x> <y> <z> [rot], !where')
+                self.say('commands: !zone <id> [x y z [rot]], !pos <x> <y> <z> [rot], !where, !time <hour>')
         except ValueError:
             self.say('numbers, please')
 
@@ -705,7 +716,7 @@ class ZoneSession:
         struct.pack_into('<BBBB', b, 0x18, c['speed'], 40, 100, 0)  # speed, animation speed, HP%, status
         struct.pack_into('<I', b, 0x1C, (self.female() * 128 + (1 << c['size'])) << 8)
         struct.pack_into('<I', b, 0x24, 0x0100)
-        struct.pack_into('<IIII', b, 0x2C, self.zone, 0, now, now - VANA_EPOCH)
+        struct.pack_into('<IIII', b, 0x2C, self.zone, 0, now, now - VANA_EPOCH + self.srv.clock)
         struct.pack_into('<HH9H', b, 0x3C, 0, self.zone, *self.looks())
         music = self.srv.zones.music.get(self.zone, (0, 0, 0, 0))
         struct.pack_into('<5H', b, 0x52, *music, 0xD4)
@@ -761,7 +772,7 @@ class ZoneSession:
         flags0 = (self.female() << 8) | ((c['size'] & 3) << 11) | (100 << 16)
         flags1 = (c['speed'] & 0xFFF) | (40 << 17)
         struct.pack_into('<III', b, 0x20, c['char_id'], flags0, flags1)
-        struct.pack_into('<II', b, 0x38, 60 * 360, int(time.time()) - VANA_EPOCH + 360)
+        struct.pack_into('<II', b, 0x38, 60 * 360, int(time.time()) - VANA_EPOCH + self.srv.clock + 360)
         b[0x54] = 0x10
         return sub(0x037, b)
 
@@ -881,6 +892,7 @@ def main():
     ap.add_argument('--name')
     ap.add_argument('--zone', type=int)
     ap.add_argument('--pos', help='x,y,z[,rot]')
+    ap.add_argument('--hour', type=float, help="Vana'diel's hour at sign-in (0-23); the clock runs on from it")
     ap.add_argument('--motd', default='Static server: no NPCs, no monsters. Say !help for commands.')
     ap.add_argument('--bind', default='0.0.0.0')
     ap.add_argument('--public-ip', default='127.0.0.1', help='the address the client reaches this server at')
