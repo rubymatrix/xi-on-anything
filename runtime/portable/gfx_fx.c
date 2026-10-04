@@ -69,6 +69,10 @@ static const struct
     /* how much of the sun's shadows stay indoors - a Mog House (gfx_set_moghouse), a zone with no sky
      * (GfxScene.indoors) - 0 none to 1 all; the key keeps its old name for the fx.txt files that have it */
     { "moghouse", offsetof(GfxFxSettings, moghouse), 0.0f },
+    /* how far round the camera the game is asked to draw the zone out of view, once after a zone-in and
+     * again as the camera moves on, so what stands behind it casts (gfx_sun_prime): the far map reaches
+     * some 170 units out and takes casters 96 beyond its sides; 0 never */
+    { "sun_prime", offsetof(GfxFxSettings, sun_prime), 300.0f },
     /* the near map's reach past the player */
     { "sun_near", offsetof(GfxFxSettings, sun_near), 10.0f },
     /* the near map's texels across, 512 to 8192 (64 MB at 4096, 256 MB at 8192); 0 and 1 are the

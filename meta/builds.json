@@ -55,7 +55,14 @@
         "cexi_malloc": "0x10311bbb",
         "cexi_spell_recast": "0x106671e0",
         "cexi_region": "0xfe000000",
-        "cexi_free": "0x101907d0"
+        "cexi_free": "0x101907d0",
+        "map_cull_ret1": "0x1017c8da",
+        "map_cull_ret2": "0x1017cb5a",
+        "map_cull_ret3": "0x1017df49",
+        "map_cull_ret4": "0x1017dfd3",
+        "map_cull_ret5": "0x10183e3f",
+        "map_cull_model1": "0x101834df",
+        "map_cull_model2": "0x101837af"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
@@ -64,6 +71,7 @@
         "lod_pick": "0x1017cb9c",
         "lod_pick2": "0x1017e01d",
         "cull_test": "0x10181bb0",
+        "cull_test2": "0x10182070",
         "cexi_ja_search": "0x10222f47",
         "cexi_fx_spell_edi": "0x100a8e9c",
         "cexi_fx_spell_eax": "0x100a9733",

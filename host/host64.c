@@ -530,6 +530,114 @@ static void setup_lod(void)
 #endif
 }
 
+/* --- the sun's casters out of view ----------------------------------------------------------------
+ * The map renderer draws only what its frustum tests pass ("cull_test" and its twin "cull_test2",
+ * 2026-09-03: a matrix and the eight corners of a box, stdcall; nonzero when every corner is outside
+ * one plane), so the zone behind the camera is never drawn and the sun's map has nothing of it to
+ * cast: at a low sun the character stood lit under trees behind the camera until the camera had
+ * looked their way. When the graphics back end asks (gfx_sun_prime: after a zone-in, and as the
+ * camera moves on), each box the map renderer tests within its radius passes for that frame: the
+ * matrix argument becomes one that puts every corner in the middle of the view. Drawn out of view,
+ * it shows nothing; the back end's caster cache keeps it.
+ *
+ * The map renderer's tests are told apart by where they return to: map_cull_ret1-5 test boxes in the
+ * world (the map objects and their tree's nodes, in three passes); map_cull_model1 and 2 test a
+ * model's own box against its world matrix times the view, the world matrix still in ebp and ebx
+ * there. FFXI_PRIMELOG=1 counts the boxes each time. */
+#if defined(FFXI_HOOK_CULL_TEST) && defined(FFXI_HOOK_CULL_TEST2) && defined(FFXI_MAP_CULL_RET1) && \
+    defined(FFXI_MAP_CULL_RET2) && defined(FFXI_MAP_CULL_RET3) && defined(FFXI_MAP_CULL_RET4) && \
+    defined(FFXI_MAP_CULL_RET5) && defined(FFXI_MAP_CULL_MODEL1) && defined(FFXI_MAP_CULL_MODEL2)
+#define HAVE_CULL_PRIME 1
+extern GuestFn rt_hook_cull_test;
+extern GuestFn rt_hook_cull_test2;
+static uint32_t g_cull_pass; /* the matrix that passes every box: all zero but w = 1 */
+static int g_prime_log;
+static uint32_t g_prime_count[8][2]; /* by site (cull_site): boxes passed, boxes tested, while asked */
+
+/* which of the map renderer's tests this is (0-6), from the return address; -1 another caller */
+static int cull_site(uint32_t ret)
+{
+    static const uint32_t at[7] = { FFXI_MAP_CULL_RET1, FFXI_MAP_CULL_RET2, FFXI_MAP_CULL_RET3, FFXI_MAP_CULL_RET4,
+        FFXI_MAP_CULL_RET5, FFXI_MAP_CULL_MODEL1, FFXI_MAP_CULL_MODEL2 };
+    for (int i = 0; i < 7; ++i)
+        if (ret == at[i])
+            return i;
+    return -1;
+}
+
+static void cull_test(Guest* g)
+{
+    float c[3], r = gfx_sun_prime(c);
+    if (r <= 0.0f)
+    {
+        if (g_prime_log && (g_prime_count[0][1] | g_prime_count[1][1] | g_prime_count[2][1] | g_prime_count[3][1] |
+                               g_prime_count[4][1] | g_prime_count[5][1] | g_prime_count[6][1]))
+        {
+            char line[256];
+            int n = 0;
+            for (int i = 0; i < 7; ++i)
+                n += snprintf(line + n, sizeof line - (size_t)n, " %u/%u", g_prime_count[i][0], g_prime_count[i][1]);
+            rt_log("[recomp] shadows: boxes drawn out of view / tested, by test:%s\n", line);
+            memset(g_prime_count, 0, sizeof g_prime_count);
+        }
+        return;
+    }
+    int site = cull_site(rd32(g->esp) - RD);
+    if (site < 0)
+        return;
+    uint32_t box = rd32(g->esp + 8), world = site == 5 ? g->ebp : site == 6 ? g->ebx : 0;
+    float W[16];
+    if (world)
+        for (int i = 0; i < 16; ++i)
+            W[i] = rdf32(world + 4u * (uint32_t)i);
+    float lo[3] = { INFINITY, INFINITY, INFINITY }, hi[3] = { -INFINITY, -INFINITY, -INFINITY };
+    for (uint32_t i = 0; i < 8; ++i)
+    {
+        float p[3] = { rdf32(box + 12 * i), rdf32(box + 12 * i + 4), rdf32(box + 12 * i + 8) }, q[3];
+        for (int j = 0; j < 3; ++j)
+            q[j] = world ? p[0] * W[j] + p[1] * W[4 + j] + p[2] * W[8 + j] + W[12 + j] : p[j];
+        for (int j = 0; j < 3; ++j)
+        {
+            if (!isfinite(q[j]))
+                return;
+            lo[j] = fminf(lo[j], q[j]), hi[j] = fmaxf(hi[j], q[j]);
+        }
+    }
+    float d2 = 0.0f;
+    for (int j = 0; j < 3; ++j)
+    {
+        float e = c[j] < lo[j] ? lo[j] - c[j] : c[j] > hi[j] ? c[j] - hi[j] : 0.0f;
+        d2 += e * e;
+    }
+    ++g_prime_count[site][1];
+    if (d2 > r * r)
+        return;
+    ++g_prime_count[site][0];
+    wr32(g->esp + 4, g_cull_pass);
+}
+#endif
+
+static void setup_cull_prime(void)
+{
+#ifdef HAVE_CULL_PRIME
+    const char* log = getenv("FFXI_PRIMELOG");
+    g_prime_log = log && log[0] && log[0] != '0';
+    g_cull_pass = gwin_alloc(64);
+    if (!g_cull_pass)
+        return;
+    for (uint32_t i = 0; i < 16; ++i)
+        wr32(g_cull_pass + 4 * i, 0);
+    float one = 1.0f;
+    uint32_t bits;
+    memcpy(&bits, &one, 4);
+    wr32(g_cull_pass + 0x3c, bits);
+    rt_hook_cull_test = cull_test;
+    rt_hook_cull_test2 = cull_test;
+#else
+    rt_log("[recomp] shadows: build %s has no map culling hook; what is behind the camera casts once seen\n", FFXI_BUILD);
+#endif
+}
+
 /* --- the Mog House --------------------------------------------------------------------------------
  * The zone-in packet (0x00A) says whether the player is in their Mog House: the byte at 0x80 is 1
  * there and 2 elsewhere, on logging in and on zoning alike (the zone id is the city's either way; as
@@ -1147,6 +1255,7 @@ int main(int argc, char** argv)
     setup_nameplates();
     setup_water();
     setup_lod();
+    setup_cull_prime();
     cexi_init(cexi, game);
     addons_packet_tap(moghouse_tap);
     {
