@@ -37,11 +37,12 @@ CFLAGS = ['-O2', '-std=c11', '-g2', '-pthread', '-fno-strict-aliasing', '-I', 'r
           '-I', 'generated', '-I', 'third_party/stb', '-I', 'third_party/sdl3/include', '-DXI_WEB=1', '-D_GNU_SOURCE']
 # host64 without the native graphics back ends, SDL3, Discord and the addon host
 HOST = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + [
-    'runtime/portable/gfx_null.c', 'runtime/portable/sdl_web.c', 'runtime/portable/net_web.c', 'host/addons_none.c']
+    'runtime/portable/gfx_null.c', 'runtime/portable/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
+    'host/addons_none.c']
 LINK = ['-pthread', '-sPROXY_TO_PTHREAD', '-sALLOW_MEMORY_GROWTH', '-sMAXIMUM_MEMORY=4GB', '-sINITIAL_MEMORY=64MB',
         '-sSTACK_SIZE=1MB', '-sDEFAULT_PTHREAD_STACK_SIZE=1MB', '-sPTHREAD_POOL_SIZE=24', '-sEXIT_RUNTIME',
         '-Wl,--wrap=sbrk', '-sERROR_ON_UNDEFINED_SYMBOLS=1', '-lm', '--js-library', 'tools/web/net.js',
-        '-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wn_deliver,_web_key,_web_text,_web_mouse_move,_web_mouse_button,_web_mouse_wheel,_web_focus,_web_close,_web_view_size,_web_gamepad']
+        '-sEXPORTED_RUNTIME_METHODS=ENV,FS', '-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wn_deliver,_web_key,_web_text,_web_mouse_move,_web_mouse_button,_web_mouse_wheel,_web_focus,_web_close,_web_view_size,_web_gamepad']
 
 
 def main():
@@ -68,6 +69,8 @@ def main():
     env = ['-sENVIRONMENT=node', '-sNODERAWFS', '--pre-js', 'tools/web/node_pre.js'] if a.node else ['-sENVIRONMENT=web,worker']
     os.makedirs(os.path.join(ROOT, out), exist_ok=True)
     bp.run(['emcc', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env)
+    if not a.node:
+        shutil.copy(os.path.join(ROOT, 'tools', 'web', 'index.html'), os.path.join(ROOT, out, 'index.html'))
     print('built %s/host64.js' % out)
 
 

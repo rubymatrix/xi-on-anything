@@ -362,12 +362,31 @@ fault on macOS: nothing the game runs dereferences thunk addresses.
 Not covered: busy crowds (the static server has no NPCs; the replay recordings aren't on this
 machine). Re-run the watermark build on the replay `crowd` and `effects` scenes when they are.
 
+## G1 results (2026-10-05): headless boot to zone-in, in Node and in Chromium
+
+`tools/build_web.py` builds host64 to wasm (33 MB) with the null graphics back end; `tools/webserve.py
+--server <ip> --game <install>` serves it. In a Chromium tab (the desktop app's browser pane) the build
+signs in to `staticserver.py` (TLS by mbedtls in the wasm, through the bridge), goes through the lobby
+and zones in to Port Jeuno, with the same log as the native client. What it took:
+
+- `sdl_web.c` + `web_bridge.h`: SDL3's calls over a queue the page feeds (the port of `sdl_uwp.c`).
+- `net_web.c` + `tools/web/net.js` + `/net`: BSD sockets (blocking, nonblocking, select, FIONREAD,
+  MSG_PEEK, SO_RCVTIMEO) over one WebSocket; the server opens real TCP/UDP to `--server` only.
+- `httpfs_web.c` + `/dat`, `/app`: the install and host64's files over HTTP: one index per mount
+  (65,358 files, case-insensitive lookups, folders for FindFirstFile) and 256 KB Range blocks by sync XHR
+  from the game's worker threads.
+- gwin's flat mode, `plat_posix.c`'s Emscripten branches (memory growth, `--wrap=sbrk` keeping malloc
+  below 0x0F000000, futexes), `host/addons_none.c`, `modern.c` reading its DAT through `plat_read_file`.
+
+Not yet: the sign-in screen (`datui.c` still `fopen`s DATs), persistence of the data folder (MEMFS),
+audio output, input from the page, graphics.
+
 ## Phases
 
 | # | Gate / phase | Work | Size |
 |---|---|---|---|
 | **G0** | **Feasibility on the desk: done, go (see above)** | (1) `emcc -O2` the generated C as a library: compile time, wasm size, largest functions vs V8 limits. (2) On Mac, log gwin's high-water mark and max guest call depth / host stack use in a busy town and a zone change. (3) Check nothing dereferences `0xFFF00000+`. → confirm the guest + host fit in 4 GB with the host region below the image, decide on stack mitigation. | 3-5 days |
-| **G1** | **Headless boot** | `runtime/web/` platform (memory, threads, time, files via sync XHR), `gfx_null`, `webserve.py` with `/dat`, `/user`, `/net`. Run first in Node (fast iteration), then in Chrome. Sign in to `staticserver.py`, reach character select and zone in, per host64.log. | 2-3 wk |
+| **G1** | **Headless boot: done (see above)** | `runtime/web/` platform (memory, threads, time, files via sync XHR), `gfx_null`, `webserve.py` with `/dat`, `/user`, `/net`. Run first in Node (fast iteration), then in Chrome. Sign in to `staticserver.py`, reach character select and zone in, per host64.log. | 2-3 wk |
 | 3 | WebGPU backend | Restore `gfx_queue.c` onto main, WGSL dialect, `gfx_webgpu.c` (core draw path first, FX passes second), render worker, sign-in screen. `gfx_test` / `d3d8_test` ported to run in the browser against the same expected images. | 3-5 wk |
 | 4 | Input | Shell input ring, keyboard tables + browser-key workarounds, mouse + Pointer Lock/software cursor, Gamepad API snapshot + mapping DB, paste. | 1.5-2 wk |
 | 5 | Audio | AudioWorklet ring, latency tuning. | 3-5 days |

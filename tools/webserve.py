@@ -10,6 +10,8 @@ request and the WebSocket need it, so other pages the browser has open can't use
                share memory between threads (COOP/COEP)
   /net         WebSocket: the game's sockets (runtime/portable/net_web.c has the frame format). Each
                channel opens a real TCP or UDP socket here, to the --server address only
+  /dat/...     the game install (--game), read only, with Range; /dat/index lists it
+  /app/...     what host64 brings with it: ffxi.reg and the texture packs (assets/textures)
 
 Binds 127.0.0.1 only: the build is translated from the player's own FFXiMain.dll and is never served
 to anyone else.
@@ -177,12 +179,48 @@ class Bridge:
 
 # --- HTTP ----------------------------------------------------------------------------------------------
 
+class Tree:
+    """A read-only folder served under a prefix: files by path (any case, as Windows finds them), and
+    an index of every file and folder for runtime/portable/httpfs_web.c (FindFirstFile, stat)."""
+
+    def __init__(self, roots):
+        self.files = {}  # lower-case relative path -> host path
+        lines = []
+        for prefix, root in roots:
+            root = os.path.realpath(root)
+            if os.path.isfile(root):
+                self.files[prefix.lower()] = root
+                lines.append('%s\t%d' % (prefix, os.path.getsize(root)))
+                continue
+            for d, dirs, files in os.walk(root):
+                dirs.sort()
+                rel = os.path.relpath(d, root).replace(os.sep, '/')
+                rel = prefix if rel == '.' else (prefix + '/' + rel if prefix else rel)
+                if rel:
+                    lines.append('%s\t-1' % rel)
+                for f in sorted(files):
+                    if f.startswith('.'):
+                        continue
+                    r = rel + '/' + f if rel else f
+                    full = os.path.join(d, f)
+                    self.files[r.lower()] = full
+                    lines.append('%s\t%d' % (r, os.path.getsize(full)))
+        self.index = ('\n'.join(lines) + '\n').encode('utf-8')
+
+    def path(self, rel):
+        return self.files.get(rel.strip('/').lower())
+
+
 class Server:
     def __init__(self, a):
         self.a = a
         self.root = os.path.realpath(a.root)
         self.token = a.token or secrets.token_urlsafe(18)
         self.allowed = set(a.server)
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.trees = {'dat': Tree([('', a.game)]),
+                      'app': Tree([('ffxi.reg', os.path.join(repo, 'ffxi.reg')),
+                                   ('textures', os.path.join(repo, 'assets', 'textures'))])}
 
     async def handle(self, reader, writer):
         try:
@@ -212,10 +250,38 @@ class Server:
             return await self.websocket(reader, writer, hdr)
         if method not in ('GET', 'HEAD'):
             return self.reply(writer, 405, b'')
+        top, _, rest = url.path.lstrip('/').partition('/')
+        if top in self.trees:
+            if q.get('t', [''])[0] != self.token:
+                return self.reply(writer, 403, b'bad token')
+            return self.tree(writer, self.trees[top], urllib.parse.unquote(rest), hdr.get('range'), method == 'HEAD')
         await self.static(writer, url.path, method == 'HEAD')
 
+    def tree(self, writer, t, rel, rng, head_only):
+        if rel == 'index':
+            return self.reply(writer, 200, t.index)
+        full = t.path(rel)
+        if not full:
+            return self.reply(writer, 404, b'not found')
+        size = os.path.getsize(full)
+        start, end = 0, size - 1
+        if rng and rng.startswith('bytes='):
+            a, _, b = rng[6:].partition('-')
+            start = int(a or 0)
+            end = min(int(b), size - 1) if b else size - 1
+        if start > end and size:
+            return self.reply(writer, 416, b'', extra=['Content-Range: bytes */%d' % size])
+        with open(full, 'rb') as f:
+            f.seek(start)
+            body = f.read(end - start + 1) if size else b''
+        if rng:
+            return self.reply(writer, 206, b'' if head_only else body, 'application/octet-stream',
+                              ['Content-Range: bytes %d-%d/%d' % (start, end, size)])
+        self.reply(writer, 200, b'' if head_only else body, 'application/octet-stream')
+
     def reply(self, writer, code, body, ctype='text/plain', extra=()):
-        reason = {200: 'OK', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed'}.get(code, 'Error')
+        reason = {200: 'OK', 206: 'Partial Content', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
+                  416: 'Range Not Satisfiable'}.get(code, 'Error')
         h = ['HTTP/1.1 %d %s' % (code, reason), 'Content-Type: ' + ctype, 'Content-Length: %d' % len(body),
              'Cross-Origin-Opener-Policy: same-origin', 'Cross-Origin-Embedder-Policy: require-corp',
              'Cross-Origin-Resource-Policy: same-origin', 'Cache-Control: no-cache', 'Connection: close'] + list(extra)
@@ -261,6 +327,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--server', action='append', required=True,
                     help="the game server's IPv4 address (repeat for more); the only place /net connects to")
+    ap.add_argument('--game', required=True, help='the FINAL FANTASY XI folder')
     ap.add_argument('--root', default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'web'))
     ap.add_argument('--port', type=int, default=8417)
     ap.add_argument('--token', default=os.environ.get('XI_WEB_TOKEN'), help='fixed token (tests); default: a new one each run')
@@ -268,6 +335,7 @@ def main():
     for s in a.server:
         ipaddress.IPv4Address(s)
     srv = Server(a)
+    LOG('indexed %d game files' % len(srv.trees['dat'].files))
 
     async def run():
         server = await asyncio.start_server(srv.handle, '127.0.0.1', a.port)

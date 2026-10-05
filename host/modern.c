@@ -41,6 +41,7 @@
 #include "gthread.h"
 #include "gwin.h"
 #include "modern.h"
+#include "plat.h"
 #include "thunk.h"
 #include "user32.h"
 #include "vfs.h"
@@ -675,16 +676,11 @@ static uint8_t* dat_chunk(const char* file, int type, const char* name, size_t* 
     snprintf(guest, sizeof guest, "%s\\%s", g_game, file);
     if (!vfs_overlay_path(guest, path, sizeof path) && !vfs_host_path(guest, path, sizeof path))
         return NULL;
-    FILE* f = fopen(path, "rb");
-    if (!f)
+    size_t got = 0;
+    uint8_t* d = plat_read_file(path, &got); /* the platform's: in the browser the install is served */
+    if (!d)
         return NULL;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t* d = n > 0 ? malloc((size_t)n) : NULL;
-    if (d && fread(d, 1, (size_t)n, f) != (size_t)n)
-        free(d), d = NULL;
-    fclose(f);
+    long n = (long)got;
     uint8_t* out = NULL;
     for (long o = 0; d && o + 16 <= n;)
     {
