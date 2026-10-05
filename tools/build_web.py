@@ -37,7 +37,7 @@ CFLAGS = ['-O2', '-std=c11', '-g2', '-pthread', '-fno-strict-aliasing', '-I', 'r
           '-I', 'generated', '-I', 'third_party/stb', '-I', 'third_party/sdl3/include', '-DXI_WEB=1', '-D_GNU_SOURCE', '-DGFX_QUEUE']
 # host64 without the native graphics back ends, SDL3, Discord and the addon host
 HOST = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + [
-    'runtime/portable/gfx_null.c', 'runtime/portable/gfx_queue.c', 'runtime/portable/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
+    'runtime/portable/gfx_queue.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c', 'runtime/portable/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
     'host/addons_none.c']
 LINK = ['-pthread', '-sPROXY_TO_PTHREAD', '-sALLOW_MEMORY_GROWTH', '-sMAXIMUM_MEMORY=4GB', '-sINITIAL_MEMORY=64MB',
         '-sSTACK_SIZE=1MB', '-sDEFAULT_PTHREAD_STACK_SIZE=1MB', '-sPTHREAD_POOL_SIZE=24', '-sEXIT_RUNTIME',
@@ -66,11 +66,16 @@ def main():
     out = os.path.join('build', 'web-node' if a.node else 'web')
     objs = bp.compile_stale(bp.generated('all'), 'build/web-obj/all', ['-I', 'generated/all'])
     objs += bp.compile_stale(bp.generated('ffxi'), 'build/web-obj/ffxi', ['-I', 'generated/ffxi'])
-    objs += bp.compile_stale(bp.PORTABLE + HOST, 'build/web-obj/host', tls_flags)
-    env = ['-sENVIRONMENT=node', '-sNODERAWFS', '--pre-js', 'tools/web/node_pre.js'] if a.node else ['-sENVIRONMENT=web,worker']
+    # the graphics back end: none in Node (headless), WebGPU in the page (Dawn's webgpu.h, emdawnwebgpu)
+    gfx = ['runtime/portable/gfx_null.c'] if a.node else ['runtime/portable/gfx_webgpu.c']
+    port = [] if a.node else ['--use-port=emdawnwebgpu']
+    objdir = 'build/web-obj/' + ('host-node' if a.node else 'host')
+    objs += bp.compile_stale(bp.PORTABLE + HOST + gfx, objdir, tls_flags + port)
+    env = ['-sENVIRONMENT=node', '-sNODERAWFS', '--pre-js', 'tools/web/node_pre.js', '--js-library', 'tools/web/gfx.js'] if a.node else \
+        ['-sENVIRONMENT=web,worker', '--pre-js', 'tools/web/web_pre.js', '--js-library', 'tools/web/gfx.js'] + port
     os.makedirs(os.path.join(ROOT, out), exist_ok=True)
     names = ['--profiling-funcs'] if a.profile else []
-    bp.run(['emcc', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env + names)
+    bp.run(['em++', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env + names)
     if not a.node:
         shutil.copy(os.path.join(ROOT, 'tools', 'web', 'index.html'), os.path.join(ROOT, out, 'index.html'))
     print('built %s/host64.js' % out)
