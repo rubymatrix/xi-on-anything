@@ -19,6 +19,7 @@ static uint8_t g_used[GRANULES];   /* granule belongs to a reservation */
 static uint8_t g_committed[GRANULES * (GRANULE / PAGE) / 8];
 static volatile uint32_t g_lock;
 static uint32_t g_hint = LOW_RESERVED / GRANULE;
+static uint32_t g_pages, g_pages_peak, g_top; /* committed pages now and at most; end of the highest reservation */
 
 static void lock(void)
 {
@@ -92,6 +93,8 @@ uint32_t gwin_reserve(uint32_t addr, uint32_t size)
     for (uint32_t g = start; g < start + n; ++g)
         g_used[g] = 1;
     g_res[start] = n;
+    if ((start + n) * GRANULE > g_top)
+        g_top = (start + n) * GRANULE;
     unlock();
     return start * GRANULE;
 }
@@ -103,7 +106,10 @@ int gwin_commit(uint32_t addr, uint32_t size)
         return 0;
     lock();
     for (uint32_t p = lo / PAGE; p < hi / PAGE; ++p)
-        g_committed[p >> 3] |= (uint8_t)(1u << (p & 7));
+        if (!(g_committed[p >> 3] & (1u << (p & 7))))
+            g_committed[p >> 3] |= (uint8_t)(1u << (p & 7)), ++g_pages;
+    if (g_pages > g_pages_peak)
+        g_pages_peak = g_pages;
     unlock();
     return 1;
 }
@@ -114,7 +120,8 @@ void gwin_decommit(uint32_t addr, uint32_t size)
     plat_decommit(rt_guest_base + lo, (size_t)hi - lo);
     lock();
     for (uint32_t p = lo / PAGE; p < hi / PAGE; ++p)
-        g_committed[p >> 3] &= (uint8_t)~(1u << (p & 7));
+        if (g_committed[p >> 3] & (1u << (p & 7)))
+            g_committed[p >> 3] &= (uint8_t)~(1u << (p & 7)), --g_pages;
     unlock();
 }
 
@@ -142,6 +149,15 @@ uint32_t gwin_alloc(uint32_t size)
         return 0;
     }
     return a;
+}
+
+void gwin_stats(GwinStats* s)
+{
+    lock();
+    s->committed = (uint64_t)g_pages * PAGE;
+    s->committed_peak = (uint64_t)g_pages_peak * PAGE;
+    s->top = g_top;
+    unlock();
 }
 
 int gwin_is_committed(uint32_t addr)

@@ -75,7 +75,7 @@ def write_build_h():
         f.write(text)
 
 
-PORTABLE =['runtime\\runtime.c', 'runtime\\portable\\plat_win.c', 'runtime\\portable\\gwin.c',
+PORTABLE =['runtime\\runtime.c', 'runtime\\portable\\plat_win.c', 'runtime\\portable\\gwin.c', 'runtime\\portable\\watermark.c',
             'runtime\\portable\\gthread.c', 'runtime\\portable\\thunk.c', 'runtime\\portable\\pe.c',
             'runtime\\portable\\k32.c', 'runtime\\portable\\gamecore.c', 'runtime\\portable\\vfs.c',
             'runtime\\portable\\kobj.c', 'runtime\\portable\\k32_io.c', 'runtime\\portable\\gamecore_slots.c',
