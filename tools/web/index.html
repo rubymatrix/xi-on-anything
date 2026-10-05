@@ -73,6 +73,13 @@ var Module = {
     ENV.XI_HTTP_URL = location.origin;
     ENV.XI_TOKEN = hash.get('t') || '';
     ENV.FFXI_DATA_DIR = '/xi-data';
+    // the file cache (dlcache.js): the game's data reads kept in Cache Storage; #cache=0 reads the network
+    // only, #cache=clear empties it first
+    if (hash.get('cache') !== '0' && self.caches) {
+      Module.fileCache = new Worker('dlcache.js');
+      ENV.XI_CACHE = '1';
+      navigator.storage?.persist?.();
+    }
     ENV.FFXI_DISCORD = '0';
     if (password) ENV.FFXI_PASSWORD = password;
     password = '';
@@ -89,11 +96,13 @@ var Module = {
   }],
   onRuntimeInitialized() {
     statusEl.textContent = 'Running';
+    Module.fileCache?.postMessage({ mem: Module.wasmMemory, clear: hash.get('cache') === 'clear' });
     Module._web_view_size(Module.viewSize[0], Module.viewSize[1]);
     Module._web_focus(1);
     xiInput.start(Module, document.getElementById('canvas'));
     xiHud.follow(Module);
     if (hash.get('fps') !== '0') xiHud.gauge(Module);
+    if (hash.get('dl') !== '0') xiHud.downloads();
     // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay.py does)
     if (hash.get('enter')) {
       const until = Date.now() + Number(hash.get('enter')) * 1000;

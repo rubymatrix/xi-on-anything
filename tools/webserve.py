@@ -197,7 +197,8 @@ class Tree:
             root = os.path.realpath(root)
             if os.path.isfile(root):
                 self.files[prefix.lower()] = root
-                lines.append('%s\t%d' % (prefix, os.path.getsize(root)))
+                st = os.stat(root)
+                lines.append('%s\t%d\t%d' % (prefix, st.st_size, int(st.st_mtime)))
                 continue
             for d, dirs, files in os.walk(root):
                 dirs.sort()
@@ -211,7 +212,8 @@ class Tree:
                     r = rel + '/' + f if rel else f
                     full = os.path.join(d, f)
                     self.files[r.lower()] = full
-                    lines.append('%s\t%d' % (r, os.path.getsize(full)))
+                    st = os.stat(full)
+                    lines.append('%s\t%d\t%d' % (r, st.st_size, int(st.st_mtime)))
         self.index = ('\n'.join(lines) + '\n').encode('utf-8')
 
     def path(self, rel):
