@@ -55,6 +55,7 @@ CFLAGS = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-fno-strict-aliasing', 
           '-I', 'generated', '-I', 'third_party/stb']
 if sys.platform != 'darwin':
     CFLAGS.append('-D_GNU_SOURCE')  # glibc hides POSIX (strdup, getaddrinfo, sigaction) under -std=c11
+CFLAGS += shlex.split(os.environ.get('XI_CFLAGS', ''))  # e.g. -DRT_WATERMARK
 # the generated C: every label and local is emitted whether used or not
 GEN_WARNINGS = ['-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-set-variable', '-Wno-unused-function',
                 '-Wno-parentheses-equality', '-Wno-unreachable-code']

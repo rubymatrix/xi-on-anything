@@ -101,6 +101,7 @@
 #include "ws2.h"
 #include "plat.h"
 #include "vfs.h"
+#include "watermark.h"
 #include "build.h" /* FFXI_VERSION */
 
 extern const RtModule rt_module_ffxi; /* recomp.py --module ffxi */
@@ -720,6 +721,7 @@ static void present_hook(void)
     if (g_addons_on)
         addons_frame();
     discord_frame();
+    watermark_frame();
     if (!g_fps_global)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
