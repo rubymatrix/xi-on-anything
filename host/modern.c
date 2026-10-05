@@ -1383,7 +1383,8 @@ static void addons_draw(const Page* p, uint32_t window)
     uint32_t sheet = find_sheet(), list = sheet ? rd32(sheet) : 0;
     if (!list || !window)
         return;
-    guest_thiscall(WINDOW_RECT, window, 4, (uint32_t[]){ g_scratch + 48, 1, 1, 1 });
+    /* Item 1 follows the window; exclude its cursor and press offsets so the whole overlay stays put. */
+    guest_thiscall(WINDOW_RECT, window, 4, (uint32_t[]){ g_scratch + 48, 1, 0, 0 });
     int ox = (int16_t)rd16(g_scratch + 48) - p->items[0].x, oy = (int16_t)rd16(g_scratch + 50) - row_top(0);
     for (int r = 0; r < p->nrows; ++r)
     {
