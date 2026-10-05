@@ -43,6 +43,8 @@ static int nparams(uint32_t op, int ps)
 
 static const char* const SWZ = "xyzw";
 
+static int g_wgsl; /* the dialect of the shader being translated is WGSL (Sb.glsl 2) */
+
 /* a source operand as a float4 expression */
 static void src_expr(char* out, size_t n, uint32_t t, int ps)
 {
@@ -54,7 +56,7 @@ static void src_expr(char* out, size_t n, uint32_t t, int ps)
     case R_INPUT: snprintf(reg, sizeof reg, "v%u", num); break;
     case R_CONST:
         if (!ps && (t & 0x2000))
-            snprintf(reg, sizeof reg, "u.vsc[clamp(int(a0.x) + %u, 0, 95)]", num);
+            snprintf(reg, sizeof reg, g_wgsl ? "u.vsc[clamp(i32(a0.x) + %u, 0, 95)]" : "u.vsc[clamp(int(a0.x) + %u, 0, 95)]", num);
         else
             snprintf(reg, sizeof reg, ps ? "c%u" : "u.vsc[%u]", num);
         break;
@@ -121,7 +123,7 @@ static void write_dst(Sb* b, uint32_t d, const char* value, int ps)
     else if (ps) /* ps.1.x registers hold [-1, 1] (at least; D3D8 hardware: MaxPixelShaderValue 1) */
     {
         char w[1100];
-        snprintf(w, sizeof w, "clamp(%s, -1.0, 1.0)", v);
+        snprintf(w, sizeof w, g_wgsl ? "clamp(%s, float4(-1.0), float4(1.0))" : "clamp(%s, -1.0, 1.0)", v);
         snprintf(v, sizeof v, "%s", w);
     }
     if (mask == 0xF || mask == 0)
@@ -133,7 +135,15 @@ static void write_dst(Sb* b, uint32_t d, const char* value, int ps)
         for (int i = 0; i < 4; ++i)
             if (mask & (1u << i))
                 m[k++] = SWZ[i];
-        sb_printf(b, "  %s.%s = float4(%s).%s;\n", name, m, v, m);
+        if (g_wgsl && k > 1) /* WGSL writes one component at a time */
+        {
+            sb_printf(b, "  {\n  let w_ = float4(%s);\n", v);
+            for (int i = 0; i < k; ++i)
+                sb_printf(b, "  %s.%c = w_.%c;\n", name, m[i], m[i]);
+            sb_printf(b, "  }\n");
+        }
+        else
+            sb_printf(b, "  %s.%s = float4(%s).%s;\n", name, m, v, m);
     }
 }
 
@@ -155,8 +165,16 @@ static int arith(Sb* b, uint32_t op, const uint32_t* p, int ps)
     case 3: snprintf(e, sizeof e, "%s - %s", s0, s1); break;
     case 4: snprintf(e, sizeof e, "%s * %s + %s", s0, s1, s2); break;
     case 5: snprintf(e, sizeof e, "%s * %s", s0, s1); break;
-    case 6: snprintf(e, sizeof e, "float4(%s.w == 0.0 ? INFINITY : 1.0 / %s.w)", s0, s0); break;
-    case 7: snprintf(e, sizeof e, "float4(%s.w == 0.0 ? INFINITY : rsqrt(abs(%s.w)))", s0, s0); break;
+    case 6:
+        snprintf(e, sizeof e, g_wgsl ? "float4(select(1.0 / %s.w, xinf(), %s.w == 0.0))" : "float4(%s.w == 0.0 ? INFINITY : 1.0 / %s.w)",
+            s0, s0);
+        break;
+    case 7:
+        if (g_wgsl)
+            snprintf(e, sizeof e, "float4(select(rsqrt(abs(%s.w)), xinf(), %s.w == 0.0))", s0, s0);
+        else
+            snprintf(e, sizeof e, "float4(%s.w == 0.0 ? INFINITY : rsqrt(abs(%s.w)))", s0, s0);
+        break;
     case 8: snprintf(e, sizeof e, "float4(dot(%s.xyz, %s.xyz))", s0, s1); break;
     case 9: snprintf(e, sizeof e, "float4(dot(%s, %s))", s0, s1); break;
     case 10: snprintf(e, sizeof e, "min(%s, %s)", s0, s1); break;
@@ -164,16 +182,31 @@ static int arith(Sb* b, uint32_t op, const uint32_t* p, int ps)
     case 12: gfx_msl_select(e, sizeof e, b, "float4(0)", "float4(1)", s0, "<", s1); break;
     case 13: gfx_msl_select(e, sizeof e, b, "float4(0)", "float4(1)", s0, ">=", s1); break;
     case 14: case 78: snprintf(e, sizeof e, "float4(exp2(%s.w))", s0); break;
-    case 15: case 79: snprintf(e, sizeof e, "float4(%s.w == 0.0 ? -INFINITY : log2(abs(%s.w)))", s0, s0); break;
+    case 15: case 79:
+        if (g_wgsl)
+            snprintf(e, sizeof e, "float4(select(log2(abs(%s.w)), -xinf(), %s.w == 0.0))", s0, s0);
+        else
+            snprintf(e, sizeof e, "float4(%s.w == 0.0 ? -INFINITY : log2(abs(%s.w)))", s0, s0);
+        break;
     case 16:
-        snprintf(e, sizeof e,
-            "float4(1.0, max(%s.x, 0.0), (%s.x > 0.0 && %s.y > 0.0) ? pow(%s.y, clamp(%s.w, -127.9961, 127.9961)) : 0.0, 1.0)", s0, s0,
-            s0, s0, s0);
+        if (g_wgsl)
+            snprintf(e, sizeof e,
+                "float4(1.0, max(%s.x, 0.0), select(0.0, pow(%s.y, clamp(%s.w, -127.9961, 127.9961)), %s.x > 0.0 && %s.y > 0.0), 1.0)",
+                s0, s0, s0, s0, s0);
+        else
+            snprintf(e, sizeof e,
+                "float4(1.0, max(%s.x, 0.0), (%s.x > 0.0 && %s.y > 0.0) ? pow(%s.y, clamp(%s.w, -127.9961, 127.9961)) : 0.0, 1.0)", s0,
+                s0, s0, s0, s0);
         break;
     case 17: snprintf(e, sizeof e, "float4(1.0, %s.y * %s.y, %s.z, %s.w)", s0, s1, s0, s1); break;
     case 18: snprintf(e, sizeof e, "mix(%s, %s, %s)", s2, s1, s0); break;
     case 19: snprintf(e, sizeof e, "fract(%s)", s0); break;
-    case 80: snprintf(e, sizeof e, "(%s.w > 0.5 ? %s : %s)", s0, s1, s2); break; /* cnd: r0.a */
+    case 80: /* cnd: r0.a */
+        if (g_wgsl)
+            snprintf(e, sizeof e, "select(%s, %s, %s.w > 0.5)", s2, s1, s0);
+        else
+            snprintf(e, sizeof e, "(%s.w > 0.5 ? %s : %s)", s0, s1, s2);
+        break;
     case 88: gfx_msl_select(e, sizeof e, b, s2, s1, s0, ">=", "float4(0.0)"); break;
     default: return 0;
     }
@@ -205,6 +238,7 @@ int gfx_msl_vs1(Sb* b, const GfxVsKey* k, const uint32_t* t)
 {
     if (!t || (t[0] & 0xFFFF0000u) != 0xFFFE0000u)
         return 0;
+    g_wgsl = b->glsl == 2;
     gfx_msl_vs_begin(b, k); /* the inputs the declaration maps: v# is the declaration's register */
     sb_printf(b, "  float4 r0 = float4(0), r1 = float4(0), r2 = float4(0), r3 = float4(0), r4 = float4(0), r5 = float4(0);\n"
                  "  float4 r6 = float4(0), r7 = float4(0), r8 = float4(0), r9 = float4(0), r10 = float4(0), r11 = float4(0), a0 = float4(0);\n"
@@ -259,6 +293,7 @@ int gfx_msl_ps1(Sb* b, const GfxFsKey* k, const uint32_t* t)
         return 0;
     }
     (void)k;
+    g_wgsl = b->glsl == 2;
     sb_printf(b, "  float4 r0 = float4(0), r1 = float4(0), t0 = float4(0), t1 = float4(0), t2 = float4(0), t3 = float4(0);\n"
                  "  float4 v0 = in.d, v1 = in.s;\n");
     for (int c = 0; c < GFX_NPSC; ++c) /* def overrides these */
@@ -285,7 +320,9 @@ int gfx_msl_ps1(Sb* b, const GfxFsKey* k, const uint32_t* t)
         {
         case 0: break;
         case 81: /* def c#, x, y, z, w */
-            if (b->glsl)
+            if (g_wgsl)
+                sb_printf(b, "  c%u = bitcast<vec4f>(vec4u(%uu, %uu, %uu, %uu));\n", n, p[1], p[2], p[3], p[4]);
+            else if (b->glsl)
                 sb_printf(b, "  c%u = uintBitsToFloat(uvec4(%uu, %uu, %uu, %uu));\n", n, p[1], p[2], p[3], p[4]);
             else
                 sb_printf(b, "  c%u = float4(as_type<float>(%uu), as_type<float>(%uu), as_type<float>(%uu), as_type<float>(%uu));\n",
@@ -304,7 +341,7 @@ int gfx_msl_ps1(Sb* b, const GfxFsKey* k, const uint32_t* t)
             break;
         case 64: sb_printf(b, "  t%u = float4(saturate(in.t%u.xyz), 1.0);\n", n, n); break; /* texcoord */
         case 65: /* texkill */
-            sb_printf(b, b->glsl ? "  if (any(lessThan(in.t%u.xyz, float3(0.0)))) discard_fragment();\n"
+            sb_printf(b, b->glsl == 1 ? "  if (any(lessThan(in.t%u.xyz, float3(0.0)))) discard_fragment();\n"
                                  : "  if (any(in.t%u.xyz < 0.0)) discard_fragment();\n", n);
             break;
         default:
