@@ -13,6 +13,11 @@ request and the WebSocket need it, so other pages the browser has open can't use
   /dat/...     the game install (--game), read only, with Range; /dat/index lists it
   /app/...     what host64 brings with it: ffxi.reg and the texture packs (assets/textures)
 
+Behind a reverse proxy or tunnel of your own (your devices only, with its own sign-in in front: Cloudflare
+Access, Caddy with forward_auth, and the like), give the address it serves under with --origin
+https://xi.example.com, and a fixed --token so a bookmark keeps working. The proxy must pass WebSocket
+upgrades through (/net) and serve HTTPS: the page needs a secure context for shared memory.
+
 Binds 127.0.0.1 only: the build is translated from the player's own FFXiMain.dll and is never served
 to anyone else.
 """
@@ -217,6 +222,7 @@ class Server:
         self.root = os.path.realpath(a.root)
         self.token = a.token or secrets.token_urlsafe(18)
         self.allowed = set(a.server)
+        self.origins = {o.rstrip('/') for o in a.origin or []}
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.trees = {'dat': Tree([('', a.game)]),
                       'app': Tree([('ffxi.reg', os.path.join(repo, 'ffxi.reg')),
@@ -242,7 +248,8 @@ class Server:
         url = urllib.parse.urlsplit(target)
         q = urllib.parse.parse_qs(url.query)
         origin = hdr.get('origin')
-        if origin and urllib.parse.urlsplit(origin).hostname not in ('127.0.0.1', 'localhost'):
+        if origin and urllib.parse.urlsplit(origin).hostname not in ('127.0.0.1', 'localhost') and \
+                origin.rstrip('/') not in self.origins:
             return self.reply(writer, 403, b'other origins may not use this server')
         if url.path == '/net':
             if q.get('t', [''])[0] != self.token:
@@ -330,7 +337,11 @@ def main():
     ap.add_argument('--game', required=True, help='the FINAL FANTASY XI folder')
     ap.add_argument('--root', default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'web'))
     ap.add_argument('--port', type=int, default=8417)
-    ap.add_argument('--token', default=os.environ.get('XI_WEB_TOKEN'), help='fixed token (tests); default: a new one each run')
+    ap.add_argument('--token', default=os.environ.get('XI_WEB_TOKEN'),
+                    help='a fixed token (or XI_WEB_TOKEN): for a bookmark behind a proxy, or tests; default: a new one each run')
+    ap.add_argument('--origin', action='append',
+                    help='an address a proxy of yours serves this under, as the browser sees it (https://xi.example.com); '
+                         'repeat for more')
     a = ap.parse_args()
     for s in a.server:
         ipaddress.IPv4Address(s)
@@ -340,6 +351,8 @@ def main():
     async def run():
         server = await asyncio.start_server(srv.handle, '127.0.0.1', a.port)
         LOG('serving %s on http://127.0.0.1:%d/#t=%s (game server %s)' % (srv.root, a.port, srv.token, ', '.join(a.server)))
+        for o in sorted(srv.origins):
+            LOG('  and through your proxy: %s/#t=%s' % (o, srv.token))
         sys.stdout.flush()
         async with server:
             await server.serve_forever()
