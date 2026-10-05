@@ -142,7 +142,7 @@ float trace(RaytracingAccelerationStructure world, float3 o, float3 d, float tmi
     prim = -1, bary = float2(0, 0);
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
         return tmax;
-    prim = (int)(q.CommittedPrimitiveIndex() + (q.CommittedGeometryIndex() ? u.rtp.x : 0u));
+    prim = (int)(q.CommittedPrimitiveIndex() + (q.CommittedInstanceID() ? u.rtp.x : 0u));
     bary = q.CommittedTriangleBarycentrics();
     return q.CommittedRayT();
 }
@@ -151,6 +151,23 @@ float trace(RaytracingAccelerationStructure world, float3 o, float3 d, float tmi
 {
     float2 bary;
     return trace(world, o, d, tmin, tmax, prim, bary);
+}
+
+// the nearest hit among the solid triangles alone: the bounce light's and the occlusion's rays pass the
+// zone's alpha-tested leaves and grass untested (a field of grass blades, each tested, cost a ray tracer
+// most of a frame at Lufaise; light through a canopy is the sun's maps' to give)
+float trace_solid(RaytracingAccelerationStructure world, float3 o, float3 d, float tmin, float tmax, out int prim)
+{
+    RayDesc r;
+    r.Origin = o, r.Direction = d, r.TMin = tmin, r.TMax = tmax;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
+    q.TraceRayInline(world, RAY_FLAG_NONE, 0x01, r); /* (the solid instance alone) */
+    q.Proceed();
+    prim = -1;
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        return tmax;
+    prim = q.CommittedPrimitiveIndex();
+    return q.CommittedRayT();
 }
 
 // is anything between o + d * tmin and o + d * tmax?
@@ -342,7 +359,7 @@ float4 rt_gi(FO fi) : SV_Target
         float2 r = pattern(fi.pos.xy, i);
         float3 d = hemi(N, r.x, r.y);
         int prim;
-        float t = trace(world, o, d, 0.0, u.gi.z, prim);
+        float t = trace_solid(world, o, d, 0.0, u.gi.z, prim);
         if (prim < 0)
             continue;
         float3 Q = o + d * t, nq = tri_normal(tri, (uint)prim, d);
@@ -373,7 +390,7 @@ float4 rt_ao(FO fi) : SV_Target
         float2 r = pattern(fi.pos.xy, i + 7);
         float3 d = hemi(N, r.x, r.y);
         int prim;
-        float t = trace(world, o, d, 0.0, R, prim);
+        float t = trace_solid(world, o, d, 0.0, R, prim);
         if (prim >= 0)
         {
             float f = 1.0 - t / R;

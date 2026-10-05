@@ -4124,7 +4124,7 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
  * it on top. The casters out of view come from the sun's cache, through the camera they were drawn with.
  * Rays are traced inline (ray queries) from the scene effects' passes, gfx_rt.hlsl's, built with dxc at
  * build time (generated/gfx_rt_dxil.h); with no such device, or no dxc at build time, none are. */
-#define RT_REACH 250.0f /* the cache's casters further than this from the camera are left out */
+#define RT_REACH 150.0f /* the cache's casters further than this from the camera are left out */
 
 static struct
 {
@@ -4133,8 +4133,8 @@ static struct
     ID3D12PipelineState *clay, *gi, *ao, *giblur;
     ID3D12RootSignature* croot; /* the normals' compute passes': eight root constants */
     ID3D12PipelineState *nclear, *nsum, *nresolve;
-    ID3D12Resource *so, *count, *blas, *tlas, *scratch, *nrm, *table;
-    uint64_t so_size, count_size, blas_size, tlas_size, scratch_size, nrm_size, table_size;
+    ID3D12Resource *so, *count, *blas, *blas2, *tlas, *scratch, *nrm, *table; /* (blas2: the alpha-tested) */
+    uint64_t so_size, count_size, blas_size, blas2_size, tlas_size, scratch_size, nrm_size, table_size;
     D3D12_RESOURCE_STATES so_state, count_state, nrm_state;
     int32_t so_srv, tlas_srv; /* the triangles (a structured buffer of float4) and the structure, in the heap */
     int32_t nrm_srv, nrm_uav, table_uav; /* the corners' smooth normals (rt_nresolve), the table that finds them */
@@ -4279,7 +4279,9 @@ typedef struct RtItem
  * and whose first stage's texture is there (else it is traced solid) */
 static int rt_alpha(const Caster* c)
 {
-    return alpha_tested(&c->lib.fs) && c->lib.vs.ntex >= 1 && c->tex[0] && c->tex[0]->srv >= 0 && c->tex[0]->type == GFX_TEX_2D;
+    /* the zone's and its placed objects' (leaves, grass); a character's (hair, a cape's fringe) is traced
+     * solid, so the bounce light's and occlusion's rays (gfx_rt.hlsl trace_solid) still meet characters */
+    return (c->fixed || c->keep) && alpha_tested(&c->lib.fs) && c->lib.vs.ntex >= 1 && c->tex[0] && c->tex[0]->srv >= 0 && c->tex[0]->type == GFX_TEX_2D;
 }
 
 /* a view in the heap at *slot (a new slot, the old one let go once the GPU is past it): a buffer of float4s
@@ -4577,44 +4579,47 @@ static int rt_capture(const float* invP, const float* view, const float* cam)
     }
     barrier(g_ray.so, D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     g_ray.so_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    /* the structure over the triangles, then the one over it */
+    /* a structure over the solid triangles and one over the alpha-tested ones, then the one over both: two
+     * instances, masks 1 and 2 - the bounce light's and occlusion's rays (mask 1) skip the leaves and grass
+     * whole, where culling their triangles alone still walked their boxes (Lufaise's grass: 9 ms a frame) */
     D3D12_RAYTRACING_GEOMETRY_DESC g[2];
-    memset(g, 0, sizeof g);
-    UINT ng = 0;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bl[2], tl;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bp[2], tp;
+    ID3D12Resource** blas[2] = { &g_ray.blas, &g_ray.blas2 };
+    uint64_t* blas_size[2] = { &g_ray.blas_size, &g_ray.blas2_size };
+    memset(g, 0, sizeof g), memset(bl, 0, sizeof bl), memset(bp, 0, sizeof bp), memset(&tl, 0, sizeof tl);
+    uint64_t scratch = 0;
+    UINT ninst = 0;
     for (int k = 0; k < 2; ++k)
     {
         uint64_t first = k ? vsolid : 0, count = k ? valpha : vsolid;
-        if (!count) /* (with no solid ones the alpha tests are geometry 0, their offset (rtp.x) 0 all the same) */
+        if (!count)
             continue;
-        g[ng].Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        g[ng].Flags = k ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-        g[ng].Triangles.VertexBuffer.StartAddress = ID3D12Resource_GetGPUVirtualAddress(g_ray.so) + first * 32;
-        g[ng].Triangles.VertexBuffer.StrideInBytes = 32;
-        g[ng].Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT, g[ng].Triangles.VertexCount = (UINT)count;
-        ng++;
+        g[k].Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        g[k].Flags = k ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g[k].Triangles.VertexBuffer.StartAddress = ID3D12Resource_GetGPUVirtualAddress(g_ray.so) + first * 32;
+        g[k].Triangles.VertexBuffer.StrideInBytes = 32;
+        g[k].Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT, g[k].Triangles.VertexCount = (UINT)count;
+        bl[k].Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        bl[k].Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        bl[k].NumDescs = 1, bl[k].DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY, bl[k].pGeometryDescs = &g[k];
+        ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(g_ray.dev, &bl[k], &bp[k]);
+        if (bp[k].ScratchDataSizeInBytes > scratch)
+            scratch = bp[k].ScratchDataSizeInBytes;
+        if (rt_buffer(blas[k], blas_size[k], bp[k].ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, 1) < 0)
+            return 0;
+        ninst++;
     }
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bl, tl;
-    memset(&bl, 0, sizeof bl);
-    bl.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-    bl.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-    bl.NumDescs = ng, bl.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY, bl.pGeometryDescs = g;
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bp, tp;
-    ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(g_ray.dev, &bl, &bp);
-    Alloc inst = ring(sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_RAYTRACING_INSTANCE_DESCS_BYTE_ALIGNMENT);
+    Alloc inst = ring(2 * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_RAYTRACING_INSTANCE_DESCS_BYTE_ALIGNMENT);
     if (!inst.cpu)
         return 0;
-    D3D12_RAYTRACING_INSTANCE_DESC id;
-    memset(&id, 0, sizeof id);
-    id.Transform[0][0] = id.Transform[1][1] = id.Transform[2][2] = 1.0f;
-    id.InstanceMask = 0xFF;
-    memset(&tl, 0, sizeof tl);
     tl.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     tl.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    tl.NumDescs = 1, tl.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY, tl.InstanceDescs = inst.gpu;
+    tl.NumDescs = ninst, tl.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY, tl.InstanceDescs = inst.gpu;
     ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(g_ray.dev, &tl, &tp);
-    uint64_t scratch = bp.ScratchDataSizeInBytes > tp.ScratchDataSizeInBytes ? bp.ScratchDataSizeInBytes : tp.ScratchDataSizeInBytes;
-    if (rt_buffer(&g_ray.blas, &g_ray.blas_size, bp.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, 1) < 0 ||
-        rt_buffer(&g_ray.scratch, &g_ray.scratch_size, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 1) < 0)
+    if (tp.ScratchDataSizeInBytes > scratch)
+        scratch = tp.ScratchDataSizeInBytes;
+    if (rt_buffer(&g_ray.scratch, &g_ray.scratch_size, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 1) < 0)
         return 0;
     int tgrown = rt_buffer(&g_ray.tlas, &g_ray.tlas_size, tp.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, 1);
     if (tgrown < 0)
@@ -4631,18 +4636,32 @@ static int rt_capture(const float* invP, const float* view, const float* cam)
         v.RaytracingAccelerationStructure.Location = ID3D12Resource_GetGPUVirtualAddress(g_ray.tlas);
         ID3D12Device_CreateShaderResourceView(g_dev, NULL, &v, heap_cpu(&g_srv, g_ray.tlas_srv));
     }
-    id.AccelerationStructure = ID3D12Resource_GetGPUVirtualAddress(g_ray.blas);
-    memcpy(inst.cpu, &id, sizeof id);
+    /* each instance's InstanceID: 0 the solid, 1 the alpha-tested (gfx_rt.hlsl: their triangles' offset) */
+    D3D12_RAYTRACING_INSTANCE_DESC* id = (D3D12_RAYTRACING_INSTANCE_DESC*)inst.cpu;
+    memset(id, 0, 2 * sizeof *id);
+    UINT ni = 0;
+    for (int k = 0; k < 2; ++k)
+        if (bl[k].NumDescs)
+        {
+            id[ni].Transform[0][0] = id[ni].Transform[1][1] = id[ni].Transform[2][2] = 1.0f;
+            id[ni].InstanceID = (UINT)k, id[ni].InstanceMask = k ? 2 : 1;
+            id[ni].AccelerationStructure = ID3D12Resource_GetGPUVirtualAddress(*blas[k]);
+            ni++;
+        }
     ID3D12GraphicsCommandList4* l4 = NULL;
     if (FAILED(ID3D12GraphicsCommandList_QueryInterface(l, &IID_ID3D12GraphicsCommandList4, (void**)&l4)))
         return 0;
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd;
     memset(&bd, 0, sizeof bd);
-    bd.DestAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(g_ray.blas);
-    bd.Inputs = bl;
     bd.ScratchAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(g_ray.scratch);
-    ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(l4, &bd, 0, NULL);
-    rt_uav_barrier();
+    for (int k = 0; k < 2; ++k)
+        if (bl[k].NumDescs)
+        {
+            bd.DestAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(*blas[k]);
+            bd.Inputs = bl[k];
+            ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(l4, &bd, 0, NULL);
+            rt_uav_barrier(); /* (the scratch is shared) */
+        }
     bd.DestAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(g_ray.tlas);
     bd.Inputs = tl;
     ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(l4, &bd, 0, NULL);
@@ -4897,8 +4916,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
     if (!gi)
         u.gi[0] = 0.0f;
     u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
-    if (rt)
-        u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f; /* traced: rays reach further, two a texel */
+    if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
+        u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
     D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&u);
     if (!ua)
         return;
@@ -4969,6 +4988,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             fx_pass(fx_out(&g_fx.gi1, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 1, 1);
             in[0] = fx_in(&g_fx.gi1, 0);
             fx_pass(fx_out(&g_fx.gi0, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 2, 2);
+            in[0] = fx_in(&g_fx.gi0, 0);
+            fx_pass(fx_out(&g_fx.gi1, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 4, 4);
+            in[0] = fx_in(&g_fx.gi1, 0);
+            fx_pass(fx_out(&g_fx.gi0, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 1, 1);
         }
         else
         {
