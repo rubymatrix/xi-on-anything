@@ -33,6 +33,7 @@
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten/heap.h>
 #include <emscripten/threading.h>
+#include "httpfs_web.h"
 #else
 #include <linux/futex.h>
 #include <sys/syscall.h>
@@ -43,6 +44,16 @@
 #include "runtime.h"
 
 const char plat_path_sep = '/';
+
+/* The browser: the game install and host64's files are the local server's (httpfs_web.c), read only;
+ * everything else (the data folder) is Emscripten's file system. */
+#if defined(__EMSCRIPTEN__)
+#define HTTP(path) httpfs_owns(path)
+#else
+#define HTTP(path) 0
+typedef struct HttpFile HttpFile;
+typedef struct HttpDir HttpDir;
+#endif
 
 #if defined(__EMSCRIPTEN__)
 void* plat_reserve(size_t size)
@@ -236,6 +247,10 @@ uint64_t plat_wall_ms(void)
 
 unsigned char* plat_read_file(const char* path, size_t* size)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+        return httpfs_read_all(path, size);
+#endif
     FILE* f = fopen(path, "rb");
     if (!f)
         return NULL;
@@ -305,10 +320,33 @@ static void set_error(const char* path)
 struct PlatFile
 {
     int fd;
+    HttpFile* h; /* the browser's served files */
 };
 
 PlatFile* plat_file_open(const char* path, int flags)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+    {
+        int64_t size;
+        int dir;
+        if (!httpfs_stat(path, &size, &dir))
+        {
+            t_error = (flags & PLAT_CREATE) ? PLAT_ACCESS : PLAT_NOT_FOUND;
+            return NULL;
+        }
+        HttpFile* h = (flags & (PLAT_WRITE | PLAT_TRUNCATE | PLAT_EXCL)) || dir ? NULL : httpfs_open(path);
+        if (!h)
+        {
+            t_error = PLAT_ACCESS;
+            return NULL;
+        }
+        PlatFile* f = (PlatFile*)calloc(1, sizeof *f);
+        f->fd = -1, f->h = h;
+        t_error = PLAT_OK;
+        return f;
+    }
+#endif
     int rw = (flags & PLAT_READ) && (flags & PLAT_WRITE) ? O_RDWR : (flags & PLAT_WRITE) ? O_WRONLY : O_RDONLY;
     int o = rw | ((flags & PLAT_CREATE) ? O_CREAT : 0) | ((flags & PLAT_EXCL) ? O_CREAT | O_EXCL : 0) |
         ((flags & PLAT_TRUNCATE) ? O_TRUNC : 0);
@@ -325,7 +363,7 @@ PlatFile* plat_file_open(const char* path, int flags)
         t_error = PLAT_ACCESS;
         return NULL;
     }
-    PlatFile* f = (PlatFile*)malloc(sizeof *f);
+    PlatFile* f = (PlatFile*)calloc(1, sizeof *f);
     f->fd = fd;
     t_error = PLAT_OK;
     return f;
@@ -333,6 +371,15 @@ PlatFile* plat_file_open(const char* path, int flags)
 
 int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n)
 {
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+    {
+        int64_t r = httpfs_read(f->h, buf, n);
+        if (r < 0)
+            t_error = PLAT_FAILED;
+        return r;
+    }
+#endif
     ssize_t r;
     do
         r = read(f->fd, buf, n);
@@ -344,6 +391,11 @@ int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n)
 
 int64_t plat_file_write(PlatFile* f, const void* buf, uint32_t n)
 {
+    if (f->h)
+    {
+        t_error = PLAT_ACCESS;
+        return -1;
+    }
     ssize_t r;
     do
         r = write(f->fd, buf, n);
@@ -355,6 +407,10 @@ int64_t plat_file_write(PlatFile* f, const void* buf, uint32_t n)
 
 int64_t plat_file_seek(PlatFile* f, int64_t offset, int whence)
 {
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+        return httpfs_seek(f->h, offset, whence);
+#endif
     off_t r = lseek(f->fd, (off_t)offset, whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET);
     if (r < 0)
         set_error(NULL);
@@ -363,24 +419,37 @@ int64_t plat_file_seek(PlatFile* f, int64_t offset, int whence)
 
 int64_t plat_file_size(PlatFile* f)
 {
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+        return httpfs_size(f->h);
+#endif
     struct stat st;
     return fstat(f->fd, &st) == 0 ? (int64_t)st.st_size : -1;
 }
 
 int plat_file_truncate(PlatFile* f)
 {
+    if (f->h)
+        return 0;
     off_t at = lseek(f->fd, 0, SEEK_CUR);
     return at >= 0 && ftruncate(f->fd, at) == 0;
 }
 
 int plat_file_flush(PlatFile* f)
 {
+    if (f->h)
+        return 1;
     return fsync(f->fd) == 0;
 }
 
 void plat_file_close(PlatFile* f)
 {
-    close(f->fd);
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+        httpfs_close(f->h);
+    else
+#endif
+        close(f->fd);
     free(f);
 }
 
@@ -388,6 +457,21 @@ static uint64_t ts_ms(struct timespec t) { return (uint64_t)t.tv_sec * 1000u + (
 
 int plat_stat(const char* path, PlatStat* st)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+    {
+        int64_t size;
+        int dir;
+        if (!httpfs_stat(path, &size, &dir))
+        {
+            t_error = PLAT_NOT_FOUND;
+            return 0;
+        }
+        memset(st, 0, sizeof *st);
+        st->is_dir = dir, st->readonly = 1, st->size = (uint64_t)size;
+        return 1;
+    }
+#endif
     struct stat s;
     if (stat(path, &s) != 0)
     {
@@ -411,6 +495,11 @@ int plat_stat(const char* path, PlatStat* st)
 
 int plat_mkdir(const char* path)
 {
+    if (HTTP(path))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (mkdir(path, 0755) == 0)
         return 1;
     set_error(path);
@@ -419,6 +508,11 @@ int plat_mkdir(const char* path)
 
 int plat_rmdir(const char* path)
 {
+    if (HTTP(path))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (rmdir(path) == 0)
         return 1;
     set_error(path);
@@ -427,6 +521,11 @@ int plat_rmdir(const char* path)
 
 int plat_unlink(const char* path)
 {
+    if (HTTP(path))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (unlink(path) == 0)
         return 1;
     set_error(path);
@@ -435,6 +534,11 @@ int plat_unlink(const char* path)
 
 int plat_rename(const char* from, const char* to)
 {
+    if (HTTP(from) || HTTP(to))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (rename(from, to) == 0)
         return 1;
     set_error(from);
@@ -444,23 +548,42 @@ int plat_rename(const char* from, const char* to)
 struct PlatDir
 {
     DIR* d;
+    HttpDir* h;
 };
 
 PlatDir* plat_dir_open(const char* path)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+    {
+        HttpDir* h = httpfs_dir_open(path);
+        if (!h)
+        {
+            t_error = PLAT_PATH_NOT_FOUND;
+            return NULL;
+        }
+        PlatDir* p = (PlatDir*)calloc(1, sizeof *p);
+        p->h = h;
+        return p;
+    }
+#endif
     DIR* d = opendir(path);
     if (!d)
     {
         set_error(path);
         return NULL;
     }
-    PlatDir* p = (PlatDir*)malloc(sizeof *p);
+    PlatDir* p = (PlatDir*)calloc(1, sizeof *p);
     p->d = d;
     return p;
 }
 
 const char* plat_dir_next(PlatDir* d)
 {
+#if defined(__EMSCRIPTEN__)
+    if (d->h)
+        return httpfs_dir_next(d->h);
+#endif
     for (struct dirent* e; (e = readdir(d->d));)
         if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
             return e->d_name;
@@ -469,7 +592,12 @@ const char* plat_dir_next(PlatDir* d)
 
 void plat_dir_close(PlatDir* d)
 {
-    closedir(d->d);
+#if defined(__EMSCRIPTEN__)
+    if (d->h)
+        httpfs_dir_close(d->h);
+    else
+#endif
+        closedir(d->d);
     free(d);
 }
 
