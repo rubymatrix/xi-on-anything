@@ -49,6 +49,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--game', default=os.path.expanduser('~/SquareEnix/FINAL FANTASY XI'))
     ap.add_argument('--node', action='store_true', help='build for Node.js (headless, files from disk)')
+    ap.add_argument('--profile', action='store_true', help="keep function names (profilers show f_10012345, not wasm-function[812])")
     a = ap.parse_args()
     if not shutil.which('emcc'):
         raise SystemExit('emcc not found: source <emsdk>/emsdk_env.sh first')
@@ -68,7 +69,8 @@ def main():
     objs += bp.compile_stale(bp.PORTABLE + HOST, 'build/web-obj/host', tls_flags)
     env = ['-sENVIRONMENT=node', '-sNODERAWFS', '--pre-js', 'tools/web/node_pre.js'] if a.node else ['-sENVIRONMENT=web,worker']
     os.makedirs(os.path.join(ROOT, out), exist_ok=True)
-    bp.run(['emcc', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env)
+    names = ['--profiling-funcs'] if a.profile else []
+    bp.run(['emcc', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env + names)
     if not a.node:
         shutil.copy(os.path.join(ROOT, 'tools', 'web', 'index.html'), os.path.join(ROOT, out, 'index.html'))
     print('built %s/host64.js' % out)

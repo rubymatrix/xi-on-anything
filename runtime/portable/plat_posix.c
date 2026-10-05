@@ -31,6 +31,7 @@
 #include <os/os_sync_wait_on_address.h>
 #include <sys/sysctl.h>
 #elif defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
 #include <emscripten/heap.h>
 #include <emscripten/threading.h>
 #include "httpfs_web.h"
@@ -233,6 +234,12 @@ uint32_t plat_atomic_cas32(volatile uint32_t* p, uint32_t expected, uint32_t des
 
 uint64_t rt_monotonic_ns(void)
 {
+#if defined(__EMSCRIPTEN__)
+    /* performance.now() straight: Emscripten's clock_gettime goes through JS with 64-bit (BigInt)
+     * arguments and was most of the game thread's busy time (the guest lock's quantum, the game's
+     * timers, the profile's per-call timing all read this) */
+    return (uint64_t)(emscripten_get_now() * 1e6);
+#endif
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;

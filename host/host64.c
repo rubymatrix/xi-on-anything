@@ -722,6 +722,10 @@ static void present_hook(void)
         addons_frame();
     discord_frame();
     watermark_frame();
+#if defined(__EMSCRIPTEN__)
+    extern void web_frame(void); /* sdl_web.c */
+    web_frame();
+#endif
     if (!g_fps_global)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)

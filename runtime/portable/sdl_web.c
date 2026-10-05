@@ -604,3 +604,25 @@ bool SDL_BindAudioStream(SDL_AudioDeviceID dev, SDL_AudioStream* s) { (void)dev,
 bool SDL_ClearAudioStream(SDL_AudioStream* s) { (void)s; return true; }
 void SDL_CloseAudioDevice(SDL_AudioDeviceID dev) { (void)dev; }
 bool SDL_SetAudioStreamGain(SDL_AudioStream* s, float gain) { (void)s, (void)gain; return true; }
+
+/* --- once a frame, on the game's thread (host64's Present hook) ------------------------------------------ */
+/* XI_CPU_PROF_AT=<seconds>: the game thread's profile, from its first frame for that long (tools/web/node_pre.js) */
+EM_JS(void, web_prof_start, (void), { if (globalThis.xiProfStart) globalThis.xiProfStart(); });
+EM_JS(void, web_prof_stop, (void), { if (globalThis.xiProfStop) globalThis.xiProfStop('game'); });
+
+void web_frame(void)
+{
+    static double stop_at = -1;
+    if (stop_at < 0)
+    {
+        const char* at = getenv("XI_CPU_PROF_AT");
+        stop_at = at ? emscripten_get_now() + atof(at) * 1000.0 : 0;
+        if (stop_at)
+            web_prof_start();
+    }
+    if (stop_at > 0 && emscripten_get_now() >= stop_at)
+    {
+        stop_at = 0;
+        web_prof_stop();
+    }
+}
