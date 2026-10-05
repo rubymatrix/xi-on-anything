@@ -34,12 +34,21 @@ static void unlock(void)
 
 int gwin_init(void)
 {
+#if defined(RT_GUEST_WINDOW)
     /* 4 GB plus a guard page: an unaligned access at 0xFFFFFFFF reaches past the window. */
     rt_guest_base = (unsigned char*)plat_reserve(0x100000000ull + PAGE);
     if (!rt_guest_base)
         return 0;
     for (uint32_t g = 0; g < LOW_RESERVED / GRANULE; ++g)
         g_used[g] = 1;
+#else
+    /* Flat (the browser): guest addresses are host addresses, and the host's own memory is everything
+     * below PLAT_HOST_TOP. The guest gets what is above it, first fit from the bottom, so the memory
+     * (which only grows) tracks the guest's working set. */
+    for (uint32_t g = 0; g < PLAT_HOST_TOP / GRANULE; ++g)
+        g_used[g] = 1;
+    g_hint = PLAT_HOST_TOP / GRANULE;
+#endif
     for (uint32_t g = HIGH_RESERVED / GRANULE; g < GRANULES; ++g)
         g_used[g] = 1;
     return 1;
@@ -88,7 +97,9 @@ uint32_t gwin_reserve(uint32_t addr, uint32_t size)
             unlock();
             return 0;
         }
+#if defined(RT_GUEST_WINDOW)
         g_hint = start + n;
+#endif
     }
     for (uint32_t g = start; g < start + n; ++g)
         g_used[g] = 1;
@@ -102,7 +113,7 @@ uint32_t gwin_reserve(uint32_t addr, uint32_t size)
 int gwin_commit(uint32_t addr, uint32_t size)
 {
     uint32_t lo = addr & ~(PAGE - 1), hi = (uint32_t)(((uint64_t)addr + size + PAGE - 1) & ~(uint64_t)(PAGE - 1));
-    if (!plat_commit(rt_guest_base + lo, (size_t)hi - lo))
+    if (!plat_commit(GUEST_PTR(lo), (size_t)hi - lo))
         return 0;
     lock();
     for (uint32_t p = lo / PAGE; p < hi / PAGE; ++p)
@@ -117,7 +128,7 @@ int gwin_commit(uint32_t addr, uint32_t size)
 void gwin_decommit(uint32_t addr, uint32_t size)
 {
     uint32_t lo = addr & ~(PAGE - 1), hi = (uint32_t)(((uint64_t)addr + size + PAGE - 1) & ~(uint64_t)(PAGE - 1));
-    plat_decommit(rt_guest_base + lo, (size_t)hi - lo);
+    plat_decommit(GUEST_PTR(lo), (size_t)hi - lo);
     lock();
     for (uint32_t p = lo / PAGE; p < hi / PAGE; ++p)
         if (g_committed[p >> 3] & (1u << (p & 7)))

@@ -18,7 +18,11 @@
 /* The host's path separator. */
 extern const char plat_path_sep;
 
-/* Address space: reserve (no access), commit (read/write) and decommit, page granular. */
+/* Address space: reserve (no access), commit (read/write) and decommit, page granular.
+ * Without RT_GUEST_WINDOW (the browser) guest addresses are host addresses: the host's own memory
+ * (malloc, stacks, static data) stays below PLAT_HOST_TOP, under FFXi.dll's image at 0x0F000000,
+ * and gwin hands the guest everything above it. */
+#define PLAT_HOST_TOP 0x0F000000u
 void* plat_reserve(size_t size);
 int plat_commit(void* p, size_t size);
 void plat_decommit(void* p, size_t size);
