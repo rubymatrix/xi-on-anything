@@ -67,7 +67,8 @@ def main():
     objs = bp.compile_stale(bp.generated('all'), 'build/web-obj/all', ['-I', 'generated/all'])
     objs += bp.compile_stale(bp.generated('ffxi'), 'build/web-obj/ffxi', ['-I', 'generated/ffxi'])
     # the graphics back end: none in Node (headless), WebGPU in the page (Dawn's webgpu.h, emdawnwebgpu)
-    gfx = ['runtime/portable/gfx_null.c'] if a.node else ['runtime/portable/gfx_webgpu.c']
+    gfx = ['runtime/portable/gfx_null.c'] if a.node else ['runtime/portable/gfx_webgpu.c', 'runtime/portable/gfx_fx.c',
+                                                          'runtime/portable/gfx_scene.c']
     port = [] if a.node else ['--use-port=emdawnwebgpu']
     objdir = 'build/web-obj/' + ('host-node' if a.node else 'host')
     objs += bp.compile_stale(bp.PORTABLE + HOST + gfx, objdir, tls_flags + port)
