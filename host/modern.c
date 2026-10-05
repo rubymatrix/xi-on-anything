@@ -100,6 +100,10 @@ enum
                                             * x and y first, in the coordinates SPRITE_DRAW takes */
     WINDOW_CURSOR = FFXI_MODERN_WINDOW_CURSOR, /* 0x10118db0 thiscall window (item, hand): the cursor to the item; the
                                                 * window's +0x4c (16 bits) the item it is on */
+    WINDOW_SCROLL = FFXI_MODERN_WINDOW_SCROLL, /* 0x10118530 thiscall window (total, shown): its scroll bar (made if it
+                                                * has none) at its right edge, for a list of total entries showing
+                                                * shown at a time; the window's +0x88 the bar, +0x14 in it the first
+                                                * entry shown. The game draws it with the window (the Effects page's) */
     VTBL_SLOTS = 17,
     CONFIG_ITEMS = 13,          /* the Config list's own */
     EV_DOWN = 1, EV_UP = 2, EV_RIGHT = 3, EV_LEFT = 4, EV_SELECT = 5, /* a menu's input events (OnInput); the game's own sliders go up on 3 */
@@ -174,6 +178,12 @@ static const Row ADDON_ROWS[ADDON_VIS] = { ADDON_ROW, ADDON_ROW, ADDON_ROW, ADDO
     ADDON_ROW, ADDON_ROW, ADDON_ROW };
 static const ModernAddons* g_addons;
 static int g_addon_n, g_addon_top, g_addon_cursor;
+static uint32_t g_addon_bar; /* the window whose scroll bar is the game's (WINDOW_SCROLL), or 0 */
+
+/* WINDOW_SCROLL's first bytes, as 2025-11-12 has them (the others' are the same, moved): checked
+ * before it is called, the page drawing a scroll bar of its own without it */
+static const uint8_t WINDOW_SCROLL_KNOWN[] = { 0x56, 0x8b, 0xf1, 0x8b, 0x86, 0x88, 0x00, 0x00, 0x00, 0x85, 0xc0, 0x75,
+    0x14, 0x6a, 0x2c };
 
 void modern_set_addons(const ModernAddons* ops) { g_addons = ops; }
 
@@ -913,6 +923,7 @@ enum
     PAGE_Y = 48,
     MIN_W = 424,
     TITLE_H = 30, /* the title strip, and room under it */
+    SCROLL_BAR_W = 8, /* the game's scroll bar, at a window's right edge (WINDOW_SCROLL) */
     ROW_H = 22,
     TRACK_W = 150, /* a slider's, from 32 right of its row's controls' column */
     LIST_VALUE_X = 32 + TRACK_W + 12 + 36, /* a list's value's words, from its row's controls' column: after Max */
@@ -1039,7 +1050,10 @@ static int panel_sprite(const Page* p, int nrows)
     const uint32_t bg[4] = { WHITE, WHITE, 0x40404040u, 0x40404040u };
     part4(0, 0, p->w, h, p->w, h, 0, 0, bg, M_PANEL, NEWTEX);
     const uint32_t strip[4] = { 0x7f7f7f20u, 0x7f404010u, 0x7f7f7f20u, 0x7f404010u };
-    part4(0, 4, p->w, 20, 64, 8, 0, 0, strip, M_ITEM, GAUGE);
+    /* a full Addons page has the game's scroll bar down its right edge, title strip and all: the strip
+     * stops short of it, or it shows through the bar's track */
+    int strip_w = p == &PAGES[PAGE_ADDONS] && nrows == ADDON_VIS ? p->w - SCROLL_BAR_W : p->w;
+    part4(0, 4, strip_w, 20, 64, 8, 0, 0, strip, M_ITEM, GAUGE);
     words(8, 6, p->title, 0);
     for (int r = 0; r < nrows; ++r)
     {
@@ -1314,7 +1328,7 @@ static uint32_t addons_open(void)
     Page* p = &PAGES[PAGE_ADDONS];
     g_addon_n = g_addons->scan();
     int rows = g_addon_n < 1 ? 1 : g_addon_n > ADDON_VIS ? ADDON_VIS : g_addon_n;
-    g_addon_top = 0, g_addon_cursor = 0;
+    g_addon_top = 0, g_addon_cursor = 0, g_addon_bar = 0;
     p->nrows = rows, p->nitems = p->row_item[rows], p->h = TITLE_H + rows * ROW_H + 8;
     memcpy(GUEST_PTR(p->spare), GUEST_PTR(g_addon_str[rows]), 16);
     return g_addon_str[rows];
@@ -1350,8 +1364,8 @@ static int draw_text(uint32_t list, const char* s, int x, int y, int w)
     return at - x;
 }
 
-/* each frame: a row's addon's name, its kind (and New), the list's place in the title strip and
- * a scroll bar when it is longer than the page */
+/* each frame: a row's addon's name, its kind (and New), and when the list is longer than the page,
+ * its place in the title strip and on a scroll bar (the game's, else one drawn here) */
 static void addons_draw(const Page* p, uint32_t window)
 {
     uint32_t sheet = find_sheet(), list = sheet ? rd32(sheet) : 0;
@@ -1381,6 +1395,18 @@ static void addons_draw(const Page* p, uint32_t window)
         char where[32];
         SDL_snprintf(where, sizeof where, "%d-%d of %d", g_addon_top + 1, g_addon_top + p->nrows, g_addon_n);
         draw_text(list, where, ox + p->w - 14 - text_width(where), oy + 6, 200);
+        /* the game's scroll bar, as its Effects page has, set up once a window and kept at the list's place */
+        if (g_addon_bar != window && guest_is(WINDOW_SCROLL, WINDOW_SCROLL_KNOWN, sizeof WINDOW_SCROLL_KNOWN))
+        {
+            guest_thiscall(WINDOW_SCROLL, window, 2, (uint32_t[]){ (uint32_t)g_addon_n, (uint32_t)p->nrows });
+            g_addon_bar = rd32(window + 0x88) ? window : 0;
+        }
+        if (g_addon_bar == window)
+        {
+            wr32(rd32(window + 0x88) + 0x14, (uint32_t)g_addon_top);
+            g_addon_cursor = (int16_t)rd16(window + 0x4c);
+            return;
+        }
         int x = ox + p->w - 12, top = oy + TITLE_H, h = p->nrows * ROW_H - 6;
         int th = h * p->nrows / g_addon_n, max = g_addon_n - p->nrows;
         th = th < 8 ? 8 : th;
