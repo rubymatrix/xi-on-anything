@@ -58,7 +58,7 @@
     document.body.appendChild(el);
     const live = new Map(), done = [], hist = [];
     let total = 0, count = 0, hits = 0, hitBytes = 0, lastHit = -1e9;
-    const name = (u) => decodeURIComponent(u.replace(/^.*?\/(dat|app|dats)\//, '$1/'));
+    const name = (u) => decodeURIComponent(u.replace(/^.*?\/(dat|app|dats)\//, '$1/').replace(/\?.*$/, ''));
     const mb = (b) => (b / 1048576).toFixed(b < 10485760 ? 2 : 1);
     new BroadcastChannel('xi-dl').onmessage = ({ data: d }) => {
       const now = performance.now();

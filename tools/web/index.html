@@ -50,6 +50,7 @@
 // Development (the static test servers): &server=<ip>&user=..&pass=..&authport=..&dataport=..&viewport=..&enter=<s>
 const hash = new URLSearchParams(location.hash.slice(1));
 const logEl = document.getElementById('log'), statusEl = document.getElementById('status');
+new BroadcastChannel('xi-err').onmessage = (e) => log('thread crashed: ' + e.data);
 const lines = [];
 function log(text) {
   lines.push(text);
@@ -59,7 +60,7 @@ function log(text) {
 }
 if (hash.get('nolog')) document.body.classList.add('nolog');
 if (!crossOriginIsolated) statusEl.textContent = 'This page needs cross-origin isolation (open it from tools/webserve.py).';
-const args = ['--game', '/game', '--data-dir', '/xi-data', '--reg', '/app/ffxi.reg'];
+const args = ['--game', '/game', '--data-dir', '/xi-data', '--reg', '/app/ffxi.reg', '--reg-final', '/xi-data/settings.reg'];
 let password = '';
 for (const k of ['server', 'user', 'pass', 'authport', 'dataport', 'viewport'])
   if (hash.get(k)) args.push('--' + k, hash.get(k));
