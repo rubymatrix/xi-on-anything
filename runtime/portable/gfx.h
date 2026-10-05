@@ -97,7 +97,8 @@ typedef struct GfxVsKey
     uint8_t pixel;      /* the lighting per pixel rather than per vertex (the back end sets it: the
                          * scene effects' light setting); the vertex function passes the normal on */
     uint8_t shadow;     /* drawn again from the sun (the back end's shadow map): the position the
-                         * function makes goes through the matrix in buffer 5 */
+                         * function makes goes through the matrix in buffer 5; 2: captured for ray
+                         * tracing, that point streamed out in view space (the back ends' rt_capture) */
     uint8_t water;      /* the back end's water (GfxFsKey.water): the view-space position is passed on */
 } GfxVsKey;
 
@@ -294,6 +295,10 @@ int gfx_sun_shadows_shown(void);
  * center where round, or 0 for the game's own culling. A frame or two after the casters kept from
  * before were let go (a zone-in) and as the camera moves on, so what stands behind it casts. */
 float gfx_sun_prime(float* center);
+
+/* Whether the scene effects can trace rays here (the rt setting: the GPU's ray queries, and on
+ * Direct3D 12 the shaders built with dxc); the first call asks the device. */
+int gfx_rt_supported(void);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);

@@ -4240,6 +4240,8 @@ static int rt_init(void)
 #endif
 }
 
+int gfx_rt_supported(void) { return rt_init(); }
+
 /* a buffer of the GPU's own of at least need bytes in *r (made again, half as large again, when it is
  * smaller), in state; uav: the acceleration structures' and scratch's */
 static int rt_buffer(ID3D12Resource** r, uint64_t* size, uint64_t need, D3D12_RESOURCE_STATES state, int uav)

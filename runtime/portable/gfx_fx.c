@@ -114,7 +114,8 @@ static const struct
     { "gi", offsetof(GfxFxSettings, gi), 0.0f },
     { "gi_radius", offsetof(GfxFxSettings, gi_radius), 6.0f },
     { "gi_distance", offsetof(GfxFxSettings, gi_distance), 48.0f },
-    /* ray tracing (gfx_d3d12.c's alone for now): kept here so Config > Modern reads and saves it */
+    /* ray tracing: the bounce light and the occlusion traced through the frame's casters (rt_capture), where
+     * the GPU can; off unless asked for */
     { "rt", offsetof(GfxFxSettings, rt), 0.0f },
 };
 
@@ -194,7 +195,7 @@ void fx_config(void)
     if (dbg)
         g_fxs.debug = !strcmp(dbg, "ao") ? 1.0f : !strcmp(dbg, "fog") ? 2.0f : !strcmp(dbg, "bloom") ? 3.0f
             : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f
-            : !strcmp(dbg, "gi") ? 6.0f : !strcmp(dbg, "gi_split") ? 7.0f : (float)atof(dbg);
+            : !strcmp(dbg, "gi") ? 6.0f : !strcmp(dbg, "gi_split") ? 7.0f : !strcmp(dbg, "clay") ? 8.0f : (float)atof(dbg);
     for (size_t i = 0; i < FX_NSETTINGS; ++i)
         g_fx_start[i] = *(float*)((char*)&g_fxs + FX_SETTINGS[i].at);
     const char* file = getenv("FFXI_FX_FILE");

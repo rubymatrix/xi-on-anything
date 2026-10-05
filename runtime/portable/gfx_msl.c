@@ -399,12 +399,41 @@ void gfx_msl_vs_params(Sb* b, const GfxVsKey* k)
 {
     if (k->shadow && !b->glsl) /* GLSL: a global (binding 5) */
         sb_printf(b, ", constant float4x4& sm [[buffer(5)]]");
+    if (k->shadow == 2 && !b->glsl) /* captured for ray tracing: the corners out, which, the indices (GLSL: 6, 7, 19) */
+        sb_printf(b, ", device float4* rto [[buffer(6)]], constant uint4& rtc [[buffer(7)]], device const uchar* rti [[buffer(8)]]");
+}
+
+/* Captured for ray tracing (shadow 2: gfx_metal.m and gfx_vulkan.c rt_capture), the function runs once
+ * a corner of the draw's triangles, nothing drawn (rasterization off), a draw of points rather than the
+ * game's own: rtc.x the first corner it writes in rto, y its indices' size (0 none, 2, 4), z 1 for a
+ * strip (each second triangle's first two corners swapped, as D3D keeps a strip's facing), w the first
+ * vertex or index. Its vertex index from that, as the game's draw would have had it. */
+static void emit_rt_index(Sb* b)
+{
+    sb_printf(b, "  uint rt_t = %s / 3u, rt_k = %s - rt_t * 3u;\n", b->glsl ? "uint(gl_VertexIndex)" : "vid",
+        b->glsl ? "uint(gl_VertexIndex)" : "vid");
+    sb_printf(b, "  uint rt_s = rtc.w + (rtc.z != 0u ? rt_t + ((rt_t & 1u) != 0u && rt_k < 2u ? 1u - rt_k : rt_k) : rt_t * 3u + rt_k);\n");
+    if (b->glsl)
+        sb_printf(b, "  uint rt_i = rtc.y == 2u ? (rti[rt_s >> 1] >> ((rt_s & 1u) * 16u)) & 0xFFFFu : rtc.y == 4u ? rti[rt_s] : rt_s;\n");
+    else
+        sb_printf(b, "  uint rt_i = rtc.y == 2u ? uint(((device const ushort*)rti)[rt_s]) : rtc.y == 4u ? ((device const uint*)rti)[rt_s] : rt_s;\n");
+    sb_printf(b, "  int vi = int(rt_i) + u.vofs.x;\n");
 }
 
 void gfx_msl_vs_return(Sb* b, const GfxVsKey* k)
 {
     if (k->shadow) /* D3D's pixel-centre fixup undone (the map has pixels of its own), then on into the map */
         sb_printf(b, "  o.pos.x -= o.pos.w / u.vp.z;\n  o.pos.y += o.pos.w / u.vp.w;\n  o.pos = sm * o.pos;\n");
+    if (k->shadow == 2)
+    {
+        /* each corner two float4s: its point in this frame's view space; its first texture coordinates and
+         * its diffuse alpha (an alpha test's: the texture's alpha and the vertex's, as stage 0 combines them) */
+        sb_printf(b, "  uint rt_o = (rtc.x + %s) * 2u;\n  rto[rt_o] = float4(o.pos.xyz / o.pos.w, 1.0);\n"
+                     "  rto[rt_o + 1u] = float4(%s, o.d.a, 0.0);\n",
+            b->glsl ? "uint(gl_VertexIndex)" : "vid", k->ntex ? "o.t0.xy" : "0.0, 0.0");
+        sb_printf(b, b->glsl ? "  gl_Position = float4(0, 0, 0, 1);\n}\n" : "}\n");
+        return;
+    }
     if (b->glsl)
     {
         sb_printf(b, "  gl_Position = o.pos;\n  gl_PointSize = o.psize;\n");
@@ -419,14 +448,24 @@ static void emit_vs_signature(Sb* b, const GfxVsKey* k)
 {
     if (b->glsl)
     {
-        sb_printf(b, "void main() {\n  VOut o;\n  int vi = gl_VertexIndex + u.vofs.x;\n  o.psize = 1.0;\n");
+        sb_printf(b, "void main() {\n  VOut o;\n");
+        if (k->shadow == 2)
+            emit_rt_index(b);
+        else
+            sb_printf(b, "  int vi = gl_VertexIndex + u.vofs.x;\n");
+        sb_printf(b, "  o.psize = 1.0;\n");
         return;
     }
-    sb_printf(b, "vertex VOut vs_main(uint vid [[vertex_id]], constant U& u [[buffer(4)]]");
+    sb_printf(b, "vertex %s vs_main(uint vid [[vertex_id]], constant U& u [[buffer(4)]]", k->shadow == 2 ? "void" : "VOut");
     for (int s = 0; s < GFX_NSTREAMS; ++s)
         sb_printf(b, ", device const uchar* s%d [[buffer(%d)]]", s, s);
     gfx_msl_vs_params(b, k);
-    sb_printf(b, ") {\n  VOut o;\n  int vi = int(vid) + u.vofs.x;\n  o.psize = 1.0;\n");
+    sb_printf(b, ") {\n  VOut o;\n");
+    if (k->shadow == 2)
+        emit_rt_index(b);
+    else
+        sb_printf(b, "  int vi = int(vid) + u.vofs.x;\n");
+    sb_printf(b, "  o.psize = 1.0;\n");
 }
 
 /* the vertex function's start and every v# it reads (the fixed-function one and vs.1.x's) */
@@ -836,6 +875,10 @@ char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* 
         sb_printf(&b, "layout(std430, set = 0, binding = %d) readonly buffer SB%d { uint w[]; } s%d;\n", 1 + s, s, s);
     if (vk->shadow)
         sb_printf(&b, "layout(std140, set = 0, binding = 5) uniform SMB { mat4 sm; };\n");
+    if (vk->shadow == 2) /* (emit_rt_index) */
+        sb_printf(&b, "layout(std430, set = 0, binding = 6) writeonly buffer RTO { vec4 rto[]; };\n"
+                      "layout(std140, set = 0, binding = 7) uniform RTC { uvec4 rtc; };\n"
+                      "layout(std430, set = 0, binding = 19) readonly buffer RTI { uint rti[]; };\n");
     if (vk->prog)
     {
         if (!gfx_msl_vs1(&b, vk, vs_tokens))

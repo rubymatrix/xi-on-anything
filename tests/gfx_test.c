@@ -568,7 +568,8 @@ static void wall_and_floor(uint32_t color)
 }
 
 /* Occlusion darkens the wall where it meets the floor and leaves the open wall as it was: at each
- * quality (its taps a frame), by 20 levels or more in a single frame. */
+ * quality (its taps a frame), by 10 levels or more (of 140) in a single frame. The wall is mid grey: what is near
+ * white glows (fx_comp), and the occlusion leaves it. */
 static void test_scene_ao(int rh)
 {
     for (int q = 0; q < 3; ++q)
@@ -576,11 +577,11 @@ static void test_scene_ao(int rh)
         fx_only("ao", 0.8f);
         gfx_fx_set("ao_quality", (float)q);
         scene_begin(rh, 0xFF000000u);
-        wall_and_floor(0xFFFFFFFFu);
+        wall_and_floor(0xFF8C8C8Cu);
         scene_end(NULL, 0);
         uint32_t open = spx(64, 30, 0), corner = spx(64, 94, 0);
-        CHECK(open >= 245, "occlusion (%s, quality %d): open wall %u (want about 255)", rh ? "RH" : "LH", q, open);
-        CHECK(corner + 20 <= open, "occlusion (%s, quality %d): wall at the floor %u (want 20 darker than %u)", rh ? "RH" : "LH",
+        CHECK(open >= 130 && open <= 150, "occlusion (%s, quality %d): open wall %u (want about 140)", rh ? "RH" : "LH", q, open);
+        CHECK(corner + 10 <= open, "occlusion (%s, quality %d): wall at the floor %u (want 10 darker than %u)", rh ? "RH" : "LH",
             q, corner, open);
     }
     gfx_fx_set("ao_quality", 0.0f);
@@ -1054,6 +1055,62 @@ static void test_large_target_mips(void)
     gfx_tex_destroy(rt);
 }
 
+
+/* The bounce light (gi): a wall the sun lights throws light on the floor before it - the gather from its
+ * map, and traced (rt), where the GPU can trace rays (none where it cannot: then only the map's). The
+ * debug view (6) shows it alone, three times over. */
+static void test_scene_gi(void)
+{
+    const float behind[3] = { 0.3f, 0.6f, -1 };
+    for (int traced = 0; traced < 2; ++traced)
+    {
+        fx_only("sun", 1.0f);
+        gfx_fx_set("gi", 1.0f);
+        gfx_fx_set("rt", (float)traced);
+        gfx_fx_set("debug", 6.0f);
+        uint32_t near = 0;
+        for (int f = 0; f < 3; ++f) /* (the history settles) */
+        {
+            scene_begin(0, 0xFF000000u);
+            wall_and_floor(0xFFFFFFFFu);
+            scene_end(behind, 0);
+            near = spx(64, 100, 16);
+        }
+        CHECK(near >= 8, "bounce light (%s): the floor at the lit wall %u (want some)", traced ? "traced" : "map", near);
+    }
+    gfx_fx_set("gi", 0.0f), gfx_fx_set("rt", 0.0f), gfx_fx_set("debug", 0.0f);
+}
+
+/* Ray tracing's world (rt_capture) in its debug view (clay, 8): rays from the camera meet the floor and
+ * the post where they were drawn (grey, not red or blue), the sky where nothing was, and the post's
+ * shadow on the floor is traced. Only where the GPU traces rays (gfx_rt_supported). */
+static void test_scene_rt(void)
+{
+    if (!gfx_rt_supported())
+    {
+        printf("gfx_test: ray tracing not on this GPU: its tests skipped\n");
+        return;
+    }
+    const float beyond[3] = { 0, 0.5f, 1 };
+    float floor[4][3] = { { -8, -3, 30 }, { 8, -3, 30 }, { -8, -3, 0.6f }, { 8, -3, 0.6f } };
+    float post[4][3] = { { -1, 0, 10 }, { 1, 0, 10 }, { -1, -3, 10 }, { 1, -3, 10 } };
+    fx_only("sun", 1.0f);
+    gfx_fx_set("rt", 1.0f);
+    gfx_fx_set("debug", 8.0f);
+    scene_begin(1, 0xFF000000u);
+    scene_quad(floor, 0xFFFFFFFFu);
+    scene_quad(post, 0xFFFFFFFFu);
+    scene_end(beyond, 0);
+    uint32_t r = spx(100, 91, 16), g = spx(100, 91, 8), b = spx(100, 91, 0);
+    CHECK(r > 60 && abs((int)r - (int)b) < 12 && abs((int)r - (int)g) < 12, "clay: open floor %u %u %u (want grey where it was drawn)", r, g, b);
+    uint32_t shade = spx(64, 91, 0), post_c = spx(64, 70, 16), post_b = spx(64, 70, 0);
+    CHECK(shade + 40 <= b, "clay: floor in the post's traced shadow %u (want darker than %u)", shade, b);
+    CHECK(abs((int)post_c - (int)post_b) < 12 && post_c > 30, "clay: the post %u %u (want grey)", post_c, post_b);
+    uint32_t sky_r = spx(64, 4, 16), sky_b = spx(64, 4, 0);
+    CHECK(sky_b > sky_r + 30, "clay: the sky %u %u (want blue-grey: no ray met anything)", sky_r, sky_b);
+    gfx_fx_set("rt", 0.0f), gfx_fx_set("debug", 0.0f);
+}
+
 /* The water (GfxDraw.water, drawn after the scene is done): a half-clear blue plane 1 above a red
  * floor. As the game drew it, half and half; deep (clarity far under its depth) all blue; with an edge
  * fading in over far more than its depth, the floor shows through; the game's own alpha stays the
@@ -1158,6 +1215,8 @@ static void test_scene_effects(void)
     test_scene_sun_hard();
     test_scene_sun_sharp();
     test_scene_water();
+    test_scene_gi();
+    test_scene_rt();
     CHECK(gfx_failures() == 0, "scene effects: %u failures", gfx_failures());
     gfx_set_targets(g_rt, 0, 0, g_ds);
     test_scene_filter();

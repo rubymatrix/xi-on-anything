@@ -1093,8 +1093,11 @@ static id<MTLRenderPipelineState> build_pipeline(const PipeKey* k, const uint32_
     {
         MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
         id<MTLFunction> vf = [lib newFunctionWithName:@"vs_main"], ff = [lib newFunctionWithName:@"fs_main"];
-        if (k->lib.vs.shadow && !alpha_tested(&k->lib.fs)) /* depth alone: nothing for the fragments to do */
+        /* depth alone: nothing for the fragments to do (the bounce light's map is in colour: write_mask) */
+        if (k->lib.vs.shadow && !alpha_tested(&k->lib.fs) && !k->pipe.write_mask)
             [ff release], ff = nil;
+        if (k->lib.vs.shadow == 2) /* captured for ray tracing (rt_capture): the corners written, nothing drawn */
+            [ff release], ff = nil, pd.rasterizationEnabled = NO;
         pd.vertexFunction = vf;
         pd.fragmentFunction = ff;
         pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassUnspecified;
@@ -2472,6 +2475,342 @@ static const char FX_MSL[] =
     "  return c;\n"
     "}\n";
 
+/* Ray tracing's passes (rt_*: gfx_d3d12.c's, gfx_rt.hlsl, as Metal's inline intersection queries), built
+ * with FX_MSL ahead of them, which they share. The world (rt_capture): every caster's triangles in this
+ * frame's view space, the solid ones and then the alpha-tested (leaves, hair, grass), as two instances of
+ * one structure - mask 1 the solid, 2 the alpha-tested; each corner two float4s in tri, its point, and its
+ * first texture coordinates with its diffuse alpha. RtU: the solid triangles' count, the alpha tests'
+ * count (tab, each its first triangle; its texture in texs; its sampler's address mode | stage 0's alpha
+ * op << 2, its arguments << 8 and << 16; its test, D3DCMPFUNC << 8 | reference | the texture factor's
+ * alpha << 16), the alpha-tested instance's index (2: none). The passes' buffers: FxU at 0, the blur's step at 1, RtU at 2,
+ * tri 3, the smooth normals 4, tab 5, texs 6, the structure 7, the solid triangles' own 8 (rays that skip the
+ * leaves trace it alone: no instances to walk). */
+static const char RT_MSL[] =
+    "using namespace metal::raytracing;\n"
+    "struct RtU { uint4 rtp; };\n"
+    "struct RtTex { texture2d<float> t; };\n"
+    "typedef intersection_query<triangle_data, instancing> RtQ;\n"
+    /* the ray through pixel px from the camera (view space) */
+    "static float3 rt_view_dir(constant FxU& u, float2 px) { return normalize(view_pos(u, px, u.hand.x)); }\n"
+    "static float3 rt_corner(device const float4* tri, uint prim, uint k) { return tri[(prim * 3u + k) * 2u].xyz; }\n"
+    /* the triangle a ray hit: its face's normal, turned toward the ray's origin */
+    "static float3 rt_tri_normal(device const float4* tri, uint prim, float3 dir) {\n"
+    "  float3 a = rt_corner(tri, prim, 0), b = rt_corner(tri, prim, 1), c = rt_corner(tri, prim, 2);\n"
+    "  float3 n = cross(b - a, c - a);\n"
+    "  n = dot(n, n) > 1e-20 ? normalize(n) : -dir;\n"
+    "  return dot(n, dir) > 0.0 ? -n : n;\n"
+    "}\n"
+    /* the surface's own smooth normal where a ray hit it (rt_nresolve's, across the triangle by bary), on
+     * the side the ray came from (geo, the face's) */
+    "static float3 rt_smooth_normal(device const float4* nrm, uint prim, float2 bary, float3 geo) {\n"
+    "  float3 n = nrm[prim * 3u].xyz * (1.0 - bary.x - bary.y) + nrm[prim * 3u + 1u].xyz * bary.x + nrm[prim * 3u + 2u].xyz * bary.y;\n"
+    "  if (dot(n, n) < 1e-8) return geo;\n"
+    "  n = normalize(n);\n"
+    "  return dot(n, geo) < 0.0 ? -n : n;\n"
+    "}\n"
+    /* does an alpha-tested triangle (prim, of all of them) let a ray through where it meets it (bary)? Its
+     * caster found by its first triangle, its texture read at its corners' coordinates, tested as the draw
+     * tests it */
+    "static bool rt_alpha_holds(constant RtU& r, device const uint4* tab, device const float4* tri, device const RtTex* texs,\n"
+    "                           uint prim, float2 bary) {\n"
+    "  uint lo = 0, hi = r.rtp.y;\n"
+    "  while (hi - lo > 1u) { uint mid = (lo + hi) / 2u; if (tab[mid].x <= prim) lo = mid; else hi = mid; }\n"
+    "  uint4 e = tab[lo];\n"
+    "  float3 uv = tri[prim * 6u + 1u].xyz * (1.0 - bary.x - bary.y) + tri[prim * 6u + 3u].xyz * bary.x + tri[prim * 6u + 5u].xyz * bary.y;\n"
+    "  constexpr sampler sw(filter::linear, address::repeat), sc(filter::linear, address::clamp_to_edge),\n"
+    "    sm(filter::linear, address::mirrored_repeat);\n"
+    "  texture2d<float> t = texs[e.y].t;\n"
+    "  uint am = e.z & 3u;\n"
+    "  float ta = (am == 1u ? t.sample(sc, uv.xy, level(0)) : am == 2u ? t.sample(sm, uv.xy, level(0)) : t.sample(sw, uv.xy, level(0))).a;\n"
+    /* stage 0's alpha as the draw makes it: its op over its two arguments (D3DTA: the diffuse or current,
+     * the texture, the texture factor; the complement flag) */
+    "  float tf = float((e.w >> 16) & 255u) / 255.0, ar[2];\n"
+    "  for (int i = 0; i < 2; ++i) {\n"
+    "    uint x = (e.z >> (8 + 8 * i)) & 255u, w = x & 15u;\n"
+    "    float v = w == 2u ? ta : w == 3u ? tf : w <= 1u ? uv.z : 1.0;\n"
+    "    ar[i] = (x & 16u) != 0u ? 1.0 - v : v;\n"
+    "  }\n"
+    "  uint op = (e.z >> 2) & 63u;\n"
+    "  float a = op == 1u ? uv.z : op == 2u ? ar[0] : op == 3u ? ar[1] : op == 4u ? ar[0] * ar[1] : op == 5u ? ar[0] * ar[1] * 2.0 :\n"
+    "    op == 6u ? ar[0] * ar[1] * 4.0 : op == 7u ? ar[0] + ar[1] : ta;\n"
+    "  a = saturate(a) * 255.0;\n"
+    "  float ref = float(e.w & 255u);\n"
+    "  switch ((e.w >> 8) & 255u) {\n"
+    "  case 1: return false;\n"
+    "  case 2: return a < ref;\n"
+    "  case 3: return abs(a - ref) < 0.5;\n"
+    "  case 4: return a <= ref;\n"
+    "  case 5: return a > ref;\n"
+    "  case 6: return abs(a - ref) >= 0.5;\n"
+    "  case 7: return a >= ref;\n"
+    "  default: return true;\n"
+    "  }\n"
+    "}\n"
+    /* the nearest hit along a ray, t in [tmin, tmax]; prim the triangle (of all of them; -1 none), bary where */
+    "static float rt_trace(instance_acceleration_structure w, constant RtU& r, device const uint4* tab, device const float4* tri,\n"
+    "                      device const RtTex* texs, float3 o, float3 d, float tmin, float tmax, thread int& prim, thread float2& bary) {\n"
+    "  ray rr(o, d, tmin, tmax);\n"
+    "  intersection_params p;\n"
+    "  RtQ q;\n"
+    "  q.reset(rr, w, 0xFFu, p);\n"
+    "  while (q.next())\n"
+    "    if (q.get_candidate_intersection_type() == intersection_type::triangle &&\n"
+    "        rt_alpha_holds(r, tab, tri, texs, r.rtp.x + q.get_candidate_primitive_id(), q.get_candidate_triangle_barycentric_coord()))\n"
+    "      q.commit_triangle_intersection();\n"
+    "  prim = -1, bary = float2(0.0);\n"
+    "  if (q.get_committed_intersection_type() != intersection_type::triangle) return tmax;\n"
+    "  prim = int(q.get_committed_primitive_id() + (q.get_committed_instance_id() == r.rtp.z ? r.rtp.x : 0u));\n"
+    "  bary = q.get_committed_triangle_barycentric_coord();\n"
+    "  return q.get_committed_distance();\n"
+    "}\n"
+    /* the nearest hit among the solid triangles alone (gfx_rt.hlsl trace_solid: the bounce light's and the
+     * occlusion's rays pass the leaves and grass) */
+    "static float rt_trace_solid(primitive_acceleration_structure w, float3 o, float3 d, float tmin, float tmax, thread int& prim) {\n"
+    "  ray rr(o, d, tmin, tmax);\n"
+    "  intersector<triangle_data> is;\n"
+    "  is.assume_geometry_type(geometry_type::triangle);\n"
+    "  is.force_opacity(forced_opacity::opaque);\n"
+    "  intersection_result<triangle_data> h = is.intersect(rr, w);\n"
+    "  prim = -1;\n"
+    "  if (h.type != intersection_type::triangle) return tmax;\n"
+    "  prim = int(h.primitive_id);\n"
+    "  return h.distance;\n"
+    "}\n"
+    /* is anything between o + d * tmin and o + d * tmax? */
+    "static bool rt_blocked(instance_acceleration_structure w, constant RtU& r, device const uint4* tab, device const float4* tri,\n"
+    "                       device const RtTex* texs, float3 o, float3 d, float tmin, float tmax) {\n"
+    "  ray rr(o, d, tmin, tmax);\n"
+    "  intersection_params p;\n"
+    "  p.accept_any_intersection(true);\n"
+    "  RtQ q;\n"
+    "  q.reset(rr, w, 0xFFu, p);\n"
+    "  while (q.next())\n"
+    "    if (q.get_candidate_intersection_type() == intersection_type::triangle &&\n"
+    "        rt_alpha_holds(r, tab, tri, texs, r.rtp.x + q.get_candidate_primitive_id(), q.get_candidate_triangle_barycentric_coord()))\n"
+    "      q.commit_triangle_intersection();\n"
+    "  return q.get_committed_intersection_type() == intersection_type::triangle;\n"
+    "}\n"
+    "constant uchar RT_BAYER[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };\n"
+    /* a pixel's two numbers for ray i this frame (gfx_rt.hlsl pattern) */
+    "static float2 rt_pattern(constant FxU& u, float2 pos, int i) {\n"
+    "  int2 cell = int2(pos) & 3;\n"
+    "  float k = fract((float(RT_BAYER[cell.y * 4 + cell.x]) + 0.5) / 16.0 + u.hist.y + float(i) * 0.6180340);\n"
+    "  uint h = (uint(pos.x) * 73856093u) ^ (uint(pos.y) * 19349663u);\n"
+    "  float j = fract(float(h & 1023u) / 1024.0 + u.hist.y * 1.3247180 + float(i) * 0.7548777);\n"
+    "  return float2(k, j);\n"
+    "}\n"
+    "static void rt_basis(float3 N, thread float3& t, thread float3& s) {\n"
+    "  t = abs(N.y) < 0.99 ? normalize(cross(N, float3(0, 1, 0))) : normalize(cross(N, float3(1, 0, 0)));\n"
+    "  s = cross(N, t);\n"
+    "}\n"
+    /* a direction over the hemisphere round N, cosine-weighted */
+    "static float3 rt_hemi(float3 N, float a, float b) {\n"
+    "  float3 t, s;\n"
+    "  rt_basis(N, t, s);\n"
+    "  float r = sqrt(a), phi = 6.2831853 * b;\n"
+    "  return normalize(t * (r * cos(phi)) + s * (r * sin(phi)) + N * sqrt(max(1.0 - a, 0.0)));\n"
+    "}\n"
+    /* how much of the sun reaches p (gfx_rt.hlsl sun_seen) */
+    "static float rt_sun_seen(constant FxU& u, instance_acceleration_structure w, constant RtU& r, device const uint4* tab,\n"
+    "                         device const float4* tri, device const RtTex* texs, float3 p, float3 n, float3 g, float2 pos, int rays) {\n"
+    "  float nl = dot(n, u.sun.xyz);\n"
+    "  if (nl <= 0.0) return 0.0;\n"
+    "  float3 t, s;\n"
+    "  rt_basis(u.sun.xyz, t, s);\n"
+    "  float3 o = p + g * 0.02 + n * 0.03;\n"
+    "  float spread = 0.035, tmin = max(u.smap2.z, 0.05), lit = 0.0;\n"
+    "  for (int i = 0; i < rays; ++i) {\n"
+    "    float2 rn = rt_pattern(u, pos, i + 3);\n"
+    "    float rr = sqrt(rn.x) * spread, phi = 6.2831853 * rn.y;\n"
+    "    float3 d = normalize(u.sun.xyz + t * (rr * cos(phi)) + s * (rr * sin(phi)));\n"
+    "    lit += rt_blocked(w, r, tab, tri, texs, o, d, tmin, 500.0) ? 0.0 : 1.0;\n"
+    "  }\n"
+    "  return smoothstep(0.0, 0.2, nl) * lit / float(rays);\n"
+    "}\n"
+    /* debug=clay (8): the world as the rays see it (gfx_rt.hlsl rt_clay). The depth at texture 0. */
+    "fragment float4 rt_clay(FO in [[stage_in]], constant FxU& u [[buffer(0)]], constant RtU& r [[buffer(2)]],\n"
+    "                        device const float4* tri [[buffer(3)]], device const float4* nrm [[buffer(4)]],\n"
+    "                        device const uint4* tab [[buffer(5)]], device const RtTex* texs [[buffer(6)]],\n"
+    "                        instance_acceleration_structure world [[buffer(7)]], depth2d<float> dt [[texture(0)]]) {\n"
+    "  float2 px = floor(u.vp.xy + in.uv * u.vp.zw) + 0.5;\n"
+    "  float z = view_z(u, dt.read(uint2(px)));\n"
+    "  float drawn = z != 0.0 ? length(view_pos(u, px, z)) : 0.0;\n"
+    "  float3 d = rt_view_dir(u, px);\n"
+    "  int prim;\n"
+    "  float2 bary;\n"
+    "  float t = rt_trace(world, r, tab, tri, texs, float3(0.0), d, 0.05, 2000.0, prim, bary);\n"
+    "  if (prim < 0) return drawn > 0.0 ? float4(0.1, 0.2, 0.9, 1) : float4(0.35, 0.45, 0.6, 1);\n"
+    "  float3 g = rt_tri_normal(tri, uint(prim), d), n = rt_smooth_normal(nrm, uint(prim), bary, g), p = d * t;\n"
+    "  float sky = 0.25 + 0.15 * dot(n, u.up.xyz);\n"
+    "  float lit = sky + (u.sun.w > 0.0 ? 0.7 * saturate(dot(n, u.sun.xyz)) * rt_sun_seen(u, world, r, tab, tri, texs, p, n, g, in.pos.xy, 8) : 0.0);\n"
+    "  float3 c = float3(lit);\n"
+    "  if (drawn <= 0.0) c *= float3(1.0, 0.85, 0.2);\n"
+    "  else if (abs(t - drawn) > max(0.05 * drawn, 0.3)) c *= t < drawn ? float3(1.0, 0.3, 0.3) : float3(0.3, 0.4, 1.0);\n"
+    "  return float4(c, 1);\n"
+    "}\n"
+    /* the surface's normal at px (P its point) from the depth: each way the neighbour nearer in depth */
+    "static float3 rt_normal_at(constant FxU& u, depth2d<float> dt, float2 px, float3 P) {\n"
+    "  float3 r = pos_at(u, dt, px + float2(1, 0)) - P, l = P - pos_at(u, dt, px - float2(1, 0));\n"
+    "  float3 d = pos_at(u, dt, px + float2(0, 1)) - P, t = P - pos_at(u, dt, px - float2(0, 1));\n"
+    "  float3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  float3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  float3 nc = cross(dx, dy);\n"
+    "  float3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
+    "  return dot(N, P) > 0.0 ? -N : N;\n"
+    "}\n"
+    /* the light leaving the surface at Q (view space) toward a ray, as the frame or the sun saw it; 0
+     * unseen (gfx_rt.hlsl radiance) */
+    "static float3 rt_radiance(constant FxU& u, float3 Q, depth2d<float> dt, texture2d<float> src, texture2d<float> occ,\n"
+    "                          depth2d<float> gd, texture2d<float> gc, sampler ls) {\n"
+    "  float qd = Q.z * u.hand.x;\n"
+    "  if (qd > 0.05) {\n"
+    "    float2 ndc = float2(Q.x * u.proj.x + Q.z * u.proj.z, Q.y * u.proj.y + Q.z * u.proj.w) / qd;\n"
+    "    float2 q = u.vp.xy + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
+    "    if (all(q >= u.vp.xy) && all(q < u.vp.xy + u.vp.zw - 1.0)) {\n"
+    "      float sd = view_z(u, dt.read(uint2(q + 0.5))) * u.hand.x;\n"
+    "      if (sd > 0.0 && abs(sd - qd) < 0.03 * qd + 0.1) {\n"
+    "        float3 c = src.read(uint2(q + 0.5)).rgb;\n"
+    "        float sun = occ.sample(ls, (q - u.vp.xy) / u.vp.zw, level(0)).z;\n"
+    "        return c * mix(1.0, sun, u.smap.x);\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "  if (u.gi.x > 0.0) {\n"
+    "    float4 lc = u.gimat * float4(Q, 1.0);\n"
+    "    if (all(abs(lc.xy) < 0.98) && lc.z < 1.0) {\n"
+    "      float2 uv = float2(lc.x * 0.5 + 0.5, 0.5 - lc.y * 0.5);\n"
+    "      float z = gd.read(uint2(uv * float2(gd.get_width(), gd.get_height())));\n"
+    "      if (lc.z - z < 0.002) return gc.sample(ls, uv, level(0)).rgb;\n"
+    "    }\n"
+    "  }\n"
+    "  return float3(0.0);\n"
+    "}\n"
+    /* the bounce light traced (gfx_rt.hlsl rt_gi). Textures: the depth (0), the scene as drawn (1), the
+     * occlusion and sun (2: fx_ao's, the sun's map in z), the bounce map's depth (3) and colour (4) */
+    "fragment float4 rt_gi(FO in [[stage_in]], constant FxU& u [[buffer(0)]], constant RtU& r [[buffer(2)]],\n"
+    "                      device const float4* tri [[buffer(3)]], primitive_acceleration_structure solid [[buffer(8)]],\n"
+    "                      depth2d<float> dt [[texture(0)]], texture2d<float> src [[texture(1)]], texture2d<float> occ [[texture(2)]],\n"
+    "                      depth2d<float> gd [[texture(3)]], texture2d<float> gc [[texture(4)]], sampler ls [[sampler(0)]]) {\n"
+    "  float2 px = floor(u.vp.xy + in.uv * u.vp.zw) + 0.5;\n"
+    "  float3 P = pos_at(u, dt, px);\n"
+    "  float dist = P.z * u.hand.x;\n"
+    "  if (dist <= 0.0) return float4(0.0);\n"
+    "  float fade = 1.0 - smoothstep(0.7 * u.gip.w, u.gip.w, dist);\n"
+    "  if (fade <= 0.0) return float4(0.0, 0.0, 0.0, dist);\n"
+    "  float3 N = rt_normal_at(u, dt, px, P);\n"
+    "  float3 o = P + N * (0.02 + 0.002 * dist);\n"
+    "  int NS = max(int(u.gip.z), 1);\n"
+    "  float3 sum = float3(0.0);\n"
+    "  for (int i = 0; i < NS; ++i) {\n"
+    "    float2 rn = rt_pattern(u, in.pos.xy, i);\n"
+    "    float3 d = rt_hemi(N, rn.x, rn.y);\n"
+    "    int prim;\n"
+    "    float t = rt_trace_solid(solid, o, d, 0.0, u.gi.z, prim);\n"
+    "    if (prim < 0) continue;\n"
+    "    float3 Q = o + d * t, nq = rt_tri_normal(tri, uint(prim), d);\n"
+    "    sum += rt_radiance(u, Q + nq * 0.02, dt, src, occ, gd, gc, ls);\n"
+    "  }\n"
+    "  return float4(sum * (u.gi.x * fade / float(NS)), dist);\n"
+    "}\n"
+    /* the occlusion traced (gfx_rt.hlsl rt_ao): fx_ao's result (texture 0) with x traced; the depth at 1 */
+    "fragment float4 rt_ao(FO in [[stage_in]], constant FxU& u [[buffer(0)]], primitive_acceleration_structure solid [[buffer(8)]],\n"
+    "                      texture2d<float> ao [[texture(0)]], depth2d<float> dt [[texture(1)]]) {\n"
+    "  float4 c = ao.read(uint2(in.pos.xy));\n"
+    "  if (c.y <= 0.0) return c;\n"
+    "  float2 px = floor(u.vp.xy + in.uv * u.vp.zw) + 0.5;\n"
+    "  float3 P = pos_at(u, dt, px);\n"
+    "  float3 N = rt_normal_at(u, dt, px, P);\n"
+    "  float3 o = P + N * (0.01 + 0.002 * c.y);\n"
+    "  float R = u.ao.x, occl = 0.0;\n"
+    "  const int NS = 6;\n"
+    "  for (int i = 0; i < NS; ++i) {\n"
+    "    float2 rn = rt_pattern(u, in.pos.xy, i + 7);\n"
+    "    float3 d = rt_hemi(N, rn.x, rn.y);\n"
+    "    int prim;\n"
+    "    float t = rt_trace_solid(solid, o, d, 0.0, R, prim);\n"
+    "    if (prim >= 0) { float f = 1.0 - t / R; occl += f * f; }\n"
+    "  }\n"
+    "  c.x = saturate(1.0 - occl / float(NS));\n"
+    "  return c;\n"
+    "}\n"
+    /* the bounce light smoothed (gfx_rt.hlsl rt_giblur): a 5x5 at the step dir, by how near each distance is */
+    "fragment float4 rt_giblur(FO in [[stage_in]], constant int2& stp [[buffer(1)]], texture2d<float> g [[texture(0)]]) {\n"
+    "  int2 p = int2(in.pos.xy), hi = int2(g.get_width(), g.get_height()) - 1;\n"
+    "  float4 c = g.read(uint2(p));\n"
+    "  if (c.a <= 0.0) return c;\n"
+    "  const float K[3] = { 0.375, 0.25, 0.0625 };\n"
+    "  float3 s = float3(0.0);\n"
+    "  float sw = 0.0;\n"
+    "  for (int y = -2; y <= 2; ++y)\n"
+    "    for (int x = -2; x <= 2; ++x) {\n"
+    "      float4 t = g.read(uint2(clamp(p + int2(x, y) * stp, int2(0), hi)));\n"
+    "      float k = K[abs(x)] * K[abs(y)] * (t.a > 0.0 ? saturate(1.0 - abs(t.a - c.a) / (0.04 * c.a)) : 0.0);\n"
+    "      s += t.rgb * k, sw += k;\n"
+    "    }\n"
+    "  return float4(sw > 0.0 ? s / sw : c.rgb, c.a);\n"
+    "}\n"
+    /* the world's smooth normals (gfx_rt.hlsl rt_nclear, rt_nsum, rt_nresolve): the corners that share a
+     * place (to 1/256 of a unit) found through a hash table, each place summing its faces' normals (in
+     * 1/4096ths), each corner taking its place's average unless it turns more than 60 degrees from its own
+     * face. NC: the triangles' count, the table's mask (its slots less one), the corners' count. Buffers:
+     * NC 0, the table 1 (four words a slot: its tag, the sum), the triangles 2, the normals 3. */
+    "struct NC { uint tris, mask, verts, pad; };\n"
+    "static uint3 rt_key(float3 p) { return uint3(int3(floor(p * 256.0 + 0.5))); }\n"
+    "static uint rt_hash(uint3 k) { return (k.x * 73856093u) ^ (k.y * 19349663u) ^ (k.z * 83492791u); }\n"
+    "static uint rt_tag(uint3 k) { return ((k.x * 2654435761u) ^ (k.y * 2246822519u) ^ (k.z * 3266489917u)) | 1u; }\n"
+    "static uint rt_slot(constant NC& n, device atomic_uint* table, float3 p, bool make) {\n"
+    "  uint3 k = rt_key(p);\n"
+    "  uint h = rt_hash(k) & n.mask, tag = rt_tag(k);\n"
+    "  for (uint i = 0; i < 64u; ++i) {\n"
+    "    uint slot = (h + i) & n.mask, was = 0;\n"
+    "    if (make) {\n"
+    "      while (!atomic_compare_exchange_weak_explicit(&table[slot * 4u], &was, tag, memory_order_relaxed, memory_order_relaxed) &&\n"
+    "             was == 0u) {}\n"
+    "    } else\n"
+    "      was = atomic_load_explicit(&table[slot * 4u], memory_order_relaxed);\n"
+    "    if (was == tag || (make && was == 0u)) return slot;\n"
+    "    if (!make && was == 0u) break;\n"
+    "  }\n"
+    "  return n.mask + 1u;\n"
+    "}\n"
+    "kernel void rt_nclear(uint id [[thread_position_in_grid]], constant NC& n [[buffer(0)]], device atomic_uint* table [[buffer(1)]]) {\n"
+    "  if (id > n.mask) return;\n"
+    "  for (uint k = 0; k < 4u; ++k) atomic_store_explicit(&table[id * 4u + k], 0u, memory_order_relaxed);\n"
+    "}\n"
+    "kernel void rt_nsum(uint id [[thread_position_in_grid]], constant NC& n [[buffer(0)]], device atomic_uint* table [[buffer(1)]],\n"
+    "                    device const float4* tri [[buffer(2)]]) {\n"
+    "  if (id >= n.tris) return;\n"
+    "  float3 v[3] = { rt_corner(tri, id, 0), rt_corner(tri, id, 1), rt_corner(tri, id, 2) };\n"
+    "  float3 f = cross(v[1] - v[0], v[2] - v[0]);\n"
+    "  if (!(dot(f, f) > 1e-14)) return;\n"
+    "  int3 q = int3(normalize(f) * 4096.0);\n"
+    "  for (int k = 0; k < 3; ++k) {\n"
+    "    uint slot = rt_slot(n, table, v[k], true);\n"
+    "    if (slot > n.mask) continue;\n"
+    "    atomic_fetch_add_explicit(&table[slot * 4u + 1u], uint(q.x), memory_order_relaxed);\n"
+    "    atomic_fetch_add_explicit(&table[slot * 4u + 2u], uint(q.y), memory_order_relaxed);\n"
+    "    atomic_fetch_add_explicit(&table[slot * 4u + 3u], uint(q.z), memory_order_relaxed);\n"
+    "  }\n"
+    "}\n"
+    "kernel void rt_nresolve(uint id [[thread_position_in_grid]], constant NC& n [[buffer(0)]], device atomic_uint* table [[buffer(1)]],\n"
+    "                        device const float4* tri [[buffer(2)]], device float4* nrm [[buffer(3)]]) {\n"
+    "  if (id >= n.verts) return;\n"
+    "  uint t0 = id - id % 3u;\n"
+    "  float3 a = tri[t0 * 2u].xyz, b = tri[(t0 + 1u) * 2u].xyz, c = tri[(t0 + 2u) * 2u].xyz;\n"
+    "  float3 f = cross(b - a, c - a);\n"
+    "  if (!(dot(f, f) > 1e-14)) { nrm[id] = float4(0.0); return; }\n"
+    "  f = normalize(f);\n"
+    "  float3 nn = f;\n"
+    "  uint slot = rt_slot(n, table, tri[id * 2u].xyz, false);\n"
+    "  if (slot <= n.mask) {\n"
+    "    float3 sum = float3(int3(int(atomic_load_explicit(&table[slot * 4u + 1u], memory_order_relaxed)),\n"
+    "                             int(atomic_load_explicit(&table[slot * 4u + 2u], memory_order_relaxed)),\n"
+    "                             int(atomic_load_explicit(&table[slot * 4u + 3u], memory_order_relaxed))));\n"
+    "    if (dot(sum, sum) > 1.0) { sum = normalize(sum); nn = dot(sum, f) > 0.5 ? sum : f; }\n"
+    "  }\n"
+    "  nrm[id] = float4(nn, 0.0);\n"
+    "}\n";
+
 
 static struct
 {
@@ -2482,7 +2821,7 @@ static struct
     /* the bounce light: the casters near the camera as the sun sees them, depth and colour (with three
      * levels below); the gather at half the occlusion's size; after the temporal pass, this frame's and
      * the one before */
-    id<MTLTexture> gimap, gicol, gi0, gih[2];
+    id<MTLTexture> gimap, gicol, gi0, gi1, gih[2]; /* (gi1: the traced bounce light's smoothing, rt_giblur) */
     int gih_at;
     uint64_t gih_serial, prev_serial; /* the frames the bounce's history and the camera (prev_view) were kept */
     MTLPixelFormat comp_fmt, aa_fmt;
@@ -3448,6 +3787,432 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     return drawn != 0;
 }
 
+/* --- ray tracing (rt) -------------------------------------------------------------------------------------------
+ * The world for rays (gfx_d3d12.c's, which says more), made from the frame's casters as the sun's maps
+ * are: each drawn once more through its own vertex function (the capture key, GfxVsKey.shadow 2: the
+ * function runs once a corner of its triangles, rasterization off, and writes the corner's point in this
+ * frame's view space into one buffer, gfx_msl.c emit_rt_index), one structure built over each of the
+ * solid triangles and the alpha-tested ones, and one over both on top, every frame. The casters out of
+ * view come from the sun's cache, through the camera they were drawn with. Rays are traced inline
+ * (intersection queries) from the scene effects' passes (RT_MSL). Where the GPU cannot, or before macOS
+ * 13 (the textures' resource IDs), none are. */
+#define RT_REACH 150.0f /* the cache's casters further than this from the camera are left out */
+
+static struct
+{
+    int tried, ok;
+    int hw; /* the GPU traces rays in hardware (Apple's M3 and A17 on): else it does in its shaders, some four times slower */
+    id<MTLLibrary> lib;
+    id<MTLRenderPipelineState> gi, ao, giblur, clay;
+    MTLPixelFormat clay_fmt;
+    id<MTLComputePipelineState> nclear, nsum, nresolve;
+    id<MTLBuffer> tri, nrm, table, scratch; /* the corners, their smooth normals, the table that finds them */
+    id<MTLAccelerationStructure> blas[2], tlas; /* (blas[1]: the alpha-tested) */
+    id<MTLTexture>* texs;                       /* the alpha tests' textures this frame (their table's) */
+    uint32_t ntexs, texs_cap;
+    id<MTLBuffer> tab, texbuf; /* this frame's alpha tests' table and their textures' IDs (the ring's) */
+    NSUInteger tab_off, texbuf_off;
+    uint32_t rtp[4]; /* RT_MSL RtU */
+    uint32_t verts;
+    /* the profile: casters captured, from the cache, skipped (no pipeline yet), triangles */
+    uint32_t st_live, st_cached, st_skipped, st_frames;
+    uint64_t st_tris;
+} g_ray;
+
+static id<MTLRenderPipelineState> rt_fx_pipeline(NSString* frag, MTLPixelFormat fmt);
+
+static int rt_init(void)
+{
+    if (g_ray.tried)
+        return g_ray.ok;
+    g_ray.tried = 1;
+    if (@available(macOS 13.0, *))
+    {
+        if (!g_dev.supportsRaytracing || ![g_dev supportsFamily:MTLGPUFamilyApple7] && ![g_dev supportsFamily:MTLGPUFamilyMac2])
+        {
+            fprintf(stderr, "[recomp] gfx: ray tracing: not on this GPU\n");
+            return 0;
+        }
+    }
+    else
+    {
+        fprintf(stderr, "[recomp] gfx: ray tracing: needs macOS 13\n");
+        return 0;
+    }
+    size_t a = strlen(FX_MSL), b = strlen(RT_MSL);
+    char* src = (char*)malloc(a + b + 1);
+    memcpy(src, FX_MSL, a), memcpy(src + a, RT_MSL, b + 1);
+    g_ray.lib = compile(src);
+    free(src);
+    if (!g_ray.lib)
+        return 0;
+    g_ray.gi = rt_fx_pipeline(@"rt_gi", MTLPixelFormatRGBA16Float);
+    g_ray.ao = rt_fx_pipeline(@"rt_ao", MTLPixelFormatRGBA16Float);
+    g_ray.giblur = rt_fx_pipeline(@"rt_giblur", MTLPixelFormatRGBA16Float);
+    id<MTLComputePipelineState>* cs[3] = { &g_ray.nclear, &g_ray.nsum, &g_ray.nresolve };
+    NSString* names[3] = { @"rt_nclear", @"rt_nsum", @"rt_nresolve" };
+    g_ray.ok = g_ray.gi && g_ray.ao && g_ray.giblur;
+    for (int i = 0; i < 3; ++i)
+    {
+        id<MTLFunction> f = [g_ray.lib newFunctionWithName:names[i]];
+        NSError* err = nil;
+        *cs[i] = f ? [g_dev newComputePipelineStateWithFunction:f error:&err] : nil;
+        [f release];
+        g_ray.ok &= *cs[i] != nil;
+    }
+    if (@available(macOS 14.0, *))
+        g_ray.hw = [g_dev supportsFamily:MTLGPUFamilyApple9];
+    fprintf(stderr, !g_ray.ok ? "[recomp] gfx: ray tracing: its pipelines failed\n"
+        : g_ray.hw ? "[recomp] gfx: ray tracing ready\n"
+        : "[recomp] gfx: ray tracing ready (no ray tracing hardware: traced at half the occlusion's resolution)\n");
+    return g_ray.ok;
+}
+
+int gfx_rt_supported(void) { return rt_init(); }
+
+/* one of RT_MSL's passes into fmt */
+static id<MTLRenderPipelineState> rt_fx_pipeline(NSString* frag, MTLPixelFormat fmt)
+{
+    id<MTLLibrary> keep = g_fx.lib;
+    g_fx.lib = g_ray.lib;
+    id<MTLRenderPipelineState> p = fx_pipeline(frag, fmt);
+    g_fx.lib = keep;
+    return p;
+}
+
+/* a private buffer of at least need bytes in *b (made again, half as large again, when smaller) */
+static int rt_buffer(id<MTLBuffer>* b, NSUInteger need)
+{
+    if (*b && (*b).length >= need)
+        return 1;
+    [*b release];
+    need = (need + need / 2 + 65535) & ~(NSUInteger)65535;
+    *b = [g_dev newBufferWithLength:need options:MTLResourceStorageModePrivate];
+    if (!*b)
+        fprintf(stderr, "[recomp] gfx: ray tracing: a buffer of %lu bytes failed\n", (unsigned long)need);
+    return *b != nil;
+}
+
+static int rt_structure(id<MTLAccelerationStructure>* s, NSUInteger need)
+{
+    if (*s && (*s).size >= need)
+        return 1;
+    [*s release];
+    *s = [g_dev newAccelerationStructureWithSize:need + need / 2];
+    return *s != nil;
+}
+
+/* one caster to capture: what it draws, through which matrix (clip space to this frame's view space) */
+typedef struct RtItem
+{
+    const Caster* c;
+    float m[16];
+    uint32_t tris;
+    uint8_t alpha; /* traced through its alpha test (rt_alpha) */
+} RtItem;
+
+/* traced through its alpha test: the zone's and its placed objects' (leaves, grass) whose vertex function
+ * gives texture coordinates and whose first stage's texture is there (gfx_d3d12.c rt_alpha) */
+static int rt_alpha(const Caster* c)
+{
+    return (c->fixed || c->keep) && alpha_tested(&c->lib.fs) && c->lib.vs.ntex >= 1 && c->tex[0] &&
+        c->tex[0].textureType == MTLTextureType2D;
+}
+
+static uint32_t rt_tris(const Caster* c)
+{
+    if (c->prim == MTLPrimitiveTypeTriangle)
+        return c->n / 3;
+    if (c->prim == MTLPrimitiveTypeTriangleStrip)
+        return c->n >= 3 ? c->n - 2 : 0;
+    return 0;
+}
+
+static id<MTLRenderPipelineState> rt_pipeline(const Caster* c, int alpha)
+{
+    PipeKey pk;
+    memset(&pk, 0, sizeof pk);
+    pk.lib = c->lib;
+    GfxVsKey* vk = &pk.lib.vs;
+    vk->shadow = 2, vk->pixel = 0, vk->water = 0;
+    /* the position alone, as the sun's depth maps draw it - and an alpha test's texture coordinates and
+     * diffuse alpha (its colour sources kept, lit by none of the lights: the alpha is the material's) */
+    vk->normalize = vk->localviewer = vk->specular = 0;
+    vk->nlights = 0, memset(vk->light_type, 0, sizeof vk->light_type);
+    vk->fog_vertex = vk->range_fog = 0, vk->flat = 0;
+    if (!alpha)
+    {
+        vk->lighting = 0, vk->src_diffuse = vk->src_specular = vk->src_ambient = vk->src_emissive = 0;
+        vk->ntex = 0, memset(vk->tci, 0, sizeof vk->tci), memset(vk->ttf, 0, sizeof vk->ttf);
+    }
+    memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
+    return pipeline_for(&pk, c->vs, c->ps);
+}
+
+/* The world for this frame's rays (invP the projection's inverse, view the camera, cam where it is): 1
+ * when it was made */
+static int rt_capture(const float* invP, const float* view, const float* cam)
+{
+    static RtItem* items;
+    static uint32_t cap;
+    uint32_t n = 0, total = g_ncasters + g_ncache;
+    if (!rt_init() || !total)
+        return 0;
+    if (cap < total)
+        cap = total + total / 2, items = (RtItem*)realloc(items, cap * sizeof *items);
+    uint64_t verts = 0;
+    for (uint32_t i = 0; i < total; ++i)
+    {
+        RtItem* it = &items[n];
+        if (i < g_ncasters)
+        {
+            it->c = &g_casters[i];
+            memcpy(it->m, invP, 64);
+        }
+        else
+        {
+            Cached* ce = &g_cache[i - g_ncasters];
+            if (ce->dead || cached_expired(ce) || !ce->c.n || ce->seen == g_serial)
+                continue;
+            if (ce->c.has_pos)
+            {
+                float dx = ce->pos[0] - cam[0], dy = ce->pos[1] - cam[1], dz = ce->pos[2] - cam[2];
+                if (dx * dx + dy * dy + dz * dz > RT_REACH * RT_REACH)
+                    continue;
+            }
+            it->c = &ce->c;
+            gfx_mat_mul(it->m, ce->clip_world, view);
+        }
+        if (!it->c->n || !(it->tris = rt_tris(it->c)))
+            continue;
+        it->alpha = (uint8_t)rt_alpha(it->c);
+        if (!rt_pipeline(it->c, it->alpha))
+        {
+            g_ray.st_skipped++;
+            continue;
+        }
+        verts += (uint64_t)it->tris * 3;
+        n++;
+    }
+    if (!n || verts > (1u << 26))
+        return 0;
+    /* the solid first, then the alpha-tested: the two structures */
+    {
+        static RtItem* tmp;
+        static uint32_t tcap;
+        if (tcap < n)
+            tcap = cap, tmp = (RtItem*)realloc(tmp, tcap * sizeof *tmp);
+        uint32_t k = 0;
+        for (int pass = 0; pass < 2; ++pass)
+            for (uint32_t i = 0; i < n; ++i)
+                if (items[i].alpha == pass)
+                    tmp[k++] = items[i];
+        memcpy(items, tmp, n * sizeof *items);
+    }
+    if (!rt_buffer(&g_ray.tri, (NSUInteger)verts * 32))
+        return 0;
+    /* the capture: a pass with nothing to draw into, each caster's corners written by its function */
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.renderTargetWidth = 1, rp.renderTargetHeight = 1, rp.defaultRasterSampleCount = 1;
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    [e setVertexBuffer:g_ray.tri offset:0 atIndex:6];
+    uint64_t vsolid = 0, valpha = 0;
+    uint32_t first = 0, live_m = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const RtItem* it = &items[i];
+        const Caster* cs = it->c;
+        [e setRenderPipelineState:rt_pipeline(cs, it->alpha)];
+        if (it->c >= g_casters && it->c < g_casters + g_ncasters)
+        {
+            if (!live_m)
+                [e setVertexBytes:it->m length:64 atIndex:5], live_m = 1;
+        }
+        else
+            [e setVertexBytes:it->m length:64 atIndex:5], live_m = 0;
+        for (int st = 0; st < GFX_NSTREAMS; ++st)
+            [e setVertexBuffer:cs->vb[st] offset:cs->voff[st] atIndex:(NSUInteger)st];
+        [e setVertexBuffer:cs->ub offset:cs->uoff atIndex:4];
+        uint32_t rtc[4] = { first, cs->itype, cs->prim == MTLPrimitiveTypeTriangleStrip, cs->itype ? 0 : cs->vstart };
+        [e setVertexBytes:rtc length:16 atIndex:7];
+        [e setVertexBuffer:cs->itype ? cs->ib : g_dummy offset:cs->itype ? cs->ioff : 0 atIndex:8];
+        [e drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:it->tris * 3];
+        first += it->tris * 3;
+        *(it->alpha ? &valpha : &vsolid) += (uint64_t)it->tris * 3;
+        if (cs >= g_casters && cs < g_casters + g_ncasters)
+            g_ray.st_live++;
+        else
+            g_ray.st_cached++;
+    }
+    [e endEncoding];
+    if (!vsolid) /* (the passes' rays that skip the leaves trace the solid ones' structure) */
+        return 0;
+    /* the alpha tests' table: each one's first triangle, its texture (its index in texs), its sampler's
+     * address mode (0 wrap, 1 clamp, 2 mirror), its test */
+    uint32_t nalpha = 0;
+    for (uint32_t i = 0; i < n; ++i)
+        nalpha += items[i].alpha;
+    g_ray.ntexs = 0, g_ray.tab = g_ray.texbuf = g_dummy, g_ray.tab_off = g_ray.texbuf_off = 0;
+    if (nalpha)
+    {
+        uint32_t* t = (uint32_t*)ring((size_t)nalpha * 16, 16, &g_ray.tab, &g_ray.tab_off);
+        uint64_t* ids = (uint64_t*)ring((size_t)nalpha * 8, 16, &g_ray.texbuf, &g_ray.texbuf_off);
+        if (g_ray.texs_cap < nalpha)
+            g_ray.texs_cap = nalpha + nalpha / 2, g_ray.texs = (id<MTLTexture>*)realloc(g_ray.texs, g_ray.texs_cap * sizeof(id));
+        uint32_t at = (uint32_t)(vsolid / 3);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            const RtItem* it = &items[i];
+            if (!it->alpha)
+                continue;
+            const Caster* c = it->c;
+            const GfxU* gu = (const GfxU*)((const uint8_t*)[c->ub contents] + c->uoff);
+            float ref = c->ub.storageMode == MTLStorageModeShared ? gu->params[1] : 128.0f;
+            uint8_t au = c->samp[0].addr_u; /* D3DTADDRESS: 1 wrap, 2 mirror, 3 clamp, 4 border, 5 mirror once */
+            uint32_t am = au == 3 || au == 4 ? 1 : au == 2 || au == 5 ? 2 : 0;
+            const GfxStage* st = &c->lib.fs.st[0];
+            if (!c->lib.fs.prog && c->lib.fs.nstages) /* (a pixel shader's alpha: the texture's alone) */
+                am |= (uint32_t)(st->aop & 63) << 2 | (uint32_t)st->aa1 << 8 | (uint32_t)st->aa2 << 16;
+            float tfa = c->ub.storageMode == MTLStorageModeShared ? gu->tfactor[3] : 1.0f;
+            t[0] = at, t[1] = g_ray.ntexs, t[2] = am;
+            t[3] = (uint32_t)c->lib.fs.alpha_func << 8 | (uint32_t)fminf(fmaxf(ref, 0.0f), 255.0f) |
+                (uint32_t)(fminf(fmaxf(tfa, 0.0f), 1.0f) * 255.0f + 0.5f) << 16;
+            if (@available(macOS 13.0, *))
+                ids[g_ray.ntexs] = c->tex[0].gpuResourceID._impl;
+            g_ray.texs[g_ray.ntexs++] = c->tex[0];
+            t += 4, at += it->tris;
+        }
+    }
+    /* a structure over the solid triangles and one over the alpha-tested, and the one over both: two
+     * instances, masks 1 and 2 (the bounce light's and occlusion's rays, mask 1, skip the leaves whole) */
+    MTLPrimitiveAccelerationStructureDescriptor* pd[2] = { nil, nil };
+    MTLAccelerationStructureSizes sz[2];
+    NSUInteger scratch = 0, soff[2] = { 0, 0 };
+    for (int k = 0; k < 2; ++k)
+    {
+        uint64_t from = k ? vsolid : 0, count = k ? valpha : vsolid;
+        if (!count)
+            continue;
+        MTLAccelerationStructureTriangleGeometryDescriptor* g = [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+        g.vertexBuffer = g_ray.tri, g.vertexBufferOffset = (NSUInteger)from * 32, g.vertexStride = 32;
+        g.triangleCount = (NSUInteger)(count / 3);
+        g.opaque = k == 0;
+        pd[k] = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+        pd[k].geometryDescriptors = @[ g ];
+        pd[k].usage = MTLAccelerationStructureUsagePreferFastBuild; /* (built for trace speed it cost more than it saved) */
+        sz[k] = [g_dev accelerationStructureSizesWithDescriptor:pd[k]];
+        if (!rt_structure(&g_ray.blas[k], sz[k].accelerationStructureSize))
+            return 0;
+        soff[k] = scratch, scratch += (sz[k].buildScratchBufferSize + 255) & ~(NSUInteger)255;
+    }
+    /* the instances: the solid (mask 1), then the alpha-tested (mask 2), whose index RT_MSL takes as theirs */
+    MTLAccelerationStructureInstanceDescriptor* inst;
+    id<MTLBuffer> ibuf;
+    NSUInteger ioff;
+    inst = (MTLAccelerationStructureInstanceDescriptor*)ring(2 * sizeof *inst, 16, &ibuf, &ioff);
+    memset(inst, 0, 2 * sizeof *inst);
+    NSMutableArray* used = [NSMutableArray arrayWithCapacity:2];
+    uint32_t ninst = 0;
+    g_ray.rtp[2] = 2;
+    for (int k = 0; k < 2; ++k)
+        if (pd[k])
+        {
+            MTLAccelerationStructureInstanceDescriptor* d = &inst[ninst];
+            d->transformationMatrix.columns[0] = (MTLPackedFloat3){ { { 1, 0, 0 } } };
+            d->transformationMatrix.columns[1] = (MTLPackedFloat3){ { { 0, 1, 0 } } };
+            d->transformationMatrix.columns[2] = (MTLPackedFloat3){ { { 0, 0, 1 } } };
+            d->options = k ? MTLAccelerationStructureInstanceOptionNonOpaque : MTLAccelerationStructureInstanceOptionOpaque;
+            d->options |= MTLAccelerationStructureInstanceOptionDisableTriangleCulling;
+            d->mask = k ? 2 : 1;
+            d->accelerationStructureIndex = ninst;
+            if (k)
+                g_ray.rtp[2] = ninst;
+            [used addObject:g_ray.blas[k]];
+            ninst++;
+        }
+    MTLInstanceAccelerationStructureDescriptor* td = [MTLInstanceAccelerationStructureDescriptor descriptor];
+    td.instanceDescriptorBuffer = ibuf, td.instanceDescriptorBufferOffset = ioff;
+    td.instanceCount = ninst, td.instancedAccelerationStructures = used;
+    td.usage = MTLAccelerationStructureUsagePreferFastBuild;
+    MTLAccelerationStructureSizes tsz = [g_dev accelerationStructureSizesWithDescriptor:td];
+    if (!rt_structure(&g_ray.tlas, tsz.accelerationStructureSize))
+        return 0;
+    NSUInteger tscratch = scratch;
+    scratch += tsz.buildScratchBufferSize;
+    if (!rt_buffer(&g_ray.scratch, scratch))
+        return 0;
+    id<MTLAccelerationStructureCommandEncoder> ae = [cmd() accelerationStructureCommandEncoder];
+    for (int k = 0; k < 2; ++k)
+        if (pd[k])
+            [ae buildAccelerationStructure:g_ray.blas[k] descriptor:pd[k] scratchBuffer:g_ray.scratch scratchBufferOffset:soff[k]];
+    [ae endEncoding];
+    ae = [cmd() accelerationStructureCommandEncoder]; /* (after the two it stands on) */
+    [ae buildAccelerationStructure:g_ray.tlas descriptor:td scratchBuffer:g_ray.scratch scratchBufferOffset:tscratch];
+    [ae endEncoding];
+    /* the corners' smooth normals (RT_MSL rt_nclear, rt_nsum, rt_nresolve) */
+    uint32_t slots = 1024;
+    while (slots < verts * 2u && slots < (1u << 26))
+        slots *= 2;
+    if (!rt_buffer(&g_ray.nrm, (NSUInteger)verts * 16) || !rt_buffer(&g_ray.table, (NSUInteger)slots * 16))
+        return 0;
+    uint32_t nc[4] = { (uint32_t)(verts / 3), slots - 1, (uint32_t)verts, 0 };
+    id<MTLComputeCommandEncoder> ce = [cmd() computeCommandEncoder];
+    [ce setBytes:nc length:16 atIndex:0];
+    [ce setBuffer:g_ray.table offset:0 atIndex:1];
+    [ce setBuffer:g_ray.tri offset:0 atIndex:2];
+    [ce setBuffer:g_ray.nrm offset:0 atIndex:3];
+    id<MTLComputePipelineState> passes[3] = { g_ray.nclear, g_ray.nsum, g_ray.nresolve };
+    uint32_t counts[3] = { slots, (uint32_t)(verts / 3), (uint32_t)verts };
+    for (int i = 0; i < 3; ++i)
+    {
+        [ce setComputePipelineState:passes[i]];
+        [ce dispatchThreads:MTLSizeMake(counts[i], 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
+    [ce endEncoding];
+    g_ray.rtp[0] = (uint32_t)(vsolid / 3), g_ray.rtp[1] = nalpha, g_ray.rtp[3] = 0;
+    g_ray.verts = (uint32_t)verts;
+    g_ray.st_tris += verts / 3, g_ray.st_frames++;
+    return 1;
+}
+
+/* one of ray tracing's passes (fx_pass, with the world bound: RT_MSL's buffers 2 to 7) */
+static void rt_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipelineState> p, MTLViewport vp, const FxU* u,
+    id<MTLTexture> const* tex, int n, const int32_t* dir)
+{
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = target;
+    rp.colorAttachments[0].loadAction = load;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    ts_mark(rp, TS_FX0, g_ts_fx_end);
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:p];
+    [e setViewport:vp];
+    [e setFragmentBytes:u length:sizeof *u atIndex:0];
+    if (dir)
+        [e setFragmentBytes:dir length:8 atIndex:1];
+    [e setFragmentBytes:g_ray.rtp length:16 atIndex:2];
+    [e setFragmentBuffer:g_ray.tri offset:0 atIndex:3];
+    [e setFragmentBuffer:g_ray.nrm offset:0 atIndex:4];
+    [e setFragmentBuffer:g_ray.tab offset:g_ray.tab_off atIndex:5];
+    [e setFragmentBuffer:g_ray.texbuf offset:g_ray.texbuf_off atIndex:6];
+    [e setFragmentAccelerationStructure:g_ray.tlas atBufferIndex:7];
+    [e setFragmentAccelerationStructure:g_ray.blas[0] atBufferIndex:8];
+    if (@available(macOS 13.0, *))
+    {
+        for (int k = 0; k < 2; ++k)
+            if (g_ray.blas[k])
+                [e useResource:g_ray.blas[k] usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        if (g_ray.ntexs)
+            [e useResources:g_ray.texs count:g_ray.ntexs usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+    }
+    for (int i = 0; i < n; ++i)
+        [e setFragmentTexture:tex[i] atIndex:(NSUInteger)i];
+    [e setFragmentSamplerState:g_fx.samp atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+}
+
+
 void gfx_trace_dump(const char* path)
 {
     FILE* f = fopen(path, "w");
@@ -3600,6 +4365,11 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             /* the occlusion at about 2000 pixels across (half a 4096 background, all of 1920): fine
              * enough that its edges hold still; bloom and rays, soft anyway, at about 1000 */
             uint32_t div = vw > 2048 ? 2 : 1, bdiv = vw > 2048 ? 4 : vw > 1024 ? 2 : 1;
+            /* traced on a GPU with no ray tracing hardware (before Apple's M3): the occlusion and the bounce
+             * light at half that, a quarter of the rays (at 1920 by 1080, an M1 Max's traced occlusion took
+             * some 30 ms a frame, its bounce light 10) */
+            if ((g_fxs.rt > 0.0f || (int)g_fxs.debug == 8) && rt_init() && !g_ray.hw)
+                div *= 2;
             NSUInteger aw = (NSUInteger)((vw + div - 1) / div), ah = (NSUInteger)((vh + div - 1) / div);
             NSUInteger bw = (NSUInteger)((vw + bdiv - 1) / bdiv), bh = (NSUInteger)((vh + bdiv - 1) / bdiv);
             float hand = s->proj[11] < 0.0f ? -1.0f : 1.0f;
@@ -3766,12 +4536,22 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
             if (g_fxs.water > 0.0f && have_v)
                 water_scene(s, vinv, &u, ct);
+            /* the world for rays, before the passes that trace them */
+            int rt = 0;
+            if ((g_fxs.rt > 0.0f || (int)g_fxs.debug == 8) && have_v)
+            {
+                float invP[16];
+                rt = gfx_mat_inverse(invP, s->proj) && rt_capture(invP, s->view, vinv + 12);
+            }
             NSUInteger gw = (aw + 1) / 2, gh = (ah + 1) / 2;
             int gi = u.gi[0] > 0.0f && fx_tex(&g_fx.gi0, MTLPixelFormatRGBA16Float, gw, gh) &&
-                fx_tex(&g_fx.gih[0], MTLPixelFormatRGBA16Float, gw, gh) && fx_tex(&g_fx.gih[1], MTLPixelFormatRGBA16Float, gw, gh);
+                fx_tex(&g_fx.gih[0], MTLPixelFormatRGBA16Float, gw, gh) && fx_tex(&g_fx.gih[1], MTLPixelFormatRGBA16Float, gw, gh) &&
+                (!rt || fx_tex(&g_fx.gi1, MTLPixelFormatRGBA16Float, gw, gh));
             if (!gi)
                 u.gi[0] = 0.0f;
             u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
+            if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
+                u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
             if (fx_tex(&g_fx.src, ct.pixelFormat, ct.width, ct.height) && fx_tex(&g_fx.ao0, MTLPixelFormatRGBA16Float, aw, ah) &&
                 fx_tex(&g_fx.ao1, MTLPixelFormatRGBA16Float, aw, ah) && fx_tex(&g_fx.b1a, MTLPixelFormatRGBA16Float, bw, bh) &&
                 fx_tex(&g_fx.b1b, MTLPixelFormatRGBA16Float, bw, bh) &&
@@ -3809,13 +4589,22 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         id<MTLTexture> ao_in[4] = { depth, u.smap[0] > 0.0f ? g_fx.smap : g_fx.sdummy,
                             u.smap[0] > 0.0f && u.smapn2[1] > 0.0f ? g_fx.smapn : g_fx.sdummy, lz ? lz : g_fx.sdummy };
                         fx_pass(g_fx.ao0, MTLLoadActionDontCare, g_fx.ao_pipe, q, &u, ao_in, 4, NULL);
-                        fx_pass(g_fx.ao1, MTLLoadActionDontCare, g_fx.blur_pipe, q, &u, &g_fx.ao0, 1, across);
-                        fx_pass(g_fx.ao0, MTLLoadActionDontCare, g_fx.blur_pipe, q, &u, &g_fx.ao1, 1, down);
+                        /* traced (rt): the occlusion from rays in the world, the sun's as fx_ao found it; ao1 then holds it */
+                        id<MTLTexture> a = g_fx.ao0, bt = g_fx.ao1;
+                        if (rt && u.ao[1] > 0.0f)
+                        {
+                            id<MTLTexture> r_in[2] = { g_fx.ao0, depth };
+                            rt_pass(g_fx.ao1, MTLLoadActionDontCare, g_ray.ao, q, &u, r_in, 2, NULL);
+                            a = g_fx.ao1, bt = g_fx.ao0;
+                        }
+                        fx_pass(bt, MTLLoadActionDontCare, g_fx.blur_pipe, q, &u, &a, 1, across);
+                        fx_pass(a, MTLLoadActionDontCare, g_fx.blur_pipe, q, &u, &bt, 1, down);
+                        ao_out = a;
                         if (g_fxs.temporal > 0.0f && fx_tex(&g_fx.hist[0], MTLPixelFormatRGBA16Float, aw, ah) &&
                             fx_tex(&g_fx.hist[1], MTLPixelFormatRGBA16Float, aw, ah))
                         {
                             int to = g_fx.hist_at ^ 1;
-                            id<MTLTexture> t_in[2] = { g_fx.ao0, g_fx.hist[g_fx.hist_at] };
+                            id<MTLTexture> t_in[2] = { a, g_fx.hist[g_fx.hist_at] };
                             fx_pass(g_fx.hist[to], MTLLoadActionDontCare, g_fx.temporal_pipe, q, &u, t_in, 2, NULL);
                             ao_out = g_fx.hist[to];
                             g_fx.hist_at = to, g_fx.hist_serial = g_serial;
@@ -3827,8 +4616,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     if (gi)
                     {
                         MTLViewport qg = fx_full(g_fx.gi0);
-                        id<MTLTexture> gi_in[3] = { depth, g_fx.gimap, g_fx.gicol };
-                        fx_pass(g_fx.gi0, MTLLoadActionDontCare, g_fx.gi_pipe, qg, &u, gi_in, 3, NULL);
+                        if (rt)
+                        {
+                            /* traced (rt): rays from each texel into the world, the light they meet as the frame or the
+                             * sun saw it; smoothed four times (one texel apart, two, four, one) before the temporal pass */
+                            static const int32_t s1[2] = { 1, 1 }, s2[2] = { 2, 2 }, s4[2] = { 4, 4 };
+                            id<MTLTexture> r_in[5] = { depth, g_fx.src, ao_out, g_fx.gimap, g_fx.gicol };
+                            rt_pass(g_fx.gi0, MTLLoadActionDontCare, g_ray.gi, qg, &u, r_in, 5, NULL);
+                            fx_pass(g_fx.gi1, MTLLoadActionDontCare, g_ray.giblur, qg, &u, &g_fx.gi0, 1, s1);
+                            fx_pass(g_fx.gi0, MTLLoadActionDontCare, g_ray.giblur, qg, &u, &g_fx.gi1, 1, s2);
+                            fx_pass(g_fx.gi1, MTLLoadActionDontCare, g_ray.giblur, qg, &u, &g_fx.gi0, 1, s4);
+                            fx_pass(g_fx.gi0, MTLLoadActionDontCare, g_ray.giblur, qg, &u, &g_fx.gi1, 1, s1);
+                        }
+                        else
+                        {
+                            id<MTLTexture> gi_in[3] = { depth, g_fx.gimap, g_fx.gicol };
+                            fx_pass(g_fx.gi0, MTLLoadActionDontCare, g_fx.gi_pipe, qg, &u, gi_in, 3, NULL);
+                        }
                         gi_out = g_fx.gi0;
                         if (u.gip[1] > 0.0f)
                         {
@@ -3859,6 +4663,13 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     }
                     id<MTLTexture> comp_in[7] = { g_fx.src, ao_out, depth, g_fx.b1a, g_fx.b2a, g_fx.rb, gi_out ? gi_out : g_fx.rb };
                     fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 7, NULL);
+                    if (rt && (int)g_fxs.debug == 8)
+                    {
+                        if (!g_ray.clay || g_ray.clay_fmt != ct.pixelFormat)
+                            [g_ray.clay release], g_ray.clay = rt_fx_pipeline(@"rt_clay", ct.pixelFormat), g_ray.clay_fmt = ct.pixelFormat;
+                        if (g_ray.clay)
+                            rt_pass(ct, MTLLoadActionLoad, g_ray.clay, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, &depth, 1, NULL);
+                    }
                 }
             }
         }
@@ -3879,6 +4690,11 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     "%u cached; map %.0f units across; sun %.2f %.2f %.2f\n", g_fx.st_frames, g_fx.st_own, g_fx.st_map, g_fx.st_cmin,
                     g_fx.st_cmax, g_fx.st_cached, g_fx.st_across, g_fx.sunw[0], g_fx.sunw[1], g_fx.sunw[2]);
                 last = now, g_fx.st_frames = g_fx.st_own = g_fx.st_map = g_fx.st_cmax = 0;
+                if (g_ray.st_frames)
+                    fprintf(stderr, "[recomp] gfx: ray tracing: %u frames; casters %u live, %u from the cache, %u waiting for pipelines; "
+                        "%llu triangles a frame\n", g_ray.st_frames, g_ray.st_live, g_ray.st_cached, g_ray.st_skipped,
+                        (unsigned long long)(g_ray.st_tris / g_ray.st_frames));
+                g_ray.st_frames = g_ray.st_live = g_ray.st_cached = g_ray.st_skipped = 0, g_ray.st_tris = 0;
             }
         }
         {
