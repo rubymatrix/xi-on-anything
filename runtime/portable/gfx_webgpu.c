@@ -522,7 +522,7 @@ GfxTex* gfx_tex_create(int type, uint32_t d3dfmt, uint32_t w, uint32_t h, uint32
     td.sampleCount = 1;
     t->tex = wgpuDeviceCreateTexture(g_dev, &td);
     WGPUTextureViewDescriptor vd = { 0 };
-    vd.format = t->wf;
+    vd.format = use == GFX_USE_DEPTH ? WGPUTextureFormat_Undefined : t->wf; /* depth: the depth aspect's own format */
     vd.dimension = type == GFX_TEX_CUBE ? WGPUTextureViewDimension_Cube : WGPUTextureViewDimension_2D;
     vd.mipLevelCount = t->levels;
     vd.arrayLayerCount = t->layers;
