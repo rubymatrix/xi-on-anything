@@ -383,6 +383,8 @@ static void run_async_read(QTex* t, uint32_t face, uint32_t level, uint32_t pitc
     plat_atomic_cas32(&t->async_pub, pub, next + 1);
 }
 
+void gfxq_call_result(GfxqCall* c, int result) { c->result = result; }
+
 void gfxq_call_done(GfxqCall* c)
 {
     plat_atomic_add32(&c->done, 1);
@@ -603,12 +605,15 @@ static void web_frame(void)
     if (!said)
         said = 1, since = gfx_now_ns(), rt_log("[recomp] gfx: render thread's first frame\n");
     frames++;
+    gfx_web_tick();
     if (getenv("XI_QDEBUG") && gfx_now_ns() - since > 2000000000ull)
         rt_log("[recomp] gfx: render thread %u frames in 2 s, head %u tail %u\n", frames, g_head, g_tail), frames = 0,
             since = gfx_now_ns();
     gfxq_pump();
 }
 EM_JS(int, web_frame_rate, (void), { return typeof requestAnimationFrame == 'function' ? 0 : 60; });
+
+extern void web_give_canvas(uintptr_t thread); /* tools/web/gfx.js */
 
 static void* web_render_thread(void* unused)
 {
@@ -622,8 +627,12 @@ static void* web_render_thread(void* unused)
 /* --- the calls --------------------------------------------------------------------------------------- */
 static void init_call(GfxqCall* c)
 {
+#if defined(__EMSCRIPTEN__)
+    gfx_init_then(c->p[0], (int)c->u[0], c); /* WebGPU's device comes in callbacks */
+#else
     c->result = gfx_init(c->p[0], (int)c->u[0]);
     gfxq_call_done(c);
+#endif
 }
 
 int gfxq_init(void* sdl_window, int vsync)
@@ -638,6 +647,7 @@ int gfxq_init(void* sdl_window, int vsync)
         if (pthread_create(&t, &a, web_render_thread, NULL))
             return 0;
         pthread_attr_destroy(&a);
+        web_give_canvas((uintptr_t)t); /* the page's canvas, to draw on from there */
         g_threaded = 1;
     }
     GfxqCall c = { init_call, { sdl_window }, { (uint32_t)vsync } };

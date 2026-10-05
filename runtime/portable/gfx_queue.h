@@ -66,6 +66,12 @@ void gfxq_call_done(GfxqCall* call);
 /* What a back end gives the queue for gfx_tex_read: the read, then gfxq_call_done(call) - at once,
  * or (WebGPU) when the copy has been mapped. */
 void gfx_tex_read_then(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch, GfxqCall* call);
+/* ... and for gfx_init: the device brought up, then gfxq_call_result(call, ok) and gfxq_call_done(call) -
+ * WebGPU's adapter and device arrive in callbacks; gfx_web_tick runs at each of the render thread's frames
+ * before the queue (to finish that start-up when the page's canvas has come). */
+void gfx_init_then(void* sdl_window, int vsync, GfxqCall* call);
+void gfx_web_tick(void);
+void gfxq_call_result(GfxqCall* call, int result);
 
 #if defined(GFX_QUEUE) && !defined(GFX_QUEUE_IMPL)
 #define gfx_init gfxq_init

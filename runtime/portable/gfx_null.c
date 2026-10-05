@@ -152,4 +152,10 @@ void gfx_tex_read_then(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint
     gfx_tex_read(t, face, level, dst, pitch);
     gfxq_call_done(call);
 }
+void gfx_init_then(void* sdl_window, int vsync, GfxqCall* call)
+{
+    gfxq_call_result(call, gfx_init(sdl_window, vsync));
+    gfxq_call_done(call);
+}
+void gfx_web_tick(void) {}
 #endif

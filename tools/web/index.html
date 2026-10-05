@@ -7,17 +7,22 @@
 <style>
   :root { --bg: #0b0d12; --fg: #d8dbe2; --dim: #8a8f9c; --accent: #c9a24a; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
-  #status { padding: 12px 16px; color: var(--accent); }
-  #log { margin: 0; padding: 0 16px 16px; color: var(--dim); font: 12px/1.35 ui-monospace, Menlo, monospace;
-         white-space: pre-wrap; word-break: break-all; height: calc(100% - 48px); overflow: auto; }
+  #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; }
+  #status { position: fixed; top: 8px; left: 12px; color: var(--accent); text-shadow: 0 1px 2px #000; z-index: 2; }
+  #log { position: fixed; left: 0; right: 0; bottom: 0; max-height: 30vh; margin: 0; padding: 8px 12px; z-index: 2;
+         color: var(--dim); background: rgba(11, 13, 18, 0.75); font: 11px/1.35 ui-monospace, Menlo, monospace;
+         white-space: pre-wrap; word-break: break-all; overflow: auto; }
+  body.nolog #log { display: none; }
 </style>
 </head>
 <body>
+<canvas id="canvas"></canvas>
 <div id="status">Starting…</div>
 <pre id="log"></pre>
 <script>
-// G1 shell (docs/web-port-plan.md): no canvas yet (the null graphics back end). The page's hash carries the
-// server's token and, for development, the sign-in: #t=<token>&server=<ip>&user=..&pass=..&authport=..
+// The development page (docs/web-port-plan.md): the game drawn into #canvas by its render thread (WebGPU), its log
+// below. The page's hash carries the server's token and, for development, the sign-in:
+// #t=<token>&server=<ip>&user=..&pass=..&authport=..&enter=<s>&profile=1&nolog=1
 const hash = new URLSearchParams(location.hash.slice(1));
 const logEl = document.getElementById('log'), statusEl = document.getElementById('status');
 const lines = [];
@@ -27,6 +32,7 @@ function log(text) {
   logEl.textContent = lines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
 }
+if (hash.get('nolog')) document.body.classList.add('nolog');
 if (!crossOriginIsolated) statusEl.textContent = 'This page needs cross-origin isolation (open it from tools/webserve.py).';
 const args = ['--game', '/game', '--data-dir', '/xi-data', '--reg', '/app/ffxi.reg'];
 for (const k of ['server', 'user', 'pass', 'authport', 'dataport', 'viewport'])
