@@ -34,10 +34,10 @@ import build_posix as bp  # noqa: E402
 import thirdparty  # noqa: E402
 
 CFLAGS = ['-O2', '-std=c11', '-g2', '-pthread', '-fno-strict-aliasing', '-I', 'runtime', '-I', 'runtime/portable',
-          '-I', 'generated', '-I', 'third_party/stb', '-I', 'third_party/sdl3/include', '-DXI_WEB=1', '-D_GNU_SOURCE']
+          '-I', 'generated', '-I', 'third_party/stb', '-I', 'third_party/sdl3/include', '-DXI_WEB=1', '-D_GNU_SOURCE', '-DGFX_QUEUE']
 # host64 without the native graphics back ends, SDL3, Discord and the addon host
 HOST = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + [
-    'runtime/portable/gfx_null.c', 'runtime/portable/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
+    'runtime/portable/gfx_null.c', 'runtime/portable/gfx_queue.c', 'runtime/portable/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
     'host/addons_none.c']
 LINK = ['-pthread', '-sPROXY_TO_PTHREAD', '-sALLOW_MEMORY_GROWTH', '-sMAXIMUM_MEMORY=4GB', '-sINITIAL_MEMORY=64MB',
         '-sSTACK_SIZE=1MB', '-sDEFAULT_PTHREAD_STACK_SIZE=1MB', '-sPTHREAD_POOL_SIZE=24', '-sEXIT_RUNTIME',

@@ -96,6 +96,7 @@
 #include "user32.h"
 #include "d3d8.h"
 #include "gfx.h"
+#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
 #include "dsound.h"
 #include "dinput.h"
 #include "ws2.h"
