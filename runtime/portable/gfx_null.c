@@ -142,3 +142,14 @@ void gfx_trace_dump(const char* path) { (void)path; }
 void gfx_finish(void) {}
 uint32_t gfx_failures(void) { return 0; }
 void gfx_set_sync_pipelines(int on) { (void)on; }
+
+#if defined(GFX_QUEUE)
+#define GFX_QUEUE_IMPL /* the back end's own gfx_* names, not the queue's */
+#include "gfx_queue.h"
+/* the render queue's read (gfx_queue.h): nothing to wait for here */
+void gfx_tex_read_then(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch, GfxqCall* call)
+{
+    gfx_tex_read(t, face, level, dst, pitch);
+    gfxq_call_done(call);
+}
+#endif

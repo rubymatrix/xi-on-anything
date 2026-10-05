@@ -38,6 +38,7 @@
 #include "d3d8.h"
 #include "datui.h"
 #include "gfx.h"
+#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
 #include "gthread.h"
 #include "gwin.h"
 #include "modern.h"
