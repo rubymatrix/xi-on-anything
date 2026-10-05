@@ -257,7 +257,7 @@ typedef struct FxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft,
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
-        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse;
+        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -1619,7 +1619,7 @@ static ID3D12PipelineState* build_pipeline(const PipeKey* k, const uint32_t* vs,
     memset(&pd, 0, sizeof pd);
     pd.pRootSignature = g_root;
     pd.VS.pShaderBytecode = ID3D10Blob_GetBufferPointer(s->vs), pd.VS.BytecodeLength = ID3D10Blob_GetBufferSize(s->vs);
-    if (!shadow || alpha_tested(&k->lib.fs))
+    if (!shadow || alpha_tested(&k->lib.fs) || k->color != DXGI_FORMAT_UNKNOWN) /* (the bounce light's map is in colour) */
         pd.PS.pShaderBytecode = ID3D10Blob_GetBufferPointer(s->ps), pd.PS.BytecodeLength = ID3D10Blob_GetBufferSize(s->ps);
     D3D12_RENDER_TARGET_BLEND_DESC* c = &pd.BlendState.RenderTarget[0];
     uint32_t wm = k->pipe.write_mask;
@@ -2007,7 +2007,7 @@ typedef struct Caster
     uint32_t vlen[GFX_NSTREAMS];
     GfxBuf* ib;            /* the indices' static buffer, or NULL */
     const uint8_t* icpu;   /* the indices on the CPU */
-    GfxTex* tex[8];        /* only for an alpha test */
+    GfxTex* tex[8];        /* for an alpha test, and the bounce light's map (in colour) */
     GfxSampler samp[8];
     float wv[16];          /* its world-view matrix (fixed function: is it placed, or a character?) */
     int32_t uidx;          /* its uniforms in g_caster_u (the cache's copy is made from them), or -1 */
@@ -2450,8 +2450,7 @@ static void draw_encode(const GfxDraw* d)
     if (rec)
     {
         rec->ugpu = ugpu;
-        if (alpha_tested(&d->fs))
-            memcpy(rec->tex, bound_tex, sizeof bound_tex), memcpy(rec->samp, bound_samp, sizeof bound_samp);
+        memcpy(rec->tex, bound_tex, sizeof bound_tex), memcpy(rec->samp, bound_samp, sizeof bound_samp);
     }
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
@@ -2750,6 +2749,9 @@ static const struct
     FXS(gameshadows, 0.0f),
     /* how much of the sun's shadows stay in a Mog House (gfx_set_moghouse), 0 none to 1 all */
     FXS(moghouse, 0.0f),
+    /* the sun's light thrown on by what it lights (bounce light): its strength (0 none), how far a lit
+     * surface throws it, and how far from the camera it is gathered (the map it is gathered from) */
+    FXS(gi, 1.5f), FXS(gi_radius, 6.0f), FXS(gi_distance, 48.0f),
 };
 #undef FXS
 
@@ -2864,7 +2866,8 @@ static void fx_config(void)
     const char* dbg = getenv("FFXI_FX_DEBUG"); /* also by name */
     if (dbg)
         g_fxs.debug = !strcmp(dbg, "ao") ? 1.0f : !strcmp(dbg, "fog") ? 2.0f : !strcmp(dbg, "bloom") ? 3.0f
-            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f : (float)atof(dbg);
+            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f
+            : !strcmp(dbg, "gi") ? 6.0f : !strcmp(dbg, "gi_split") ? 7.0f : (float)atof(dbg);
     for (size_t i = 0; i < FX_NSETTINGS; ++i)
         g_fx_start[i] = *(float*)((char*)&g_fxs + FX_SETTINGS[i].at);
     /* where Config > Modern writes it (host/modern.c fx_file): FFXI_CACHE_DIR's when that is set */
@@ -2886,7 +2889,8 @@ static void fx_config(void)
 typedef struct FxU
 {
     float proj[4], zp[4], vp[4], size[4], ao[4], grade[4], hand[4], up[4], sun[4], suncol[4], sunuv[4], fogc[4], fogp[4],
-        bloom[4], rays[4], shadow[4], lmat[16], smap[4], smap2[4], reproj[16], hist[4], lmatn[16], smapn[4], smapn2[4], aop[4];
+        bloom[4], rays[4], shadow[4], lmat[16], smap[4], smap2[4], reproj[16], hist[4], lmatn[16], smapn[4], smapn2[4], aop[4],
+        gimat[16], giinv[16], gi[4], gip[4];
 } FxU;
 
 /* a target of the effects': one level (or the occlusion's depth: four), each level's state its own */
@@ -2911,11 +2915,12 @@ typedef struct SunTex
 #define FX_HALF DXGI_FORMAT_R16G16B16A16_FLOAT
 #define FX_Z DXGI_FORMAT_R32_FLOAT
 #define FX_COLOR DXGI_FORMAT_B8G8R8A8_UNORM /* the game's color targets (comp, aa and mip draw onto them) */
+#define GI_MAP 1024 /* the bounce light's map's texels across */
 
 static struct
 {
     volatile LONG state; /* 0 not asked for, 1 building, 2 ready, 3 failed */
-    ID3D12PipelineState *ao, *blur, *bright, *down, *gauss, *raymask, *rays, *temporal, *linz, *zmip, *comp, *aa, *mip;
+    ID3D12PipelineState *ao, *blur, *bright, *down, *gauss, *raymask, *rays, *temporal, *linz, *zmip, *comp, *aa, *mip, *gi, *gitemp;
     uint32_t cmp; /* the comparison sampler's slot (the shadow maps') */
     FxTex lz;     /* the occlusion's depth: view z at its size and three levels below (fx_linz, fx_zmip) */
     FxTex aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
@@ -2934,6 +2939,13 @@ static struct
     int fogc_set;
     float last_cam[3]; /* where the camera was at the last scene (a jump is a new place) */
     SunTex smap, smapn; /* the sun's maps: far, near */
+    /* the bounce light: the casters near the camera as the sun sees them, depth and colour (with three
+     * levels below, for the gather's wide reads); the gather at half the occlusion's size; the gather
+     * after the temporal pass, this frame's and the one before */
+    SunTex gimap;
+    FxTex gicol, gi0, gih[2];
+    int gih_at;
+    uint64_t gih_serial, prev_serial; /* the frames the bounce's history and the camera's (prev_view) were kept */
     /* the shadows' profile (FFXI_PROFILE): frames, frames with their own sun, with a map, the fewest
      * and most casters; casters drawn live, from the cache, skipped (no pipeline yet) */
     uint32_t st_frames, st_own, st_map, st_cmin, st_cmax, st_drawn_this, st_cached, st_live, st_replayed, st_skipped, st_beyond;
@@ -2971,10 +2983,12 @@ static void fx_build(void)
         g_fx.comp = fx_pipeline(vs, "fx_comp", FX_COLOR);
         g_fx.aa = fx_pipeline(vs, "fx_fxaa", FX_COLOR);
         g_fx.mip = fx_pipeline(vs, "fx_mip", FX_COLOR);
+        g_fx.gi = fx_pipeline(vs, "fx_gi", FX_HALF);
+        g_fx.gitemp = fx_pipeline(vs, "fx_gitemp", FX_HALF);
         ID3D10Blob_Release(vs);
     }
     int ok = vs && g_fx.ao && g_fx.blur && g_fx.bright && g_fx.down && g_fx.gauss && g_fx.raymask && g_fx.rays && g_fx.temporal &&
-        g_fx.linz && g_fx.zmip && g_fx.comp && g_fx.aa && g_fx.mip;
+        g_fx.linz && g_fx.zmip && g_fx.comp && g_fx.aa && g_fx.mip && g_fx.gi && g_fx.gitemp;
     fprintf(stderr, ok ? "[recomp] gfx: scene effects ready\n" : "[recomp] gfx: scene effects failed: the scene goes through as it was\n");
     InterlockedExchange(&g_fx.state, ok ? 2 : 3);
 }
@@ -3378,7 +3392,7 @@ static void sun_cache_forget_tex(const GfxTex* t)
     for (uint32_t i = 0; i < g_ncasters; ++i)
         for (int k = 0; k < 8; ++k)
             if (g_casters[i].tex[k] == t)
-                g_casters[i].n = 0, g_casters[i].tex[k] = NULL;
+                g_casters[i].n = alpha_tested(&g_casters[i].lib.fs) ? 0 : g_casters[i].n, g_casters[i].tex[k] = NULL;
 }
 
 /* gone from the cache's view: not seen for SUN_CACHE_FRAMES, and the camera has moved on from where it was */
@@ -3669,6 +3683,8 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
             /* what it draws with as of this frame (a copy's buffers are its own: cache_copy) */
             Caster was = ce->c;
             ce->c = *c;
+            if (!alpha_tested(&c->lib.fs)) /* its textures are the bounce light's, which draws this frame's alone */
+                memset(ce->c.tex, 0, sizeof ce->c.tex);
             if (copy && !fresh)
                 memcpy(ce->c.va, was.va, sizeof was.va), ce->c.iva = was.iva;
         }
@@ -3829,9 +3845,19 @@ static int beyond_map(const SunCascade* k, const float* p)
     return (fmaxf(fabsf(m[0]), fabsf(m[1])) - 1.0f) * 0.5f * k->across > 96.0f;
 }
 
-/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). How many
- * were drawn; -1 when the map was not even cleared (it still holds an earlier frame's) */
-static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCascade* k, int cache)
+/* is a world point more than margin units outside the cascade's sides? */
+static int beyond_by(const SunCascade* k, const float* p, float margin)
+{
+    float q[4] = { p[0], p[1], p[2], 1.0f }, m[4];
+    xform4(m, q, k->S);
+    return (fmaxf(fabsf(m[0]), fabsf(m[1])) - 1.0f) * 0.5f * k->across > margin;
+}
+
+/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). With col,
+ * the bounce light's: every caster (whoever casts) in its own colour as well, through its own pixel
+ * function, unfogged. How many were drawn; -1 when the map was not even cleared (it still holds an
+ * earlier frame's) */
+static int sun_draw(SunTex* t, FxTex* col, const float* invP, const float* invV, const SunCascade* k, int cache)
 {
     float clip_world[16], M[16];
     mat_mul(clip_world, invP, invV);
@@ -3843,7 +3869,15 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
     sun_state(t, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = heap_cpu(&g_dsv, t->dsv);
     ID3D12GraphicsCommandList_ClearDepthStencilView(l, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
-    ID3D12GraphicsCommandList_OMSetRenderTargets(l, 0, NULL, FALSE, &dsv);
+    if (col)
+    {
+        static const float black[4] = { 0, 0, 0, 0 };
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = fx_out(col, 0);
+        ID3D12GraphicsCommandList_ClearRenderTargetView(l, rtv, black, 0, NULL);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(l, 1, &rtv, FALSE, &dsv);
+    }
+    else
+        ID3D12GraphicsCommandList_OMSetRenderTargets(l, 0, NULL, FALSE, &dsv);
     D3D12_VIEWPORT v = { 0, 0, (float)k->size, (float)k->size, 0, 1 };
     D3D12_RECT sc = { 0, 0, k->size, k->size };
     ID3D12GraphicsCommandList_RSSetViewports(l, 1, &v);
@@ -3862,9 +3896,9 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
                 continue;
             /* sun_casters 1: characters alone cast - the zone's shadows are baked into its colours
              * already, and the game tints them for the hour and the weather */
-            if ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep))
+            if (!col && ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep)))
                 continue;
-            if (cs->has_wpos && beyond_map(k, cs->wpos))
+            if (cs->has_wpos && (col ? beyond_by(k, cs->wpos, 16.0f) : beyond_map(k, cs->wpos)))
             {
                 g_fx.st_beyond++;
                 continue;
@@ -3900,8 +3934,10 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
         memset(&pk, 0, sizeof pk);
         pk.lib = cs->lib;
         pk.lib.vs.shadow = 1, pk.lib.vs.pixel = 0;
-        int at = alpha_tested(&cs->lib.fs);
-        if (!at)
+        int at = alpha_tested(&cs->lib.fs), tex = at || col;
+        if (col)
+            pk.lib.fs.fog = 0, pk.pipe.write_mask = 15; /* its colour as the sun sees it: no fog of the camera's */
+        else if (!at)
         {
             /* the position alone: one pipeline serves every draw with the same vertex layout */
             GfxVsKey* vk = &pk.lib.vs;
@@ -3913,7 +3949,7 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
             memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
         }
         pk.depth.zenable = 1, pk.depth.zwrite = 1, pk.depth.zfunc = 2; /* LESS */
-        pk.color = DXGI_FORMAT_UNKNOWN, pk.dsv = DXGI_FORMAT_D32_FLOAT;
+        pk.color = col ? FX_COLOR : DXGI_FORMAT_UNKNOWN, pk.dsv = DXGI_FORMAT_D32_FLOAT;
         pk.cull = 1, pk.fill = 3; /* both faces: a caster's back faces cast as well */
         pk.topo = (uint8_t)topology_type(cs->prim);
         ID3D12PipelineState* p = pipeline_for(&pk, cs->vs, cs->ps);
@@ -3935,7 +3971,7 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
             ID3D12GraphicsCommandList_SetGraphicsRootShaderResourceView(l, ROOT_STREAM0 + st, cs->va[st] ? cs->va[st] : dummy);
         }
         ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(l, ROOT_U, ugpu);
-        if (at)
+        if (tex)
         {
             uint32_t bind[16];
             for (int tx = 0; tx < 8; ++tx)
@@ -4015,7 +4051,7 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     sun_fit(s, invV, L, 0.5f, dfar, SUN_MAP, &far_k);
     if (!sun_target(&g_fx.smap, SUN_MAP))
         return 0;
-    int drawn = sun_draw(&g_fx.smap, invP, invV, &far_k, 1);
+    int drawn = sun_draw(&g_fx.smap, NULL, invP, invV, &far_k, 1);
     memcpy(u->lmat, far_k.lmat, 64);
     u->smap[1] = far_k.texel, u->smap[2] = far_k.bias, u->smap[3] = far_k.soft;
     u->smap2[0] = far_k.slope, u->smap2[3] = far_k.range;
@@ -4024,11 +4060,38 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     if (dnear > 0.0f && sun_target(&g_fx.smapn, nsize))
     {
         sun_fit(s, invV, L, 0.5f, tnear, nsize, &near_k);
-        if (sun_draw(&g_fx.smapn, invP, invV, &near_k, 1) >= 0) /* not an earlier frame's map through this one's matrix */
+        if (sun_draw(&g_fx.smapn, NULL, invP, invV, &near_k, 1) >= 0) /* not an earlier frame's map through this one's matrix */
         {
             memcpy(u->lmatn, near_k.lmat, 64);
             u->smapn[0] = near_k.texel, u->smapn[1] = near_k.bias, u->smapn[2] = near_k.soft, u->smapn[3] = near_k.slope;
             u->smapn2[0] = near_k.range, u->smapn2[1] = 1.0f;
+        }
+    }
+    /* the bounce light's map: this frame's casters over the first gi_distance units the camera sees, in
+     * colour, 1024 across (light thrown a few units wants no finer), and its levels below */
+    u->gi[0] = 0.0f;
+    float gd = fminf(fmaxf(g_fxs.gi_distance, 8.0f), dfar);
+    if (g_fxs.gi > 0.0f && sun_target(&g_fx.gimap, GI_MAP) && fx_tex(&g_fx.gicol, FX_COLOR, GI_MAP, GI_MAP, 4))
+    {
+        SunCascade gk;
+        float inv[16];
+        sun_fit(s, invV, L, 0.5f, gd, GI_MAP, &gk);
+        if (sun_draw(&g_fx.gimap, &g_fx.gicol, invP, invV, &gk, 0) > 0 && mat_inverse(inv, gk.lmat))
+        {
+            FxU mu;
+            memset(&mu, 0, sizeof mu);
+            D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&mu);
+            for (int lv = 1; lv < 4 && ua; ++lv)
+            {
+                uint32_t in = fx_in(&g_fx.gicol, lv - 1);
+                fx_pass(fx_out(&g_fx.gicol, lv), g_fx.mip, 0, 0, (float)(GI_MAP >> lv), (float)(GI_MAP >> lv), ua, &in, 1, 0, 0);
+            }
+            /* the reach in the map's uv; the level read where a texel is about a quarter of it */
+            float r = fmaxf(g_fxs.gi_radius, 0.5f);
+            memcpy(u->gimat, gk.lmat, 64), memcpy(u->giinv, inv, 64);
+            u->gi[0] = 1.0f, u->gi[1] = r / gk.across, u->gi[2] = r;
+            u->gi[3] = fminf(fmaxf(log2f(r / (4.0f * gk.texel)), 0.0f), 3.0f);
+            u->gip[3] = gd;
         }
     }
     g_fx.st_across = far_k.across;
@@ -4193,6 +4256,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
         {
             u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+            u.gi[0] *= g_fxs.gi * day;
             if (day >= 0.25f)
                 g_sun_shown = g_serial;
         }
@@ -4213,19 +4277,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
      * size, and not a jump away */
     {
         float vinv2[16], m[16];
-        int ok = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0].res && g_fx.hist[0].w == aw &&
-            g_fx.hist[0].h == ah && mat_inverse(vinv2, s->view);
-        if (ok)
+        int cam = g_fx.prev_serial && g_fx.prev_serial + 1 == g_serial && mat_inverse(vinv2, s->view);
+        if (cam)
         {
             float dx = vinv2[12] - g_fx.prev_cam[0], dy = vinv2[13] - g_fx.prev_cam[1], dz = vinv2[14] - g_fx.prev_cam[2];
-            ok = dx * dx + dy * dy + dz * dz < 25.0f;
+            cam = dx * dx + dy * dy + dz * dz < 25.0f;
         }
-        if (ok)
+        if (cam)
         {
             mat_mul(m, vinv2, g_fx.prev_view);
             mat_mul(u.reproj, m, g_fx.prev_proj);
-            u.hist[0] = 1.0f;
+            u.hist[0] = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0].res && g_fx.hist[0].w == aw &&
+                g_fx.hist[0].h == ah ? 1.0f : 0.0f;
+            /* the bounce light's too, at its own size */
+            u.gip[0] = g_fx.gih_serial && g_fx.gih_serial + 1 == g_serial && g_fx.gih[0].res && g_fx.gih[0].w == (aw + 1) / 2 &&
+                g_fx.gih[0].h == (ah + 1) / 2 ? 1.0f : 0.0f;
         }
+        g_fx.prev_serial = g_serial;
         u.hist[1] = (float)fmod((double)g_serial * 0.6180339887, 1.0); /* the pattern's turn: a golden-ratio step */
         u.hist[2] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f);
         memcpy(g_fx.prev_view, s->view, 64), memcpy(g_fx.prev_proj, s->proj, 64);
@@ -4245,12 +4313,18 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
     if (occlusion && !lz)
         u.ao[1] = 0.0f;
     int temporal = occlusion && g_fxs.temporal > 0.0f && fx_tex(&g_fx.hist[0], FX_HALF, aw, ah, 1) && fx_tex(&g_fx.hist[1], FX_HALF, aw, ah, 1);
+    uint32_t gw = (aw + 1) / 2, gh = (ah + 1) / 2;
+    int gi = u.gi[0] > 0.0f && fx_tex(&g_fx.gi0, FX_HALF, gw, gh, 1) && fx_tex(&g_fx.gih[0], FX_HALF, gw, gh, 1) &&
+        fx_tex(&g_fx.gih[1], FX_HALF, gw, gh, 1);
+    if (!gi)
+        u.gi[0] = 0.0f;
+    u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
     D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&u);
     if (!ua)
         return;
     fx_copy(color, &g_fx.src);
     float fw = (float)aw, fh = (float)ah, fbw = (float)bw, fbh = (float)bh;
-    uint32_t in[6];
+    uint32_t in[7];
     FxTex* ao_out = NULL;
     if (occlusion)
     {
@@ -4291,6 +4365,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.hist_at = to, g_fx.hist_serial = g_serial;
         }
     }
+    /* the bounce light: gathered from its map at half the occlusion's size, then over frames */
+    FxTex* gi_out = NULL;
+    if (gi)
+    {
+        sun_state(&g_fx.gimap, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        in[0] = fx_depth(depth), in[1] = (uint32_t)g_fx.gimap.srv, in[2] = fx_in(&g_fx.gicol, -1);
+        fx_pass(fx_out(&g_fx.gi0, 0), g_fx.gi, 0, 0, (float)gw, (float)gh, ua, in, 3, 0, 0);
+        gi_out = &g_fx.gi0;
+        if (u.gip[1] > 0.0f)
+        {
+            int to = g_fx.gih_at ^ 1;
+            in[0] = fx_in(&g_fx.gi0, 0), in[1] = fx_in(&g_fx.gih[g_fx.gih_at], 0);
+            fx_pass(fx_out(&g_fx.gih[to], 0), g_fx.gitemp, 0, 0, (float)gw, (float)gh, ua, in, 2, 0, 0);
+            gi_out = &g_fx.gih[to];
+            g_fx.gih_at = to, g_fx.gih_serial = g_serial;
+        }
+    }
     if (u.bloom[1] > 0.0f)
     {
         float f2w = (float)b2w, f2h = (float)b2h;
@@ -4324,8 +4415,9 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
     in[3] = u.bloom[1] > 0.0f ? fx_in(&g_fx.b1a, 0) : SRV_NULL_2D;
     in[4] = u.bloom[1] > 0.0f ? fx_in(&g_fx.b2a, 0) : SRV_NULL_2D;
     in[5] = u.rays[0] > 0.0f ? fx_in(&g_fx.rb, 0) : SRV_NULL_2D;
+    in[6] = gi_out ? fx_in(gi_out, 0) : SRV_NULL_2D;
     tex_state(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    fx_pass(target_view(color, 0, 0), g_fx.comp, vx, vy, vw, vh, ua, in, 6, 0, 0);
+    fx_pass(target_view(color, 0, 0), g_fx.comp, vx, vy, vw, vh, ua, in, 7, 0, 0);
     color->scene = 0; /* the effects changed it: its mips are behind (scene_mips) */
 }
 
