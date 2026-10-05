@@ -2926,6 +2926,7 @@ static struct
     uint64_t eased_serial;
     float fog_on, fogc[3], up[3], sun[3], suncol[3];
     float sunw[3]; /* toward the sun in the world, as the last lit draw gave it, and the frame it was seen */
+    float sun0[3], sunt[3], sunp; /* the sun's glide from its last step (sun0) to the game's (sunt), sunp of the way */
     float direct;  /* how much of the game's light is the sun's, eased */
     uint64_t sunw_seen;
     /* the shadows' profile (FFXI_PROFILE) */
@@ -4083,10 +4084,21 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             for (int j = 0; j < 3; ++j)
                 w[j] = s->sun_dir[0] * vinv[j] + s->sun_dir[1] * vinv[4 + j] + s->sun_dir[2] * vinv[8 + j];
             gfx_normalize3(w);
-            /* the sun moves on in steps of a quarter degree: the shadows' edges hold still between them */
-            float dot = w[0] * g_fx.sunw[0] + w[1] * g_fx.sunw[1] + w[2] * g_fx.sunw[2];
-            if (!g_fx.sunw_seen || dot < 0.99999f)
-                memcpy(g_fx.sunw, w, 12);
+            /* the sun moves on in the game's steps (a quarter degree each game minute, every 2.4 s): the shadows
+             * glide from each to the next over the 150 frames to it rather than jump - long at dawn and dusk, a
+             * jump of their whole edge (a step past a few degrees, a new hour or place, is taken at once) */
+            float dot = w[0] * g_fx.sunt[0] + w[1] * g_fx.sunt[1] + w[2] * g_fx.sunt[2];
+            if (!g_fx.sunw_seen || dot < 0.995f)
+                memcpy(g_fx.sunw, w, 12), memcpy(g_fx.sun0, w, 12), memcpy(g_fx.sunt, w, 12), g_fx.sunp = 1.0f;
+            else if (dot < 0.999995f) /* (past the noise of the game's own, short of its quarter-degree step) */
+                memcpy(g_fx.sun0, g_fx.sunw, 12), memcpy(g_fx.sunt, w, 12), g_fx.sunp = 0.0f;
+            if (g_fx.sunp < 1.0f)
+            {
+                g_fx.sunp = fminf(g_fx.sunp + 1.0f / 150.0f, 1.0f);
+                for (int j = 0; j < 3; ++j)
+                    g_fx.sunw[j] = g_fx.sun0[j] + (g_fx.sunt[j] - g_fx.sun0[j]) * g_fx.sunp;
+                gfx_normalize3(g_fx.sunw);
+            }
             g_fx.sunw_seen = g_serial;
             fx_ease(g_fx.suncol, s->sun_color, 3, 0.1f);
         }

@@ -156,6 +156,8 @@ void gfx_hlsl_vs_return(Sb* b, const GfxVsKey* k)
 {
     if (k->shadow) /* the pixel-centre fixup undone (the map has pixels of its own), then on into the map */
         sb_printf(b, "  o.pos.x -= o.pos.w / u.vp.z;\n  o.pos.y += o.pos.w / u.vp.w;\n  o.pos = mul(sm, o.pos);\n");
+    if (k->shadow == 2) /* captured for ray tracing (gfx_d3d12.c rt_capture): a point in view space, streamed out */
+        sb_printf(b, "  o.pos = float4(o.pos.xyz / o.pos.w, 1.0);\n");
     sb_printf(b, "  return o;\n}\n");
 }
 
@@ -574,7 +576,7 @@ const char gfx_hlsl_fx[] =
     "struct FxU {\n"
     "  float4 proj, zp, vp, size, ao, grade, hand, up, sun, suncol, sunuv, fogc, fogp, bloom, rays, shadow;\n"
     "  float4x4 lmat; float4 smap, smap2; float4x4 reproj; float4 hist; float4x4 lmatn; float4 smapn, smapn2, aop;\n"
-    "  float4x4 gimat, giinv; float4 gi, gip;\n"
+    "  float4x4 gimat, giinv; float4 gi, gip; uint4 rtp;\n"
     "};\n"
     "cbuffer CU : register(b0) { FxU u; };\n"
     "cbuffer FB : register(b1) { uint4 ft[2]; uint4 fsm[2]; };\n"
