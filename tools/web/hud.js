@@ -44,5 +44,46 @@
     }, 500);
   }
 
-  window.xiHud = { sizes, follow, gauge };
+  // the downloads overlay: the file reads in flight (dlcache.js, or httpfs_web.c without the cache, announces
+  // each on the 'xi-dl' channel; » a read ahead), the last few finished with their time, the rate over the
+  // last two seconds, and the reads the cache answered.
+  function downloads() {
+    const el = document.createElement('div');
+    el.id = 'dl';
+    el.title = 'File downloads. Click to hide.';
+    el.style.cssText = 'position:fixed;top:8px;left:10px;z-index:3;padding:4px 8px;border-radius:4px;max-width:46vw;' +
+      'font:500 11px/1.35 ui-monospace,Menlo,monospace;background:rgba(0,0,0,.55);color:#cfd8e3;cursor:pointer;' +
+      'user-select:none;pointer-events:auto;white-space:pre;overflow:hidden';
+    el.addEventListener('click', () => (el.style.opacity = el.style.opacity === '0.15' ? '1' : '0.15'));
+    document.body.appendChild(el);
+    const live = new Map(), done = [], hist = [];
+    let total = 0, count = 0, hits = 0, hitBytes = 0, lastHit = -1e9;
+    const name = (u) => decodeURIComponent(u.replace(/^.*?\/(dat|app|dats)\//, '$1/'));
+    const mb = (b) => (b / 1048576).toFixed(b < 10485760 ? 2 : 1);
+    new BroadcastChannel('xi-dl').onmessage = ({ data: d }) => {
+      const now = performance.now();
+      if (d.hit) return void (hits++, (hitBytes += d.k), (lastHit = now));
+      if (d.s) return void live.set(d.id, { ...d, t: now });
+      live.delete(d.id);
+      if (d.k > 0) total += d.k, hist.push([now, d.k]);
+      count++;
+      done.unshift({ ...d, t: now });
+      done.length = Math.min(done.length, 5);
+    };
+    setInterval(() => {
+      const now = performance.now();
+      while (hist.length && now - hist[0][0] > 2000) hist.shift();
+      const rate = hist.reduce((a, h) => a + h[1], 0) / 2;
+      const lines = [`files: ${live.size} loading · ${(rate / 1048576).toFixed(2)} MB/s · ${count} fetched, ${mb(total)} MB` +
+        ` · cache ${hits} hits, ${mb(hitBytes)} MB`];
+      for (const r of live.values())
+        lines.push(`  ${r.ahead ? '»' : '⇣'} ${name(r.u)}  ${r.n >= 0 ? mb(r.n) + ' MB @' + mb(r.at) : 'all'}  ${((now - r.t) / 1000).toFixed(1)} s`);
+      for (const r of done)
+        if (now - r.t < 4000) lines.push(`  ${r.k < 0 ? '✗' : '✓'} ${name(r.u)}  ${r.k > 0 ? mb(r.k) + ' MB ' : ''}${r.ms.toFixed(0)} ms`);
+      el.textContent = lines.join('\n');
+      el.style.display = live.size || now - Math.max(done[0]?.t ?? -1e9, lastHit) < 4000 ? '' : 'none';
+    }, 200);
+  }
+
+  window.xiHud = { sizes, follow, gauge, downloads };
 })();

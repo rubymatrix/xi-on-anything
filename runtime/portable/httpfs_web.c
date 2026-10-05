@@ -21,17 +21,40 @@
 
 /* --- requests ----------------------------------------------------------------------------------------- */
 /* n bytes at start (n < 0: the whole file) into dst (cap bytes): bytes copied, or -1 */
+/* each request is announced on the 'xi-dl' channel (start, then end) for the page's downloads overlay */
 EM_JS(int, httpfs_xhr, (const char* url, double start, double n, uint8_t* dst, uint32_t cap), {
+    const u = UTF8ToString(url), ch = (globalThis.xiDlChan ||= new BroadcastChannel('xi-dl'));
+    const id = (globalThis.xiDlId = (globalThis.xiDlId || 0) + 1) + '.' + (typeof _pthread_self === 'function' ? _pthread_self() : 0);
+    const t0 = performance.now();
+    ch.postMessage({ s: 1, id, u, at: start, n });
+    const end = (k) => (ch.postMessage({ s: 0, id, u, k, ms: performance.now() - t0 }), k);
     const x = new XMLHttpRequest();
-    x.open('GET', UTF8ToString(url), false);
+    x.open('GET', u, false);
     x.responseType = 'arraybuffer';
     if (n >= 0) x.setRequestHeader('Range', 'bytes=' + start + '-' + (start + n - 1));
-    try { x.send(); } catch (e) { return -1; }
-    if (x.status != 200 && x.status != 206) return -1;
+    try { x.send(); } catch (e) { return end(-1); }
+    if (x.status != 200 && x.status != 206) return end(-1);
     const b = new Uint8Array(x.response);
+    end(b.length);
     const k = Math.min(b.length, cap);
     new Uint8Array(wasmMemory.buffer).set(b.subarray(0, k), dst);
     return k;
+});
+
+/* the same through the page's file cache (tools/web/dlcache.js): the request goes to the cache worker on
+ * the 'xi-cache' channel and this thread waits on cell (0 asked, 1 being written, 2 done; cell[1] the result)
+ * while the worker answers from Cache Storage or the network into dst. -2: no answer (the caller reads
+ * the network itself): the cell is marked 3 so a late answer is dropped. */
+EM_JS(int, httpfs_cached, (const char* url, const char* key, double start, double n, double size, uint8_t* dst,
+    uint32_t cap, int32_t* cell), {
+    const ch = (globalThis.xiCacheChan ||= new BroadcastChannel('xi-cache'));
+    ch.postMessage({ u: UTF8ToString(url), k: UTF8ToString(key), at: start, n, size, dst, cap, cell });
+    const c = new Int32Array(wasmMemory.buffer, cell, 2);
+    for (;;) {
+        const st = Atomics.load(c, 0);
+        if (st == 2) return Atomics.load(c, 1);
+        if (Atomics.wait(c, 0, st, 20000) == 'timed-out' && st == 0 && Atomics.compareExchange(c, 0, 0, 3) == 0) return -2;
+    }
 });
 
 /* a whole response, malloc'd (NUL-terminated), or NULL */
@@ -56,6 +79,7 @@ typedef struct Ent
     char* name;   /* as written, the last component */
     char* key;    /* lower-case, from the mount's root: "rom/1/2.dat" */
     int64_t size; /* -1: a folder */
+    int64_t mtime; /* the version the file cache keys on, with the size */
     int parent, child, next; /* -1: none */
 } Ent;
 
@@ -74,7 +98,7 @@ static Mount g_mounts[] = { { "/game/", "dat" }, { "/app/", "app" }, { "/dats/",
 #define NMOUNTS (int)(sizeof g_mounts / sizeof *g_mounts)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_base[512], g_token[128];
-static int g_on = -1;
+static int g_on = -1, g_cache;
 
 static int on(void)
 {
@@ -82,6 +106,8 @@ static int on(void)
     {
         const char* b = getenv("XI_HTTP_URL");
         const char* t = getenv("XI_TOKEN");
+        const char* c = getenv("XI_CACHE");
+        g_cache = c && *c == '1';
         g_on = b && *b;
         snprintf(g_base, sizeof g_base, "%s", g_on ? b : "");
         snprintf(g_token, sizeof g_token, "%s", t ? t : "");
@@ -109,7 +135,7 @@ static int find(Mount* m, const char* key)
     }
 }
 
-static int add(Mount* m, const char* rel, int64_t size)
+static int add(Mount* m, const char* rel, int64_t size, int64_t mtime)
 {
     if (m->n == m->cap)
     {
@@ -123,6 +149,7 @@ static int add(Mount* m, const char* rel, int64_t size)
     const char* slash = strrchr(rel, '/');
     e->name = strdup(slash ? slash + 1 : rel);
     e->size = size;
+    e->mtime = mtime;
     e->child = e->next = -1;
     e->parent = 0; /* the root, unless a folder above is found below */
     if (slash)
@@ -165,7 +192,7 @@ static void load(Mount* m)
     while (m->tcap < (unsigned)lines * 2 + 16)
         m->tcap <<= 1;
     m->table = (int*)calloc(m->tcap, sizeof *m->table);
-    add(m, "", -1); /* the root, entry 0 */
+    add(m, "", -1, 0); /* the root, entry 0 */
     for (char* line = text; line && *line;)
     {
         char* end = strchr(line, '\n');
@@ -175,7 +202,9 @@ static void load(Mount* m)
         if (tab)
         {
             *tab = 0;
-            add(m, line, strtoll(tab + 1, NULL, 10));
+            char* end2;
+            int64_t size = strtoll(tab + 1, &end2, 10);
+            add(m, line, size, *end2 == '\t' ? strtoll(end2 + 1, NULL, 10) : 0);
         }
         line = end ? end + 1 : NULL;
     }
@@ -275,7 +304,7 @@ typedef struct Slot
 static Slot g_slots[SLOTS];
 static unsigned g_hand;
 
-static void url_of(Mount* m, int e, char* url, size_t n)
+static void url_of(Mount* m, int e, char* url, size_t n, char* key, size_t kn)
 {
     /* the path as the index wrote it: the key with each component's own case */
     char rel[1024] = "";
@@ -299,6 +328,7 @@ static void url_of(Mount* m, int e, char* url, size_t n)
         rel[o] = 0;
     }
     snprintf(url, n, "%s/%s/%s?t=%s", g_base, m->route, rel, g_token);
+    snprintf(key, kn, "%s/%s?v=%lld.%lld", m->route, rel, (long long)m->ents[e].mtime, (long long)m->ents[e].size);
 }
 
 /* the block, held (ref) until release; NULL if it can't be read */
@@ -327,12 +357,24 @@ static Slot* block(Mount* m, int e, uint32_t b)
     if (!s->data)
         s->data = (uint8_t*)malloc(BLOCK);
     s->used = 0, s->ref = 1;
-    char url[1400];
-    url_of(m, e, url, sizeof url);
+    char url[1400], key[1200];
+    url_of(m, e, url, sizeof url, key, sizeof key);
     pthread_mutex_unlock(&g_mu);
     int64_t size = m->ents[e].size, at = (int64_t)b * BLOCK;
     uint32_t want = (uint32_t)(size - at < BLOCK ? size - at : BLOCK);
-    int got = s->data ? httpfs_xhr(url, (double)at, (double)want, s->data, BLOCK) : -1;
+    int got = -2;
+    if (s->data && g_cache)
+    {
+        int32_t cell[2] = { 0, 0 };
+        got = httpfs_cached(url, key, (double)at, (double)want, (double)size, s->data, BLOCK, cell);
+        if (got == -2)
+        {
+            fprintf(stderr, "httpfs: the file cache didn't answer; reading the network directly\n");
+            g_cache = 0;
+        }
+    }
+    if (got == -2)
+        got = s->data ? httpfs_xhr(url, (double)at, (double)want, s->data, BLOCK) : -1;
     pthread_mutex_lock(&g_mu);
     if (got < 0)
     {
