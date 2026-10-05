@@ -431,7 +431,7 @@ void gfx_msl_vs_return(Sb* b, const GfxVsKey* k)
         sb_printf(b, "  uint rt_o = (rtc.x + %s) * 2u;\n  rto[rt_o] = float4(o.pos.xyz / o.pos.w, 1.0);\n"
                      "  rto[rt_o + 1u] = float4(%s, o.d.a, 0.0);\n",
             b->glsl ? "uint(gl_VertexIndex)" : "vid", k->ntex ? "o.t0.xy" : "0.0, 0.0");
-        sb_printf(b, b->glsl ? "  gl_Position = float4(0, 0, 0, 1);\n}\n" : "}\n");
+        sb_printf(b, b->glsl ? "  gl_Position = float4(0, 0, 0, 1);\n  gl_PointSize = 1.0;\n}\n" : "}\n");
         return;
     }
     if (b->glsl)

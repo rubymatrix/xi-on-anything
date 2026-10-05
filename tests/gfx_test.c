@@ -1056,6 +1056,71 @@ static void test_large_target_mips(void)
 }
 
 
+/* Ray tracing's world through an alpha test, from indexed draws: a card before a wall, its left half
+ * cut away by its texture's alpha (GREATER 128), drawn from static buffers with 16-bit indices that start
+ * past a storage buffer's alignment. In the clay view the rays pass the cut half to the wall behind
+ * (grey: where the drawn depth says) and meet the other half (grey too); traced solid, they would meet
+ * the card in front of the wall's drawn depth (red). */
+static void test_scene_rt_alpha(void)
+{
+    if (!gfx_rt_supported())
+        return;
+    typedef struct { float x, y, z, u, v; } CardVert;
+    CardVert cv[4] = { { -2, 2, 5, 0, 0 }, { 2, 2, 5, 1, 0 }, { -2, -2, 5, 0, 1 }, { 2, -2, 5, 1, 1 } };
+    uint16_t idx[8] = { 0xFFFF, 0xFFFF, 0, 1, 2, 2, 1, 3 }; /* (the first two words skipped: ibuf_off 4) */
+    GfxBuf* vb = gfx_buf_create(sizeof cv);
+    GfxBuf* ib = gfx_buf_create(sizeof idx);
+    gfx_buf_upload(vb, cv, sizeof cv);
+    gfx_buf_upload(ib, idx, sizeof idx);
+    uint32_t texel[2] = { 0x00FFFFFFu, 0xFFFFFFFFu };
+    GfxTex* t = gfx_tex_create(GFX_TEX_2D, 21, 2, 1, 1, GFX_USE_SAMPLE);
+    gfx_tex_upload(t, 0, 0, texel, 8);
+    fx_only("sun", 1.0f);
+    gfx_fx_set("rt", 1.0f);
+    gfx_fx_set("debug", 8.0f);
+    float wall[4][3] = { { -8, 8, 8 }, { 8, 8, 8 }, { -8, -8, 8 }, { 8, -8, 8 } };
+    GfxDraw d;
+    defaults(&d);
+    identity(d.u.wv);
+    d.u.vp[2] = d.u.vp[3] = SS;
+    memcpy(d.vp, SVP, sizeof SVP);
+    d.vs.el[GFX_R_POSITION] = (GfxElem){ 1, 0, GFX_FLOAT3, 0 };
+    d.vs.el[GFX_R_TEXCOORD0] = (GfxElem){ 1, 0, GFX_FLOAT2, 0 };
+    d.u.offset[GFX_R_TEXCOORD0] = 12;
+    d.u.stride[0] = sizeof(CardVert);
+    d.vs.ntex = 1;
+    d.fs.st[0] = (GfxStage){ 2, 2, 1, 1, 2, 2, 1, 1, 1, 1, 0, 2 }; /* the texture's colour and alpha */
+    d.tex[0] = t;
+    d.samp[0] = (GfxSampler){ 3, 3, 3, 1, 1, 0, 1, 0, 0 };
+    d.fs.alpha_func = 5, d.u.params[1] = 128;
+    d.depth.zenable = 1, d.depth.zwrite = 1, d.depth.zfunc = 4;
+    d.caster = 1;
+    d.buf[0] = vb, d.size[0] = sizeof cv;
+    d.indices = idx + 2, d.index_size = 2, d.ibuf = ib, d.ibuf_off = 4;
+    d.prim = GFX_TRIANGLELIST, d.count = 2;
+    for (int solid = 0; solid < 2; ++solid)
+    {
+        /* solid: the same card from the frame's own vertices, as a character's are - traced solid (rt_alpha) */
+        scene_begin(0, 0xFF000000u);
+        memcpy(d.u.wvp, g_sproj, 64); /* (scene_begin's projection) */
+        scene_quad(wall, 0xFF404040u);
+        d.buf[0] = solid ? NULL : vb, d.data[0] = solid ? cv : NULL;
+        d.ibuf = solid ? NULL : ib;
+        gfx_draw(&d);
+        scene_end(NULL, 0);
+        uint32_t lr = spx(51, 64, 16), lb = spx(51, 64, 0), rr = spx(77, 64, 16), rb = spx(77, 64, 0);
+        if (solid)
+            CHECK(lr > lb + 40, "clay, a character's alpha test traced solid: the card's cut half %u %u (want red: met before the wall)", lr, lb);
+        else
+            CHECK(lr > 30 && abs((int)lr - (int)lb) < 12, "clay through an alpha test: the card's cut half %u %u (want grey: the wall)", lr, lb);
+        CHECK(rr > 30 && abs((int)rr - (int)rb) < 12, "clay through an alpha test: the card's solid half %u %u (want grey: the card)", rr, rb);
+        gfx_present(NULL);
+    }
+    gfx_tex_destroy(t);
+    gfx_buf_destroy(vb);
+    gfx_buf_destroy(ib);
+}
+
 /* The bounce light (gi): a wall the sun lights throws light on the floor before it - the gather from its
  * map, and traced (rt), where the GPU can trace rays (none where it cannot: then only the map's). The
  * debug view (6) shows it alone, three times over. */
@@ -1217,6 +1282,7 @@ static void test_scene_effects(void)
     test_scene_water();
     test_scene_gi();
     test_scene_rt();
+    test_scene_rt_alpha();
     CHECK(gfx_failures() == 0, "scene effects: %u failures", gfx_failures());
     gfx_set_targets(g_rt, 0, 0, g_ds);
     test_scene_filter();
