@@ -19,8 +19,11 @@
  *  - no view swizzles or 16-bit color formats: those textures are widened to BGRA8 on upload;
  *  - partial clears are a quad.
  *
- * Not yet: the scene effects, sun shadows and water (gfx_scene_done does nothing), the async read's
- * frame-late copies (it answers zeros), the pipeline cache file. */
+ * The scene effects (gfx_scene_done): FX_GLSL's passes as WGSL (gfx_webgpu_fx.h) - occlusion, contact
+ * shadows, height fog, bloom, god rays, the grade, FXAA - and the world lit per pixel.
+ *
+ * Not yet: the sun's shadow maps and water, the async read's frame-late copies (it answers zeros), the
+ * pipeline cache file. */
 #include <emscripten/emscripten.h>
 #include <webgpu/webgpu.h>
 
@@ -33,7 +36,10 @@
 #include "gfx.h"
 #define GFX_QUEUE_IMPL /* the back end's own gfx_* names */
 #include "gfx_queue.h"
+#include "gfx_fx.h"
 #include "gfx_msl.h"
+#include "gfx_scene.h"
+#include "gfx_webgpu_fx.h"
 #include "plat.h"
 #include "runtime.h"
 
@@ -380,6 +386,7 @@ struct GfxTex
     uint32_t fmt, w, h, levels, layers, block, texel, id;
     int has_stencil;
     uint32_t used; /* the encoder serial that last read it */
+    GfxTex *depth_seen, *depth_world; /* render targets: the depth they were last drawn with; by the scene's casters */
 };
 
 static uint32_t g_tex_ids;
@@ -1128,6 +1135,18 @@ static void build_pipeline(const PipeKey* k, PipeEntry* e, const uint32_t* vs, c
     wgpuDeviceCreateRenderPipelineAsync(g_dev, &pd, cb);
 }
 
+static WGPURenderPipeline pipeline_for(const PipeKey* k, const GfxDraw* d)
+{
+    PipeEntry* e = (PipeEntry*)map_get(&g_pipes, k);
+    if (!e)
+    {
+        e = (PipeEntry*)calloc(1, sizeof *e);
+        map_put(&g_pipes, k, e);
+        build_pipeline(k, e, d->vs_tokens, d->ps_tokens);
+    }
+    return e->state == 1 ? e->p : NULL;
+}
+
 static WGPURenderPipeline pipeline(const GfxDraw* d, GfxTex* depth)
 {
     PipeKey k;
@@ -1157,14 +1176,16 @@ static WGPURenderPipeline pipeline(const GfxDraw* d, GfxTex* depth)
             k.depth.zwrite = k.depth.zfunc = 0;
         k.zbias = d->zbias;
     }
-    PipeEntry* e = (PipeEntry*)map_get(&g_pipes, &k);
-    if (!e)
+    /* the world's lit draws lit per pixel (gfx_msl.c pixel_lit), by the vertex's light meanwhile */
+    if (g_fxs.fx != 0.0f && g_fxs.light != 0.0f && d->vs.lighting && !d->vs.rhw && !d->vs.prog && !d->vs.flat)
     {
-        e = (PipeEntry*)calloc(1, sizeof *e);
-        map_put(&g_pipes, &k, e);
-        build_pipeline(&k, e, d->vs_tokens, d->ps_tokens);
+        k.lib.vs.pixel = g_fxs.light >= 2.0f ? 2 : 1;
+        WGPURenderPipeline p = pipeline_for(&k, d);
+        if (p)
+            return p;
+        k.lib.vs.pixel = 0;
     }
-    return e->state == 1 ? e->p : NULL;
+    return pipeline_for(&k, d);
 }
 
 /* --- bind groups, cached by what they hold ------------------------------------------------------------------- */
@@ -1302,6 +1323,12 @@ void gfx_draw(const GfxDraw* d)
         return;
     }
     GfxTex* depth = depth_attachment();
+    if (depth && !g_rt_face && !g_rt_level) /* the scene's depth, for the effects */
+    {
+        g_rt->depth_seen = depth;
+        if (d->caster)
+            g_rt->depth_world = depth;
+    }
     WGPURenderPipeline p = pipeline(d, depth);
     if (!p)
     {
@@ -1657,8 +1684,11 @@ static WGPUShaderModule module_from(const char* wgsl)
     return wgpuDeviceCreateShaderModule(g_dev, &md);
 }
 
+static uint64_t g_serial; /* frames presented */
+
 static void make_statics(void)
 {
+    fx_config();
     WGPUBufferDescriptor bd = { 0 };
     bd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_Storage | WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
     bd.size = RING_SIZE;
@@ -1735,6 +1765,9 @@ void gfx_present(GfxTex* backbuffer)
     }
     g_hud_last_ns = t0;
     g_hud_frames++;
+    g_serial++;
+    if (g_serial % 30 == 0)
+        fx_reload();
     if (g_clear_flags && g_rt) /* a clear nothing drew after: still a clear */
         begin_pass();
     end_pass();
@@ -1785,13 +1818,12 @@ void gfx_present(GfxTex* backbuffer)
 void gfx_resize(uint32_t w, uint32_t h) { surface_size(w, h); }
 
 /* --- the rest of gfx.h --------------------------------------------------------------------------------------- */
-void gfx_scene_done(GfxTex* color, const GfxScene* s) { (void)color, (void)s; }
-void gfx_fx_set(const char* key, float v) { (void)key, (void)v; }
-float gfx_fx_get(const char* key) { return (void)key, 0.0f; }
 void gfx_set_focus(const float* pos) { (void)pos; }
 void gfx_set_moghouse(int in) { (void)in; }
 int gfx_sun_shadows_shown(void) { return 0; }
 float gfx_sun_prime(float* center) { (void)center; return 0.0f; }
+/* the passes (gfx_webgpu_fx.h) are written; their driver comes next */
+void gfx_scene_done(GfxTex* color, const GfxScene* s) { (void)color, (void)s; }
 void gfx_trace_dump(const char* path) { (void)path; }
 void gfx_finish(void) { submit(); }
 uint32_t gfx_failures(void) { return g_failures; }
