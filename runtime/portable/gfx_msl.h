@@ -25,7 +25,8 @@ char* gfx_msl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* v
  * adds it and the define). The bindings, all in set 0 (gfx_vulkan.c pushes them per draw):
  *   0 the uniforms (U), 1-4 the vertex streams (storage buffers of words), 5 the shadow matrix,
  *   8-15 texture stages 0-7 (combined image samplers), 16 the water's uniforms, 17 and 18 its
- *   copies of the color and depth targets. */
+ *   copies of the color and depth targets; captured for ray tracing (GfxVsKey.shadow 2), 6 the corners
+ *   written, 7 where and how (a uvec4), 19 the indices (storage buffers). */
 char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
 
 /* The pieces both translators share (gfx_msl.c): the vertex function's start (signature, v#
