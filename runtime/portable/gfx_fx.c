@@ -109,10 +109,13 @@ static const struct
     /* not an effect: anti-aliasing of the finished scene, 0 none, 1 FXAA (scene_aa); with or without the effects */
     { "aa", offsetof(GfxFxSettings, aa), 0.0f },
     /* the sun's light thrown on by what it lights (bounce light): its strength (0 none), how far a lit
-     * surface throws it, and how far from the camera it is gathered (the map it is gathered from) */
-    { "gi", offsetof(GfxFxSettings, gi), 1.5f },
+     * surface throws it, and how far from the camera it is gathered (the map it is gathered from); off
+     * unless asked for (Config > Modern's Bounce Light) */
+    { "gi", offsetof(GfxFxSettings, gi), 0.0f },
     { "gi_radius", offsetof(GfxFxSettings, gi_radius), 6.0f },
     { "gi_distance", offsetof(GfxFxSettings, gi_distance), 48.0f },
+    /* ray tracing (gfx_d3d12.c's alone for now): kept here so Config > Modern reads and saves it */
+    { "rt", offsetof(GfxFxSettings, rt), 0.0f },
 };
 
 static float* fx_setting(const char* key)

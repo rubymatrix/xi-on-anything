@@ -2762,10 +2762,11 @@ static const struct
     FXS(moghouse, 0.0f),
     /* the sun's light thrown on by what it lights (bounce light): its strength (0 none), how far a lit
      * surface throws it, and how far from the camera it is gathered (the map it is gathered from) */
-    FXS(gi, 1.5f), FXS(gi_radius, 6.0f), FXS(gi_distance, 48.0f),
+    FXS(gi, 0.0f), FXS(gi_radius, 6.0f), FXS(gi_distance, 48.0f), /* (off unless asked for: Config > Modern's Bounce Light) */
     /* ray tracing: the world made for rays each frame (rt_capture) where the device can, the bounce light
-     * and the occlusion traced through it; 0 none (the bounce light from its map alone); debug=clay shows it */
-    FXS(rt, 1.0f),
+     * and the occlusion traced through it; 0, the default, none (the bounce light from its map alone, the
+     * occlusion from the depth); debug=clay shows it */
+    FXS(rt, 0.0f),
 };
 #undef FXS
 
