@@ -8,7 +8,7 @@
  *
  * Each mount's index (every file with its size, every folder) is fetched once: lookups, FindFirstFile
  * and stat need no request, and names match without case, as on Windows. Reads go through a cache of
- * 256 KB blocks, each block one Range request (a synchronous XMLHttpRequest: the game's threads are
+ * 1 MB blocks, each block one Range request (a synchronous XMLHttpRequest: the game's threads are
  * workers, where that is allowed). */
 #include "httpfs_web.h"
 
@@ -260,8 +260,9 @@ int httpfs_stat(const char* path, int64_t* size, int* is_dir)
 }
 
 /* --- reading -------------------------------------------------------------------------------------------- */
-#define BLOCK (256u << 10)
-#define SLOTS 128 /* 32 MB */
+/* 1 MB a request: over a tunnel each one is a round trip to the internet and back */
+#define BLOCK (1u << 20)
+#define SLOTS 96 /* 96 MB */
 typedef struct Slot
 {
     Mount* m;
