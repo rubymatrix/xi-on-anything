@@ -11,6 +11,8 @@ request and the WebSocket need it, so other pages the browser has open can't use
   /net         WebSocket: the game's sockets (runtime/portable/net_web.c has the frame format). Each
                channel opens a real TCP or UDP socket here, to the --server address only
   /dat/...     the game install (--game), read only, with Range; /dat/index lists it
+  /dats/N/...  the DAT overlay folders (--dats, first wins), the same way
+  /config      what the page needs to start the game: the server's address, how many overlays
   /app/...     what host64 brings with it: ffxi.reg and the texture packs (assets/textures)
 
 Behind a reverse proxy or tunnel of your own (your devices only, with its own sign-in in front: Cloudflare
@@ -25,7 +27,7 @@ import argparse
 import asyncio
 import base64
 import hashlib
-import ipaddress
+import json
 import mimetypes
 import os
 import secrets
@@ -221,12 +223,21 @@ class Server:
         self.a = a
         self.root = os.path.realpath(a.root)
         self.token = a.token or secrets.token_urlsafe(18)
-        self.allowed = set(a.server)
+        # the game server by name or address: the page gets an address (it can't look names up), and
+        # /net connects only to the addresses the names have
+        self.allowed, self.server_ip = set(), None
+        for name in a.server:
+            ips = sorted({ai[4][0] for ai in socket.getaddrinfo(name, None, socket.AF_INET)})
+            self.allowed.update(ips)
+            self.server_ip = self.server_ip or ips[0]
+        self.server_name = a.server[0]
+        self.ndats = len(a.dats or [])
         self.origins = {o.rstrip('/') for o in a.origin or []}
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.trees = {'dat': Tree([('', a.game)]),
                       'app': Tree([('ffxi.reg', os.path.join(repo, 'ffxi.reg')),
-                                   ('textures', os.path.join(repo, 'assets', 'textures'))])}
+                                   ('textures', os.path.join(repo, 'assets', 'textures'))]),
+                      'dats': Tree([(str(i), d) for i, d in enumerate(a.dats or [])])}
 
     async def handle(self, reader, writer):
         try:
@@ -258,6 +269,11 @@ class Server:
         if method not in ('GET', 'HEAD'):
             return self.reply(writer, 405, b'')
         top, _, rest = url.path.lstrip('/').partition('/')
+        if url.path == '/config':
+            if q.get('t', [''])[0] != self.token:
+                return self.reply(writer, 403, b'bad token')
+            body = json.dumps({'server': self.server_ip, 'server_name': self.server_name, 'dats': self.ndats}).encode()
+            return self.reply(writer, 200, body, 'application/json')
         if top in self.trees:
             if q.get('t', [''])[0] != self.token:
                 return self.reply(writer, 403, b'bad token')
@@ -333,7 +349,8 @@ class Server:
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--server', action='append', required=True,
-                    help="the game server's IPv4 address (repeat for more); the only place /net connects to")
+                    help="the game server, by name or IPv4 address (repeat for more); the only place /net connects to")
+    ap.add_argument('--dats', action='append', help='a DAT overlay folder (repeat; the first given wins)')
     ap.add_argument('--game', required=True, help='the FINAL FANTASY XI folder')
     ap.add_argument('--root', default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'web'))
     ap.add_argument('--port', type=int, default=8417)
@@ -343,14 +360,13 @@ def main():
                     help='an address a proxy of yours serves this under, as the browser sees it (https://xi.example.com); '
                          'repeat for more')
     a = ap.parse_args()
-    for s in a.server:
-        ipaddress.IPv4Address(s)
     srv = Server(a)
     LOG('indexed %d game files' % len(srv.trees['dat'].files))
 
     async def run():
         server = await asyncio.start_server(srv.handle, '127.0.0.1', a.port)
-        LOG('serving %s on http://127.0.0.1:%d/#t=%s (game server %s)' % (srv.root, a.port, srv.token, ', '.join(a.server)))
+        LOG('serving %s on http://127.0.0.1:%d/#t=%s (game server %s: %s)' % (srv.root, a.port, srv.token, ', '.join(a.server),
+                                                                           ', '.join(sorted(srv.allowed))))
         for o in sorted(srv.origins):
             LOG('  and through your proxy: %s/#t=%s' % (o, srv.token))
         sys.stdout.flush()
