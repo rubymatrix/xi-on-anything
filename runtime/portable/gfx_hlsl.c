@@ -179,14 +179,17 @@ static void emit_fog_factor(Sb* b, const char* dst, int mode, const char* dist)
 }
 
 /* D3D's lighting from N and pe (view space) and the material colors cd, ca, cs, ce in scope, into
- * lit_d and lit_s. which: 0 every light; 1 the directional ones, with the rest's terms from the vertex
- * function (vin.pa, pd, ps); 2 the rest alone, leaving amb, dif and spc for it to pass on */
+ * lit_d and lit_s. which: 0 every light; 1 the directional ones, with the rest's from the vertex
+ * function (vin.pa, ps: everything but the directional lights, lit and clamped per vertex as D3D clamps it -
+ * so the game's torches light as the game drew them: unclamped and spread across a triangle, a vertex
+ * by a torch lit far past white lit the whole face, and stepped as the game swapped the torches it
+ * gives each draw while the camera moved); 2 the rest alone, leaving amb, dif and spc for it to pass on */
 static void emit_lighting(Sb* b, const GfxVsKey* k, int pixel, int which)
 {
     if (which == 2)
         sb_printf(b, "  float3 amb = float3(0, 0, 0), dif = float3(0, 0, 0), spc = float3(0, 0, 0);\n");
     else if (which == 1)
-        sb_printf(b, "  float3 amb = u.ambient.rgb + vin.pa.rgb, dif = vin.pd.rgb, spc = vin.ps.rgb;\n");
+        sb_printf(b, "  float3 amb = float3(0, 0, 0), dif = float3(0, 0, 0), spc = float3(0, 0, 0);\n");
     else
         sb_printf(b, "  float3 amb = u.ambient.rgb, dif = float3(0, 0, 0), spc = float3(0, 0, 0);\n");
     if (k->specular)
@@ -218,7 +221,11 @@ static void emit_lighting(Sb* b, const GfxVsKey* k, int pixel, int which)
             sb_printf(b, "    if (ndl > 0.0) spc += L.specular.rgb * (pow(max(dot(N, normalize(V + l)), 0.0), u.params.x) * a);\n");
         sb_printf(b, "  }\n");
     }
-    if (which != 2)
+    if (which == 1)
+        sb_printf(b,
+            "  float4 lit_d = saturate(float4(vin.pa.rgb + ca.rgb * amb + cd.rgb * dif, cd.a));\n"
+            "  float4 lit_s = saturate(float4(vin.ps.rgb + cs.rgb * spc, cs.a));\n");
+    else if (which == 0)
         sb_printf(b,
             "  float4 lit_d = saturate(float4(ce.rgb + ca.rgb * amb + cd.rgb * dif, cd.a));\n"
             "  float4 lit_s = saturate(float4(cs.rgb * spc, cs.a));\n");
@@ -273,7 +280,8 @@ static void emit_ff_vs(Sb* b, const GfxVsKey* k)
             {
                 sb_printf(b, "  {\n");
                 emit_lighting(b, k, 0, 2);
-                sb_printf(b, "  o.pa = float4(amb, 0); o.pd = float4(dif, 0); o.ps = float4(spc, 0);\n  }\n");
+                sb_printf(b, "  o.pa = float4(saturate(ce.rgb + ca.rgb * (u.ambient.rgb + amb) + cd.rgb * dif), 0);\n"
+                             "  o.pd = float4(0, 0, 0, 0); o.ps = float4(saturate(cs.rgb * spc), 0);\n  }\n");
             }
         }
         else
@@ -970,7 +978,9 @@ const char gfx_hlsl_fx[] =
     "  int dbg = int(u.grade.w);\n"
     "  float3 os = float3(1, 1, 1);\n"
     "  if (u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0) os = ao_at(TX(1), fi.uv, view_z(depth_at(TX(2), px)) * u.hand.x);\n"
-    "  float o = os.x, sun = lerp(1.0, os.y, u.smap.x) * lerp(1.0, os.z, u.shadow.x);\n"
+    /* what glows (a lamp's glass, a lit doorway: near white in a colour) is light, not a surface: the occlusion
+     * leaves it, as it greyed the lamps it stood next to */
+    "  float o = lerp(os.x, 1.0, smoothstep(0.6, 0.95, max(c.r, max(c.g, c.b)))), sun = lerp(1.0, os.y, u.smap.x) * lerp(1.0, os.z, u.shadow.x);\n"
     "  if (dbg == 1) return float4(o, o, o, c.a);\n"
     "  if (dbg == 5) return float4(sun, sun, sun, c.a);\n"
     /* the bounce light (t6): on the surface's own colour, mostly where the sun does not reach (in full
@@ -1010,7 +1020,9 @@ const char gfx_hlsl_fx[] =
     "  c.rgb = screen(c.rgb, add);\n"
     "  float3 x = lerp((float3)dot(c.rgb, LUMA), c.rgb, u.grade.y);\n"
     "  x = saturate(x);\n"
-    "  x = lerp(x, x * x * (3.0 - 2.0 * x), u.grade.z);\n"
+    /* the contrast curve leaves what nothing was drawn on (no depth). (The game's sky dome has depth: it
+     * stands round the camera, no farther than the walls, so the curve still darkens it.) */
+    "  x = lerp(x, x * x * (3.0 - 2.0 * x), u.grade.z * (view_z(depth_at(TX(2), px)) != 0.0 ? 1.0 : 0.0));\n"
     "  c.rgb = lerp(c.rgb, x, u.grade.x);\n"
     "  return c;\n"
     "}\n"

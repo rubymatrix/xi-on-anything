@@ -2422,7 +2422,9 @@ static const char FX_MSL[] =
     "  float4 c = src.read(uint2(px));\n"
     "  int dbg = int(u.grade.w);\n"
     "  float3 os = u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0 ? ao_at(u, ao, in.uv, view_z(u, dt.read(uint2(px))) * u.hand.x) : float3(1.0);\n"
-    "  float o = os.x, sun = mix(1.0, os.y, u.smap.x) * mix(1.0, os.z, u.shadow.x);\n"
+    /* what glows (a lamp's glass, a lit doorway: near white in a colour) is light, not a surface: the occlusion
+     * leaves it, as it greyed the lamps it stood next to */
+    "  float o = mix(os.x, 1.0, smoothstep(0.6, 0.95, max(c.r, max(c.g, c.b)))), sun = mix(1.0, os.y, u.smap.x) * mix(1.0, os.z, u.shadow.x);\n"
     "  if (dbg == 1) return float4(o, o, o, c.a);\n"
     "  if (dbg == 5) return float4(float3(sun), c.a);\n"
     /* the bounce light (t6) on the surface's own colour, mostly where the sun does not reach, shaded by
@@ -2463,7 +2465,9 @@ static const char FX_MSL[] =
     "  c.rgb = screen(c.rgb, add);\n"
     "  float3 x = mix(float3(dot(c.rgb, LUMA)), c.rgb, u.grade.y);\n"
     "  x = saturate(x);\n"
-    "  x = mix(x, x * x * (3.0 - 2.0 * x), u.grade.z);\n"
+    /* the contrast curve leaves what nothing was drawn on (no depth). (The game's sky dome has depth: it
+     * stands round the camera, no farther than the walls, so the curve still darkens it.) */
+    "  x = mix(x, x * x * (3.0 - 2.0 * x), u.grade.z * (view_z(u, dt.read(uint2(px))) != 0.0 ? 1.0 : 0.0));\n"
     "  c.rgb = mix(c.rgb, x, u.grade.x);\n"
     "  return c;\n"
     "}\n";

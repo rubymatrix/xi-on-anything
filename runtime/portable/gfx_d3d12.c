@@ -394,6 +394,8 @@ void gfx_prof_shim(uint64_t ns)
         g_prof.shim_ns += ns;
 }
 
+static uint32_t g_pixel_fallbacks; /* draws lit per vertex while their per-pixel pipeline builds (the profile) */
+
 /* at each Present: every two seconds, the average frame and where it went */
 static void prof_frame(uint64_t present_start)
 {
@@ -432,6 +434,9 @@ static void prof_frame(uint64_t present_start)
             fprintf(stderr, "%s%s %llu", any++ ? ", " : "[gfx]   skipped draws (2 s): ", WHY[i], (unsigned long long)g_prof.skips[i]);
     if (any)
         fprintf(stderr, "\n");
+    if (g_pixel_fallbacks)
+        fprintf(stderr, "[gfx]   lit per vertex while their per-pixel pipelines build (2 s): %u draws\n", g_pixel_fallbacks);
+    g_pixel_fallbacks = 0;
     if (g_fx_ran || g_fx_no_depth || g_fx_no_proj || g_fx_not_ready || g_pipes_building)
         fprintf(stderr, "[gfx]   scene effects (2 s): ran %u, no depth %u, no perspective %u, not ready %u; %ld pipelines building\n",
             g_fx_ran, g_fx_no_depth, g_fx_no_proj, g_fx_not_ready, (long)g_pipes_building);
@@ -1839,6 +1844,7 @@ static ID3D12PipelineState* pipeline(const GfxDraw* d, GfxTex* ds)
     ID3D12PipelineState* p = pipeline_for(&k, d->vs_tokens, d->ps_tokens);
     if (!p && k.lib.vs.pixel)
     {
+        g_pixel_fallbacks++;
         /* lit per pixel, still building: lit per vertex meanwhile (a new mix of the game's lights
          * would blink the object out while its pipeline builds) */
         k.lib.vs.pixel = 0;

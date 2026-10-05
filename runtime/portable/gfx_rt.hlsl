@@ -383,8 +383,8 @@ float4 rt_ao(FO fi) : SV_Target
     float3 P = pos_at(dt, px);
     float3 N = normal_at(dt, px, P);
     float3 o = P + N * (0.01 + 0.002 * c.y);
-    float R = u.ao.x * 1.5, occl = 0.0;
-    const int NS = 4;
+    float R = u.ao.x, occl = 0.0; /* (as fx_ao reaches: at 1.5 times it, recesses went darker than the screen's) */
+    const int NS = 6;
     for (int i = 0; i < NS; ++i)
     {
         float2 r = pattern(fi.pos.xy, i + 7);
@@ -397,7 +397,7 @@ float4 rt_ao(FO fi) : SV_Target
             occl += f * f;
         }
     }
-    c.x = saturate(1.0 - 1.2 * occl / float(NS));
+    c.x = saturate(1.0 - occl / float(NS));
     return c;
 }
 

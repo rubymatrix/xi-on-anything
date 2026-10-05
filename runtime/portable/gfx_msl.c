@@ -462,14 +462,17 @@ static void emit_fog_factor(Sb* b, const char* dst, int mode, const char* dist)
 
 /* D3D's lighting from N and pe (view space) and the material colors cd, ca, cs, ce in scope, into
  * lit_d and lit_s */
-/* which: 0 every light; 1 the directional ones, with the rest's terms from the vertex function
- * (in.pa, pd, ps); 2 the rest alone, leaving amb, dif and spc for it to pass on */
+/* which: 0 every light; 1 the directional ones, with the rest's from the vertex
+ * function (in.pa, ps: everything but the directional lights, lit and clamped per vertex as D3D clamps it -
+ * so the game's torches light as the game drew them: unclamped and spread across a triangle, a vertex
+ * by a torch lit far past white lit the whole face, and stepped as the game swapped the torches it
+ * gives each draw while the camera moved); 2 the rest alone, leaving amb, dif and spc for it to pass on */
 static void emit_lighting(Sb* b, const GfxVsKey* k, int pixel, int which)
 {
     if (which == 2)
         sb_printf(b, "  float3 amb = float3(0), dif = float3(0), spc = float3(0);\n");
     else if (which == 1)
-        sb_printf(b, "  float3 amb = u.ambient.rgb + in.pa.rgb, dif = in.pd.rgb, spc = in.ps.rgb;\n");
+        sb_printf(b, "  float3 amb = float3(0), dif = float3(0), spc = float3(0);\n");
     else
         sb_printf(b, "  float3 amb = u.ambient.rgb, dif = float3(0), spc = float3(0);\n");
     if (k->specular)
@@ -502,7 +505,11 @@ static void emit_lighting(Sb* b, const GfxVsKey* k, int pixel, int which)
             sb_printf(b, "    if (ndl > 0.0) spc += L.specular.rgb * (pow(max(dot(N, normalize(V + l)), 0.0), u.params.x) * a);\n");
         sb_printf(b, "  }\n");
     }
-    if (which != 2)
+    if (which == 1)
+        sb_printf(b,
+            "  float4 lit_d = saturate(float4(in.pa.rgb + ca.rgb * amb + cd.rgb * dif, cd.a));\n"
+            "  float4 lit_s = saturate(float4(in.ps.rgb + cs.rgb * spc, cs.a));\n");
+    else if (which == 0)
         sb_printf(b,
             "  float4 lit_d = saturate(float4(ce.rgb + ca.rgb * amb + cd.rgb * dif, cd.a));\n"
             "  float4 lit_s = saturate(float4(cs.rgb * spc, cs.a));\n");
@@ -557,7 +564,8 @@ static void emit_ff_vs(Sb* b, const GfxVsKey* k)
             {
                 sb_printf(b, "  {\n");
                 emit_lighting(b, k, 0, 2);
-                sb_printf(b, "  o.pa = float4(amb, 0), o.pd = float4(dif, 0), o.ps = float4(spc, 0);\n  }\n");
+                sb_printf(b, "  o.pa = float4(saturate(ce.rgb + ca.rgb * (u.ambient.rgb + amb) + cd.rgb * dif), 0);\n"
+                             "  o.pd = float4(0), o.ps = float4(saturate(cs.rgb * spc), 0);\n  }\n");
             }
         }
         else
