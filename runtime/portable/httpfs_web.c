@@ -4,6 +4,7 @@
  *
  *   /game/...  the install (the server's /dat/), read only
  *   /app/...   ffxi.reg and the texture packs (the server's /app/)
+ *   /dats/N/.. the DAT overlay folders (the server's /dats/), for host64's --dats
  *
  * Each mount's index (every file with its size, every folder) is fetched once: lookups, FindFirstFile
  * and stat need no request, and names match without case, as on Windows. Reads go through a cache of
@@ -69,7 +70,7 @@ typedef struct Mount
     unsigned tcap;
 } Mount;
 
-static Mount g_mounts[] = { { "/game/", "dat" }, { "/app/", "app" } };
+static Mount g_mounts[] = { { "/game/", "dat" }, { "/app/", "app" }, { "/dats/", "dats" } };
 #define NMOUNTS (int)(sizeof g_mounts / sizeof *g_mounts)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_base[512], g_token[128];
