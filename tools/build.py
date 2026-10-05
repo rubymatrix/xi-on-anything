@@ -217,8 +217,9 @@ def rt_shaders(env):
         with open(out, 'w') as f:
             f.write(text)
         for d, _, files in os.walk(os.path.join(ROOT, 'build')):
-            if 'gfx_d3d12.obj' in files:
-                os.remove(os.path.join(d, 'gfx_d3d12.obj'))
+            for name in ('gfx_d3d12.obj', 'gfx_d3d12.o'):  # build.py's, build_mingw.py's
+                if name in files:
+                    os.remove(os.path.join(d, name))
 GFX_LIBS = ['d3d12.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dxguid.lib']
 HOST_BASE = ['runtime\\portable\\user32.c', 'runtime\\portable\\d3d8.c', 'runtime\\portable\\dsound.c',
              'runtime\\portable\\input.c', 'runtime\\portable\\dinput.c', 'runtime\\portable\\ws2.c', 'host\\host64.c',
