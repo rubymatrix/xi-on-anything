@@ -367,7 +367,7 @@ static const Row MODERN_ROWS[] = {
     { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
         "Sunlit ground and walls light what stands near them. Off at the left." },
     { "Ray Tracing", "rt", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Bounce light and soft shade traced through the world. Windows, with a ray-tracing graphics card." },
+        "Bounce light and soft shade traced through the world. Needs a graphics card that traces rays; on a Mac, macOS 13." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
     { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
