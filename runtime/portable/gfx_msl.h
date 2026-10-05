@@ -11,7 +11,7 @@ typedef struct Sb
 {
     char* s;
     size_t len, cap;
-    int glsl; /* the dialect being written: 0 MSL, 1 Vulkan GLSL */
+    int glsl; /* the dialect being written: 0 MSL, 1 Vulkan GLSL, 2 WGSL (WebGPU) */
 } Sb;
 
 void sb_printf(Sb* b, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -27,6 +27,12 @@ char* gfx_msl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* v
  *   8-15 texture stages 0-7 (combined image samplers), 16 the water's uniforms, 17 and 18 its
  *   copies of the color and depth targets. */
 char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
+
+/* The same as WGSL for WebGPU (gfx_webgpu.c): one module with vs_main and fs_main. Bindings, all
+ * in group 0: 0 the uniforms, 1-4 the vertex streams (storage, read), 5 the shadow matrix, 8-15 the
+ * stages' textures and 24-31 their samplers. The water and the sun's shadow pass are not written yet
+ * (a key asking for water is drawn without it). */
+char* gfx_wgsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
 
 /* The pieces both translators share (gfx_msl.c): the vertex function's start (signature, v#
  * fetched from the streams), a texture stage sampled at coord, and a per-component compare that
