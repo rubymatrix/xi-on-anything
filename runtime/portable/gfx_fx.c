@@ -108,6 +108,11 @@ static const struct
     { "lod", offsetof(GfxFxSettings, lod), 0.0f },
     /* not an effect: anti-aliasing of the finished scene, 0 none, 1 FXAA (scene_aa); with or without the effects */
     { "aa", offsetof(GfxFxSettings, aa), 0.0f },
+    /* the sun's light thrown on by what it lights (bounce light): its strength (0 none), how far a lit
+     * surface throws it, and how far from the camera it is gathered (the map it is gathered from) */
+    { "gi", offsetof(GfxFxSettings, gi), 1.5f },
+    { "gi_radius", offsetof(GfxFxSettings, gi_radius), 6.0f },
+    { "gi_distance", offsetof(GfxFxSettings, gi_distance), 48.0f },
 };
 
 static float* fx_setting(const char* key)
@@ -185,7 +190,8 @@ void fx_config(void)
     const char* dbg = getenv("FFXI_FX_DEBUG"); /* also by name */
     if (dbg)
         g_fxs.debug = !strcmp(dbg, "ao") ? 1.0f : !strcmp(dbg, "fog") ? 2.0f : !strcmp(dbg, "bloom") ? 3.0f
-            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f : (float)atof(dbg);
+            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f
+            : !strcmp(dbg, "gi") ? 6.0f : !strcmp(dbg, "gi_split") ? 7.0f : (float)atof(dbg);
     for (size_t i = 0; i < FX_NSETTINGS; ++i)
         g_fx_start[i] = *(float*)((char*)&g_fxs + FX_SETTINGS[i].at);
     const char* file = getenv("FFXI_FX_FILE");

@@ -1709,7 +1709,7 @@ static void draw_encode(const GfxDraw* d)
             if (g_bound.samp[i] != ss)
                 [g_enc setFragmentSamplerState:ss atIndex:(NSUInteger)i], g_bound.samp[i] = ss;
             t->used = g_serial;
-            if (rec && alpha_tested(&d->fs))
+            if (rec) /* (an alpha test's, and the bounce light's map, which draws in colour) */
                 rec->tex[i] = [view retain], rec->samp[i] = sk;
         }
 
@@ -1966,6 +1966,10 @@ static const char FX_MSL[] =
     "  float4 smapn;  // its texel in world units, depth bias, penumbra, slope\n"
     "  float4 smapn2; // its depth units, 1 when it is there, 1 for hard edges (sun_soft 0)\n"
     "  float4 aop;    // the occlusion's taps this frame\n"
+    "  float4x4 gimat; // the bounce light: view space to its map\n"
+    "  float4x4 giinv; // its map back to view space\n"
+    "  float4 gi;     // its strength (0: none), its reach in the map's uv and in world units, the level read\n"
+    "  float4 gip;    // 1 when its frame before is there, that one's weight, its samples, how far it reaches\n"
     "};\n"
     "struct FO { float4 pos [[position]]; float2 uv; };\n"
     "vertex FO fx_vs(uint vid [[vertex_id]]) {\n"
@@ -2325,11 +2329,95 @@ static const char FX_MSL[] =
     "  for (int i = 0; i < NS; ++i) { acc += m.sample(s, uv).rgb * w; w *= u.rays.y; uv -= step; }\n"
     "  return float4(acc * (4.0 / float(NS)), 1.0);\n"
     "}\n"
+    /* The bounce light (gfx_hlsl.c's fx_gi, which says what each step does): what the sunlit surfaces
+     * near P throw onto it, gathered from the map of the casters near the camera as the sun sees them,
+     * depth and colour. rgb the light, a the distance. */
+    "fragment float4 fx_gi(FO in [[stage_in]], constant FxU& u [[buffer(0)]], depth2d<float> dt [[texture(0)]],\n"
+    "                      depth2d<float> gd [[texture(1)]], texture2d<float> gc [[texture(2)]]) {\n"
+    "  constexpr sampler ls(coord::normalized, filter::linear, mip_filter::linear, address::clamp_to_edge);\n"
+    "  float2 px = floor(u.vp.xy + in.uv * u.vp.zw) + 0.5;\n"
+    "  float3 P = pos_at(u, dt, px);\n"
+    "  float dist = P.z * u.hand.x;\n"
+    "  if (dist <= 0.0) return float4(0.0);\n"
+    "  float4 q = u.gimat * float4(P, 1.0);\n"
+    "  float2 e = abs(q.xy);\n"
+    "  float edge = (1.0 - smoothstep(0.8, 0.95, max(e.x, e.y))) * (1.0 - smoothstep(0.7 * u.gip.w, u.gip.w, dist));\n"
+    "  if (edge <= 0.0 || q.z >= 1.0) return float4(0.0, 0.0, 0.0, dist);\n"
+    "  float3 r = pos_at(u, dt, px + float2(1, 0)) - P, l = P - pos_at(u, dt, px - float2(1, 0));\n"
+    "  float3 d = pos_at(u, dt, px + float2(0, 1)) - P, t = P - pos_at(u, dt, px - float2(0, 1));\n"
+    "  float3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  float3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  float3 nc = cross(dx, dy);\n"
+    "  float3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
+    "  if (dot(N, P) > 0.0) N = -N;\n"
+    "  float2 uv = float2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5), sz = float2(gd.get_width(), gd.get_height());\n"
+    "  const uchar BAYER[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };\n"
+    "  int2 cell = int2(in.pos.xy) & 3;\n"
+    "  float k = fract((float(BAYER[cell.y * 4 + cell.x]) + 0.5) / 16.0 + u.hist.y);\n"
+    "  const int NS = max(int(u.gip.z), 1);\n"
+    "  float r2 = u.gi.z * u.gi.z;\n"
+    "  float3 sum = float3(0.0);\n"
+    "  for (int i = 0; i < NS; ++i) {\n"
+    "    float tt = (float(i) + k) / float(NS), a = float(i) * 2.3999632 + k * 6.2831853;\n"
+    "    float2 us = uv + float2(cos(a), sin(a)) * (sqrt(tt) * u.gi.y);\n"
+    "    if (any(us <= 0.0) || any(us >= 1.0)) continue;\n"
+    "    float zs = gd.read(uint2(us * sz));\n"
+    "    if (zs >= 1.0) continue;\n"
+    "    float4 x = u.giinv * float4(us.x * 2.0 - 1.0, 1.0 - us.y * 2.0, zs, 1.0);\n"
+    "    float3 v = x.xyz / x.w - P;\n"
+    "    float dd = dot(v, v) + 1e-4;\n"
+    "    float3 vn = v * rsqrt(dd);\n"
+    "    float w = saturate(dot(N, vn)) * saturate(0.25 - 0.75 * dot(u.sun.xyz, vn)) * r2 / (dd + 0.25 * r2) * saturate(2.0 - dd / r2);\n"
+    "    sum += gc.sample(ls, us, level(u.gi.w)).rgb * w;\n"
+    "  }\n"
+    "  return float4(sum * (u.gi.x * edge / float(NS)), dist);\n"
+    "}\n"
+    /* the bounce light over frames: last frame's where this point was then, kept within what its
+     * neighbours have now */
+    "fragment float4 fx_gitemp(FO in [[stage_in]], constant FxU& u [[buffer(0)]], texture2d<float> cur [[texture(0)]],\n"
+    "                          texture2d<float> hist [[texture(1)]], sampler s [[sampler(0)]]) {\n"
+    "  float4 c = cur.read(uint2(in.pos.xy));\n"
+    "  if (c.a <= 0.0 || u.gip.x == 0.0) return c;\n"
+    "  float2 px = u.vp.xy + in.uv * u.vp.zw;\n"
+    "  float3 P = view_pos(u, px, c.a * u.hand.x);\n"
+    "  float4 pc = u.reproj * float4(P, 1.0);\n"
+    "  if (pc.w <= 1e-4) return c;\n"
+    "  float2 puv = float2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"
+    "  if (any(puv < 0.0) || any(puv > 1.0)) return c;\n"
+    "  float4 h = hist.sample(s, puv);\n"
+    "  if (!(h.a > 0.0) || abs(h.a - pc.w) > 0.04 * pc.w) return c;\n"
+    "  int2 p = int2(in.pos.xy), hi = int2(cur.get_width(), cur.get_height()) - 1;\n"
+    "  float3 lo = c.rgb, up = c.rgb;\n"
+    "  for (int dy = -1; dy <= 1; ++dy)\n"
+    "    for (int dx = -1; dx <= 1; ++dx) {\n"
+    "      float4 t = cur.read(uint2(clamp(p + int2(dx, dy), int2(0), hi)));\n"
+    "      if (t.a > 0.0 && abs(t.a - c.a) < 0.05 * c.a) lo = min(lo, t.rgb), up = max(up, t.rgb);\n"
+    "    }\n"
+    "  float3 give = 0.1 * (up - lo) + 0.01;\n"
+    "  return float4(mix(c.rgb, clamp(h.rgb, lo - give, up + give), u.gip.y), c.a);\n"
+    "}\n"
+    /* the bounce light at uv from its half size: the four round it, each as near in distance as it is */
+    "static float3 gi_at(texture2d<float> g, float2 uv, float dist) {\n"
+    "  if (dist <= 0.0) return float3(0.0);\n"
+    "  int2 sz = int2(g.get_width(), g.get_height()), hi = sz - 1;\n"
+    "  float2 gg = uv * float2(sz) - 0.5, f = fract(gg);\n"
+    "  int2 i0 = int2(floor(gg));\n"
+    "  float3 s = 0.0;\n"
+    "  float w = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    int2 o = int2(k & 1, k >> 1);\n"
+    "    float4 t = g.read(uint2(clamp(i0 + o, int2(0), hi)));\n"
+    "    float bw = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);\n"
+    "    float dw = t.a > 0.0 ? 1.0 / (1e-3 + abs(t.a - dist) / dist) : 1e-3;\n"
+    "    s += t.rgb * bw * dw, w += bw * dw;\n"
+    "  }\n"
+    "  return w > 0.0 ? s / w : float3(0.0);\n"
+    "}\n"
     "static float3 screen(float3 a, float3 b) { return 1.0 - (1.0 - saturate(a)) * (1.0 - saturate(b)); }\n"
     "fragment float4 fx_comp(FO in [[stage_in]], constant FxU& u [[buffer(0)]], texture2d<float> src [[texture(0)]],\n"
     "                        texture2d<float> ao [[texture(1)]], depth2d<float> dt [[texture(2)]],\n"
     "                        texture2d<float> b1 [[texture(3)]], texture2d<float> b2 [[texture(4)]],\n"
-    "                        texture2d<float> ry [[texture(5)]], sampler s [[sampler(0)]]) {\n"
+    "                        texture2d<float> ry [[texture(5)]], texture2d<float> gt [[texture(6)]], sampler s [[sampler(0)]]) {\n"
     "  float2 px = in.pos.xy;\n"
     "  float4 c = src.read(uint2(px));\n"
     "  int dbg = int(u.grade.w);\n"
@@ -2337,7 +2425,14 @@ static const char FX_MSL[] =
     "  float o = os.x, sun = mix(1.0, os.y, u.smap.x) * mix(1.0, os.z, u.shadow.x);\n"
     "  if (dbg == 1) return float4(o, o, o, c.a);\n"
     "  if (dbg == 5) return float4(float3(sun), c.a);\n"
+    /* the bounce light (t6) on the surface's own colour, mostly where the sun does not reach, shaded by
+     * the occlusion like any light that is not the sun's */
+    "  float3 gl = u.gi.x > 0.0 ? gi_at(gt, in.uv, view_z(u, dt.read(uint2(px))) * u.hand.x) : float3(0.0);\n"
+    "  if (dbg == 6) return float4(gl * 3.0, c.a);\n"
+    "  if (dbg == 7 && px.x < u.vp.x + u.vp.z * 0.5) gl = float3(0.0);\n"
+    "  float3 base = c.rgb;\n"
     "  c.rgb *= mix(1.0, o, u.ao.y) * sun;\n"
+    "  c.rgb += base * gl * mix(1.0, o, u.ao.y) * (1.0 - 0.75 * mix(1.0, os.y, u.smap.x));\n"
     "  float f = 0.0;\n"
     "  if (u.fogc.a > 0.0) {\n"
     "    float z = view_z(u, dt.read(uint2(px)));\n"
@@ -2379,7 +2474,13 @@ static struct
     int tried;
     id<MTLLibrary> lib;
     id<MTLRenderPipelineState> ao_pipe, blur_pipe, bright_pipe, down_pipe, gauss_pipe, raymask_pipe, rays_pipe, comp_pipe,
-        temporal_pipe, aa_pipe, linz_pipe, zmip_pipe;
+        temporal_pipe, aa_pipe, linz_pipe, zmip_pipe, gi_pipe, gitemp_pipe;
+    /* the bounce light: the casters near the camera as the sun sees them, depth and colour (with three
+     * levels below); the gather at half the occlusion's size; after the temporal pass, this frame's and
+     * the one before */
+    id<MTLTexture> gimap, gicol, gi0, gih[2];
+    int gih_at;
+    uint64_t gih_serial, prev_serial; /* the frames the bounce's history and the camera (prev_view) were kept */
     MTLPixelFormat comp_fmt, aa_fmt;
     /* the occlusion's depth: view z at its size and three levels below (fx_linz, fx_zmip), and a view
      * of each level to draw into */
@@ -2490,6 +2591,8 @@ static int fx_init(void)
     g_fx.temporal_pipe = fx_pipeline(@"fx_temporal", MTLPixelFormatRGBA16Float);
     g_fx.linz_pipe = fx_pipeline(@"fx_linz", MTLPixelFormatR32Float);
     g_fx.zmip_pipe = fx_pipeline(@"fx_zmip", MTLPixelFormatR32Float);
+    g_fx.gi_pipe = fx_pipeline(@"fx_gi", MTLPixelFormatRGBA16Float);
+    g_fx.gitemp_pipe = fx_pipeline(@"fx_gitemp", MTLPixelFormatRGBA16Float);
     MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
     sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
     sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
@@ -2508,7 +2611,7 @@ static int fx_init(void)
     g_fx.sdepth = [g_dev newDepthStencilStateWithDescriptor:dd];
     [dd release];
     if (!g_fx.ao_pipe || !g_fx.blur_pipe || !g_fx.bright_pipe || !g_fx.down_pipe || !g_fx.gauss_pipe || !g_fx.raymask_pipe ||
-        !g_fx.rays_pipe || !g_fx.temporal_pipe || !g_fx.linz_pipe || !g_fx.zmip_pipe)
+        !g_fx.rays_pipe || !g_fx.temporal_pipe || !g_fx.linz_pipe || !g_fx.zmip_pipe || !g_fx.gi_pipe || !g_fx.gitemp_pipe)
     {
         [g_fx.ao_pipe release], g_fx.ao_pipe = nil;
         return 0;
@@ -3045,13 +3148,13 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
                 ce->c.vb[s] = copy ? nil : [ce->c.vb[s] retain];
             ce->c.ib = copy ? nil : [ce->c.ib retain];
             for (int t = 0; t < 8; ++t)
-                [ce->c.tex[t] retain];
+                ce->c.tex[t] = alpha_tested(&c->lib.fs) ? [ce->c.tex[t] retain] : nil;
             ce->c.ub = nil;
         }
         else if (copy)
         {
             /* the textures as of this frame (an alpha test's) */
-            for (int t = 0; t < 8; ++t)
+            for (int t = 0; t < 8 && alpha_tested(&c->lib.fs); ++t)
             {
                 [c->tex[t] retain];
                 [ce->c.tex[t] release];
@@ -3095,6 +3198,8 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
     }
 }
 
+#define GI_MAP 1024 /* the bounce light's map's texels across */
+
 static id<MTLTexture> sun_target(id<MTLTexture>* t, int size)
 {
     if (*t && (*t).width != (NSUInteger)size)
@@ -3107,6 +3212,8 @@ static id<MTLTexture> sun_target(id<MTLTexture>* t, int size)
         td.storageMode = MTLStorageModePrivate;
         *t = [g_dev newTextureWithDescriptor:td];
     }
+    if (t == &g_fx.gimap)
+        return *t;
     id<MTLTexture>* col = t == &g_fx.smapn ? &g_fx.scol8 : &g_fx.scol;
     if (*col && (*col).width != (NSUInteger)size)
         [*col release], *col = nil;
@@ -3121,8 +3228,10 @@ static id<MTLTexture> sun_target(id<MTLTexture>* t, int size)
     return *t && *col ? *t : nil;
 }
 
-/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache) */
-static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* invV, const SunCascade* k, int cache)
+/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). With col,
+ * the bounce light's: every caster (whoever casts) in its own colour as well, through its own pixel
+ * function, unfogged (gfx_d3d12.c's) */
+static uint32_t sun_draw(id<MTLTexture> target, id<MTLTexture> col, const float* invP, const float* invV, const SunCascade* k, int cache)
 {
     float clip_world[16], M[16];
     gfx_mat_mul(clip_world, invP, invV);
@@ -3132,9 +3241,10 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
     rp.depthAttachment.loadAction = MTLLoadActionClear;
     rp.depthAttachment.clearDepth = 1.0;
     rp.depthAttachment.storeAction = MTLStoreActionStore;
-    rp.colorAttachments[0].texture = target == g_fx.smapn ? g_fx.scol8 : g_fx.scol;
-    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-    rp.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+    rp.colorAttachments[0].texture = col ? col : target == g_fx.smapn ? g_fx.scol8 : g_fx.scol;
+    rp.colorAttachments[0].loadAction = col ? MTLLoadActionClear : MTLLoadActionDontCare;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    rp.colorAttachments[0].storeAction = col ? MTLStoreActionStore : MTLStoreActionDontCare;
     ts_mark(rp, TS_SUN0, TS_SUN1);
     id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
     [e setViewport:(MTLViewport){ 0, 0, (double)k->size, (double)k->size, 0, 1 }];
@@ -3151,10 +3261,12 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
             if (i == 0)
                 [e setVertexBytes:M length:64 atIndex:5];
             /* sun_casters 1: characters alone cast - the zone's shadows are baked into its colours
-             * already, and the game tints them for the hour and the weather */
-            if ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep))
+             * already, and the game tints them for the hour and the weather (the bounce light's map has
+             * them all) */
+            if (!col && ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep)))
                 continue;
-            /* this frame's too: more than 96 units outside the map's sides, no shadow of it falls in it */
+            /* this frame's too: more than 96 units outside the map's sides (the bounce light's: 16), no
+             * shadow of it falls in it */
             if (cs->has_pos)
             {
                 float h[4];
@@ -3164,7 +3276,7 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
                     float q[3] = { h[0] / h[3], h[1] / h[3], h[2] / h[3] };
                     float mx = q[0] * k->S[0] + q[1] * k->S[4] + q[2] * k->S[8] + k->S[12];
                     float my = q[0] * k->S[1] + q[1] * k->S[5] + q[2] * k->S[9] + k->S[13];
-                    float edge = 1.0f + 96.0f * 2.0f / k->across;
+                    float edge = 1.0f + (col ? 16.0f : 96.0f) * 2.0f / k->across;
                     if (fabsf(mx) > edge || fabsf(my) > edge)
                         continue;
                 }
@@ -3199,8 +3311,10 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
         memset(&pk, 0, sizeof pk);
         pk.lib = cs->lib;
         pk.lib.vs.shadow = 1, pk.lib.vs.pixel = 0;
-        int at = alpha_tested(&cs->lib.fs);
-        if (!at)
+        int at = alpha_tested(&cs->lib.fs), tex = at || col;
+        if (col)
+            pk.lib.fs.fog = 0, pk.pipe.write_mask = 15; /* its colour as the sun sees it: no fog of the camera's */
+        else if (!at)
         {
             /* the position alone: one pipeline serves every draw with the same vertex layout */
             GfxVsKey* v = &pk.lib.vs;
@@ -3211,7 +3325,7 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
             memset(v->tci, 0, sizeof v->tci), memset(v->ttf, 0, sizeof v->ttf);
             memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
         }
-        pk.color = (uint32_t)MTLPixelFormatR8Unorm, pk.depth = (uint32_t)MTLPixelFormatDepth32Float;
+        pk.color = (uint32_t)(col ? col.pixelFormat : MTLPixelFormatR8Unorm), pk.depth = (uint32_t)MTLPixelFormatDepth32Float;
         id<MTLRenderPipelineState> ps = pipeline_for(&pk, cs->vs, cs->ps);
         if (!ps)
         {
@@ -3226,7 +3340,7 @@ static uint32_t sun_draw(id<MTLTexture> target, const float* invP, const float* 
         for (int st = 0; st < GFX_NSTREAMS; ++st)
             [e setVertexBuffer:cs->vb[st] offset:cs->voff[st] atIndex:(NSUInteger)st];
         [e setVertexBuffer:cs->ub offset:cs->uoff atIndex:4];
-        if (at)
+        if (tex)
         {
             [e setFragmentBuffer:cs->ub offset:cs->uoff atIndex:4];
             for (int t = 0; t < 8; ++t)
@@ -3269,7 +3383,7 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     gfx_sun_fit(s, invV, L, 0.5f, dfar, GFX_SUN_MAP, &far);
     if (!sun_target(&g_fx.smap, GFX_SUN_MAP))
         return 0;
-    uint32_t drawn = sun_draw(g_fx.smap, invP, invV, &far, 1);
+    uint32_t drawn = sun_draw(g_fx.smap, nil, invP, invV, &far, 1);
     memcpy(u->lmat, far.lmat, 64);
     u->smap[1] = far.texel, u->smap[2] = far.bias, u->smap[3] = far.soft;
     u->smap2[0] = far.slope, u->smap2[3] = far.range;
@@ -3289,10 +3403,40 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     if (dnear >= 2.0f && tnear < dfar && sun_target(&g_fx.smapn, nsize))
     {
         gfx_sun_fit(s, invV, L, 0.5f, tnear, nsize, &near);
-        sun_draw(g_fx.smapn, invP, invV, &near, 1);
+        sun_draw(g_fx.smapn, nil, invP, invV, &near, 1);
         memcpy(u->lmatn, near.lmat, 64);
         u->smapn[0] = near.texel, u->smapn[1] = near.bias, u->smapn[2] = near.soft, u->smapn[3] = near.slope;
         u->smapn2[0] = near.range, u->smapn2[1] = 1.0f;
+    }
+    /* the bounce light's map: this frame's casters over the first gi_distance units the camera sees, in
+     * colour, 1024 across, and its levels below (gfx_d3d12.c's) */
+    u->gi[0] = 0.0f;
+    float gd = fminf(fmaxf(g_fxs.gi_distance, 8.0f), dfar);
+    if (g_fxs.gi > 0.0f && sun_target(&g_fx.gimap, GI_MAP))
+    {
+        if (!g_fx.gicol)
+        {
+            MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                          width:GI_MAP height:GI_MAP mipmapped:YES];
+            td.mipmapLevelCount = 4;
+            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            td.storageMode = MTLStorageModePrivate;
+            g_fx.gicol = [g_dev newTextureWithDescriptor:td];
+        }
+        SunCascade gk;
+        float inv[16];
+        gfx_sun_fit(s, invV, L, 0.5f, gd, GI_MAP, &gk);
+        if (g_fx.gicol && sun_draw(g_fx.gimap, g_fx.gicol, invP, invV, &gk, 0) && gfx_mat_inverse(inv, gk.lmat))
+        {
+            id<MTLBlitCommandEncoder> b = [cmd() blitCommandEncoder];
+            [b generateMipmapsForTexture:g_fx.gicol];
+            [b endEncoding];
+            float r = fmaxf(g_fxs.gi_radius, 0.5f);
+            memcpy(u->gimat, gk.lmat, 64), memcpy(u->giinv, inv, 64);
+            u->gi[0] = 1.0f, u->gi[1] = r / gk.across, u->gi[2] = r;
+            u->gi[3] = fminf(fmaxf(log2f(r / (4.0f * gk.texel)), 0.0f), 3.0f);
+            u->gip[3] = gd;
+        }
     }
     g_fx.st_across = far.across;
     g_fx.st_cached = g_ncache;
@@ -3555,9 +3699,12 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
                 {
                     u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+                    u.gi[0] *= g_fxs.gi * day;
                     if (day >= 0.25f)
                         g_sun_shown = g_serial;
                 }
+                else
+                    u.gi[0] = 0.0f;
                 g_fx.tr_strength = u.smap[0], g_fx.tr_day = day;
                 u.smap2[1] = fminf(fmaxf(g_fxs.sun_face, 0.0f), 1.0f), u.smap2[2] = fmaxf(g_fxs.sun_min, 0.0f);
                 /* the sun's place on screen: far along its direction, through the projection */
@@ -3576,19 +3723,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
              * size, and not a jump away */
             {
                 float vinv2[16], m[16];
-                int ok = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0] &&
-                    g_fx.hist[0].width == aw && g_fx.hist[0].height == ah && gfx_mat_inverse(vinv2, s->view);
-                if (ok)
+                int cam = g_fx.prev_serial && g_fx.prev_serial + 1 == g_serial && gfx_mat_inverse(vinv2, s->view);
+                if (cam)
                 {
                     float dx = vinv2[12] - g_fx.prev_cam[0], dy = vinv2[13] - g_fx.prev_cam[1], dz = vinv2[14] - g_fx.prev_cam[2];
-                    ok = dx * dx + dy * dy + dz * dz < 25.0f;
+                    cam = dx * dx + dy * dy + dz * dz < 25.0f;
                 }
-                if (ok)
+                if (cam)
                 {
                     gfx_mat_mul(m, vinv2, g_fx.prev_view);
                     gfx_mat_mul(u.reproj, m, g_fx.prev_proj);
-                    u.hist[0] = 1.0f;
+                    u.hist[0] = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0] && g_fx.hist[0].width == aw &&
+                        g_fx.hist[0].height == ah ? 1.0f : 0.0f;
+                    /* the bounce light's too, at its own size */
+                    u.gip[0] = g_fx.gih_serial && g_fx.gih_serial + 1 == g_serial && g_fx.gih[0] && g_fx.gih[0].width == (aw + 1) / 2 &&
+                        g_fx.gih[0].height == (ah + 1) / 2 ? 1.0f : 0.0f;
                 }
+                g_fx.prev_serial = g_serial;
                 /* the pattern's turn: a golden-ratio step each frame */
                 u.hist[1] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
                 u.hist[2] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f);
@@ -3600,6 +3751,12 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
             if (g_fxs.water > 0.0f && have_v)
                 water_scene(s, vinv, &u, ct);
+            NSUInteger gw = (aw + 1) / 2, gh = (ah + 1) / 2;
+            int gi = u.gi[0] > 0.0f && fx_tex(&g_fx.gi0, MTLPixelFormatRGBA16Float, gw, gh) &&
+                fx_tex(&g_fx.gih[0], MTLPixelFormatRGBA16Float, gw, gh) && fx_tex(&g_fx.gih[1], MTLPixelFormatRGBA16Float, gw, gh);
+            if (!gi)
+                u.gi[0] = 0.0f;
+            u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
             if (fx_tex(&g_fx.src, ct.pixelFormat, ct.width, ct.height) && fx_tex(&g_fx.ao0, MTLPixelFormatRGBA16Float, aw, ah) &&
                 fx_tex(&g_fx.ao1, MTLPixelFormatRGBA16Float, aw, ah) && fx_tex(&g_fx.b1a, MTLPixelFormatRGBA16Float, bw, bh) &&
                 fx_tex(&g_fx.b1b, MTLPixelFormatRGBA16Float, bw, bh) &&
@@ -3650,6 +3807,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         }
                         g_ts_fx_end = TS_FX1;
                     }
+                    /* the bounce light: gathered from its map at half the occlusion's size, then over frames */
+                    id<MTLTexture> gi_out = nil;
+                    if (gi)
+                    {
+                        MTLViewport qg = fx_full(g_fx.gi0);
+                        id<MTLTexture> gi_in[3] = { depth, g_fx.gimap, g_fx.gicol };
+                        fx_pass(g_fx.gi0, MTLLoadActionDontCare, g_fx.gi_pipe, qg, &u, gi_in, 3, NULL);
+                        gi_out = g_fx.gi0;
+                        if (u.gip[1] > 0.0f)
+                        {
+                            int to = g_fx.gih_at ^ 1;
+                            id<MTLTexture> t_in[2] = { g_fx.gi0, g_fx.gih[g_fx.gih_at] };
+                            fx_pass(g_fx.gih[to], MTLLoadActionDontCare, g_fx.gitemp_pipe, qg, &u, t_in, 2, NULL);
+                            gi_out = g_fx.gih[to];
+                            g_fx.gih_at = to, g_fx.gih_serial = g_serial;
+                        }
+                    }
                     if (u.bloom[1] > 0.0f)
                     {
                         id<MTLTexture> b_in[2] = { g_fx.src, ao_out }; /* shaded as fx_comp shades */
@@ -3668,8 +3842,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.rb, 1, across);
                         fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.ra, 1, down);
                     }
-                    id<MTLTexture> comp_in[6] = { g_fx.src, ao_out, depth, g_fx.b1a, g_fx.b2a, g_fx.rb };
-                    fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 6, NULL);
+                    id<MTLTexture> comp_in[7] = { g_fx.src, ao_out, depth, g_fx.b1a, g_fx.b2a, g_fx.rb, gi_out ? gi_out : g_fx.rb };
+                    fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 7, NULL);
                 }
             }
         }

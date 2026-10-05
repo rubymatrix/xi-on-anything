@@ -2226,7 +2226,7 @@ static void draw_encode(const GfxDraw* d)
         w[nw].descriptorCount = 1;
         w[nw].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[nw++].pImageInfo = &ii[i];
-        if (rec && alpha_tested(&d->fs))
+        if (rec)
             rec->tex[i] = view, rec->samp[i] = sk;
     }
     if (water)
@@ -2412,6 +2412,10 @@ static const char FX_GLSL[] =
     "  vec4 smapn;  // its texel in world units, depth bias, penumbra, slope\n"
     "  vec4 smapn2; // its depth units, 1 when it is there, 1 for hard edges\n"
     "  vec4 aop;    // the occlusion's taps this frame\n"
+    "  mat4 gimat;  // the bounce light: view space to its map\n"
+    "  mat4 giinv;  // its map back to view space\n"
+    "  vec4 gi;     // its strength (0: none), its reach in the map's uv and in world units, the level read\n"
+    "  vec4 gip;    // 1 when its frame before is there, that one's weight, its samples, how far it reaches\n"
     "} u;\n"
     "layout(push_constant) uniform FxPC { ivec2 dir; } pc;\n"
     "#ifdef GFX_VS\n"
@@ -2432,6 +2436,7 @@ static const char FX_GLSL[] =
     "layout(set = 0, binding = 6) uniform sampler2D t5;\n"
     "layout(set = 0, binding = 7) uniform sampler2DShadow smc;  /* t1 with a compare sampler */\n"
     "layout(set = 0, binding = 8) uniform sampler2DShadow smnc; /* t2 with a compare sampler */\n"
+    "layout(set = 0, binding = 9) uniform sampler2D t6;\n"
     "const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);\n"
     "float view_z(float d) {\n"
     "  d = (d - u.zp.z) / max(u.zp.w - u.zp.z, 1e-6);\n"
@@ -2575,6 +2580,85 @@ static const char FX_GLSL[] =
     "  float facing = smoothstep(0.1, 0.4, dot(N, -P) / dist);\n"
     "  oc = vec4(clamp(1.0 - 3.0 * facing * sum / float(NS), 0.0, 1.0), dist, mp, sh);\n"
     "}\n"
+    "#endif\n"
+    "\n"
+    /* the bounce light (gfx_hlsl.c's fx_gi, which says what each step does): depth at t0, the map's depth
+     * at t1, its colour at t2; rgb the light, a the distance */
+    "#ifdef FX_GI\n"
+    "vec3 normal_at(vec2 px, vec3 P) {\n"
+    "  vec3 r = pos_at(t0, px + vec2(1, 0)) - P, l = P - pos_at(t0, px - vec2(1, 0));\n"
+    "  vec3 d = pos_at(t0, px + vec2(0, 1)) - P, t = P - pos_at(t0, px - vec2(0, 1));\n"
+    "  vec3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  vec3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  vec3 nc = cross(dx, dy);\n"
+    "  vec3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
+    "  return dot(N, P) > 0.0 ? -N : N;\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 px = floor(u.vp.xy + vuv * u.vp.zw) + 0.5;\n"
+    "  vec3 P = pos_at(t0, px);\n"
+    "  float dist = P.z * u.hand.x;\n"
+    "  oc = vec4(0.0);\n"
+    "  if (dist <= 0.0) return;\n"
+    "  oc.a = dist;\n"
+    "  vec4 q = u.gimat * vec4(P, 1.0);\n"
+    "  vec2 e = abs(q.xy);\n"
+    "  float edge = (1.0 - smoothstep(0.8, 0.95, max(e.x, e.y))) * (1.0 - smoothstep(0.7 * u.gip.w, u.gip.w, dist));\n"
+    "  if (edge <= 0.0 || q.z >= 1.0) return;\n"
+    "  vec3 N = normal_at(px, P);\n"
+    "  vec2 uv = vec2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5), sz = vec2(textureSize(t1, 0));\n"
+    "  const int BAYER[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);\n"
+    "  ivec2 cell = ivec2(gl_FragCoord.xy) & 3;\n"
+    "  float k = fract((float(BAYER[cell.y * 4 + cell.x]) + 0.5) / 16.0 + u.hist.y);\n"
+    "  int NS = max(int(u.gip.z), 1);\n"
+    "  float r2 = u.gi.z * u.gi.z;\n"
+    "  vec3 sum = vec3(0.0);\n"
+    "  for (int i = 0; i < NS; ++i) {\n"
+    "    float t = (float(i) + k) / float(NS), a = float(i) * 2.3999632 + k * 6.2831853;\n"
+    "    vec2 us = uv + vec2(cos(a), sin(a)) * (sqrt(t) * u.gi.y);\n"
+    "    if (any(lessThanEqual(us, vec2(0.0))) || any(greaterThanEqual(us, vec2(1.0)))) continue;\n"
+    "    float zs = texelFetch(t1, ivec2(us * sz), 0).r;\n"
+    "    if (zs >= 1.0) continue;\n"
+    "    vec4 x = u.giinv * vec4(us.x * 2.0 - 1.0, 1.0 - us.y * 2.0, zs, 1.0);\n"
+    "    vec3 v = x.xyz / x.w - P;\n"
+    "    float dd = dot(v, v) + 1e-4;\n"
+    "    vec3 vn = v * inversesqrt(dd);\n"
+    "    float w = clamp(dot(N, vn), 0.0, 1.0) * clamp(0.25 - 0.75 * dot(u.sun.xyz, vn), 0.0, 1.0) * r2 / (dd + 0.25 * r2) *\n"
+    "      clamp(2.0 - dd / r2, 0.0, 1.0);\n"
+    "    sum += textureLod(t2, us, u.gi.w).rgb * w;\n"
+    "  }\n"
+    "  oc.rgb = sum * (u.gi.x * edge / float(NS));\n"
+    "}\n"
+    "#endif\n"
+    "\n"
+    "#ifdef FX_GITEMP\n"
+    "void main() {\n"
+    "  vec4 c = texelFetch(t0, ivec2(gl_FragCoord.xy), 0);\n"
+    "  oc = c;\n"
+    "  if (c.a <= 0.0 || u.gip.x == 0.0) return;\n"
+    "  vec2 px = u.vp.xy + vuv * u.vp.zw;\n"
+    "  vec3 P = view_pos(px, c.a * u.hand.x);\n"
+    "  vec4 pcl = u.reproj * vec4(P, 1.0);\n"
+    "  if (pcl.w <= 1e-4) return;\n"
+    "  vec2 puv = vec2(pcl.x / pcl.w * 0.5 + 0.5, 0.5 - pcl.y / pcl.w * 0.5);\n"
+    "  if (any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0)))) return;\n"
+    "  vec4 h = texture(t1, puv);\n"
+    "  if (!(h.a > 0.0) || abs(h.a - pcl.w) > 0.04 * pcl.w) return;\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy), hi = textureSize(t0, 0) - 1;\n"
+    "  vec3 lo = c.rgb, up = c.rgb;\n"
+    "  for (int dy = -1; dy <= 1; ++dy)\n"
+    "    for (int dx = -1; dx <= 1; ++dx) {\n"
+    "      vec4 t = texelFetch(t0, clamp(p + ivec2(dx, dy), ivec2(0), hi), 0);\n"
+    "      if (t.a > 0.0 && abs(t.a - c.a) < 0.05 * c.a) lo = min(lo, t.rgb), up = max(up, t.rgb);\n"
+    "    }\n"
+    "  vec3 give = 0.1 * (up - lo) + 0.01;\n"
+    "  oc = vec4(mix(c.rgb, clamp(h.rgb, lo - give, up + give), u.gip.y), c.a);\n"
+    "}\n"
+    "#endif\n"
+    "\n"
+    /* one level of the bounce light's map from the level above: the average of the 2x2 over it */
+    "#ifdef FX_MIP\n"
+    "void main() { oc = texture(t0, vuv); }\n"
     "#endif\n"
     "\n"
     "#ifdef FX_BLUR\n"
@@ -2740,6 +2824,23 @@ static const char FX_GLSL[] =
     "  return w > 0.0 ? s / w : vec3(1.0);\n"
     "}\n"
     "vec3 screen(vec3 a, vec3 b) { return 1.0 - (1.0 - clamp(a, 0.0, 1.0)) * (1.0 - clamp(b, 0.0, 1.0)); }\n"
+    /* the bounce light at uv from its half size: the four round it, each as near in distance as it is */
+    "vec3 gi_at(vec2 uv, float dist) {\n"
+    "  if (dist <= 0.0) return vec3(0.0);\n"
+    "  ivec2 sz = textureSize(t6, 0), hi = sz - 1;\n"
+    "  vec2 g = uv * vec2(sz) - 0.5, f = fract(g);\n"
+    "  ivec2 i0 = ivec2(floor(g));\n"
+    "  vec3 s = vec3(0.0);\n"
+    "  float w = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    ivec2 o = ivec2(k & 1, k >> 1);\n"
+    "    vec4 t = texelFetch(t6, clamp(i0 + o, ivec2(0), hi), 0);\n"
+    "    float bw = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y);\n"
+    "    float dw = t.a > 0.0 ? 1.0 / (1e-3 + abs(t.a - dist) / dist) : 1e-3;\n"
+    "    s += t.rgb * bw * dw, w += bw * dw;\n"
+    "  }\n"
+    "  return w > 0.0 ? s / w : vec3(0.0);\n"
+    "}\n"
     "void main() {\n"
     "  vec2 px = gl_FragCoord.xy;\n"
     "  vec4 c = texelFetch(t0, ivec2(px), 0);\n"
@@ -2748,7 +2849,13 @@ static const char FX_GLSL[] =
     "  float o = os.x, sun = mix(1.0, os.y, u.smap.x) * mix(1.0, os.z, u.shadow.x);\n"
     "  if (dbg == 1) { oc = vec4(o, o, o, c.a); return; }\n"
     "  if (dbg == 5) { oc = vec4(vec3(sun), c.a); return; }\n"
+    /* the bounce light (t6) on the surface's own colour, mostly where the sun does not reach (gfx_hlsl.c) */
+    "  vec3 gl = u.gi.x > 0.0 ? gi_at(vuv, view_z(depth_at(t2, px)) * u.hand.x) : vec3(0.0);\n"
+    "  if (dbg == 6) { oc = vec4(gl * 3.0, c.a); return; }\n"
+    "  if (dbg == 7 && px.x < u.vp.x + u.vp.z * 0.5) gl = vec3(0.0);\n"
+    "  vec3 base = c.rgb;\n"
     "  c.rgb *= mix(1.0, o, u.ao.y) * sun;\n"
+    "  c.rgb += base * gl * mix(1.0, o, u.ao.y) * (1.0 - 0.75 * mix(1.0, os.y, u.smap.x));\n"
     "  float f = 0.0;\n"
     "  if (u.fogc.a > 0.0) {\n"
     "    float z = view_z(depth_at(t2, px));\n"
@@ -2784,12 +2891,15 @@ static const char FX_GLSL[] =
     "#endif\n"
     "#endif\n";
 
+#define GI_MAP 1024 /* the bounce light's map's texels across */
+#define GI_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+
 static struct
 {
     int tried;
     VkShaderModule vs;
     VkPipeline ao_pipe, blur_pipe, bright_pipe, down_pipe, gauss_pipe, raymask_pipe, rays_pipe, comp_pipe, temporal_pipe, aa_pipe,
-        linz_pipe, zmip_pipe;
+        linz_pipe, zmip_pipe, gi_pipe, gitemp_pipe, mip_pipe;
     VkFormat comp_fmt, aa_fmt;
     GfxTex* lz;     /* the occlusion's depth: view z at its size and three levels below (FX_LINZ, FX_ZMIP) */
     GfxTex* aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
@@ -2801,6 +2911,14 @@ static struct
     float last_cam[3]; /* where the camera was at the last scene (a jump is a new place) */
     VkSampler samp, cmp;
     GfxTex *smap, *smapn, *sdummy; /* the sun's shadow maps (far, near), a stand-in */
+    /* the bounce light: the casters near the camera as the sun sees them, depth and colour (with three
+     * levels below); the gather at half the occlusion's size; after the temporal pass, this frame's and
+     * the one before; the sampler that reads the colour's levels (samp reads level 0 alone) */
+    GfxTex *gimap, *gicol, *gi0, *gih[2];
+    int gih_at;
+    uint64_t gih_serial, prev_serial; /* the frames the bounce's history and the camera (prev_view) were kept */
+    VkSampler mipsamp;
+    uint32_t mip_in; /* fx_pass: the inputs read through mipsamp (a bit each) */
     float focus[3];                /* the player's place in the world (gfx_set_focus) */
     int has_focus;
     /* what the fog and rays follow, eased from frame to frame (fx_ease) */
@@ -2892,13 +3010,13 @@ static int fx_init(void)
         return g_fx.ao_pipe != VK_NULL_HANDLE;
     g_fx.tried = 1;
     /* the passes' bindings: their uniforms, six textures, the two sun maps with a compare sampler */
-    VkDescriptorSetLayoutBinding b[9];
+    VkDescriptorSetLayoutBinding b[10];
     b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-    for (uint32_t i = 1; i < 9; ++i)
+    for (uint32_t i = 1; i < 10; ++i)
         b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    dl.bindingCount = 9;
+    dl.bindingCount = 10;
     dl.pBindings = b;
     VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_fx_dsl));
     VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8 };
@@ -2920,9 +3038,16 @@ static int fx_init(void)
     g_fx.temporal_pipe = fx_pipeline("TEMPORAL", F16);
     g_fx.linz_pipe = fx_pipeline("LINZ", F32);
     g_fx.zmip_pipe = fx_pipeline("ZMIP", F32);
+    g_fx.gi_pipe = fx_pipeline("GI", F16);
+    g_fx.gitemp_pipe = fx_pipeline("GITEMP", F16);
+    g_fx.mip_pipe = fx_pipeline("MIP", GI_FORMAT);
     VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     si.magFilter = si.minFilter = VK_FILTER_LINEAR;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.mipsamp));
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.maxLod = 0.25f;
     VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.samp));
     /* 1 where the point is no deeper than the map; filtered where the device filters depth */
@@ -2935,7 +3060,8 @@ static int fx_init(void)
     VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.cmp));
     g_fx.sdummy = tex_create(GFX_TEX_2D, F_D16, 1, 1, 1, GFX_USE_DEPTH, VK_FORMAT_D32_SFLOAT, 1);
     if (!g_fx.ao_pipe || !g_fx.blur_pipe || !g_fx.bright_pipe || !g_fx.down_pipe || !g_fx.gauss_pipe || !g_fx.raymask_pipe ||
-        !g_fx.rays_pipe || !g_fx.temporal_pipe || !g_fx.linz_pipe || !g_fx.zmip_pipe || !g_fx.sdummy)
+        !g_fx.rays_pipe || !g_fx.temporal_pipe || !g_fx.linz_pipe || !g_fx.zmip_pipe || !g_fx.gi_pipe || !g_fx.gitemp_pipe ||
+        !g_fx.mip_pipe || !g_fx.sdummy)
     {
         g_fx.ao_pipe = VK_NULL_HANDLE;
         return 0;
@@ -2984,7 +3110,8 @@ static void image_copy(GfxTex* src, GfxTex* dst, VkImageAspectFlags aspect)
 }
 
 /* one full-screen triangle into a level of target (within vp, x y w h; NULL: all of it), reading
- * in[0..n) as t0.., and the sun maps sh[0..2) through the compare sampler; load keeps what is there */
+ * in[0..n) as t0.. (up to seven), and the sun maps sh[0..2) through the compare sampler; load keeps
+ * what is there */
 static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, const float* vp, const VkImageView* in, int n,
     const VkImageView* sh, const int32_t* dir)
 {
@@ -3009,18 +3136,20 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
     vkCmdSetViewport(cb, 0, 1, &v);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    VkWriteDescriptorSet w[9];
+    VkWriteDescriptorSet w[10];
     VkDescriptorBufferInfo bi = { g_fx.ub, g_fx.uoff, sizeof(FxU) };
-    VkDescriptorImageInfo ii[8];
+    VkDescriptorImageInfo ii[9];
     w[0] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     w[0].dstBinding = 0;
     w[0].descriptorCount = 1;
     w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     w[0].pBufferInfo = &bi;
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < 9; ++i)
     {
-        if (i < 6)
-            ii[i] = (VkDescriptorImageInfo){ g_fx.samp, i < n && in[i] ? in[i] : g_dummy2d->view, VK_IMAGE_LAYOUT_GENERAL };
+        int t = i < 6 ? i : i == 8 ? 6 : -1; /* bindings 1..6 are t0..t5, 9 is t6; 7 and 8 the sun maps */
+        if (t >= 0)
+            ii[i] = (VkDescriptorImageInfo){ (g_fx.mip_in >> t) & 1 ? g_fx.mipsamp : g_fx.samp, t < n && in[t] ? in[t] : g_dummy2d->view,
+                VK_IMAGE_LAYOUT_GENERAL };
         else
             ii[i] = (VkDescriptorImageInfo){ g_fx.cmp, sh && sh[i - 6] ? sh[i - 6] : g_fx.sdummy->view, VK_IMAGE_LAYOUT_GENERAL };
         w[1 + i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -3029,7 +3158,7 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
         w[1 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[1 + i].pImageInfo = &ii[i];
     }
-    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, 9, w);
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, 10, w);
     int32_t d2[2] = { dir ? dir[0] : 0, dir ? dir[1] : 0 };
     vkCmdPushConstants(cb, g_fx_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8, d2);
     vkCmdDraw(cb, 3, 1, 0, 0);
@@ -3454,8 +3583,10 @@ static GfxTex* sun_target(GfxTex** t, int size)
     return fx_tex(t, VK_FORMAT_D32_SFLOAT, (uint32_t)size, (uint32_t)size, GFX_USE_DEPTH, 1);
 }
 
-/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache) */
-static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, const SunCascade* k, int cache)
+/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). With col,
+ * the bounce light's: every caster (whoever casts) in its own colour as well, through its own pixel
+ * function, unfogged (gfx_d3d12.c's) */
+static uint32_t sun_draw(GfxTex* target, GfxTex* col, const float* invP, const float* invV, const SunCascade* k, int cache)
 {
     float clip_world[16], M[16];
     gfx_mat_mul(clip_world, invP, invV);
@@ -3473,6 +3604,16 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
     ri.renderArea.extent = (VkExtent2D){ (uint32_t)k->size, (uint32_t)k->size };
     ri.layerCount = 1;
     ri.pDepthAttachment = &da;
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    if (col)
+    {
+        ca.imageView = attachment_view(col, 0, 0);
+        ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &ca;
+    }
     vkCmdBeginRendering(cb, &ri);
     /* y up, as the draws' (set_viewport): the map's rows as sun_look reads them */
     VkViewport v = { 0, (float)k->size, (float)k->size, -(float)k->size, 0, 1 };
@@ -3491,10 +3632,10 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
             cs = &g_casters[i];
             if (!mb)
                 memcpy(ring(64, RING_ALIGN, &mb, &moff), M, 64);
-            /* sun_casters 1: characters alone cast; 2: the zone alone */
-            if ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep))
+            /* sun_casters 1: characters alone cast; 2: the zone alone (the bounce light's map has them all) */
+            if (!col && ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep)))
                 continue;
-            /* more than 96 units outside the map's sides: no shadow of it falls in it */
+            /* more than 96 units outside the map's sides (the bounce light's: 16): no shadow of it falls in it */
             if (cs->has_pos)
             {
                 float h[4];
@@ -3504,7 +3645,7 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
                     float q[3] = { h[0] / h[3], h[1] / h[3], h[2] / h[3] };
                     float mx = q[0] * k->S[0] + q[1] * k->S[4] + q[2] * k->S[8] + k->S[12];
                     float my = q[0] * k->S[1] + q[1] * k->S[5] + q[2] * k->S[9] + k->S[13];
-                    float edge = 1.0f + 96.0f * 2.0f / k->across;
+                    float edge = 1.0f + (col ? 16.0f : 96.0f) * 2.0f / k->across;
                     if (fabsf(mx) > edge || fabsf(my) > edge)
                         continue;
                 }
@@ -3538,8 +3679,10 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
         memset(&pk, 0, sizeof pk);
         pk.lib = cs->lib;
         pk.lib.vs.shadow = 1, pk.lib.vs.pixel = 0, pk.lib.vs.water = 0, pk.lib.fs.water = 0;
-        int at = alpha_tested(&cs->lib.fs);
-        if (!at)
+        int at = alpha_tested(&cs->lib.fs), tex = at || col;
+        if (col)
+            pk.lib.fs.fog = 0, pk.pipe.write_mask = 15; /* its colour as the sun sees it: no fog of the camera's */
+        else if (!at)
         {
             /* the position alone: one pipeline serves every draw with the same vertex layout */
             GfxVsKey* vk = &pk.lib.vs;
@@ -3550,7 +3693,7 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
             memset(vk->tci, 0, sizeof vk->tci), memset(vk->ttf, 0, sizeof vk->ttf);
             memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
         }
-        pk.color = VK_FORMAT_UNDEFINED, pk.depth = VK_FORMAT_D32_SFLOAT;
+        pk.color = col ? (uint32_t)col->vf : VK_FORMAT_UNDEFINED, pk.depth = VK_FORMAT_D32_SFLOAT;
         pk.topo = cs->prim == VK_PRIMITIVE_TOPOLOGY_POINT_LIST ? 0
             : cs->prim == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || cs->prim == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ? 1 : 2;
         VkPipeline ps = pipeline_for(&pk, cs->vs, cs->ps);
@@ -3606,7 +3749,7 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
             w[nw].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             w[nw++].pBufferInfo = &bi[2 + st];
         }
-        if (at)
+        if (tex)
             for (int t = 0; t < 8; ++t)
             {
                 int wanted = cs->lib.fs.prog || t < cs->lib.fs.nstages ? cs->lib.fs.st[t].tex : 0;
@@ -3635,6 +3778,8 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
     g_dirty = 1;
     g_bound = VK_NULL_HANDLE;
     target->used = g_serial, target->rec = g_cb_index;
+    if (col)
+        col->used = g_serial, col->rec = g_cb_index;
     return drawn;
 }
 
@@ -3657,7 +3802,7 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     gfx_sun_fit(s, invV, L, 0.5f, dfar, GFX_SUN_MAP, &far);
     if (!sun_target(&g_fx.smap, GFX_SUN_MAP))
         return 0;
-    uint32_t drawn = sun_draw(g_fx.smap, invP, invV, &far, 1);
+    uint32_t drawn = sun_draw(g_fx.smap, NULL, invP, invV, &far, 1);
     memcpy(u->lmat, far.lmat, 64);
     u->smap[1] = far.texel, u->smap[2] = far.bias, u->smap[3] = far.soft;
     u->smap2[0] = far.slope, u->smap2[3] = far.range;
@@ -3675,10 +3820,34 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     if (dnear > 0.0f && sun_target(&g_fx.smapn, nsize))
     {
         gfx_sun_fit(s, invV, L, 0.5f, tnear, nsize, &near);
-        sun_draw(g_fx.smapn, invP, invV, &near, 1);
+        sun_draw(g_fx.smapn, NULL, invP, invV, &near, 1);
         memcpy(u->lmatn, near.lmat, 64);
         u->smapn[0] = near.texel, u->smapn[1] = near.bias, u->smapn[2] = near.soft, u->smapn[3] = near.slope;
         u->smapn2[0] = near.range, u->smapn2[1] = 1.0f;
+    }
+    /* the bounce light's map: this frame's casters over the first gi_distance units the camera sees, in
+     * colour, 1024 across, and its levels below (gfx_d3d12.c's) */
+    u->gi[0] = 0.0f;
+    float gd = fminf(fmaxf(g_fxs.gi_distance, 8.0f), dfar);
+    if (g_fxs.gi > 0.0f && sun_target(&g_fx.gimap, GI_MAP) && fx_tex(&g_fx.gicol, GI_FORMAT, GI_MAP, GI_MAP, GFX_USE_RT, 4))
+    {
+        SunCascade gk;
+        float inv[16];
+        gfx_sun_fit(s, invV, L, 0.5f, gd, GI_MAP, &gk);
+        if (sun_draw(g_fx.gimap, g_fx.gicol, invP, invV, &gk, 0) && gfx_mat_inverse(inv, gk.lmat))
+        {
+            fx_uniforms(u); /* (the levels read none of them, but the pass binds them) */
+            for (uint32_t lv = 1; lv < 4; ++lv)
+            {
+                VkImageView prev = level_view(g_fx.gicol, lv - 1);
+                fx_pass(g_fx.gicol, lv, 0, g_fx.mip_pipe, NULL, &prev, 1, NULL, NULL);
+            }
+            float r = fmaxf(g_fxs.gi_radius, 0.5f);
+            memcpy(u->gimat, gk.lmat, 64), memcpy(u->giinv, inv, 64);
+            u->gi[0] = 1.0f, u->gi[1] = r / gk.across, u->gi[2] = r;
+            u->gi[3] = fminf(fmaxf(log2f(r / (4.0f * gk.texel)), 0.0f), 3.0f);
+            u->gip[3] = gd;
+        }
     }
     g_fx.st_across = far.across;
     g_fx.st_cached = g_ncache;
@@ -3951,9 +4120,12 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
             {
                 u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+                u.gi[0] *= g_fxs.gi * day;
                 if (day >= 0.25f)
                     g_sun_shown = g_serial;
             }
+            else
+                u.gi[0] = 0.0f;
             g_fx.tr_strength = u.smap[0], g_fx.tr_day = day;
             u.smap2[1] = fminf(fmaxf(g_fxs.sun_face, 0.0f), 1.0f), u.smap2[2] = fmaxf(g_fxs.sun_min, 0.0f);
             /* the sun's place on screen: far along its direction, through the projection */
@@ -3972,19 +4144,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
          * size, and not a jump away */
         {
             float vinv2[16], m[16];
-            int ok = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0] && g_fx.hist[0]->w == aw &&
-                g_fx.hist[0]->h == ah && gfx_mat_inverse(vinv2, s->view);
-            if (ok)
+            int cam = g_fx.prev_serial && g_fx.prev_serial + 1 == g_serial && gfx_mat_inverse(vinv2, s->view);
+            if (cam)
             {
                 float dx = vinv2[12] - g_fx.prev_cam[0], dy = vinv2[13] - g_fx.prev_cam[1], dz = vinv2[14] - g_fx.prev_cam[2];
-                ok = dx * dx + dy * dy + dz * dz < 25.0f;
+                cam = dx * dx + dy * dy + dz * dz < 25.0f;
             }
-            if (ok)
+            if (cam)
             {
                 gfx_mat_mul(m, vinv2, g_fx.prev_view);
                 gfx_mat_mul(u.reproj, m, g_fx.prev_proj);
-                u.hist[0] = 1.0f;
+                u.hist[0] = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0] && g_fx.hist[0]->w == aw &&
+                    g_fx.hist[0]->h == ah ? 1.0f : 0.0f;
+                /* the bounce light's too, at its own size */
+                u.gip[0] = g_fx.gih_serial && g_fx.gih_serial + 1 == g_serial && g_fx.gih[0] && g_fx.gih[0]->w == (aw + 1) / 2 &&
+                    g_fx.gih[0]->h == (ah + 1) / 2 ? 1.0f : 0.0f;
             }
+            g_fx.prev_serial = g_serial;
             /* the pattern's turn: a golden-ratio step each frame */
             u.hist[1] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
             u.hist[2] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f);
@@ -3997,6 +4173,12 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         if (g_fxs.water > 0.0f && have_v)
             water_scene(s, vinv, &u, ct);
         const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+        uint32_t gw = (aw + 1) / 2, gh = (ah + 1) / 2;
+        int gi = u.gi[0] > 0.0f && fx_tex(&g_fx.gi0, F16, gw, gh, GFX_USE_RT, 1) && fx_tex(&g_fx.gih[0], F16, gw, gh, GFX_USE_RT, 1) &&
+            fx_tex(&g_fx.gih[1], F16, gw, gh, GFX_USE_RT, 1);
+        if (!gi)
+            u.gi[0] = 0.0f;
+        u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
         if (fx_tex(&g_fx.src, ct->vf, ct->w, ct->h, GFX_USE_RT, 1) && fx_tex(&g_fx.ao0, F16, aw, ah, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.ao1, F16, aw, ah, GFX_USE_RT, 1) && fx_tex(&g_fx.b1a, F16, bw, bh, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.b1b, F16, bw, bh, GFX_USE_RT, 1) && fx_tex(&g_fx.b2a, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) &&
@@ -4049,6 +4231,24 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 }
                 else
                     fx_uniforms(&u);
+                /* the bounce light: gathered from its map at half the occlusion's size, then over frames */
+                GfxTex* gi_out = NULL;
+                if (gi)
+                {
+                    VkImageView gi_in[3] = { depth->view, g_fx.gimap->view, g_fx.gicol->view };
+                    g_fx.mip_in = 1u << 2;
+                    fx_pass(g_fx.gi0, 0, 0, g_fx.gi_pipe, NULL, gi_in, 3, NULL, NULL);
+                    g_fx.mip_in = 0;
+                    gi_out = g_fx.gi0;
+                    if (u.gip[1] > 0.0f)
+                    {
+                        int to = g_fx.gih_at ^ 1;
+                        VkImageView t_in[2] = { g_fx.gi0->view, g_fx.gih[g_fx.gih_at]->view };
+                        fx_pass(g_fx.gih[to], 0, 0, g_fx.gitemp_pipe, NULL, t_in, 2, NULL, NULL);
+                        gi_out = g_fx.gih[to];
+                        g_fx.gih_at = to, g_fx.gih_serial = g_serial;
+                    }
+                }
                 if (u.bloom[1] > 0.0f)
                 {
                     VkImageView b_in[2] = { g_fx.src->view, ao_out->view }; /* shaded as the composite shades */
@@ -4067,9 +4267,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     fx_pass(g_fx.ra, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.rb->view, 1, NULL, across);
                     fx_pass(g_fx.rb, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.ra->view, 1, NULL, down);
                 }
-                VkImageView comp_in[6] = { g_fx.src->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view };
+                VkImageView comp_in[7] = { g_fx.src->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view,
+                    gi_out ? gi_out->view : VK_NULL_HANDLE };
                 float vp[4] = { vx, vy, vw, vh };
-                fx_pass(ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 6, NULL, NULL);
+                fx_pass(ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 7, NULL, NULL);
                 depth->used = g_serial, depth->rec = g_cb_index;
             }
         }
