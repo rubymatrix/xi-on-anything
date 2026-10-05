@@ -433,6 +433,46 @@ static WebAudioSink g_sink;
 
 void web_set_audio_sink(WebAudioSink sink) { g_sink = sink; }
 
+/* The page's audio: a ring of interleaved stereo floats in the shared memory that the page's AudioWorklet
+ * (tools/web/audio-worklet.js) reads straight from - no thread of the page's touches the samples.
+ * Header: write index, read index (frames, each only moved by its side), size in frames. */
+#define RING_FRAMES 16384 /* about 340 ms */
+#define RING_TARGET 4800  /* frames ahead of the worklet the mix keeps at most: 100 ms */
+typedef struct AudioRing
+{
+    volatile int32_t write, read, size, pad;
+    float data[RING_FRAMES * 2];
+} AudioRing;
+static AudioRing* g_ring;
+
+EMSCRIPTEN_KEEPALIVE AudioRing* web_audio_ring(void)
+{
+    if (!g_ring)
+    {
+        g_ring = (AudioRing*)calloc(1, sizeof *g_ring);
+        g_ring->size = RING_FRAMES;
+    }
+    return g_ring;
+}
+
+static void ring_write(const float* f, int n)
+{
+    AudioRing* r = g_ring;
+    if (!r)
+        return;
+    int32_t w = __atomic_load_n(&r->write, __ATOMIC_ACQUIRE), rd = __atomic_load_n(&r->read, __ATOMIC_ACQUIRE);
+    int32_t ahead = (w - rd + RING_FRAMES) % RING_FRAMES;
+    if (ahead + n > RING_TARGET) /* the worklet fell behind (a hidden page, a hitch): drop, so the sound
+                                  * stays no more than RING_TARGET behind the game */
+        return;
+    for (int i = 0; i < n; ++i)
+    {
+        int32_t at = (w + i) % RING_FRAMES;
+        r->data[2 * at] = f[2 * i], r->data[2 * at + 1] = f[2 * i + 1];
+    }
+    __atomic_store_n(&r->write, (w + n) % RING_FRAMES, __ATOMIC_RELEASE);
+}
+
 static uint64_t now_ns(void)
 {
     struct timespec t;
@@ -490,6 +530,7 @@ bool SDL_PutAudioStreamData(SDL_AudioStream* s, const void* buf, int len)
     WebAudioSink sink = g_sink;
     if (sink)
         sink((const float*)buf, len / (int)(2 * sizeof(float)));
+    ring_write((const float*)buf, len / (int)(2 * sizeof(float)));
     return true;
 }
 

@@ -42,7 +42,7 @@ HOST = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/dis
 LINK = ['-pthread', '-sPROXY_TO_PTHREAD', '-sALLOW_MEMORY_GROWTH', '-sMAXIMUM_MEMORY=4GB', '-sINITIAL_MEMORY=64MB',
         '-sSTACK_SIZE=1MB', '-sDEFAULT_PTHREAD_STACK_SIZE=1MB', '-sPTHREAD_POOL_SIZE=24', '-sEXIT_RUNTIME',
         '-Wl,--wrap=sbrk', '-sERROR_ON_UNDEFINED_SYMBOLS=1', '-lm', '--js-library', 'tools/web/net.js',
-        '-sEXPORTED_RUNTIME_METHODS=ENV,FS', '-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wn_deliver,_web_key,_web_text,_web_mouse_move,_web_mouse_button,_web_mouse_wheel,_web_focus,_web_close,_web_view_size,_web_gamepad']
+        '-sEXPORTED_RUNTIME_METHODS=ENV,FS,stringToNewUTF8,HEAPU8', '-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wn_deliver,_web_key,_web_text,_web_mouse_move,_web_mouse_button,_web_mouse_wheel,_web_focus,_web_close,_web_view_size,_web_gamepad,_web_audio_ring']
 
 
 def main():
@@ -77,7 +77,8 @@ def main():
     names = ['--profiling-funcs'] if a.profile else []
     bp.run(['em++', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env + names)
     if not a.node:
-        shutil.copy(os.path.join(ROOT, 'tools', 'web', 'index.html'), os.path.join(ROOT, out, 'index.html'))
+        for page in ('index.html', 'input.js', 'audio-worklet.js'):
+            shutil.copy(os.path.join(ROOT, 'tools', 'web', page), os.path.join(ROOT, out, page))
     print('built %s/host64.js' % out)
 
 
