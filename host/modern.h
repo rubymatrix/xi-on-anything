@@ -22,6 +22,10 @@ void modern_init(const ModernSetup* setup);
  * its menu data is loaded (and again if it reloads it). */
 void modern_frame(void);
 
+/* The window has a new size (the browser's: the page was resized), and the menus' size for it (0: the
+ * window's over the UI scale): applied between frames as Config > Display applies a size it picks. */
+void modern_window_size(int w, int h, int menu_w, int menu_h);
+
 /* Config > Addons: the addon host's installed addons, a row each (host/addons/manage.c). Each call
  * is on the game's thread. */
 typedef struct ModernAddons

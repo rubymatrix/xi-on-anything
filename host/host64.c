@@ -725,7 +725,13 @@ static void present_hook(void)
     watermark_frame();
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */
+    extern int web_take_resize(int* w, int* h, int* menu_w, int* menu_h);
     web_frame();
+    {
+        int w, h, mw, mh; /* the page was resized: the game's resolution follows */
+        if (web_take_resize(&w, &h, &mw, &mh))
+            modern_window_size(w, h, mw, mh);
+    }
 #endif
     if (!g_fps_global)
         find_fps_global();

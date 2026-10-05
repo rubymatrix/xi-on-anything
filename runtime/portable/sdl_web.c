@@ -182,10 +182,29 @@ const SDL_DisplayMode* SDL_GetDesktopDisplayMode(SDL_DisplayID id)
     return &m;
 }
 
+static volatile int g_menu_w, g_menu_h, g_resized;
+
 EMSCRIPTEN_KEEPALIVE void web_view_size(int w, int h)
 {
     if (w > 0 && h > 0)
         __atomic_store_n(&g_view_w, w, __ATOMIC_SEQ_CST), __atomic_store_n(&g_view_h, h, __ATOMIC_SEQ_CST);
+}
+
+/* the page was resized: the canvas's new size in device pixels and the menus' for it (the page picks the UI
+ * scale); the game's thread takes it (web_take_resize) and changes the game's resolution between frames */
+EMSCRIPTEN_KEEPALIVE void web_resize(int w, int h, int menu_w, int menu_h)
+{
+    web_view_size(w, h);
+    g_menu_w = menu_w, g_menu_h = menu_h;
+    __atomic_store_n(&g_resized, 1, __ATOMIC_SEQ_CST);
+}
+
+int web_take_resize(int* w, int* h, int* menu_w, int* menu_h)
+{
+    if (!__atomic_exchange_n(&g_resized, 0, __ATOMIC_SEQ_CST))
+        return 0;
+    *w = g_view_w, *h = g_view_h, *menu_w = g_menu_w, *menu_h = g_menu_h;
+    return 1;
 }
 
 /* --- keyboard and mouse ---------------------------------------------------------------------------- */
