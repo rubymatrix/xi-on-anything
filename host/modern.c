@@ -2199,6 +2199,22 @@ static void menu_apply(int mw, int mh)
     windows_follow(w0, h0, mw, mh);
 }
 
+void modern_window_size(int w, int h, int menu_w, int menu_h)
+{
+    w &= ~1, h &= ~1;
+    if (w < 320 || h < 240 || (w == g_win_w && h == g_win_h && menu_w == g_menu_w && menu_h == g_menu_h))
+        return;
+    g_win_w = w, g_win_h = h;
+    if (menu_w > 0 && menu_h > 0)
+        menu_size(menu_w, menu_h, 1.0f, &g_menu_w, &g_menu_h); /* in the interface's shape */
+    else
+    {
+        float scale = g_scale.n ? g_scale.v[list_at(&g_scale)] : 1.0f;
+        menu_size(w, h, scale, &g_menu_w, &g_menu_h);
+    }
+    g_display_live = 1; /* display_apply, after this frame's Present */
+}
+
 /* The window's mode and size now, between frames (after Present): the window (user32), the back
  * buffer (d3d8), then the game's own copies of them - the registry's values it read at its start,
  * its graphics object's and its first viewport (made once, at its start), its scene's, its device's

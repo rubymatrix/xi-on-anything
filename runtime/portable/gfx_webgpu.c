@@ -1713,11 +1713,28 @@ static void make_statics(void)
     g_blit_samp = wgpuDeviceCreateSampler(g_dev, &sd);
 }
 
+/* The page's fps gauge (tools/web/hud.js): frames presented, and the longest gap between two since it last
+ * asked (the worst frame), read from the page's thread. */
+static volatile uint32_t g_hud_frames;
+static volatile uint32_t g_hud_worst_us;
+static uint64_t g_hud_last_ns;
+
+EMSCRIPTEN_KEEPALIVE uint32_t web_hud_frames(void) { return g_hud_frames; }
+EMSCRIPTEN_KEEPALIVE uint32_t web_hud_worst_us(void) { return __atomic_exchange_n(&g_hud_worst_us, 0, __ATOMIC_SEQ_CST); }
+
 void gfx_present(GfxTex* backbuffer)
 {
     if (!g_dev || g_init_state != 4)
         return;
     uint64_t t0 = gfx_now_ns();
+    if (g_hud_last_ns)
+    {
+        uint32_t us = (uint32_t)((t0 - g_hud_last_ns) / 1000u);
+        if (us > g_hud_worst_us)
+            g_hud_worst_us = us;
+    }
+    g_hud_last_ns = t0;
+    g_hud_frames++;
     if (g_clear_flags && g_rt) /* a clear nothing drew after: still a clear */
         begin_pass();
     end_pass();

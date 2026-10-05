@@ -22,7 +22,7 @@
 <script>
 // The development page (docs/web-port-plan.md): the game drawn into #canvas by its render thread (WebGPU), its log
 // below. The page's hash carries the server's token and, for development, the sign-in:
-// #t=<token>&server=<ip>&user=..&pass=..&authport=..&enter=<s>&profile=1&nolog=1
+// #t=<token>&server=<ip>&user=..&pass=..&authport=..&enter=<s>&profile=1&nolog=1&fps=0
 const hash = new URLSearchParams(location.hash.slice(1));
 const logEl = document.getElementById('log'), statusEl = document.getElementById('status');
 const lines = [];
@@ -52,12 +52,11 @@ var Module = {
     FS.mkdir('/xi-data');
     // the game's window is the canvas, in device pixels: its resolution and the menus' (the data folder's
     // settings.reg, loaded last), windowed, with the 4096 background the scene effects want
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+    const { w, h, mw, mh } = xiHud.sizes();
     const hex = (v) => 'dword:' + v.toString(16).padStart(8, '0');
     FS.writeFile('/xi-data/settings.reg', 'REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI]\r\n' +
       '"0001"=' + hex(w) + '\r\n"0002"=' + hex(h) + '\r\n"0003"=' + hex(4096) + '\r\n"0004"=' + hex(4096) + '\r\n' +
-      '"0034"=' + hex(1) + '\r\n"0037"=' + hex(w) + '\r\n"0038"=' + hex(h) + '\r\n');
+      '"0034"=' + hex(1) + '\r\n"0037"=' + hex(mw) + '\r\n"0038"=' + hex(mh) + '\r\n');
     Module.viewSize = [w, h];
   }],
   onRuntimeInitialized() {
@@ -65,6 +64,8 @@ var Module = {
     Module._web_view_size(Module.viewSize[0], Module.viewSize[1]);
     Module._web_focus(1);
     xiInput.start(Module, document.getElementById('canvas'));
+    xiHud.follow(Module);
+    if (hash.get('fps') !== '0') xiHud.gauge(Module);
     // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay.py does)
     if (hash.get('enter')) {
       const until = Date.now() + Number(hash.get('enter')) * 1000;
@@ -80,6 +81,7 @@ var Module = {
 window.addEventListener('error', (e) => log('error: ' + e.message));
 </script>
 <script src="input.js"></script>
+<script src="hud.js"></script>
 <script src="host64.js"></script>
 </body>
 </html>
