@@ -242,7 +242,13 @@ static void* rec(uint32_t op, size_t body)
     {
         while (g_cur->n + size > g_cur->cap)
             g_cur->cap *= 2;
-        g_cur->p = (uint8_t*)realloc(g_cur->p, g_cur->cap);
+        uint8_t* p = (uint8_t*)realloc(g_cur->p, g_cur->cap);
+        if (!p)
+        {
+            fprintf(stderr, "gfx queue: out of memory for a %zu-byte batch\n", g_cur->cap);
+            abort();
+        }
+        g_cur->p = p;
     }
     Cmd* c = (Cmd*)(g_cur->p + g_cur->n);
     c->op = op, c->size = (uint32_t)size;

@@ -291,7 +291,7 @@ int httpfs_stat(const char* path, int64_t* size, int* is_dir)
 /* --- reading -------------------------------------------------------------------------------------------- */
 /* 1 MB a request: over a tunnel each one is a round trip to the internet and back */
 #define BLOCK (1u << 20)
-#define SLOTS 96 /* 96 MB */
+#define SLOTS 24 /* 24 MB of the host heap (PLAT_HOST_TOP): the page's file cache keeps the rest */
 typedef struct Slot
 {
     Mount* m;
