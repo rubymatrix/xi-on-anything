@@ -32,7 +32,7 @@
       return;
     }
     audio = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
-    audio.audioWorklet.addModule('audio-worklet.js').then(() => {
+    audio.audioWorklet.addModule('audio-worklet.js?v=__XI_BUILD__').then(() => {
       const node = new AudioWorkletNode(audio, 'xi-audio', { outputChannelCount: [2] });
       node.port.postMessage({ mem: M.HEAPU8.buffer, ring: M._web_audio_ring() });
       node.connect(audio.destination);

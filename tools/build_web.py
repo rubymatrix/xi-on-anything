@@ -16,6 +16,7 @@ from the player's own FFXiMain.dll (Square Enix code).
 Needs Emscripten (emcc on PATH, or EMSDK set: source <emsdk>/emsdk_env.sh).
 """
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -78,8 +79,21 @@ def main():
     names = ['--profiling-funcs'] if a.profile else []
     bp.run(['em++', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env + names)
     if not a.node:
-        for page in ('index.html', 'input.js', 'hud.js', 'audio-worklet.js', 'dlcache.js'):
-            shutil.copy(os.path.join(ROOT, 'tools', 'web', page), os.path.join(ROOT, out, page))
+        # the build's id, in each page's ?v= (index.html's XI_BUILD): the wasm and the pages, hashed
+        h = hashlib.sha1()
+        for f in ('host64.js', 'host64.wasm'):
+            with open(os.path.join(ROOT, out, f), 'rb') as fh:
+                h.update(fh.read())
+        pages = ('index.html', 'input.js', 'hud.js', 'audio-worklet.js', 'dlcache.js')
+        for page in pages:
+            with open(os.path.join(ROOT, 'tools', 'web', page), 'rb') as fh:
+                h.update(fh.read())
+        build_id = h.hexdigest()[:12]
+        for page in pages:
+            with open(os.path.join(ROOT, 'tools', 'web', page), encoding='utf-8') as fh:
+                text = fh.read().replace('__XI_BUILD__', build_id)
+            with open(os.path.join(ROOT, out, page), 'w', encoding='utf-8') as fh:
+                fh.write(text)
     print('built %s/host64.js' % out)
 
 
