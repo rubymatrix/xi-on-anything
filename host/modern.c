@@ -103,6 +103,7 @@ enum
     VTBL_SLOTS = 17,
     CONFIG_ITEMS = 13,          /* the Config list's own */
     EV_DOWN = 1, EV_UP = 2, EV_RIGHT = 3, EV_LEFT = 4, EV_SELECT = 5, /* a menu's input events (OnInput); the game's own sliders go up on 3 */
+    EV_WHEEL_UP = 22, EV_WHEEL_DOWN = 23, /* a step of the mouse wheel over the window (the game's Effects page scrolls on them) */
 };
 
 static const char CONFIG_NAME[] = "menu    configwi", SHEET_NAME[] = "menu    modernps",
@@ -156,12 +157,12 @@ static int g_nfx_keys;
 
 /* Config > Addons: a row an installed addon (host/addons/manage.c), ADDON_VIS of them at a time
  * over the list from g_addon_top, scrolled as the inventory is: up from the top row or down from the
- * bottom one moves the list under the cursor, past the end back round to the start. The rows are
- * the same each time; their names, kinds and the list's place are drawn each frame (addons_draw)
- * with a sprite a glyph, so an addon installed while the game runs shows the next time the page
- * opens. The page's height follows the list's length up to ADDON_VIS rows: a layout for each,
- * "menu    addonw01" to "menu    addonw10", the page's menu table entry renamed to the one that
- * fits as it opens. */
+ * bottom one moves the list under the cursor, past the end back round to the start; the mouse wheel
+ * moves it a row a step, as the game's Effects page does. The rows are the same each time; their
+ * names, kinds and the list's place are drawn each frame (addons_draw) with a sprite a glyph, so an
+ * addon installed while the game runs shows the next time the page opens. The page's height follows
+ * the list's length up to ADDON_VIS rows: a layout for each, "menu    addonw01" to "menu    addonw10",
+ * the page's menu table entry renamed to the one that fits as it opens. */
 enum
 {
     ADDON_VIS = 10,
@@ -1423,6 +1424,24 @@ static void addons_scroll(const Page* p, uint32_t window, int id, int ev)
     g_addon_cursor = item;
 }
 
+/* a wheel step, as the game's Effects page takes one: the list moves a row (not past either end) and
+ * the cursor a row the other way, so it stays on its addon until that one leaves the page */
+static void addons_wheel(const Page* p, uint32_t window, int ev)
+{
+    int max = g_addon_n > p->nrows ? g_addon_n - p->nrows : 0, step = ev == EV_WHEEL_DOWN ? 1 : -1;
+    if (!window || g_addon_top + step < 0 || g_addon_top + step > max)
+        return;
+    g_addon_top += step;
+    int id = (int16_t)rd16(window + 0x4c);
+    if (id < 1 || id > p->nitems)
+        return;
+    int r = p->items[id - 1].row, to = r - step < 0 ? 0 : r - step >= p->nrows ? p->nrows - 1 : r - step;
+    int item = p->row_item[to] + (id - 1 - p->row_item[r]) + 1;
+    if (item != id)
+        guest_thiscall(WINDOW_CURSOR, window, 2, (uint32_t[]){ (uint32_t)item, 1 });
+    g_addon_cursor = item;
+}
+
 /* the Config list's select: ours open their pages, the rest as the game does */
 static void config_input(Guest* g)
 {
@@ -1522,6 +1541,8 @@ static void page_input(Guest* g)
     Page* p = page_of(g->ecx);
     if (p == &PAGES[PAGE_ADDONS] && g_addons && id >= 1 && id <= p->nitems && (ev == EV_UP || ev == EV_DOWN))
         addons_scroll(p, window_of(g->ecx), id, ev);
+    else if (p == &PAGES[PAGE_ADDONS] && g_addons && (ev == EV_WHEEL_UP || ev == EV_WHEEL_DOWN))
+        addons_wheel(p, window_of(g->ecx), ev);
     else if (p && id >= 1 && id <= p->nitems)
     {
         const Item* it = &p->items[id - 1];
