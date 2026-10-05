@@ -50,10 +50,21 @@ var Module = {
     ENV.FFXI_DISCORD = '0';
     if (hash.get('profile')) ENV.FFXI_PROFILE = '1';
     FS.mkdir('/xi-data');
+    // the game's window is the canvas, in device pixels: its resolution and the menus' (the data folder's
+    // settings.reg, loaded last), windowed, with the 4096 background the scene effects want
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+    const hex = (v) => 'dword:' + v.toString(16).padStart(8, '0');
+    FS.writeFile('/xi-data/settings.reg', 'REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI]\r\n' +
+      '"0001"=' + hex(w) + '\r\n"0002"=' + hex(h) + '\r\n"0003"=' + hex(4096) + '\r\n"0004"=' + hex(4096) + '\r\n' +
+      '"0034"=' + hex(1) + '\r\n"0037"=' + hex(w) + '\r\n"0038"=' + hex(h) + '\r\n');
+    Module.viewSize = [w, h];
   }],
   onRuntimeInitialized() {
     statusEl.textContent = 'Running';
+    Module._web_view_size(Module.viewSize[0], Module.viewSize[1]);
     Module._web_focus(1);
+    xiInput.start(Module, document.getElementById('canvas'));
     // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay.py does)
     if (hash.get('enter')) {
       const until = Date.now() + Number(hash.get('enter')) * 1000;
@@ -68,6 +79,7 @@ var Module = {
 };
 window.addEventListener('error', (e) => log('error: ' + e.message));
 </script>
+<script src="input.js"></script>
 <script src="host64.js"></script>
 </body>
 </html>
