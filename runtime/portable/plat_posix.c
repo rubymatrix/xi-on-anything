@@ -3,13 +3,19 @@
  * Waiting on an address: macOS 14.4+ has os_sync_wait_on_address (the supported form of the
  * __ulock calls libc++ uses); Linux has futex. Address space: one PROT_NONE reservation; commit
  * is mprotect, decommit maps fresh zero pages over the range, as Win32's decommit + commit gives
- * zeroed memory back. */
+ * zeroed memory back.
+ *
+ * The browser (Emscripten, wasm32): no address space to reserve. Guest addresses are linear-memory
+ * addresses (guest.h without RT_GUEST_WINDOW; gwin.c keeps the host's region below the images), so
+ * commit grows the memory to cover the range and decommit zeroes it (wasm memory never shrinks).
+ * Waiting is Emscripten's futex (Atomics.wait). */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -24,6 +30,9 @@
 #if defined(__APPLE__)
 #include <os/os_sync_wait_on_address.h>
 #include <sys/sysctl.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/heap.h>
+#include <emscripten/threading.h>
 #else
 #include <linux/futex.h>
 #include <sys/syscall.h>
@@ -35,6 +44,38 @@
 
 const char plat_path_sep = '/';
 
+#if defined(__EMSCRIPTEN__)
+void* plat_reserve(size_t size)
+{
+    (void)size;
+    return NULL; /* gwin.c's flat mode never reserves */
+}
+
+int plat_commit(void* p, size_t size)
+{
+    size_t end = (size_t)(uintptr_t)p + size;
+    return end <= emscripten_get_heap_size() || emscripten_resize_heap(end);
+}
+
+void plat_decommit(void* p, size_t size)
+{
+    memset(p, 0, size);
+}
+
+/* The host's malloc (sbrk) may not grow into the guest's part of memory: linked with
+ * -Wl,--wrap=sbrk, every sbrk comes here first. */
+void* __real_sbrk(intptr_t increment);
+void* __wrap_sbrk(intptr_t increment)
+{
+    uintptr_t now = (uintptr_t)__real_sbrk(0);
+    if (increment > 0 && now + (uintptr_t)increment > PLAT_HOST_TOP)
+    {
+        errno = ENOMEM;
+        return (void*)-1;
+    }
+    return __real_sbrk(increment);
+}
+#else
 void* plat_reserve(size_t size)
 {
     void* p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
@@ -50,6 +91,7 @@ void plat_decommit(void* p, size_t size)
 {
     mmap(p, size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0);
 }
+#endif
 
 /* --- threads ------------------------------------------------------------------------------------- */
 uint32_t plat_thread_id(void)
@@ -58,6 +100,8 @@ uint32_t plat_thread_id(void)
     uint64_t id = 0;
     pthread_threadid_np(NULL, &id);
     return (uint32_t)id;
+#elif defined(__EMSCRIPTEN__)
+    return (uint32_t)(uintptr_t)pthread_self();
 #else
     return (uint32_t)syscall(SYS_gettid);
 #endif
@@ -87,7 +131,13 @@ int plat_thread_start(void (*fn)(void*), void* arg)
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+#if defined(__EMSCRIPTEN__)
+    /* only the C shadow stack (locals whose address is taken): wasm keeps its own call stack, and
+     * gate 0 measured 20 KB of native stack at most (docs/web-port-plan.md) */
+    pthread_attr_setstacksize(&a, 1u << 20);
+#else
     pthread_attr_setstacksize(&a, 8u << 20); /* translated frames are large; Windows gives 1 MB+ and grows */
+#endif
     pthread_t t;
     int r = pthread_create(&t, &a, thread_entry, s);
     pthread_attr_destroy(&a);
@@ -122,6 +172,8 @@ void plat_wait32(volatile uint32_t* addr, uint32_t expected)
 {
 #if defined(__APPLE__)
     os_sync_wait_on_address((void*)addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+#elif defined(__EMSCRIPTEN__)
+    emscripten_futex_wait(addr, expected, INFINITY);
 #else
     syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, NULL, NULL, 0);
 #endif
@@ -137,6 +189,8 @@ void plat_wait32_ms(volatile uint32_t* addr, uint32_t expected, uint32_t ms)
 #if defined(__APPLE__)
     os_sync_wait_on_address_with_timeout((void*)addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME,
         (uint64_t)ms * 1000000u);
+#elif defined(__EMSCRIPTEN__)
+    emscripten_futex_wait(addr, expected, (double)ms);
 #else
     struct timespec t = { (time_t)(ms / 1000), (long)(ms % 1000) * 1000000L };
     syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, &t, NULL, 0);
@@ -147,6 +201,8 @@ void plat_wake_all32(volatile uint32_t* addr)
 {
 #if defined(__APPLE__)
     os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE);
+#elif defined(__EMSCRIPTEN__)
+    emscripten_futex_wake(addr, 0x7FFFFFFF);
 #else
     syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, 0x7FFFFFFF, NULL, NULL, 0);
 #endif
@@ -452,6 +508,9 @@ void plat_memory(uint64_t* total, uint64_t* avail)
     sysctlbyname("hw.memsize", &mem, &len, NULL, 0);
     *total = mem;
     *avail = mem / 2; /* the guest only uses this for a "memory load" figure */
+#elif defined(__EMSCRIPTEN__)
+    *total = 4ull << 30; /* wasm32's whole memory */
+    *avail = *total - emscripten_get_heap_size();
 #else
     struct sysinfo si;
     sysinfo(&si);

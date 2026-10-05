@@ -44,7 +44,7 @@ and the DATs only to that player's browser. We never host a playable build on th
 | SDL3 owns window, events, audio, gamepad; video + events tied to the main thread | `user32.c:213`, `dsound.c` | Replace with a thin web platform layer (below). The game must not run on the browser main thread. |
 | Blocking GPU readbacks (`gfx_tex_read`: CopyRects, screenshots) | `d3d8.c:1470,1130` | WebGPU readback is async (`mapAsync`). OK once the game thread is separate from the render thread: it blocks on an atomic while the render worker maps. |
 | `SetCursorPos` warps the OS cursor | `user32.c:1416` | Browsers can't warp. Pointer Lock + software cursor when the game warps. |
-| LuaJIT addons | `host/addons` | LuaJIT can't JIT in wasm and its interpreter is hand-written asm. Addons are out of v1. |
+| LuaJIT addons | `host/addons` | LuaJIT can't JIT in wasm and its interpreter is hand-written asm. The browser gets its own addons instead: HTML and JS over the canvas, with a JS API reading game state from wasm memory (the page's own JS engine runs them; no Lua, no ImGui). `host/addons_none.c` stands in for the addon host. |
 | Keychain, Discord IPC | `host/keychain.c`, `host/discord.c` | Move to the local server (it has the OS keychain and the Discord socket). |
 
 ## Architecture

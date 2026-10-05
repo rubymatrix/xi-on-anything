@@ -57,7 +57,12 @@ typedef SOCKET sock_t;
 #include <unistd.h>
 typedef int sock_t;
 #define SOCK_BAD (-1)
+#if defined(__EMSCRIPTEN__) /* the browser: sockets over the local server's WebSocket */
+#include "net_web.h"
+#define sock_close wn_close
+#else
 #define sock_close close
+#endif
 #endif
 
 #if !defined(_WIN32) /* Windows has its own TLS: SChannel */
