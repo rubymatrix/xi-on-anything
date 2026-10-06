@@ -20,7 +20,8 @@ A private S3-compatible bucket holding a copy of the install and overlays (Digit
 Cloudflare R2, ...) takes the file reads off this machine's upload: --bucket is its address with the bucket
 in the host name (https://<bucket>.sfo3.digitaloceanspaces.com, or the CDN one), --bucket-game the folder
 the install is in, --bucket-dats each overlay's folder (in --dats order), and XI_BUCKET_KEY /
-XI_BUCKET_SECRET an access key. The page's file cache (tools/web/dlcache.js) then reads blocks straight from
+XI_BUCKET_SECRET an access key (in the environment, or in ~/.config/xi-web.env or --env <file> as KEY=VALUE
+lines). The page's file cache (tools/web/dlcache.js) then reads blocks straight from
 the bucket with links signed here, so only this server's sign-in can read it. Keep the bucket private, and
 let the page's address read it cross-origin (tools/bucket.py cors sets that up).
 
@@ -234,6 +235,27 @@ class Tree:
         return self.files.get(rel.strip('/').lower())
 
 
+ENV_FILE = os.path.expanduser('~/.config/xi-web.env')
+
+
+def load_env(path=None):
+    """KEY=VALUE lines (# comments, optional quotes, 'export ' allowed) into the environment, without
+    replacing what is already set: --env, else ~/.config/xi-web.env if there is one"""
+    path = path or (ENV_FILE if os.path.exists(ENV_FILE) else None)
+    if not path:
+        return
+    with open(os.path.expanduser(path), encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, v = line.split('=', 1)
+            k, v = k.strip().removeprefix('export ').strip(), v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'':
+                v = v[1:-1]
+            os.environ.setdefault(k, v)
+
+
 class Bucket:
     """S3 signature version 4, as query-string links: GET of one object, for a while."""
 
@@ -443,12 +465,17 @@ def main():
                     '(keys in XI_BUCKET_KEY, XI_BUCKET_SECRET)')
     ap.add_argument('--bucket-game', help="the install's folder in the bucket")
     ap.add_argument('--bucket-dats', action='append', help="each --dats folder's folder in the bucket, in the same order")
+    ap.add_argument('--env', help='a file of KEY=VALUE lines for the environment (default: ~/.config/xi-web.env, if there is '
+                    'one): XI_BUCKET_KEY, XI_BUCKET_SECRET, XI_WEB_TOKEN')
     ap.add_argument('--token', default=os.environ.get('XI_WEB_TOKEN'),
                     help='a fixed token (or XI_WEB_TOKEN): for a bookmark behind a proxy, or tests; default: a new one each run')
     ap.add_argument('--origin', action='append',
                     help='an address a proxy of yours serves this under, as the browser sees it (https://xi.example.com); '
                          'repeat for more')
     a = ap.parse_args()
+    load_env(a.env)
+    if not a.token:
+        a.token = os.environ.get('XI_WEB_TOKEN')
     srv = Server(a)
     LOG('indexed %d game files' % len(srv.trees['dat'].files))
 
