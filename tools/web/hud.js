@@ -45,23 +45,49 @@
   }
 
   // the downloads overlay: the file reads in flight (dlcache.js, or httpfs_web.c without the cache, announces
-  // each on the 'xi-dl' channel; » a read ahead), the last few finished with their time, the rate over the
-  // last two seconds, and the reads the cache answered.
-  function downloads() {
+  // each on the 'xi-dl' channel; » a read ahead), the last few finished with their time and where from, the
+  // rate over the last two seconds, the reads the cache answered, and the background download's button and
+  // progress.
+  function downloads(worker) {
     const el = document.createElement('div');
     el.id = 'dl';
-    el.title = 'File downloads. Click to hide.';
     el.style.cssText = 'position:fixed;top:8px;left:10px;z-index:3;padding:4px 8px;border-radius:4px;max-width:46vw;' +
-      'font:500 11px/1.35 ui-monospace,Menlo,monospace;background:rgba(0,0,0,.55);color:#cfd8e3;cursor:pointer;' +
-      'user-select:none;pointer-events:auto;white-space:pre;overflow:hidden';
-    el.addEventListener('click', () => (el.style.opacity = el.style.opacity === '0.15' ? '1' : '0.15'));
+      'font:500 11px/1.35 ui-monospace,Menlo,monospace;background:rgba(0,0,0,.55);color:#cfd8e3;' +
+      'user-select:none;pointer-events:auto;overflow:hidden';
+    const text = document.createElement('div');
+    text.style.cssText = 'white-space:pre;cursor:pointer';
+    text.title = 'File downloads. Click to dim.';
+    text.addEventListener('click', () => (el.style.opacity = el.style.opacity === '0.15' ? '1' : '0.15'));
+    // the background download of every game file (dlcache.js), remembered for the next visit
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;gap:8px;align-items:center;white-space:nowrap';
+    const btn = document.createElement('button');
+    btn.style.cssText = 'font:600 11px ui-monospace,Menlo,monospace;padding:2px 8px;border-radius:4px;border:0;' +
+      'background:#c9a54a;color:#111;cursor:pointer';
+    const prog = document.createElement('span');
+    bar.append(btn, prog);
+    el.append(text, bar);
     document.body.appendChild(el);
+    let pf = null, want = false;
+    try { want = localStorage.getItem('xi.prefetch') === '1'; } catch (e) {}
+    const set = (on) => {
+      want = on;
+      try { localStorage.setItem('xi.prefetch', on ? '1' : '0'); } catch (e) {}
+      worker?.postMessage({ prefetch: on });
+      draw();
+    };
+    btn.addEventListener('click', () => set(!want));
+    if (!worker) bar.style.display = 'none';
+    else if (want) setTimeout(() => worker.postMessage({ prefetch: true }), 3000);
+
     const live = new Map(), done = [], hist = [];
     let total = 0, count = 0, hits = 0, hitBytes = 0, lastHit = -1e9;
     const name = (u) => decodeURIComponent(u.replace(/^.*?\/(dat|app|dats)\//, '$1/').replace(/\?.*$/, ''));
     const mb = (b) => (b / 1048576).toFixed(b < 10485760 ? 2 : 1);
+    const gb = (b) => (b / 1073741824).toFixed(1);
     new BroadcastChannel('xi-dl').onmessage = ({ data: d }) => {
       const now = performance.now();
+      if (d.pf) return void (pf = d.pf);
       if (d.hit) return void (hits++, (hitBytes += d.k), (lastHit = now));
       if (d.s) return void live.set(d.id, { ...d, t: now });
       live.delete(d.id);
@@ -70,20 +96,37 @@
       done.unshift({ ...d, t: now });
       done.length = Math.min(done.length, 5);
     };
-    setInterval(() => {
+    function draw() {
       const now = performance.now();
       while (hist.length && now - hist[0][0] > 2000) hist.shift();
       const rate = hist.reduce((a, h) => a + h[1], 0) / 2;
-      const lines = [`files: ${live.size} loading · ${(rate / 1048576).toFixed(2)} MB/s · ${count} fetched, ${mb(total)} MB` +
-        ` · cache ${hits} hits, ${mb(hitBytes)} MB`];
-      for (const r of live.values())
-        lines.push(`  ${r.ahead ? '»' : '⇣'} ${name(r.u)}  ${r.n >= 0 ? mb(r.n) + ' MB @' + mb(r.at) : 'all'}  ${((now - r.t) / 1000).toFixed(1)} s`);
-      for (const r of done)
-        if (now - r.t < 4000)
-          lines.push(`  ${r.k < 0 ? '✗' : '✓'} ${name(r.u)}  ${r.k > 0 ? mb(r.k) + ' MB ' : ''}${r.ms.toFixed(0)} ms${r.from ? ' · ' + r.from : ''}`);
-      el.textContent = lines.join('\n');
-      el.style.display = live.size || now - Math.max(done[0]?.t ?? -1e9, lastHit) < 4000 ? '' : 'none';
-    }, 200);
+      const lines = [];
+      const busy = live.size || now - Math.max(done[0]?.t ?? -1e9, lastHit) < 4000;
+      if (busy) {
+        lines.push(`files: ${live.size} loading · ${(rate / 1048576).toFixed(2)} MB/s · ${count} fetched, ${mb(total)} MB` +
+          ` · cache ${hits} hits, ${mb(hitBytes)} MB`);
+        for (const r of live.values())
+          lines.push(`  ${r.ahead ? '»' : '⇣'} ${name(r.u)}  ${r.n >= 0 ? mb(r.n) + ' MB @' + mb(r.at) : 'all'}  ${((now - r.t) / 1000).toFixed(1)} s`);
+        for (const r of done)
+          if (now - r.t < 4000)
+            lines.push(`  ${r.k < 0 ? '✗' : '✓'} ${name(r.u)}  ${r.k > 0 ? mb(r.k) + ' MB ' : ''}${r.ms.toFixed(0)} ms${r.from ? ' · ' + r.from : ''}`);
+      }
+      text.textContent = lines.join('\n');
+      text.style.display = lines.length ? '' : 'none';
+      if (pf && pf.finished) {
+        btn.style.display = 'none';
+        prog.textContent = `all game data in this browser (${gb(pf.bytes)} GB)` + (pf.failed ? `, ${pf.failed} files failed` : '');
+      } else {
+        btn.style.display = '';
+        btn.textContent = want ? 'Pause download' : 'Download all game data';
+        prog.textContent = pf
+          ? `${gb(pf.doneBytes)} of ${gb(pf.bytes)} GB · ${pf.done}/${pf.files} files` +
+            (pf.on ? ` · ${(pf.rate / 1048576).toFixed(1)} MB/s` : ' · paused') + (pf.error ? ' · ' + pf.error : '')
+          : want ? 'starting…' : '';
+      }
+    }
+    setInterval(draw, 250);
+    draw();
   }
 
   window.xiHud = { sizes, follow, gauge, downloads };

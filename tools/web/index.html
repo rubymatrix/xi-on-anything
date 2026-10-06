@@ -102,13 +102,14 @@ var Module = {
   }],
   onRuntimeInitialized() {
     statusEl.textContent = 'Running';
-    Module.fileCache?.postMessage({ mem: Module.wasmMemory, clear: hash.get('cache') === 'clear', bucket: !!xiCfg.bucket });
+    Module.fileCache?.postMessage({ mem: Module.wasmMemory, clear: hash.get('cache') === 'clear', bucket: !!xiCfg.bucket,
+      token: hash.get('t') || '' });
     Module._web_view_size(Module.viewSize[0], Module.viewSize[1]);
     Module._web_focus(1);
     xiInput.start(Module, document.getElementById('canvas'));
     xiHud.follow(Module);
     if (hash.get('fps') !== '0') xiHud.gauge(Module);
-    if (hash.get('dl') !== '0') xiHud.downloads();
+    if (hash.get('dl') !== '0') xiHud.downloads(Module.fileCache);
     // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay.py does)
     if (hash.get('enter')) {
       const until = Date.now() + Number(hash.get('enter')) * 1000;
