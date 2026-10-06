@@ -165,6 +165,9 @@ reuses one (`--help`).
 - What *is* committed: the recompiler, the runtime, the platform layer, tests, and per-build
   **metadata**: addresses and shapes only (function ranges, switch tables, tail jumps), keyed by
   the SHA-256 of the retail DLL.
+- **LandSandBoat packet captures** are committed too, as the maintainers agreed: the replay suite's
+  recordings in `tools/replay/scenes/`, so every machine and CI plays the same scenes. They are what
+  a server sent, not game files.
 - Every supported build is listed in `meta/builds.json`, keyed by the SHA-256 of its retail
   `FFXiMain.dll` and `FFXi.dll`. `tools/prepare.py` identifies the install's build and records it in
   `generated/build.json`; the build tools read it from there.
@@ -490,7 +493,8 @@ tools/             prepare.py, buildinfo.py, unpack.py, build.py (MSVC), build_p
                    setup.py (the source install, run by install-source.sh and setup.command),
                    thirdparty.py (builds third_party/ with clang), vendor.py (refreshes third_party/),
                    staticserver.py (a fixed-data server); replayserver.py, replay.py and replayreport.py
-                   (recorded scenes for performance tests: tools/replay/)
+                   (recorded scenes for performance tests: tools/replay/, the reference set in
+                   tools/replay/scenes/)
 third_party/       stb; SDL3 and mbedtls, trimmed to what the build uses, with manifest.json each
 discovery/         the discovery pass: Ghidra (Jython) post-scripts, verdicts.py (the manual verdicts
                    per build), notes/ (what each build's run found)
