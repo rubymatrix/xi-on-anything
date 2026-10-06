@@ -55,17 +55,24 @@ def cors(a):
 
 
 def check(a):
-    b = Bucket(a.bucket, *keys())
-    link = b.sign(a.object, expires=600)
-    hdrs = {'Range': 'bytes=0-15'}
-    if a.origin:
-        hdrs['Origin'] = a.origin[0]
-    code, h, body = fetch(link, hdrs)
-    allow = {k.lower(): v for k, v in h.items()}.get('access-control-allow-origin')
-    print('signed read:   %d, %d bytes, Access-Control-Allow-Origin: %s' % (code, len(body), allow))
-    code2, _, _ = fetch(link.split('?')[0], {'Range': 'bytes=0-15'})
-    print('unsigned read: %d (should be 403)' % code2)
-    return code in (200, 206) and code2 == 403 and (not a.origin or allow)
+    """the address given and, for a CDN address, the bucket's own"""
+    ok = False
+    for url in dict.fromkeys([a.bucket, a.bucket.replace('.cdn.', '.')]):
+        b = Bucket(url, *keys())
+        link = b.sign(a.object, expires=600)
+        hdrs = {'Range': 'bytes=0-15'}
+        if a.origin:
+            hdrs['Origin'] = a.origin[0]
+        code, h, body = fetch(link, hdrs)
+        allow = {k.lower(): v for k, v in h.items()}.get('access-control-allow-origin')
+        print('%s (region %s)' % (b.base, b.region))
+        print('  signed read:   %d, %d bytes, Access-Control-Allow-Origin: %s' % (code, len(body), allow))
+        if code not in (200, 206):
+            print('  ' + body.decode(errors='replace')[:400])
+        code2, _, _ = fetch(link.split('?')[0], {'Range': 'bytes=0-15'})
+        print('  unsigned read: %d (should be 403)' % code2)
+        ok = ok or (code in (200, 206) and code2 == 403 and (not a.origin or allow))
+    return ok
 
 
 def main():
