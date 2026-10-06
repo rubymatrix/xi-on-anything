@@ -261,7 +261,9 @@ class Bucket:
 
     def __init__(self, url, key, secret):
         u = urllib.parse.urlsplit(url.rstrip('/'))
-        self.base, self.host = '%s://%s' % (u.scheme, u.netloc), u.netloc
+        # a CDN address (<bucket>.<region>.cdn.digitaloceanspaces.com) passes the request on to the bucket's
+        # own, which checks the signature against its own host name
+        self.base, self.host = '%s://%s' % (u.scheme, u.netloc), u.netloc.replace('.cdn.', '.')
         labels = u.hostname.split('.')
         self.region = labels[1] if len(labels) > 2 else 'us-east-1'  # <bucket>.<region>[.cdn].digitaloceanspaces.com
         self.key, self.secret = key, secret
