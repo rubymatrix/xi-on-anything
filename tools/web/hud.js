@@ -81,13 +81,14 @@
     else if (want) setTimeout(() => worker.postMessage({ prefetch: true }), 3000);
 
     const live = new Map(), done = [], hist = [];
-    let total = 0, count = 0, hits = 0, hitBytes = 0, lastHit = -1e9;
+    let total = 0, count = 0, hits = 0, hitBytes = 0, lastHit = -1e9, followed = null;
     const name = (u) => decodeURIComponent(u.replace(/^.*?\/(dat|app|dats)\//, '$1/').replace(/\?.*$/, ''));
     const mb = (b) => (b / 1048576).toFixed(b < 10485760 ? 2 : 1);
     const gb = (b) => (b / 1073741824).toFixed(1);
     new BroadcastChannel('xi-dl').onmessage = ({ data: d }) => {
       const now = performance.now();
       if (d.pf) return void (pf = d.pf);
+      if (d.follow) return void (followed = { n: d.follow, p: d.p, t: now });
       if (d.hit) return void (hits++, (hitBytes += d.k), (lastHit = now));
       if (d.s) return void live.set(d.id, { ...d, t: now });
       live.delete(d.id);
@@ -102,6 +103,7 @@
       const rate = hist.reduce((a, h) => a + h[1], 0) / 2;
       const lines = [];
       const busy = live.size || now - Math.max(done[0]?.t ?? -1e9, lastHit) < 4000;
+      if (followed && now - followed.t < 6000) lines.push(`learned: ${name('/' + followed.p)} → fetching ${followed.n} files that follow it`);
       if (busy) {
         lines.push(`files: ${live.size} loading · ${(rate / 1048576).toFixed(2)} MB/s · ${count} fetched, ${mb(total)} MB` +
           ` · cache ${hits} hits, ${mb(hitBytes)} MB`);
@@ -120,7 +122,8 @@
         btn.style.display = '';
         btn.textContent = want ? 'Pause download' : 'Download all game data';
         prog.textContent = pf
-          ? `${gb(pf.doneBytes)} of ${gb(pf.bytes)} GB · ${pf.done}/${pf.files} files` +
+          ? (pf.packs && pf.packsDone < pf.packs ? `small files: pack ${pf.packsDone}/${pf.packs} · ` : '') +
+            `${gb(pf.doneBytes)} of ${gb(pf.bytes)} GB · ${pf.done}/${pf.files} files` +
             (pf.on ? ` · ${(pf.rate / 1048576).toFixed(1)} MB/s` : ' · paused') + (pf.error ? ' · ' + pf.error : '')
           : want ? 'starting…' : '';
       }
