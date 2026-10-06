@@ -14,6 +14,15 @@ request and the WebSocket need it, so other pages the browser has open can't use
   /dats/N/...  the DAT overlay folders (--dats, first wins), the same way
   /config      what the page needs to start the game: the server's address, how many overlays
   /app/...     what host64 brings with it: ffxi.reg and the texture packs (assets/textures)
+  /sign        with --bucket: a signed link (6 hours) to a /dat or /dats file's copy in the bucket
+
+A private S3-compatible bucket holding a copy of the install and overlays (DigitalOcean Spaces,
+Cloudflare R2, ...) takes the file reads off this machine's upload: --bucket is its address with the bucket
+in the host name (https://<bucket>.sfo3.digitaloceanspaces.com, or the CDN one), --bucket-game the folder
+the install is in, --bucket-dats each overlay's folder (in --dats order), and XI_BUCKET_KEY /
+XI_BUCKET_SECRET an access key. The page's file cache (tools/web/dlcache.js) then reads blocks straight from
+the bucket with links signed here, so only this server's sign-in can read it. Keep the bucket private, and
+let the page's address read it cross-origin (tools/bucket.py cors sets that up).
 
 Behind a reverse proxy or tunnel of your own (your devices only, with its own sign-in in front: Cloudflare
 Access, Caddy with forward_auth, and the like), give the address it serves under with --origin
@@ -26,6 +35,8 @@ to anyone else.
 import argparse
 import asyncio
 import base64
+import datetime
+import hmac
 import hashlib
 import json
 import mimetypes
@@ -192,11 +203,13 @@ class Tree:
 
     def __init__(self, roots):
         self.files = {}  # lower-case relative path -> host path
+        self.where = {}  # lower-case relative path -> (prefix, the path under its root as written)
         lines = []
         for prefix, root in roots:
             root = os.path.realpath(root)
             if os.path.isfile(root):
                 self.files[prefix.lower()] = root
+                self.where[prefix.lower()] = (prefix, os.path.basename(root))
                 st = os.stat(root)
                 lines.append('%s\t%d\t%d' % (prefix, st.st_size, int(st.st_mtime)))
                 continue
@@ -212,12 +225,54 @@ class Tree:
                     r = rel + '/' + f if rel else f
                     full = os.path.join(d, f)
                     self.files[r.lower()] = full
+                    self.where[r.lower()] = (prefix, os.path.relpath(full, root).replace(os.sep, '/'))
                     st = os.stat(full)
                     lines.append('%s\t%d\t%d' % (r, st.st_size, int(st.st_mtime)))
         self.index = ('\n'.join(lines) + '\n').encode('utf-8')
 
     def path(self, rel):
         return self.files.get(rel.strip('/').lower())
+
+
+class Bucket:
+    """S3 signature version 4, as query-string links: GET of one object, for a while."""
+
+    def __init__(self, url, key, secret):
+        u = urllib.parse.urlsplit(url.rstrip('/'))
+        self.base, self.host = '%s://%s' % (u.scheme, u.netloc), u.netloc
+        labels = u.hostname.split('.')
+        self.region = labels[1] if len(labels) > 2 else 'us-east-1'  # <bucket>.<region>[.cdn].digitaloceanspaces.com
+        self.key, self.secret = key, secret
+
+    def _key(self, day):
+        k = ('AWS4' + self.secret).encode()
+        for part in (day, self.region, 's3', 'aws4_request'):
+            k = hmac.new(k, part.encode(), hashlib.sha256).digest()
+        return k
+
+    def sign(self, obj, method='GET', expires=6 * 3600, query=None, headers=None, payload_hash='UNSIGNED-PAYLOAD',
+             presign=True):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        amz, day = now.strftime('%Y%m%dT%H%M%SZ'), now.strftime('%Y%m%d')
+        scope = '%s/%s/s3/aws4_request' % (day, self.region)
+        path = '/' + urllib.parse.quote(obj, safe='/~')
+        q = dict(query or {})
+        hdrs = {'host': self.host}
+        hdrs.update({k.lower(): v for k, v in (headers or {}).items()})
+        if presign:
+            q.update({'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': self.key + '/' + scope,
+                      'X-Amz-Date': amz, 'X-Amz-Expires': str(expires), 'X-Amz-SignedHeaders': ';'.join(sorted(hdrs))})
+        else:
+            hdrs.update({'x-amz-date': amz, 'x-amz-content-sha256': payload_hash})
+        names = ';'.join(sorted(hdrs))
+        cq = '&'.join('%s=%s' % (urllib.parse.quote(k, safe='~'), urllib.parse.quote(v, safe='~')) for k, v in sorted(q.items()))
+        creq = '\n'.join([method, path, cq, ''.join('%s:%s\n' % (k, hdrs[k].strip()) for k in sorted(hdrs)), names, payload_hash])
+        sts = '\n'.join(['AWS4-HMAC-SHA256', amz, scope, hashlib.sha256(creq.encode()).hexdigest()])
+        sig = hmac.new(self._key(day), sts.encode(), hashlib.sha256).hexdigest()
+        if presign:
+            return '%s%s?%s&X-Amz-Signature=%s' % (self.base, path, cq, sig)
+        hdrs['authorization'] = 'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s' % (self.key, scope, names, sig)
+        return '%s%s%s' % (self.base, path, '?' + cq if cq else ''), hdrs
 
 
 class Server:
@@ -240,6 +295,16 @@ class Server:
                       'app': Tree([('ffxi.reg', os.path.join(repo, 'ffxi.reg')),
                                    ('textures', os.path.join(repo, 'assets', 'textures'))]),
                       'dats': Tree([(str(i), d) for i, d in enumerate(a.dats or [])])}
+        # the bucket's copy: (tree, its prefix) -> the folder in the bucket
+        self.bucket, self.folders = None, {}
+        if a.bucket:
+            key, secret = os.environ.get('XI_BUCKET_KEY'), os.environ.get('XI_BUCKET_SECRET')
+            if not key or not secret:
+                sys.exit('--bucket needs XI_BUCKET_KEY and XI_BUCKET_SECRET')
+            self.bucket = Bucket(a.bucket, key, secret)
+            self.folders[('dat', '')] = (a.bucket_game or '').strip('/')
+            for i, f in enumerate(a.bucket_dats or []):
+                self.folders[('dats', str(i))] = f.strip('/')
 
     async def handle(self, reader, writer):
         try:
@@ -274,8 +339,16 @@ class Server:
         if url.path == '/config':
             if q.get('t', [''])[0] != self.token:
                 return self.reply(writer, 403, b'bad token')
-            body = json.dumps({'server': self.server_ip, 'server_name': self.server_name, 'dats': self.ndats}).encode()
+            body = json.dumps({'server': self.server_ip, 'server_name': self.server_name, 'dats': self.ndats,
+                               'bucket': bool(self.bucket)}).encode()
             return self.reply(writer, 200, body, 'application/json')
+        if url.path == '/sign':
+            if q.get('t', [''])[0] != self.token:
+                return self.reply(writer, 403, b'bad token')
+            link = self.sign(q.get('p', [''])[0])
+            if not link:
+                return self.reply(writer, 404, b'not in the bucket')
+            return self.reply(writer, 200, json.dumps({'url': link}).encode(), 'application/json')
         if top in self.trees:
             if q.get('t', [''])[0] != self.token:
                 return self.reply(writer, 403, b'bad token')
@@ -303,6 +376,16 @@ class Server:
             return self.reply(writer, 206, b'' if head_only else body, 'application/octet-stream',
                               ['Content-Range: bytes %d-%d/%d' % (start, end, size)])
         self.reply(writer, 200, b'' if head_only else body, 'application/octet-stream')
+
+    def sign(self, p):
+        """'dat/<path>' or 'dats/<path>' -> a signed link to its copy in the bucket, or None"""
+        top, _, rel = p.partition('/')
+        t = self.trees.get(top) if self.bucket and top in ('dat', 'dats') else None
+        w = t and t.where.get(rel.strip('/').lower())
+        folder = w and self.folders.get((top, w[0]))
+        if folder is None or not w:
+            return None
+        return self.bucket.sign((folder + '/' if folder else '') + w[1])
 
     def reply(self, writer, code, body, ctype='text/plain', extra=()):
         reason = {200: 'OK', 206: 'Partial Content', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
@@ -356,6 +439,10 @@ def main():
     ap.add_argument('--game', required=True, help='the FINAL FANTASY XI folder')
     ap.add_argument('--root', default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'web'))
     ap.add_argument('--port', type=int, default=8417)
+    ap.add_argument('--bucket', help='a private bucket with a copy of the files: https://<bucket>.<region>.digitaloceanspaces.com '
+                    '(keys in XI_BUCKET_KEY, XI_BUCKET_SECRET)')
+    ap.add_argument('--bucket-game', help="the install's folder in the bucket")
+    ap.add_argument('--bucket-dats', action='append', help="each --dats folder's folder in the bucket, in the same order")
     ap.add_argument('--token', default=os.environ.get('XI_WEB_TOKEN'),
                     help='a fixed token (or XI_WEB_TOKEN): for a bookmark behind a proxy, or tests; default: a new one each run')
     ap.add_argument('--origin', action='append',
@@ -371,6 +458,8 @@ def main():
                                                                            ', '.join(sorted(srv.allowed))))
         for o in sorted(srv.origins):
             LOG('  and through your proxy: %s/#t=%s' % (o, srv.token))
+        if srv.bucket:
+            LOG('  file reads from the bucket at %s' % srv.bucket.base)
         sys.stdout.flush()
         async with server:
             await server.serve_forever()
