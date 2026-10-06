@@ -45,6 +45,8 @@ def fetch(url, headers=None, method='GET', data=None):
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
+    except OSError as e:  # the network (a name that didn't resolve, a dropped connection): try again
+        return 0, {}, str(e).encode()
 
 
 def cors(a):
@@ -117,7 +119,7 @@ def blocks(a):
                 if not d and n:
                     break
                 z = gzip.compress(d, 6, mtime=0)
-                for attempt in range(4):
+                for attempt in range(6):
                     c, _, out = fetch(b.sign(block_key(prefix, key, ver, n), method='PUT', expires=3600),
                                       {'Content-Type': 'application/gzip'}, 'PUT', z)
                     if c == 200:
