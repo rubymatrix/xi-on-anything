@@ -25,6 +25,10 @@ lines). The page's file cache (tools/web/dlcache.js) then reads blocks straight 
 the bucket with links signed here, so only this server's sign-in can read it. Keep the bucket private, and
 let the page's address read it cross-origin (tools/bucket.py cors sets that up).
 
+--bucket-blocks names a folder of the same files cut in 1 MB blocks, each gzipped (about 40% of the DATs'
+size), that tools/bucket.py blocks uploads with a manifest of what it holds: a file the manifest has in
+its current version (size and date) is read as those blocks, and unpacked in the page.
+
 Behind a reverse proxy or tunnel of your own (your devices only, with its own sign-in in front: Cloudflare
 Access, Caddy with forward_auth, and the like), give the address it serves under with --origin
 https://xi.example.com, and a fixed --token so a bookmark keeps working. The proxy must pass WebSocket
@@ -256,6 +260,20 @@ def load_env(path=None):
             os.environ.setdefault(k, v)
 
 
+BLOCK = 1 << 20  # the page's file block (runtime/portable/httpfs_web.c)
+
+
+def version(path):
+    """a file's version as the blocks and the page's cache name it: size.mtime"""
+    st = os.stat(path)
+    return '%d.%d' % (st.st_size, int(st.st_mtime))
+
+
+def block_key(prefix, p, ver, n):
+    """the bucket object for block n of 'dat/<path>' (any case) in version ver"""
+    return '%s/%s@%s/%d.gz' % (prefix.strip('/'), p.lower(), ver, n)
+
+
 class Bucket:
     """S3 signature version 4, as query-string links: GET of one object, for a while."""
 
@@ -320,12 +338,13 @@ class Server:
                                    ('textures', os.path.join(repo, 'assets', 'textures'))]),
                       'dats': Tree([(str(i), d) for i, d in enumerate(a.dats or [])])}
         # the bucket's copy: (tree, its prefix) -> the folder in the bucket
-        self.bucket, self.folders = None, {}
+        self.bucket, self.folders, self.blocks_prefix, self.manifest = None, {}, '', {}
         if a.bucket:
             key, secret = os.environ.get('XI_BUCKET_KEY'), os.environ.get('XI_BUCKET_SECRET')
             if not key or not secret:
                 sys.exit('--bucket needs XI_BUCKET_KEY and XI_BUCKET_SECRET')
             self.bucket = Bucket(a.bucket, key, secret)
+            self.blocks_prefix, self.manifest, self.manifest_at = (a.bucket_blocks or '').strip('/'), {}, 0
             self.folders[('dat', '')] = (a.bucket_game or '').strip('/')
             for i, f in enumerate(a.bucket_dats or []):
                 self.folders[('dats', str(i))] = f.strip('/')
@@ -372,7 +391,7 @@ class Server:
             link = self.sign(q.get('p', [''])[0])
             if not link:
                 return self.reply(writer, 404, b'not in the bucket')
-            return self.reply(writer, 200, json.dumps({'url': link}).encode(), 'application/json')
+            return self.reply(writer, 200, json.dumps(link).encode(), 'application/json')
         if top in self.trees:
             if q.get('t', [''])[0] != self.token:
                 return self.reply(writer, 403, b'bad token')
@@ -401,15 +420,49 @@ class Server:
                               ['Content-Range: bytes %d-%d/%d' % (start, end, size)])
         self.reply(writer, 200, b'' if head_only else body, 'application/octet-stream')
 
+    def load_manifest(self, wait=False):
+        """the blocks' manifest ('dat/<path>\t<version>' lines), read again every 5 minutes on a thread of its
+        own (the server goes on with the one it has)"""
+        import threading
+        import time
+        if not self.blocks_prefix or time.time() - self.manifest_at < 300:
+            return
+        self.manifest_at = time.time()
+        th = threading.Thread(target=self._read_manifest, daemon=True)
+        th.start()
+        if wait:
+            th.join()
+
+    def _read_manifest(self):
+        import urllib.request
+        try:
+            own = Bucket(self.bucket.base.replace('.cdn.', '.'), self.bucket.key, self.bucket.secret)
+            with urllib.request.urlopen(own.sign(self.blocks_prefix + '/manifest.txt', expires=300), timeout=20) as r:
+                text = r.read().decode('utf-8')
+            self.manifest = dict(line.split('\t')[:2] for line in text.splitlines() if line.count('\t') >= 1)
+            LOG('blocks: %d files in the manifest' % len(self.manifest))
+        except Exception as e:  # noqa: BLE001 - no manifest yet: the plain copies
+            LOG('blocks: no manifest (%s)' % e)
+
     def sign(self, p):
-        """'dat/<path>' or 'dats/<path>' -> a signed link to its copy in the bucket, or None"""
+        """'dat/<path>' or 'dats/<path>' -> {url: a signed link to its copy in the bucket, blocks: links to its
+        gzipped blocks when the manifest has its version}, or None"""
         top, _, rel = p.partition('/')
         t = self.trees.get(top) if self.bucket and top in ('dat', 'dats') else None
-        w = t and t.where.get(rel.strip('/').lower())
+        rel = rel.strip('/')
+        w = t and t.where.get(rel.lower())
         folder = w and self.folders.get((top, w[0]))
         if folder is None or not w:
             return None
-        return self.bucket.sign((folder + '/' if folder else '') + w[1])
+        out = {'url': self.bucket.sign((folder + '/' if folder else '') + w[1])}
+        self.load_manifest()
+        key = top + '/' + rel.lower()
+        ver = version(t.files[rel.lower()])
+        if self.manifest.get(key) == ver:
+            size = int(ver.split('.')[0])
+            out['blocks'] = [self.bucket.sign(block_key(self.blocks_prefix, key, ver, n))
+                             for n in range(max(1, (size + BLOCK - 1) // BLOCK))]
+        return out
 
     def reply(self, writer, code, body, ctype='text/plain', extra=()):
         reason = {200: 'OK', 206: 'Partial Content', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
@@ -467,6 +520,7 @@ def main():
                     '(keys in XI_BUCKET_KEY, XI_BUCKET_SECRET)')
     ap.add_argument('--bucket-game', help="the install's folder in the bucket")
     ap.add_argument('--bucket-dats', action='append', help="each --dats folder's folder in the bucket, in the same order")
+    ap.add_argument('--bucket-blocks', help='the folder tools/bucket.py blocks uploaded the gzipped blocks to')
     ap.add_argument('--env', help='a file of KEY=VALUE lines for the environment (default: ~/.config/xi-web.env, if there is '
                     'one): XI_BUCKET_KEY, XI_BUCKET_SECRET, XI_WEB_TOKEN')
     ap.add_argument('--token', default=os.environ.get('XI_WEB_TOKEN'),
@@ -489,6 +543,7 @@ def main():
             LOG('  and through your proxy: %s/#t=%s' % (o, srv.token))
         if srv.bucket:
             LOG('  file reads from the bucket at %s' % srv.bucket.base)
+            srv.load_manifest(wait=True)
         sys.stdout.flush()
         async with server:
             await server.serve_forever()

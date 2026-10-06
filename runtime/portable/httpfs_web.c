@@ -57,6 +57,11 @@ EM_JS(int, httpfs_cached, (const char* url, const char* key, double start, doubl
     }
 });
 
+/* the game opened a file: the cache worker starts on its first blocks (nothing waits for it) */
+EM_JS(void, httpfs_hint, (const char* url, const char* key, double size), {
+    (globalThis.xiCacheChan ||= new BroadcastChannel('xi-cache')).postMessage({ open: 1, u: UTF8ToString(url), k: UTF8ToString(key), size });
+});
+
 /* a whole response, malloc'd (NUL-terminated), or NULL */
 EM_JS(uint8_t*, httpfs_get, (const char* url, uint32_t* size), {
     const x = new XMLHttpRequest();
@@ -409,6 +414,14 @@ HttpFile* httpfs_open(const char* path)
         return NULL;
     HttpFile* f = (HttpFile*)calloc(1, sizeof *f);
     f->m = m, f->ent = e;
+    if (g_cache && m->ents[e].size > 0)
+    {
+        char url[1400], key[1200];
+        pthread_mutex_lock(&g_mu);
+        url_of(m, e, url, sizeof url, key, sizeof key);
+        pthread_mutex_unlock(&g_mu);
+        httpfs_hint(url, key, (double)m->ents[e].size);
+    }
     return f;
 }
 
