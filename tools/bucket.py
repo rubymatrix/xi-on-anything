@@ -3,7 +3,8 @@
   python3 tools/bucket.py cors  --bucket <url> --origin https://xi.example.com [--origin ...]
   python3 tools/bucket.py check --bucket <url> --object '<folder>/<file>' [--origin https://xi.example.com]
 
-The key is in XI_BUCKET_KEY / XI_BUCKET_SECRET, as for webserve.py.
+The key is in XI_BUCKET_KEY / XI_BUCKET_SECRET, as for webserve.py: in the environment, ~/.config/xi-web.env,
+or the file given with --env.
   cors   lets those page addresses read the bucket cross-origin (GET and HEAD with Range), which the page's
          file cache needs; the bucket stays private (every read still needs a signed link)
   check  signs a link to one object, reads its first 16 bytes the way the page does, and shows that an
@@ -18,7 +19,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from webserve import Bucket  # noqa: E402
+from webserve import Bucket, load_env  # noqa: E402
 
 
 def keys():
@@ -81,7 +82,9 @@ def main():
     ap.add_argument('--bucket', required=True, help='https://<bucket>.<region>[.cdn].digitaloceanspaces.com')
     ap.add_argument('--origin', action='append', default=[], help="the page's address, as the browser sees it")
     ap.add_argument('--object', help='check: an object in the bucket')
+    ap.add_argument('--env', help='a file of KEY=VALUE lines (default: ~/.config/xi-web.env, if there is one)')
     a = ap.parse_args()
+    load_env(a.env)
     if a.what == 'cors' and not a.origin:
         sys.exit('cors needs --origin')
     if a.what == 'check' and not a.object:
