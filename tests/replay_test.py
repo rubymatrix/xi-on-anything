@@ -289,6 +289,10 @@ class SceneFlags(Folder):
         self.assertEqual(struct.unpack_from('<H', d, 0x68)[0], replayscene.WEATHERS.index('hot spell'))
         self.assertEqual(s.marks[-1], [0.6, 'end'])
 
+    def test_a_negative_position_is_a_value_not_a_flag(self):
+        s = self.load('--zone 35 --at -322.5,5,-362.75,219 --turn -90')
+        self.assertEqual(struct.unpack_from('<fff', s.packets[0][1], 0x0C), (-322.5, 5, -362.75))
+
     def test_flags_that_need_another(self):
         for flags in ('--echo', '--looks a.jsonl', '--echo-spells haste', '--at 1,2,3', '--zone 104', '--zone 104 --at 1,2',
                       '--weather fog-bank', '--mob-spells no-such-spell'):

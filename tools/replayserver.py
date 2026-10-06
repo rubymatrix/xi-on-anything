@@ -42,7 +42,6 @@ without it shows them as chat. Recorded chat and other text is dropped from scen
 Ports default to 55231 auth, 55230 data, 55001 lobby and 55232 zone, so it can run beside a
 LandSandBoat server. --huffman as for staticserver.py.
 """
-import argparse
 import os
 import shlex
 import socket
@@ -69,7 +68,7 @@ def event(text):
 
 # --- scenes and suites -------------------------------------------------------------------------
 
-class FlagParser(argparse.ArgumentParser):
+class FlagParser(ss.ArgumentParser):
     """Scene flags' parser: a mistake is an error in the suite's line, not the end of the program."""
 
     def error(self, message):
@@ -328,7 +327,7 @@ def main():
     if '--scene' in argv:  # everything after --scene's recording is that scene's flags
         i = argv.index('--scene')
         scene_words, argv = argv[i + 1:], argv[:i]
-    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    ap = ss.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--huffman', default=os.environ.get('FFXI_HUFFMAN'), help='folder with compress.dat')
     ap.add_argument('--suite', help='a suite file: one scene per line, a recording and its scene flags')
     ap.add_argument('--scene', help='one recording to play (the rest of the command line is its scene flags)')
