@@ -9,14 +9,20 @@
 //  - with a bucket (webserve.py --bucket), a miss reads the block from the bucket, by links webserve.py signs
 //    (one ask a file, used for 5 hours): the file's gzipped block when there are blocks (--bucket-blocks;
 //    unpacked here), else a range of its plain copy, and through webserve.py only if both fail.
+//  - a small file (under 256 KB) missing comes with the rest of its pack (webserve.py --bucket-blocks): about
+//    8 MB of its folder's small files in one request, all put in the cache.
 //  - the background download ({prefetch: true} from the page) fills the cache with every file of the
-//    install, a few at a time, the game's own reads first; a file done is marked, so it resumes.
+//    install: the packs, then the rest a file at a time, several at once, the game's own reads first; a file
+//    done is marked, so it resumes.
+//  - each burst of files the game opens (gaps under 3 s) goes to webserve.py (/learn); the first open of a
+//    burst asks /follow for the files that came after it before, and fetches them at once.
 //  - the downloads overlay (hud.js) hears each fetch, hit and the background download on 'xi-dl'.
-const BLOCK = 1 << 20, AHEAD = 3, OPEN_BLOCKS = 16, BG_FILES = 8;
+const BLOCK = 1 << 20, AHEAD = 3, OPEN_BLOCKS = 16, BG_FILES = 16, BG_PACKS = 16, FOLLOWERS = 8, BURST_MS = 3000;
 const CACHE = 'xi-files-v1';
 const dl = new BroadcastChannel('xi-dl');
 const inflight = new Map(); // key -> Promise<Uint8Array | null>
-const links = new Map(); // 'dat/<path>' -> Promise<{ url, blocks?, until } | null>
+const links = new Map(); // 'dat/<path>' -> Promise<{ url, blocks?, pack?, until } | null>
+const packs = new Map(); // pack id -> Promise<Map<key, Uint8Array> | null>
 let mem = null, cache = null, queue = [], seq = 0, bucket = false, token = '', game = 0;
 let bg = null; // the background download: { on, files, done, bytes, doneBytes, t0 }
 
@@ -56,7 +62,13 @@ function get(u, k, at, n, lane) {
     let b = null, from = 'server';
     try {
       const l = bucket ? await signed(u) : null;
-      if (l && l.blocks && l.blocks[at / BLOCK]) {
+      if (l && l.pack && at == 0) {
+        const all = await packGet(l.pack);
+        b = all && all.get(k);
+        if (b && b.length != n) b = null;
+        if (b) from = 'bucket, pack';
+      }
+      if (!b && l && l.blocks && l.blocks[at / BLOCK]) {
         b = await unzip(l.blocks[at / BLOCK], n);
         from = 'bucket, gzip';
       }
@@ -92,13 +104,13 @@ async function read(url, at, n, opts) {
   return null;
 }
 
-// a gzipped block, unpacked; null unless it is n bytes
+// a gzipped block or pack, unpacked; null unless it is n bytes (any, n < 0)
 async function unzip(url, n) {
   try {
     const r = await fetch(url, { mode: 'cors', credentials: 'omit' });
     if (!r.ok) return null;
     const b = new Uint8Array(await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
-    return b.length == n ? b : null;
+    return n < 0 || b.length == n ? b : null;
   } catch (e) {
     return null;
   }
@@ -117,6 +129,35 @@ function signed(u) {
   return got;
 }
 
+// a file as webserve.py describes it ([route, path as written, mtime, size]): its cache key and address
+const keyOf = (d) => d[0] + '/' + enc(d[1]) + '?v=' + d[2] + '.' + d[3];
+const urlOf = (d) => location.origin + '/' + d[0] + '/' + enc(d[1]) + '?t=' + encodeURIComponent(token);
+
+// a pack ({id, url, members: [[route, path, mtime, size, offset]]}): fetched once, each member put in the cache
+// (and marked done for the background download); a map of its members' keys to their bytes
+function packGet(pack) {
+  let p = packs.get(pack.id);
+  if (p) return p;
+  p = (async () => {
+    const raw = await unzip(pack.url, -1);
+    if (!raw) return null;
+    const out = new Map();
+    await Promise.all(pack.members.map(async (m) => {
+      const k = keyOf(m), b = raw.subarray(m[4], m[4] + m[3]);
+      if (b.length != m[3]) return;
+      out.set(k, b);
+      if (cache) {
+        await cache.put(entry(k, 0), new Response(b.slice())).catch(() => {});
+        await cache.put(entry('done/' + k, 0), new Response('')).catch(() => {});
+      }
+    }));
+    return out;
+  })();
+  packs.set(pack.id, p);
+  p.then((r) => r || packs.delete(pack.id));
+  return p;
+}
+
 function blocksOf(size, first, count) {
   const out = [];
   for (let at = first * BLOCK; at < size && out.length < count; at += BLOCK) out.push([at, Math.min(BLOCK, size - at)]);
@@ -127,6 +168,7 @@ async function serve(r) {
   if (r.open) {
     // the game opened the file: its first blocks, all at once
     for (const [at, n] of blocksOf(r.size, 0, OPEN_BLOCKS)) get(r.u, r.k, at, n, 1);
+    opened(r.u);
     return;
   }
   const b = get(r.u, r.k, r.at, r.n, 0);
@@ -142,6 +184,41 @@ async function serve(r) {
   Atomics.store(c, 1, len);
   Atomics.store(c, 0, 2);
   Atomics.notify(c, 0);
+}
+
+// --- bursts: what the game opens together -------------------------------------------------------------------
+let burst = [], burstTimer = 0;
+function opened(u) {
+  const p = decodeURIComponent(new URL(u).pathname.slice(1));
+  if (!burst.length) follow(p);
+  burst.push(p);
+  clearTimeout(burstTimer);
+  burstTimer = setTimeout(() => {
+    const files = burst;
+    burst = [];
+    if (files.length >= 5 && token)
+      fetch('/learn?t=' + encodeURIComponent(token), { method: 'POST', body: JSON.stringify(files.slice(0, 2000)) }).catch(() => {});
+  }, BURST_MS);
+}
+
+// the files that came after p before: fetched now, a few at a time (a pack fetched answers its neighbours)
+async function follow(p) {
+  if (!token || !mem) return;
+  let list = [];
+  try {
+    const r = await fetch('/follow?t=' + encodeURIComponent(token) + '&p=' + encodeURIComponent(p));
+    if (r.ok) list = await r.json();
+  } catch (e) {}
+  if (!list.length) return;
+  dl.postMessage({ follow: list.length, p });
+  let i = 0;
+  await Promise.all(Array.from({ length: FOLLOWERS }, async () => {
+    while (i < list.length) {
+      const d = list[i++], k = keyOf(d);
+      if (cache && (await cache.match(entry('done/' + k, 0)))) continue;
+      await Promise.all(blocksOf(d[3], 0, OPEN_BLOCKS).map(([at, n]) => get(urlOf(d), k, at, n, 1)));
+    }
+  }));
 }
 
 // --- the background download ------------------------------------------------------------------------------
@@ -171,7 +248,8 @@ function report() {
   if (!bg) return;
   const el = (performance.now() - bg.t0) / 1000;
   dl.postMessage({ pf: { on: bg.on, files: bg.files.length, done: bg.done, bytes: bg.bytes, doneBytes: bg.doneBytes,
-    rate: bg.fetched / Math.max(el, 1), finished: bg.finished, failed: bg.failed || 0, error: bg.error } });
+    rate: bg.fetched / Math.max(el, 1), finished: bg.finished, failed: bg.failed || 0, error: bg.error,
+    packs: bg.packs ? bg.packs.length : 0, packsDone: bg.packsDone || 0 } });
 }
 
 async function prefetch(on) {
@@ -187,6 +265,17 @@ async function prefetch(on) {
   bg.on = true;
   bg.t0 = performance.now();
   bg.fetched = 0;
+  if (!bg.packs) {
+    try {
+      const r = await fetch('/packs?t=' + encodeURIComponent(token));
+      bg.packs = r.ok ? await r.json() : [];
+    } catch (e) {
+      bg.packs = [];
+    }
+    bg.packs.sort((a, b) => (a.members[0]?.[0] == 'dats' ? 0 : 1) - (b.members[0]?.[0] == 'dats' ? 0 : 1));
+    bg.packsDone = 0;
+    bg.packNext = 0;
+  }
   try {
     const est = await navigator.storage.estimate();
     if (est.quota - est.usage < bg.bytes - bg.doneBytes) bg.error = `the browser allows ${(est.quota / 1e9).toFixed(1)} GB here, ${((est.quota - est.usage) / 1e9).toFixed(1)} GB free`;
@@ -211,6 +300,21 @@ async function prefetch(on) {
     bg.done++;
     return true;
   };
+  // the packs: a few thousand requests for the small files
+  await Promise.all(Array.from({ length: BG_PACKS }, async () => {
+    while (bg.on && bg.packNext < bg.packs.length) {
+      const pk = bg.packs[bg.packNext++];
+      while (game > 0 && bg.on) await new Promise((r) => setTimeout(r, 50));
+      const mark = entry('pack/' + pk.id, 0);
+      if (!(cache && (await cache.match(mark)))) {
+        const got = await packGet(pk);
+        if (!got) continue;
+        for (const b of got.values()) bg.fetched += b.length;
+        if (cache) await cache.put(mark, new Response('')).catch(() => {});
+      }
+      bg.packsDone++;
+    }
+  }));
   const take = () => bg.again.pop() || (bg.next < bg.files.length ? bg.files[bg.next++] : null);
   await Promise.all(Array.from({ length: BG_FILES }, async () => {
     for (let f; bg.on && (f = take()); ) await one(f);

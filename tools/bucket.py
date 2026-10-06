@@ -12,7 +12,8 @@ or the file given with --env.
          unsigned read is refused
   blocks uploads the install and the overlays (as webserve.py --game/--dats serve them) to <folder> in 1 MB
          gzipped blocks, and <folder>/manifest.txt naming each file's version there; for webserve.py
-         --bucket-blocks <folder>. Run again after the files change: it uploads only the files whose size or
+         --bucket-blocks <folder>. Then the files under 256 KB again, in gzipped packs of about 8 MB a folder
+         (<folder>/packs/<id>.gz, the id a hash of what's in it; <folder>/packs.txt lists them). Run again after the files change: it uploads only the files whose size or
          date differ from the manifest's (the key needs write access to the bucket)
 """
 import argparse
@@ -152,7 +153,69 @@ def blocks(a):
         with lock:
             save()
         print('\nmanifest saved: %d files' % len(manifest))
-    return True
+    return packs(b, prefix, trees, a.jobs)
+
+
+PACK_SMALL, PACK_SIZE = 256 << 10, 8 << 20
+
+
+def packs(b, prefix, trees, jobs):
+    """the small files in packs: a folder's, in order, cut at about PACK_SIZE"""
+    groups = {}
+    for top, t in trees.items():
+        for rel, full in sorted(t.files.items()):
+            st = os.stat(full)
+            if st.st_size < PACK_SMALL:
+                groups.setdefault(top + '/' + os.path.dirname(rel), []).append((top + '/' + rel, version(full), full, st.st_size))
+    plan = []  # [(id, [(key, ver, full, size)])]
+    for _, files in sorted(groups.items()):
+        cur, n = [], 0
+        for f in files:
+            if cur and n + f[3] > PACK_SIZE:
+                plan.append(cur)
+                cur, n = [], 0
+            cur.append(f)
+            n += f[3]
+        if cur:
+            plan.append(cur)
+    plan = [(hashlib.sha1(''.join('%s\t%s\n' % (k, v) for k, v, _, _ in m).encode()).hexdigest()[:20], m) for m in plan]
+    code, _, text = fetch(b.sign(prefix + '/packs.txt', expires=300))
+    have = {line.split('\t')[0] for line in text.decode('utf-8').splitlines()} if code == 200 else set()
+    todo = [p for p in plan if p[0] not in have]
+    print('%d packs of %d small files; %d to upload' % (len(plan), sum(len(m) for _, m in plan), len(todo)))
+    lock, done = threading.Lock(), [0, 0, 0]
+
+    def one(job):
+        pid, members = job
+        raw = b''.join(open(full, 'rb').read() for _, _, full, _ in members)
+        z = gzip.compress(raw, 6, mtime=0)
+        for attempt in range(6):
+            c, _, out = fetch(b.sign('%s/packs/%s.gz' % (prefix, pid), method='PUT', expires=3600),
+                              {'Content-Type': 'application/gzip'}, 'PUT', z)
+            if c == 200:
+                break
+            time.sleep(2 ** attempt)
+        else:
+            raise RuntimeError('pack %s: %d %s' % (pid, c, out[:200]))
+        with lock:
+            done[0] += 1
+            done[1] += len(raw)
+            done[2] += len(z)
+            print('\r%d/%d packs, %.2f GB (sent %.2f GB)   ' % (done[0], len(todo), done[1] / 1e9, done[2] / 1e9), end='', flush=True)
+
+    with concurrent.futures.ThreadPoolExecutor(jobs) as ex:
+        for f in concurrent.futures.as_completed([ex.submit(one, j) for j in todo]):
+            f.result()
+    lines = []
+    for pid, members in plan:
+        off = 0
+        for k, v, _, size in members:
+            lines.append('%s\t%s\t%s\t%d\t%d\n' % (pid, k, v, off, size))
+            off += size
+    c, _, out = fetch(b.sign(prefix + '/packs.txt', method='PUT', expires=600), {'Content-Type': 'text/plain'}, 'PUT',
+                      ''.join(lines).encode())
+    print('\npacks.txt: %d' % c)
+    return c == 200
 
 
 def main():

@@ -27,7 +27,13 @@ let the page's address read it cross-origin (tools/bucket.py cors sets that up).
 
 --bucket-blocks names a folder of the same files cut in 1 MB blocks, each gzipped (about 40% of the DATs'
 size), that tools/bucket.py blocks uploads with a manifest of what it holds: a file the manifest has in
-its current version (size and date) is read as those blocks, and unpacked in the page.
+its current version (size and date) is read as those blocks, and unpacked in the page. Files under 256 KB
+(84% of them) are also in packs of about 8 MB (<folder>/packs.txt lists them): a page missing one fetches
+its pack, and the background download takes packs, a few thousand requests rather than 65,000.
+
+The page also reports each burst of files the game opens (a zone's, a cutscene's: /learn), and this server
+keeps, for the burst's first files, the files that followed (~/.cache/xi-web/follow-<server>.json). When
+one of those opens again, the page asks /follow and fetches the rest at once.
 
 Behind a reverse proxy or tunnel of your own (your devices only, with its own sign-in in front: Cloudflare
 Access, Caddy with forward_auth, and the like), give the address it serves under with --origin
@@ -209,12 +215,14 @@ class Tree:
     def __init__(self, roots):
         self.files = {}  # lower-case relative path -> host path
         self.where = {}  # lower-case relative path -> (prefix, the path under its root as written)
+        self.written = {}  # lower-case relative path -> as the index writes it
         lines = []
         for prefix, root in roots:
             root = os.path.realpath(root)
             if os.path.isfile(root):
                 self.files[prefix.lower()] = root
                 self.where[prefix.lower()] = (prefix, os.path.basename(root))
+                self.written[prefix.lower()] = prefix
                 st = os.stat(root)
                 lines.append('%s\t%d\t%d' % (prefix, st.st_size, int(st.st_mtime)))
                 continue
@@ -231,6 +239,7 @@ class Tree:
                     full = os.path.join(d, f)
                     self.files[r.lower()] = full
                     self.where[r.lower()] = (prefix, os.path.relpath(full, root).replace(os.sep, '/'))
+                    self.written[r.lower()] = r
                     st = os.stat(full)
                     lines.append('%s\t%d\t%d' % (r, st.st_size, int(st.st_mtime)))
         self.index = ('\n'.join(lines) + '\n').encode('utf-8')
@@ -339,6 +348,14 @@ class Server:
                       'dats': Tree([(str(i), d) for i, d in enumerate(a.dats or [])])}
         # the bucket's copy: (tree, its prefix) -> the folder in the bucket
         self.bucket, self.folders, self.blocks_prefix, self.manifest = None, {}, '', {}
+        self.packs, self.pack_of = {}, {}  # pack id -> [(key, version, offset, size)]; key -> pack id
+        self.follow_path = os.path.expanduser('~/.cache/xi-web/follow-%s.json' % a.server[0])
+        try:
+            with open(self.follow_path, encoding='utf-8') as f:
+                self.follow = json.load(f)
+        except (OSError, ValueError):
+            self.follow = {}
+        self.follow_saved = 0
         if a.bucket:
             key, secret = os.environ.get('XI_BUCKET_KEY'), os.environ.get('XI_BUCKET_SECRET')
             if not key or not secret:
@@ -376,8 +393,26 @@ class Server:
             if q.get('t', [''])[0] != self.token:
                 return self.reply(writer, 403, b'bad token')
             return await self.websocket(reader, writer, hdr)
+        if url.path == '/learn' and method == 'POST':
+            if q.get('t', [''])[0] != self.token:
+                return self.reply(writer, 403, b'bad token')
+            try:
+                n = int(hdr.get('content-length', '0'))
+                files = json.loads((await reader.readexactly(n)).decode('utf-8')) if 0 < n < 1 << 20 else []
+                self.learn([f for f in files if isinstance(f, str)][:2000])
+            except (ValueError, asyncio.IncompleteReadError):
+                return self.reply(writer, 400, b'')
+            return self.reply(writer, 204, b'')
         if method not in ('GET', 'HEAD'):
             return self.reply(writer, 405, b'')
+        if url.path in ('/follow', '/packs'):
+            if q.get('t', [''])[0] != self.token:
+                return self.reply(writer, 403, b'bad token')
+            if url.path == '/follow':
+                out = [d for d in (self.describe(k) for k in self.follow.get(q.get('p', [''])[0].lower(), [])) if d]
+            else:
+                out = [p for p in (self.pack(pid) for pid in self.packs) if p and p['members']] if self.bucket else []
+            return self.reply(writer, 200, json.dumps(out).encode(), 'application/json')
         top, _, rest = url.path.lstrip('/').partition('/')
         if url.path == '/config':
             if q.get('t', [''])[0] != self.token:
@@ -443,6 +478,18 @@ class Server:
             LOG('blocks: %d files in the manifest' % len(self.manifest))
         except Exception as e:  # noqa: BLE001 - no manifest yet: the plain copies
             LOG('blocks: no manifest (%s)' % e)
+        try:
+            with urllib.request.urlopen(own.sign(self.blocks_prefix + '/packs.txt', expires=300), timeout=30) as r:
+                text = r.read().decode('utf-8')
+            packs = {}
+            for line in text.splitlines():
+                f = line.split('\t')
+                if len(f) == 5:
+                    packs.setdefault(f[0], []).append((f[1], f[2], int(f[3]), int(f[4])))
+            self.packs, self.pack_of = packs, {m[0]: pid for pid, ms in packs.items() for m in ms}
+            LOG('blocks: %d packs of %d small files' % (len(packs), len(self.pack_of)))
+        except Exception as e:  # noqa: BLE001
+            LOG('blocks: no packs (%s)' % e)
 
     def sign(self, p):
         """'dat/<path>' or 'dats/<path>' -> {url: a signed link to its copy in the bucket, blocks: links to its
@@ -462,10 +509,50 @@ class Server:
             size = int(ver.split('.')[0])
             out['blocks'] = [self.bucket.sign(block_key(self.blocks_prefix, key, ver, n))
                              for n in range(max(1, (size + BLOCK - 1) // BLOCK))]
+        pack = self.pack(self.pack_of.get(key))
+        if pack and pack['members']:
+            out['pack'] = pack
         return out
 
+    def describe(self, key):
+        """'dat/<lower path>' -> [route, path as the index writes it, mtime, size] (the page's cache key), or None"""
+        top, _, rel = key.partition('/')
+        t = self.trees.get(top)
+        full = t and t.files.get(rel)
+        if not full:
+            return None
+        st = os.stat(full)
+        return [top, t.written[rel], int(st.st_mtime), st.st_size]
+
+    def pack(self, pid):
+        """a pack: {id, url, members: [[route, path, mtime, size, offset]]}, its members still in the version packed"""
+        if not pid or pid not in self.packs:
+            return None
+        members = []
+        for key, ver, off, size in self.packs[pid]:
+            d = self.describe(key)
+            if d and '%d.%d' % (d[3], d[2]) == ver:
+                members.append(d + [off])
+        return {'id': pid, 'url': self.bucket.sign('%s/packs/%s.gz' % (self.blocks_prefix, pid)), 'members': members}
+
+    def learn(self, files):
+        """a burst of opens ('dat/<path>', in order): its first files lead to the rest"""
+        keys = list(dict.fromkeys(f.lower() for f in files if '/' in f))
+        for trigger in keys[:3]:
+            have = self.follow.get(trigger, [])
+            rest = [k for k in keys if k != trigger and k not in have]
+            self.follow[trigger] = (have + rest)[:600]
+        import time
+        if time.time() - self.follow_saved > 10:
+            self.follow_saved = time.time()
+            os.makedirs(os.path.dirname(self.follow_path), exist_ok=True)
+            tmp = self.follow_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(self.follow, f)
+            os.replace(tmp, self.follow_path)
+
     def reply(self, writer, code, body, ctype='text/plain', extra=()):
-        reason = {200: 'OK', 206: 'Partial Content', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
+        reason = {200: 'OK', 204: 'No Content', 206: 'Partial Content', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
                   416: 'Range Not Satisfiable'}.get(code, 'Error')
         h = ['HTTP/1.1 %d %s' % (code, reason), 'Content-Type: ' + ctype, 'Content-Length: %d' % len(body),
              'Cross-Origin-Opener-Policy: same-origin', 'Cross-Origin-Embedder-Policy: require-corp',
