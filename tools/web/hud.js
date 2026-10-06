@@ -79,7 +79,8 @@
       for (const r of live.values())
         lines.push(`  ${r.ahead ? '»' : '⇣'} ${name(r.u)}  ${r.n >= 0 ? mb(r.n) + ' MB @' + mb(r.at) : 'all'}  ${((now - r.t) / 1000).toFixed(1)} s`);
       for (const r of done)
-        if (now - r.t < 4000) lines.push(`  ${r.k < 0 ? '✗' : '✓'} ${name(r.u)}  ${r.k > 0 ? mb(r.k) + ' MB ' : ''}${r.ms.toFixed(0)} ms`);
+        if (now - r.t < 4000)
+          lines.push(`  ${r.k < 0 ? '✗' : '✓'} ${name(r.u)}  ${r.k > 0 ? mb(r.k) + ' MB ' : ''}${r.ms.toFixed(0)} ms${r.from ? ' · ' + r.from : ''}`);
       el.textContent = lines.join('\n');
       el.style.display = live.size || now - Math.max(done[0]?.t ?? -1e9, lastHit) < 4000 ? '' : 'none';
     }, 200);

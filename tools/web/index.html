@@ -67,6 +67,7 @@ for (const k of ['server', 'user', 'pass', 'authport', 'dataport', 'viewport'])
 // every file of a build is asked for as name?v=<build> (tools/build_web.py fills it in), so a browser or a
 // proxy's cache can't pair a new page with an old script or wasm
 const XI_BUILD = '__XI_BUILD__';
+let xiCfg = {}; // webserve.py's /config
 var Module = {
   locateFile: (p, dir) => dir + p + '?v=' + XI_BUILD,
   arguments: args,
@@ -101,7 +102,7 @@ var Module = {
   }],
   onRuntimeInitialized() {
     statusEl.textContent = 'Running';
-    Module.fileCache?.postMessage({ mem: Module.wasmMemory, clear: hash.get('cache') === 'clear' });
+    Module.fileCache?.postMessage({ mem: Module.wasmMemory, clear: hash.get('cache') === 'clear', bucket: !!xiCfg.bucket });
     Module._web_view_size(Module.viewSize[0], Module.viewSize[1]);
     Module._web_focus(1);
     xiInput.start(Module, document.getElementById('canvas'));
@@ -136,6 +137,7 @@ function startGame() {
     const r = await fetch('config?t=' + encodeURIComponent(hash.get('t') || ''));
     if (r.ok) cfg = await r.json();
   } catch (e) {}
+  xiCfg = cfg;
   if (!hash.get('server') && cfg.server) args.push('--server', cfg.server);
   for (let i = 0; i < (cfg.dats || 0); i++) args.push('--dats', '/dats/' + i);
   if (hash.get('user')) return startGame();
