@@ -37,6 +37,7 @@
 
 #include "res.h"
 #include "res_sjis.h"
+#include "vfs.h"
 
 /* ---- state ----------------------------------------------------------------------------------- */
 
@@ -155,12 +156,14 @@ static int resolve(const char* rel, char* out, size_t n)
     for (int i = 0; i < g_overlays; ++i)
     {
         snprintf(out, n, "%s%s", g_overlay[i], rel);
+        vfs_match_case(out);
         if (file_exists(out))
             return 1;
     }
     if (!g_dir)
         return 0;
     snprintf(out, n, "%s%s", g_dir, rel);
+    vfs_match_case(out);
     return 1;
 }
 
