@@ -39,6 +39,9 @@
 #include "plat.h"
 #include "thunk.h"
 #include "user32.h"
+#if defined(FFXI_ANDROID_VULKAN)
+#include "build.h" /* FFXI_WRAP_PROBE_CTOR/DTOR, when the Android translation wraps them */
+#endif
 
 #define D3D_OK 0u
 #define D3DERR_INVALIDCALL 0x8876086Cu
@@ -624,6 +627,7 @@ static void raise_top(int* top, uint32_t n)
 /* A 16x16 occlusion probe tests a quad at the sky's depth (z 0x3f7ffffe, 1 - 2^-23: the game's
  * probe for the sun and its lens flare) since the last probe was read; see lock_rect. */
 static int g_probe_sky;
+static int g_occlusion; /* d3d8_set_occlusion */
 static uint32_t g_d3d;
 
 static int xf_index(uint32_t ts)
@@ -980,7 +984,11 @@ static void IDirect3D8_CreateDevice(Guest* g)
     /* windowed devices ignore the presentation interval and wait for the display; so do we unless
      * a full-screen device asks for IMMEDIATE */
     user32_set_fullscreen(d->hwnd, !d->pp[7]);
-    gfx_init(user32_sdl_window(d->hwnd), d->pp[7] || d->pp[12] != 0x80000000u);
+    /* FFXI_VSYNC=0: never wait for the display (the Android host sets it, to measure past the refresh rate) */
+    int vsync = d->pp[7] || d->pp[12] != 0x80000000u;
+    if (getenv("FFXI_VSYNC") && getenv("FFXI_VSYNC")[0] == '0')
+        vsync = 0;
+    gfx_init(user32_sdl_window(d->hwnd), vsync);
     obj_addref(d->d3d);
     d->guest = obj_new(O_DEVICE);
     d->backbuffer = new_surface(d->pp[2], d->pp[0], d->pp[1], USAGE_RENDERTARGET, 0, 0);
@@ -1091,6 +1099,16 @@ static void IDirect3DDevice8_Reset(Guest* g)
 static void (*g_present_hook)(void);
 
 void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
+
+void d3d8_set_occlusion(int mode)
+{
+#if defined(FFXI_ANDROID_VULKAN)
+    g_occlusion = mode >= 0 && mode <= 2 ? mode : 0;
+#else
+    g_occlusion = mode == 2 ? 2 : 0; /* Delayed is Android's alone (lock_rect); FFXI_PROBE still reaches it */
+#endif
+}
+int d3d8_occlusion(void) { return g_occlusion; }
 
 void d3d8_screen_size(uint32_t* w, uint32_t* h)
 {
@@ -2471,6 +2489,7 @@ static int build_draw(GfxDraw* d)
     {
         d->vs.prog = vs->hash;
         d->vs_tokens = vs->func;
+        d->vs_token_count = vs->nfunc;
         memcpy(d->u.vsc, s->vsc, sizeof d->u.vsc);
     }
     if (s->ps)
@@ -2480,6 +2499,7 @@ static int build_draw(GfxDraw* d)
         {
             d->fs.prog = g_dev.ps[i].hash;
             d->ps_tokens = g_dev.ps[i].func;
+            d->ps_token_count = g_dev.ps[i].nfunc;
             memcpy(d->u.psc, s->psc, sizeof d->u.psc);
         }
     }
@@ -3715,9 +3735,153 @@ static void Texture_GetSurfaceLevel(Guest* g)
 
 #define LOCK_READONLY 0x10u
 
+#if defined(FFXI_ANDROID_VULKAN)
+/* The lifetimes of the game's occlusion probe objects, for gfx_tex_read_async_keyed: when the
+ * Android translation wraps the probe's constructor and destructor (FFXI_WRAP_PROBE_*), each
+ * construction gets a new generation, so a probe at a reused address is a different key. The
+ * wrappers still run the game's own bodies. Only the guest's (serialized) D3D calls touch this. */
+#define ANDROID_PROBE_LIVES 4096u
+typedef struct AndroidProbeLife
+{
+    uint32_t object, generation;
+    uint8_t state; /* 0 empty, 1 live, 2 destroyed */
+} AndroidProbeLife;
+static AndroidProbeLife g_android_probe_lives[ANDROID_PROBE_LIVES];
+static int g_android_probe_hooks;
+static int android_probe_mapped(uint32_t address, uint32_t size)
+{
+    if (!address || !size || address > UINT32_MAX - (size - 1))
+        return 0;
+    uint32_t last = (address + size - 1) & ~0xfffu;
+    for (uint32_t page = address & ~0xfffu;; page += 0x1000u)
+    {
+        if (!gwin_is_committed(page))
+            return 0;
+        if (page == last)
+            return 1;
+    }
+}
+/* the object's entry (open addressing), or with create a free one for it */
+static AndroidProbeLife* android_probe_life(uint32_t object, int create)
+{
+    uint32_t start = ((object >> 2) * 2654435761u) & (ANDROID_PROBE_LIVES - 1);
+    AndroidProbeLife* vacant = NULL;
+    for (uint32_t n = 0; n < ANDROID_PROBE_LIVES; ++n)
+    {
+        AndroidProbeLife* entry = &g_android_probe_lives[(start + n) & (ANDROID_PROBE_LIVES - 1)];
+        if (entry->state && entry->object == object)
+            return entry;
+        if (entry->state != 1 && !vacant)
+            vacant = entry;
+        if (!entry->state)
+            break;
+    }
+    return create ? vacant : NULL;
+}
+#if defined(FFXI_WRAP_PROBE_CTOR) && defined(FFXI_WRAP_PROBE_DTOR)
+static uint32_t g_android_probe_generation;
+static void android_probe_created(uint32_t object)
+{
+    if (!object)
+        return;
+    if (g_android_probe_generation == UINT32_MAX)
+    {
+        AndroidProbeLife* old = android_probe_life(object, 0);
+        if (old)
+        {
+            old->generation = 0;
+            old->state = 2;
+        }
+        /* out of generations: rather than wrap, and let a reused address match an earlier
+         * lifetime, every read is exact for the rest of the process */
+        g_android_probe_hooks = 0;
+        return;
+    }
+    AndroidProbeLife* entry = android_probe_life(object, 1);
+    if (!entry)
+        return;
+    entry->object = object;
+    entry->generation = ++g_android_probe_generation;
+    entry->state = 1;
+}
+static void android_probe_destroyed(uint32_t object)
+{
+    AndroidProbeLife* entry = android_probe_life(object, 0);
+    if (entry)
+    {
+        entry->generation = 0;
+        entry->state = 2;
+    }
+}
+extern GuestFn rt_wrap_probe_ctor, rt_wrap_probe_dtor;
+extern const GuestFn rt_orig_probe_ctor, rt_orig_probe_dtor;
+static void android_wrap_probe_ctor(Guest* guest)
+{
+    uint32_t object = guest->ecx;
+    rt_orig_probe_ctor(guest);
+    if (android_probe_mapped(object, 8))
+        android_probe_created(object);
+}
+static void android_wrap_probe_dtor(Guest* guest)
+{
+    android_probe_destroyed(guest->ecx);
+    rt_orig_probe_dtor(guest);
+}
+/* FNV-1a of guest bytes */
+static uint64_t android_probe_hash(uint32_t address, unsigned bytes)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (unsigned i = 0; i < bytes; ++i)
+        hash = (hash ^ rd8(address + i)) * UINT64_C(1099511628211);
+    return hash;
+}
+#endif
+static void android_probe_hooks_init(void)
+{
+#if defined(FFXI_WRAP_PROBE_CTOR) && defined(FFXI_WRAP_PROBE_DTOR)
+    uint32_t c = FFXI_WRAP_PROBE_CTOR + RD, d = FFXI_WRAP_PROBE_DTOR + RD;
+    if (FFXI_WRAP_PROBE_CTOR == 0x1006c070u && FFXI_WRAP_PROBE_DTOR == 0x1006c080u && !rt_wrap_probe_ctor &&
+        !rt_wrap_probe_dtor && rt_orig_probe_ctor && rt_orig_probe_dtor && android_probe_mapped(c, 12) &&
+        android_probe_mapped(d, 14) && android_probe_hash(c, 12) == UINT64_C(3548464250665196336) &&
+        android_probe_hash(d, 14) == UINT64_C(6811020891934928636))
+    {
+        rt_wrap_probe_ctor = android_wrap_probe_ctor;
+        rt_wrap_probe_dtor = android_wrap_probe_dtor;
+        g_android_probe_hooks = 1;
+        rt_log("[recomp] d3d8: Android probe lifetime hooks admitted ctor=%08x dtor=%08x; delayed reads up to 16 frames old\n", c,
+               d);
+    }
+    else
+        rt_log("[recomp] d3d8: Android probe lifetime anchors differ; all reads stay synchronous\n");
+#else
+    rt_log("[recomp] d3d8: Android probe lifetime wrappers missing; all reads stay synchronous\n");
+#endif
+}
+/* The key of a read-only lock of a live probe's 16x16 target from the game's one call (returning to
+ * 0x1006c72f, with the RECT at 0x1032a17c and the probe in ebp, its surface at +4); 0 for any other. */
+static uint64_t android_surface_probe_key(Guest* guest, const Obj* surface, uint32_t rect, uint32_t flags)
+{
+    if (!g_android_probe_hooks || flags != LOCK_READONLY || surface->width != 16 || surface->height != 16 ||
+        surface->format != FMT_A8R8G8B8 || !(surface->usage & USAGE_RENDERTARGET) ||
+        !android_probe_mapped(guest->esp, 4) || rd32(guest->esp) != 0x1006c72fu + RD ||
+        !android_probe_mapped(guest->ebp, 8) || rd32(guest->ebp + 4) != surface->guest || rect != 0x1032a17cu + RD ||
+        !android_probe_mapped(rect, 16) || rd32(rect) != 0 || rd32(rect + 4) != 0 || rd32(rect + 8) != 16 ||
+        rd32(rect + 12) != 16)
+        return 0;
+    AndroidProbeLife* life = android_probe_life(guest->ebp, 0);
+    if (!life || life->state != 1 || !life->generation)
+        return 0;
+    /* the probe's generation and address: unique while the process runs */
+    return ((uint64_t)life->generation << 32) | guest->ebp;
+}
+#define ANDROID_PROBE_ARGUMENT(value) , value
+#else
+#define ANDROID_PROBE_ARGUMENT(value)
+#endif
+
 /* D3DLOCKED_RECT for a surface and an optional RECT. A surface the GPU owns is read back first
  * and written again at unlock; one the game owns is uploaded before its next draw. */
-static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags)
+static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags ANDROID_PROBE_ARGUMENT(uint64_t probe_key))
 {
     uint32_t pitch = fmt_pitch(s->format, s->width), bits = obj_mem(s);
     if (gpu_owned(s) && surface_scaled(s))
@@ -3733,33 +3897,52 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags)
         GfxTex* g = surface_gpu(s, &face, &level);
         if (!s->gpu_locked && !(s->usage & USAGE_DEPTHSTENCIL))
         {
-            /* The game's per-frame probe decides what is drawn from these pixels: a copy even a frame
-             * old makes characters flicker. So the read waits (the back end commits each frame in
-             * chunks, so the wait is the frame's tail); FFXI_ASYNC_READBACK=1 trades that for
-             * the newest finished copy. */
-            static int async = -1, visible = -1;
+            /* The game's 16x16 occlusion probe (FFXiMain 0x1006c8c0: CopyRects of a 16x16 target, a
+             * read-only lock, bit 7 of the blue byte counted over 8x8 samples: 0 hidden .. 256 fully
+             * visible) decides what is drawn from these pixels. The occlusion setting (d3d8_set_occlusion)
+             * says how it is answered:
+             * - 0, fully visible, with no wait for the GPU. That draws what the probe would have hidden,
+             *   which the depth test hides anyway. Not so the sky probe: the sun's lens flare draws with
+             *   no depth test, so it is the probe that hides it behind walls. It reads a frame late, for
+             *   free; the flare writes no depth, so the late answer does not feed back into the next.
+             * - 1, the newest copy the GPU has finished, a few frames late: per probe where its lifetime
+             *   is known (Android's probe wraps; other probes read exactly there), else the target's newest,
+             *   which makes characters flicker, so only Android's menu offers it.
+             * - 2, exactly: the CPU waits for the scene so far (7-8 ms a frame at a 4096x4096 background).
+             * FFXI_PROBE=gpu reads exactly; FFXI_ASYNC_READBACK=1 makes that late (Android: always late),
+             * and on desktop also reads other small read-only locks late. */
+            static int async = -1, forced = -1;
             if (async < 0)
                 async = getenv("FFXI_ASYNC_READBACK") && getenv("FFXI_ASYNC_READBACK")[0] == '1';
-            if (visible < 0)
-                visible = !(getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu"));
-            /* The game's 16x16 occlusion probe (FFXiMain 0x1006c8c0: CopyRects of a 16x16 target,
-             * a read-only lock, bit 7 of the blue byte counted over 8x8 samples: 0 hidden .. 256
-             * fully visible) reads fully visible, with no wait for the GPU. Reading it for real
-             * stalls the CPU on the whole scene every frame (7-8 ms at a 4096x4096 background),
-             * and a late answer makes characters flicker; answering visible draws what the probe
-             * would have hidden, which the depth test hides anyway. FFXI_PROBE=gpu reads it.
-             * Not so the sky probe: the sun's lens flare draws without a depth test, so it is the
-             * probe that hides it behind walls. That one reads a frame late, for free; the flare
-             * writes no depth, so the late answer does not feed back into the next. */
+            if (forced < 0)
+            {
+                int gpu = getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu");
+#if defined(FFXI_ANDROID_VULKAN)
+                forced = async ? 1 : gpu ? 2 : 0;
+#else
+                forced = gpu ? (async ? 1 : 2) : 0;
+#endif
+            }
             int probe = (flags & LOCK_READONLY) && s->width == 16 && s->height == 16, sky = probe && g_probe_sky;
+            int mode = forced ? forced : g_occlusion;
             if (probe)
                 g_probe_sky = 0;
-            if (visible && sky)
-                gfx_tex_read_async(g, face, level, GUEST_PTR(bits), pitch);
-            else if (visible && probe)
+#if defined(FFXI_ANDROID_VULKAN)
+            if (probe)
+                gfx_android_probe_read(probe_key != 0, mode == 1);
+            if (probe && mode == 1) /* a probe whose lifetime is not known reads exactly */
+                probe_key ? gfx_tex_read_async_keyed(g, face, level, GUEST_PTR(bits), pitch, probe_key, 16)
+                          : gfx_tex_read(g, face, level, GUEST_PTR(bits), pitch);
+            else
+#endif
+            if (probe && mode == 0 && !sky)
                 memset(GUEST_PTR(bits), 0xFF, (size_t)pitch * s->height);
+            else if (probe && (mode == 1 || (mode == 0 && sky)))
+                gfx_tex_read_async(g, face, level, GUEST_PTR(bits), pitch);
+#if !defined(FFXI_ANDROID_VULKAN)
             else if (async && (flags & LOCK_READONLY) && s->width * s->height <= 128 * 128)
                 gfx_tex_read_async(g, face, level, GUEST_PTR(bits), pitch);
+#endif
             else
                 gfx_tex_read(g, face, level, GUEST_PTR(bits), pitch);
         }
@@ -3793,7 +3976,7 @@ static void Texture_LockRect(Guest* g)
     Obj* s = sub(ARG(0), 0, ARG(1));
     if (!s)
         RET(D3DERR_INVALIDCALL, 5);
-    lock_rect(s, ARG(2), ARG(3), ARG(4));
+    lock_rect(s, ARG(2), ARG(3), ARG(4) ANDROID_PROBE_ARGUMENT(0));
     RET(D3D_OK, 5);
 }
 
@@ -3833,7 +4016,7 @@ static void Cube_LockRect(Guest* g)
     Obj* s = sub(ARG(0), ARG(1), ARG(2));
     if (!s)
         RET(D3DERR_INVALIDCALL, 6);
-    lock_rect(s, ARG(3), ARG(4), ARG(5));
+    lock_rect(s, ARG(3), ARG(4), ARG(5) ANDROID_PROBE_ARGUMENT(0));
     RET(D3D_OK, 6);
 }
 
@@ -3905,7 +4088,7 @@ static void Surface_LockRect(Guest* g)
     Obj* s = obj(ARG(0));
     if (!s)
         RET(D3DERR_INVALIDCALL, 4);
-    lock_rect(s, ARG(1), ARG(2), ARG(3));
+    lock_rect(s, ARG(1), ARG(2), ARG(3) ANDROID_PROBE_ARGUMENT(android_surface_probe_key(g, s, ARG(2), ARG(3))));
     RET(D3D_OK, 4);
 }
 
@@ -4153,6 +4336,10 @@ void d3d8_init(void)
 /* the vtables are guest memory: built once the guest heap is up (from the host, before GameStart) */
 void d3d8_setup(void)
 {
+#if defined(FFXI_ANDROID_VULKAN)
+    /* after the images are mapped, before either DLL's DllMain */
+    android_probe_hooks_init();
+#endif
     g_vtbl[O_D3D] = make_vtbl("IDirect3D8", kD3D8);
     g_vtbl[O_DEVICE] = make_vtbl("IDirect3DDevice8", kDevice);
     g_vtbl[O_TEXTURE] = make_vtbl("IDirect3DTexture8", kTexture);

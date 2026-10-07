@@ -24,6 +24,9 @@ XI on Anything runs on Apple silicon Macs today, with more platforms planned.
 username, password and one-time code, or a server launcher's token; pick the server in the
 sign-in screen's Settings.
 
+Experimental: an [Android build](docs/android.md), tested on a Pixel Fold. Desktop defaults are
+unchanged.
+
 ## What's better than the original
 
 - **A Modern page in the game's own Config menu**, next to Gameplay, Windows and the rest:
@@ -32,6 +35,7 @@ sign-in screen's Settings.
   - texture filtering up to 16x, and longer draw and character distances
   - 30 or 60 fps
   - interface shape: full width, 16:9 or 4:3
+  - the occlusion check: off (everything counts as seen, the fastest) or exact
 - **Widescreen and ultrawide**: the 3D view widens with the window instead of stretching a 4:3
   view, the interface can stay 16:9 in the middle of an ultrawide, and nameplates keep their shape.
 - **A native sign-in screen** in the game's own window themes and font, with the password kept in
@@ -338,7 +342,7 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--data-dir <folder>` | Where `host64` writes its own files (the `patch.ver` it makes for an install without one). Default: beside `host64`. |
 | `--reg-final <file.reg>` | Loaded after the overlay, so its values win over what the game saved (up to 8). Without one, the sign-in screen loads its `settings.reg` here. |
 | `--dats <folder>` | DAT overlays, the way XIPivot does them (up to 8; the first folder given wins). See below. |
-| `--fps-divisor <n>` | The game's frame divisor: `1` is 60 fps (the default here), `2` is 30 fps as shipped. |
+| `--fps-divisor <n>` | The game's frame divisor: `1` is 60 fps (the default here), `2` is 30 fps as shipped, `0` uncapped (for measurements). |
 | `--aspect <auto, off or w:h>` | The 3D scene's aspect ratio. `auto` (the default) follows the window's shape, as Ashita's aspect addon does, so a widescreen or ultrawide window sees more to the sides instead of a 4:3 view stretched across it. `off` leaves it to the game; a shape (`16:9`, `1.778`) fixes it. |
 | `--ui-aspect <w:h>` | Keep the interface at this shape, full height and centered, in a wider window (`16:9` on an ultrawide), instead of stretched across it. The 3D world still fills the window. The mouse is mapped to match, so the sides outside the box can't be clicked. Off by default (`off`); an app bundle's `FFXIUIAspect` key is the default. Best with a 16:9 menu resolution (960x540). |
 | `--nameplates fix\|off` | The names over characters' heads. The game sizes them across by the window's width and down by its height, so they widen with the window (1.8 times at 3440x1440); `fix`, the default, keeps the shape they have in a 4:3 window. Builds with a `nameplate_scale` hook in `meta/builds.json` only. |
@@ -381,9 +385,10 @@ the log reports each one: `[recomp] dats: era-dats, 163 files`.
 | `FFXI_DISCORD=0` | No Discord Rich Presence. |
 | `FFXI_DISCORD_NAME=0` | Rich Presence without the character's name (jobs and zone only). |
 | `FFXI_DISCORD_APP_ID` | The Discord application the presence is shown as, in place of the built-in one. |
-| `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU. By default it answers "visible" at once, which saves 7–8 ms a frame. |
+| `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU, whatever Config > Modern's Occlusion Check says. By default it answers "visible" at once, which saves 7–8 ms a frame. |
 | `FFXI_DRAWLOG=<file>` | While `<file>.go` exists, write the next frame's draws to `<file>` (return addresses on the guest stack, texture, vertex box), then remove `.go`. For finding which game code draws what. |
 | `FFXI_ASYNC_READBACK=1` | Small read-only surface locks take the newest finished copy instead of waiting for the GPU. |
+| `FFXI_VSYNC=0` | Never wait for the display, for measuring frame rates past its refresh rate. |
 | `FFXI_NATIVE_GEOMETRY=1` | Skin characters with [SSE-order kernels](docs/shared-graphics-optimizations.md) (NEON or SSE2) instead of the translated x87 code, on builds with a verified layout (2025-11-12). The same output as the original's SSE path; no measured FPS gain on desktop. |
 | `FFXI_CACHE_DIR` | Where the pipeline cache goes. Default `~/Library/Caches/FFXI`. |
 | `FFXI_RECOMP_TRACE=1` | Log every shim call, and every failed `CreateFileA` / `FindFirstFileA` path. |
@@ -485,9 +490,14 @@ runtime/portable/  64-bit hosts: plat.h (+ plat_win.c, plat_posix.c), gwin (gues
                    gamecore* (our own gamecore), user32 + input + dinput + dsound (SDL3),
                    d3d8 (the D3D8 front end), ws2 (sockets), gfx.h (the graphics back end):
                    gfx_metal.m (Metal) + gfx_msl*.c (D3D8 state and shaders -> MSL), gfx_null.c (elsewhere),
-                   geometry_* (SSE-order skinning kernels and their guarded adapters, opt-in)
+                   geometry_* (SSE-order skinning kernels and their guarded adapters, opt-in),
+                   Android: gfx_vulkan.cpp (its C++ Vulkan back end), gfx_worker* (render thread),
+                   gfx_pass_plan.h, gfx_visibility_storage* (with the GLSL its SPIR-V comes from),
+                   gfx_probe_* (keyed visibility), gfx_spirv.c
 host/              ffximain.c: the 32-bit stand-in FFXiMain.dll; host64.c: the 64-bit game host;
-                   lsb_login.c: the LandSandBoat sign-in
+                   lsb_login.c: the LandSandBoat sign-in; android_main.c (the Android entry) and
+                   benchmark.c (its frame timestamps)
+android/           the Android app: its manifest and activity (docs/android.md)
 tests/             difftest.c (original vs translation), boot.c (x86), boot64.c (x64),
                    gfx_test.c (the Metal back end), d3d8_test.c (the D3D8 front end on it)
 tools/             prepare.py, buildinfo.py, unpack.py, build.py (MSVC), build_posix.py (clang),
@@ -496,7 +506,8 @@ tools/             prepare.py, buildinfo.py, unpack.py, build.py (MSVC), build_p
                    thirdparty.py (builds third_party/ with clang), vendor.py (refreshes third_party/),
                    staticserver.py (a fixed-data server); replayserver.py, replay.py and replayreport.py
                    (recorded scenes for performance tests: tools/replay/, the reference set in
-                   tools/replay/scenes/)
+                   tools/replay/scenes/); android_deps.py, build_android.py, build_android_apk.py,
+                   android_translation.py and android_toolchain.py (the APK), visibility_storage_spv.py
 third_party/       stb; SDL3 and mbedtls, trimmed to what the build uses, with manifest.json each
 discovery/         the discovery pass: Ghidra (Jython) post-scripts, verdicts.py (the manual verdicts
                    per build), notes/ (what each build's run found)

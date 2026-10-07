@@ -276,6 +276,13 @@ static void test_pixel_lighting(void)
     static const float modes[3] = { 2, 0, 1 };
     for (int pass = 0; pass < 3; ++pass)
     {
+#ifdef FFXI_ANDROID_VULKAN
+        if (pass == 0)
+        {
+            puts("gfx_test: skip per-pixel lighting (light 2): no Modern FX on Android");
+            continue;
+        }
+#endif
         gfx_fx_set("light", modes[pass]);
         gfx_clear(0, NULL, 3, 0xFF000000u, 1.0f, 0, VP);
         GfxDraw d;
@@ -1251,12 +1258,20 @@ static void test_scene_water(void)
  * defaults, each kept as set; a key no back end knows reads as 0 */
 static void test_fx_settings(void)
 {
+#ifdef FFXI_ANDROID_VULKAN
+    /* Android has no Modern FX: every key reads 0 and setting one does nothing */
+    CHECK(gfx_fx_get("fx") == 0.0f, "fx settings: fx %g (want 0 on Android)", gfx_fx_get("fx"));
+    CHECK(gfx_fx_get("aniso") == 0.0f, "fx settings: aniso %g (want 0 on Android)", gfx_fx_get("aniso"));
+    gfx_fx_set("bloom", 1.25f);
+    CHECK(gfx_fx_get("bloom") == 0.0f, "fx settings: bloom kept as %g (want 0 on Android)", gfx_fx_get("bloom"));
+#else
     CHECK(gfx_fx_get("fx") == 1.0f, "fx settings: fx %g (want 1, from FFXI_FX)", gfx_fx_get("fx"));
     CHECK(gfx_fx_get("aniso") == 16.0f, "fx settings: aniso %g (want its default, 16)", gfx_fx_get("aniso"));
     float was = gfx_fx_get("bloom");
     gfx_fx_set("bloom", 1.25f);
     CHECK(gfx_fx_get("bloom") == 1.25f, "fx settings: bloom %g after setting 1.25", gfx_fx_get("bloom"));
     gfx_fx_set("bloom", was);
+#endif
     gfx_fx_set("no_such_setting", 3.0f);
     CHECK(gfx_fx_get("no_such_setting") == 0.0f, "fx settings: an unknown key reads %g", gfx_fx_get("no_such_setting"));
 }
@@ -1264,6 +1279,10 @@ static void test_fx_settings(void)
 static void test_scene_effects(void)
 {
     test_large_target_mips();
+#ifdef FFXI_ANDROID_VULKAN
+    puts("gfx_test: skip the scene effects: no Modern FX on Android");
+    CHECK(gfx_failures() == 0, "back end: %u failures", gfx_failures());
+#else
     test_scene_ao(0);
     test_scene_ao(1);
     test_scene_ao_halo();
@@ -1288,6 +1307,7 @@ static void test_scene_effects(void)
     test_scene_filter();
     gfx_tex_destroy(g_srt);
     gfx_tex_destroy(g_sds);
+#endif
 }
 
 int main(int argc, char** argv)
