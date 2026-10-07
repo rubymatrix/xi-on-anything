@@ -3,8 +3,10 @@
 in Unicorn, over synthetic animated meshes: --frames per single/dual stream, with and without bone
 remapping. Every page the original touches must match, as must the general registers and flags.
 
-Needs your own prepared 2025-11-12 build (generated/all, generated/FFXiMain.unpacked.dll), pefile
-and unicorn. The translated functions are copied into a temporary folder only; nothing from the
+Needs your own prepared build (generated/all, generated/FFXiMain.unpacked.dll), pefile and unicorn,
+and the build's geometry addresses in meta/builds.json (its geometry_* wraps and "geometry" globals,
+from tools/newbuild.py carry). A build without a layout yet is run as layout 1: a pass is what lets
+it have one. The translated functions are copied into a temporary folder only; nothing from the
 game is written anywhere else. Checks geometry, not gameplay or frame rate.
 
   python3 tests/geometry_replay_test.py
@@ -12,6 +14,7 @@ game is written anywhere else. Checks geometry, not gameplay or frame rate.
 
 import argparse
 import ctypes as C
+import json
 import math
 import os
 from pathlib import Path
@@ -32,6 +35,9 @@ import build  # noqa: E402
 REGS = dict(eax=UC_X86_REG_EAX, ebx=UC_X86_REG_EBX, ecx=UC_X86_REG_ECX, edx=UC_X86_REG_EDX,
             esi=UC_X86_REG_ESI, edi=UC_X86_REG_EDI, ebp=UC_X86_REG_EBP, esp=UC_X86_REG_ESP)
 FLAGS = dict(cf=0, pf=2, af=4, zf=6, sf=7, df=10, of=11)
+IMAGEBASE = 0x10000000
+WRAPS = ('geometry_parent', 'geometry_feature_sse', 'geometry_feature_sse2', 'geometry_rigid', 'geometry_weighted')
+GLOBALS = ('info', 'callback', 'palette', 'counts')
 
 
 class Guest(C.Structure):  # runtime/guest.h's
@@ -43,10 +49,36 @@ class Guest(C.Structure):  # runtime/guest.h's
     )
 
 
-def local_library(directory):
-    config = build.BUILD  # tools/prepare.py checked the install's hashes
-    if config['build'] != '2025-11-12':
-        raise ValueError('only the verified layout can be compared')
+def layout_of(config):
+    """The build's geometry addresses, as integers; exits if it has none to compare."""
+    wraps, geometry = config['wraps'], config.get('geometry', {})
+    missing = [k for k in WRAPS if k not in wraps] + [k for k in GLOBALS if k not in geometry]
+    if missing:
+        raise SystemExit('%s has no geometry addresses (%s): tools/newbuild.py carry --only geometry'
+                         % (config['build'], ', '.join(missing)))
+    return {k: int(geometry[k], 16) for k in GLOBALS} | {'parent': int(wraps['geometry_parent'], 16)}
+
+
+def check_named(config, image):
+    """The adapter reads the globals only for its guards and the SSE feature flag; the skinning runs
+    the game's parent, which reads its own. So the comparison cannot catch a wrong but harmless global
+    address. Each must be an operand of the code that uses it: info in both feature getters, the rest
+    in the parent."""
+    functions = {f['entry']: f['ranges'] for f in json.load(open(config['ffximain_meta']))['functions']}
+    for wrap in WRAPS:
+        if int(config['wraps'][wrap], 16) not in functions:
+            raise SystemExit(f'{config["build"]}: {wrap} is not a function entry')
+    users = {'info': ('geometry_feature_sse', 'geometry_feature_sse2'),
+             'callback': ('geometry_parent',), 'palette': ('geometry_parent',), 'counts': ('geometry_parent',)}
+    for name, wraps in users.items():
+        operand = struct.pack('<I', int(config['geometry'][name], 16))
+        for wrap in wraps:
+            ranges = functions[int(config['wraps'][wrap], 16)]
+            if not any(operand in image[lo - IMAGEBASE : hi - IMAGEBASE] for lo, hi in ranges):
+                raise SystemExit(f'{config["build"]}: {wrap} does not name the geometry {name} global')
+
+
+def local_library(directory, config):
     # The wrapped functions and everything they call, copied whole and unchanged from the
     # translation into the temporary folder.
     source = '\n'.join(p.read_text() for p in (ROOT / 'generated/all').glob('funcs_*.c'))
@@ -69,6 +101,7 @@ def local_library(directory):
     )
     unit = directory / 'local_parent.c'
     unit.write_text('#include "runtime.h"\n#include "funcs.h"\n' + definitions + '\n' + '\n'.join(selected.values()))
+    build.BUILD = dict(config, geometry=dict(config['geometry'], layout=1))  # the layout under test
     build.BUILD_H = str(directory / 'build.h')
     build.write_build_h()
     library = directory / ('geometry.dylib' if sys.platform == 'darwin' else 'geometry.so')
@@ -87,18 +120,19 @@ def local_library(directory):
     return lib
 
 
-def synthetic(frame, dual, remap):
-    memory = bytearray(0x20000)
-    globals_ = bytearray(0x20000)
+def synthetic(frame, dual, remap, layout):
+    # the mesh's memory, and the pages from the first of the layout's globals to the last
+    first = min(layout[k] for k in GLOBALS) & ~4095
+    pages = {a: bytearray(4096) for a in range(0, 0x20000, 4096)}
+    pages.update({a: bytearray(4096) for a in range(first, max(layout[k] for k in GLOBALS) + 4096, 4096)})
 
     def write(a, fmt, *v):
-        dst, offset = (memory, a) if a < len(memory) else (globals_, a - 0x10454000)
-        struct.pack_into('<' + fmt, dst, offset, *v)
+        struct.pack_into('<' + fmt, pages[a & ~4095], a & 4095, *v)
 
     for a, v in [
-        (0x10454538, 0x2400),
-        (0x104553A0, 0x4000),
-        (0x10459468, 2 | (2 << 16)),
+        (layout['info'], 0x2400),
+        (layout['palette'], 0x4000),
+        (layout['counts'], 2 | (2 << 16)),
         (0x1042, 0x2800),
         (0x1048, 0x3000),
         (0x105E, 0x2000),
@@ -144,12 +178,10 @@ def synthetic(frame, dual, remap):
     g.ecx = 0x1000
     g.esp = 0x1E000
     g.fcw = 0x023F
-    pages = {a: bytes(memory[a : a + 4096]) for a in range(0, len(memory), 4096)}
-    pages.update({0x10454000 + a: bytes(globals_[a : a + 4096]) for a in range(0, len(globals_), 4096)})
-    return g, pages
+    return g, {a: bytes(data) for a, data in pages.items()}
 
 
-def compare(lib, g, pages, delta, image, ordinal):
+def compare(lib, g, pages, delta, image, layout, ordinal):
     base = C.c_void_p.in_dll(lib, 'rt_guest_base').value
     C.c_uint32.in_dll(lib, 'rt_reloc_delta').value = delta
     lib.test_reset_pages()
@@ -160,7 +192,7 @@ def compare(lib, g, pages, delta, image, ordinal):
         assert bytes(native) == bytes(g)
         assert all(C.string_at(base + a, 4096) == data for a, data in pages.items())
         return False, 0
-    imagebase = 0x10000000 + delta
+    imagebase = IMAGEBASE + delta
     u = Uc(UC_ARCH_X86, UC_MODE_32)
     size = (len(image) + 4095) & ~4095
     u.mem_map(imagebase, size)
@@ -171,7 +203,7 @@ def compare(lib, g, pages, delta, image, ordinal):
             u.mem_map(a, 4096)
             mapped.add(a)
         u.mem_write(a, data)
-    info = struct.unpack('<I', C.string_at(base + 0x10454538 + delta, 4))[0]
+    info = struct.unpack('<I', C.string_at(base + layout['info'] + delta, 4))[0]
     u.mem_write(info + 9, b'\1')
     for k, r in REGS.items():
         u.reg_write(r, getattr(g, k))
@@ -185,11 +217,12 @@ def compare(lib, g, pages, delta, image, ordinal):
     oldret = bytes(u.mem_read(g.esp, 4))
     u.mem_write(g.esp, struct.pack('<I', stop))
     errors = []
-    returns = {imagebase + 0x301B2, imagebase + 0x307B1}
 
     def coverage(uc, access, address, size, value, user):
         if address < g.esp + 4 and g.esp < address + size:
-            if access == UC_MEM_READ and address == g.esp and size == 4 and uc.reg_read(UC_X86_REG_EIP) in returns:
+            # only the parent's own ret may read the synthetic return address
+            eip = uc.reg_read(UC_X86_REG_EIP)
+            if access == UC_MEM_READ and address == g.esp and size == 4 and image[eip - imagebase] == 0xC3:
                 return
             errors.append(('synthetic return used as data', hex(address)))
             uc.emu_stop()
@@ -201,7 +234,7 @@ def compare(lib, g, pages, delta, image, ordinal):
                 return
 
     u.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, coverage)
-    u.emu_start(imagebase + 0x2EFE0, stop, count=10000000)
+    u.emu_start(layout['parent'] + delta, stop, count=10000000)
     assert not errors, (ordinal, errors)
     assert u.reg_read(UC_X86_REG_EIP) == stop, (ordinal, 'did not return')
     u.mem_write(g.esp, oldret)
@@ -231,20 +264,26 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.frames <= 10000:
         parser.error('--frames must be 1..10000')
+    config = build.BUILD  # tools/prepare.py checked the install's hashes
+    layout = layout_of(config)
     with tempfile.TemporaryDirectory(prefix='xi-geometry-oracle-') as directory:
-        lib = local_library(Path(directory))
+        lib = local_library(Path(directory), config)
         image = pefile.PE(str(ROOT / 'generated/FFXiMain.unpacked.dll')).get_memory_mapped_image()
+        check_named(config, image)
         total = checked = 0
         for dual in (0, 1):
             for remap in (0, 1):
                 for frame in range(args.frames):
-                    g, pages = synthetic(frame, dual, remap)
-                    admitted, n = compare(lib, g, pages, 0, image, (dual, remap, frame))
+                    g, pages = synthetic(frame, dual, remap, layout)
+                    admitted, n = compare(lib, g, pages, 0, image, layout, (dual, remap, frame))
                     assert admitted, 'synthetic frame rejected'
                     total += 1
                     checked += n
         lib.test_destroy()
-    print(f'geometry_replay: PASS ({total} parent calls, {checked} page bytes, no mismatch with the original SSE code)')
+    print(f'geometry_replay: PASS ({config["build"]}: {total} parent calls, {checked} page bytes, '
+          'no mismatch with the original SSE code)')
+    if config['geometry'].get('layout') != 1:
+        print(f'{config["build"]} matches layout 1: set "layout": 1 in its meta/builds.json "geometry"')
 
 
 if __name__ == '__main__':

@@ -59,6 +59,9 @@ The report maps these onto the new image:
 - `present_site`: the return address after `call [ecx+0x3c]`, IDirect3DDevice8::Present.
 - the 15 CRT functions that difftest compares.
 - the manual verdicts (NOT_CODE, REDECODE, SWITCHES).
+- the skinning kernels' five `geometry_*` wraps and four `geometry` globals, all or none, and
+  never the layout: game-version-build sets that once `tests/geometry_replay_test.py` passes. If
+  they don't all map, the build simply goes without them; nothing is left UNMAPPED.
 
 Deltas are usually small and uniform (for example 0, -0x10, -0x40). A mapping far off from its
 neighbours' delta is suspect, so check it with `dis`.
