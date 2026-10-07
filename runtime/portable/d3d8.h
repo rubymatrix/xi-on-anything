@@ -42,3 +42,7 @@ void d3d8_texture_pack(const char* dir);
 /* The game is loading one of its water models (host64's hook on the model loader): 1 before, 0 after.
  * The vertex buffers made meanwhile are the model's, and draws from them are drawn as water. */
 void d3d8_water_loading(int on);
+/* How the game's occlusion probe is answered (Config > Modern's Occlusion Check): 0 fully visible,
+ * 1 the newest copy the GPU has finished, 2 exactly, waiting for the GPU. 0 until set. */
+void d3d8_set_occlusion(int mode);
+int d3d8_occlusion(void);

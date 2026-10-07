@@ -85,14 +85,15 @@ overhead; leave them out of performance comparisons. The older geometry
 diagnostics in the generated code (scalar, capture) are not included, and the
 Android entry rejects their options.
 
-The game's occlusion check is Config > Modern's Occlusion Check, the `occlusion`
-key of `android-fx.txt` (live): 0 Off (the default, as on desktop) answers that
+The game's occlusion check is Config > Modern's Occlusion Check, live, and kept
+as `occlusion` in `modern.cfg` in the data folder: 0 Off (the default, as on desktop) answers that
 everything is visible, without waiting for the GPU; 1 Delayed uses each probe's
 answer the GPU finished in an earlier frame, up to 16 frames old, and reads
 exactly where the probe's lifetime is unknown; 2 Exact waits for the GPU every
-probe. On the Pixel Fold, Off and Delayed ran at the same speed in a camera
-sweep through the Markets and crowd scenes; Exact, in fixed-camera runs, at a
-fifth to a third of that.
+probe. On the Pixel Fold, in a camera sweep through Markets and the crowd and
+spell scenes (alternating runs), Off was 3.5-5.4% faster than Delayed in every
+scene, with a shorter tail (player-crowd's 99th-percentile frame 38 ms against
+63-68 ms); Exact runs at a fifth to a third of their speed.
 
 ## Correctness checks
 

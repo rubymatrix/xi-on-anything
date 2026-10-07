@@ -10,7 +10,7 @@ typedef struct GfxFxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft, sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw,
         draw_entities, fps, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple, water_scale,
         water_reflect, water_spec, lod, aa, ao_quality, sun_detail, sun_dusk, gameshadows, moghouse, sun_prime, gi, gi_radius,
-        gi_distance, rt, occlusion;
+        gi_distance, rt;
 } GfxFxSettings;
 
 extern GfxFxSettings g_fxs;

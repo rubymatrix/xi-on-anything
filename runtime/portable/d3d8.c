@@ -683,6 +683,7 @@ static void raise_top(int* top, uint32_t n)
 /* A 16x16 occlusion probe tests a quad at the sky's depth (z 0x3f7ffffe, 1 - 2^-23: the game's
  * probe for the sun and its lens flare) since the last probe was read; see lock_rect. */
 static int g_probe_sky;
+static int g_occlusion; /* d3d8_set_occlusion */
 static uint32_t g_d3d;
 
 static int xf_index(uint32_t ts)
@@ -1154,6 +1155,9 @@ static void IDirect3DDevice8_Reset(Guest* g)
 static void (*g_present_hook)(void);
 
 void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
+
+void d3d8_set_occlusion(int mode) { g_occlusion = mode >= 0 && mode <= 2 ? mode : 0; }
+int d3d8_occlusion(void) { return g_occlusion; }
 
 void d3d8_screen_size(uint32_t* w, uint32_t* h)
 {
@@ -4000,8 +4004,8 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
         {
             /* The game's 16x16 occlusion probe (FFXiMain 0x1006c8c0: CopyRects of a 16x16 target, a
              * read-only lock, bit 7 of the blue byte counted over 8x8 samples: 0 hidden .. 256 fully
-             * visible) decides what is drawn from these pixels. The occlusion setting (gfx_fx.c) says how
-             * it is answered:
+             * visible) decides what is drawn from these pixels. The occlusion setting (d3d8_set_occlusion)
+             * says how it is answered:
              * - 0, fully visible, with no wait for the GPU. That draws what the probe would have hidden,
              *   which the depth test hides anyway. Not so the sky probe: the sun's lens flare draws with
              *   no depth test, so it is the probe that hides it behind walls. It reads a frame late, for
@@ -4025,8 +4029,7 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
 #endif
             }
             int probe = (flags & LOCK_READONLY) && s->width == 16 && s->height == 16, sky = probe && g_probe_sky;
-            float setting = forced ? 0.0f : gfx_fx_get("occlusion");
-            int mode = forced ? forced : setting >= 2.0f ? 2 : setting >= 1.0f ? 1 : 0;
+            int mode = forced ? forced : g_occlusion;
             if (probe)
                 g_probe_sky = 0;
 #if defined(FFXI_ANDROID_VULKAN)
