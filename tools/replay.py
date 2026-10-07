@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -59,6 +60,10 @@ def wait_port_free(port, wait=60):
     deadline = time.time() + wait
     while True:
         with socket.socket() as s:
+            # as the game's listener does (control.lua), so the last run's connections in TIME_WAIT don't
+            # count; not on Windows, where it would let this bind a port that is in use
+            if sys.platform != 'win32':
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(('127.0.0.1', port))
                 return
@@ -67,6 +72,19 @@ def wait_port_free(port, wait=60):
         if time.time() > deadline:
             raise SystemExit(f'the control port {port} is taken: is another game still running?')
         time.sleep(1)
+
+
+def wait_server(server, log_path, timeout=60):
+    """Wait until the replay server is listening: it logs "[server] ..." once its ports are open."""
+    deadline = time.time() + timeout
+    while server.poll() is None:
+        with open(log_path, encoding='utf-8', errors='replace') as f:
+            if '[server] ' in f.read():
+                return
+        if time.time() > deadline:
+            raise SystemExit(f'the server is not listening after {timeout} s; see {log_path}')
+        time.sleep(0.2)
+    raise SystemExit(f'the server stopped; see {log_path}')
 
 
 class Control:
@@ -193,9 +211,7 @@ def session(a, autoplay, on_event=None, wait_done=True):
                                    '--suite', a.suite, '--autoplay', autoplay], stdout=server_log, stderr=subprocess.STDOUT)
     client = ctl = None
     try:
-        time.sleep(1.5)
-        if server.poll() is not None:
-            raise SystemExit(f'the server stopped; see {out}/server.log')
+        wait_server(server, os.path.join(out, 'server.log'))
         client, ctl = launch(a, data, os.path.join(out, 'client.log'),
                              ['--server', '127.0.0.1', '--user', 'replay', '--pass', 'replay',
                               '--authport', str(replayserver.AUTH_PORT), '--dataport', str(replayserver.DATA_PORT),
@@ -211,6 +227,8 @@ def session(a, autoplay, on_event=None, wait_done=True):
         deadline = time.time() + RUN_TIMEOUT
         done = False
         while not done and client.poll() is None:
+            if server.poll() is not None:
+                raise SystemExit(f'the server stopped; see {out}/server.log')
             for e in events.new():
                 print('  ' + e, flush=True)
                 if on_event:
@@ -386,6 +404,8 @@ def keep(a):
 
 
 def main():
+    # SIGTERM as an exit, through the finally blocks that stop the client and the server
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
     argv = sys.argv[1:]
     client_args = []
     if '--' in argv:
