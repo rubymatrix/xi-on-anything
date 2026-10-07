@@ -131,8 +131,8 @@ typedef enum xi_game_ptr
     XI_P_INVENTORY_OFS,  /* inventory_t's offset in the character block, an immediate */
     XI_P_AUTOFOLLOW,     /* autofollow_t (static) */
     XI_P_CASTBAR,        /* global holding castbar_t* */
-    XI_P_KEYITEMS,       /* u32[128] "have" bits (4096 key items) */
-    XI_P_KEYITEMS_SEEN,  /* u32[128] "examined" bits */
+    XI_P_KEYITEMS,       /* u32 "have" bits, as many words as the getter allows (0x70 or 0x80) */
+    XI_P_KEYITEMS_SEEN,  /* u32 "examined" bits, as many */
     XI_P_JOBLEVEL_FN,    /* uint8_t __cdecl (int job): match = the function */
     XI_P_MASTERLEVEL_FN, /* uint8_t __cdecl (int job) */
     XI_P_MASTERFLAG_FN,  /* bool __cdecl (int job): tests the job-master bit mask */
