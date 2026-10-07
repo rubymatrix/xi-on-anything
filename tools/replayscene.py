@@ -85,6 +85,16 @@ class Scene:
             raise ValueError(f'{path}: no zone-in (0x00A)')
         return s
 
+    def save(self, path):
+        """The scene as a recording Scene.load reads back the same: its meta line, then its packets and
+        markers in time order, times from the zone-in."""
+        recs = [{'t': round(t * 1000), 'dir': 'in', 'id': ptype(d), 'hex': d.hex()} for t, d in self.packets]
+        recs += [{'t': round(t * 1000), 'mark': m} for t, m in self.marks]
+        recs.sort(key=lambda r: r['t'])
+        with open(path, 'w', encoding='utf-8', newline='\n') as f:
+            for r in [{'meta': self.meta}] + recs:
+                f.write(json.dumps(r, separators=(',', ':')) + '\n')
+
     @property
     def zone(self):
         return int(self.meta.get('zone') or 0)
@@ -402,6 +412,15 @@ def _hold(s):
         keep.append(p)
     s.packets = keep
     return n
+
+
+TRIM = {'my-actions': _my_actions, 'hold': _hold}  # what trim() applies, in transform()'s order
+
+
+def trim(s):
+    """The scene as --my-actions and --hold play it: no one else's actions, and every NPC and mob held
+    where it first appears. Returns each step's count."""
+    return [step(s) for step in TRIM.values()]
 
 
 def _clone(s, copies, radius=2.5):
