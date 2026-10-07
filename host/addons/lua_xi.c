@@ -101,7 +101,7 @@ static int m_find(lua_State* L)
     {
         const char* mod = lua_tostring(L, 1);
         if (!strcasecmp(mod, "FFXiMain.dll") || !strcasecmp(mod, "FFXiMain"))
-            xi_image(NULL, NULL, &start, &size);
+            xi_image(&start, &size, NULL, NULL); /* the whole image, as Ashita's module size is */
         else if (!strcasecmp(mod, "FFXi.dll"))
             start = 0x0F000000u, size = 0x100000u;
         else
