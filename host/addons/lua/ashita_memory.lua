@@ -498,6 +498,8 @@ function Target:GetTargetPosF(i)
 end
 
 function Target:GetLastTargetName() return cstr(game.target('LastTargetName')) end
+-- newer Ashita's: 1 while locked on (LockedOnFlags bit 0), else 0; XIUI and LibraPlates compare it with 1
+function Target:GetIsLockedOn() return bit.band(num(game.target(pid('target_t', 'LockedOnFlags'))), 1) end
 function Target:GetRawStructure() return proxy('target_t', game.base('target')) end
 function Target:GetRawStructureWindow() return proxy('targetwindow_t', game.base('target_window')) end
 

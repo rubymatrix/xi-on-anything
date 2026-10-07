@@ -26,8 +26,14 @@ Ashita event      xi event     what the callback gets
   xinput_button   frame        e: button (bit number in wButtons), state (1 down, 0 up), injected, blocked
                                (both polled from the pad the game reads; blocking doesn't hide
                                anything from the game here)
-  d3d_dp, d3d_dip, dinput_button, dinput_state: accepted, never raised (no per-draw-call or
-      DirectInput-pad hook here); the first registration logs "unsupported: event <name>".
+  dinput_button   dinput_*     e: button (DIJOYSTATE offset: 48 + the button, 32 the D-pad), state (128 down,
+                               0 up; the D-pad's hundredths of a degree, -1 centred), injected, blocked
+  dinput_state    dinput_*     e: data, data_raw (DIJOYSTATE), size, pov (as state above), injected, blocked
+                               (both from the first pad as its own driver numbers it on Windows -
+                               PlayStation, Switch Pro and Stadia orders, else Xbox's - read when the game
+                               reads it; a press blocked in dinput_button is kept from the game)
+  d3d_dp, d3d_dip: accepted, never raised (no per-draw-call hook here); the first registration
+      logs "unsupported: event <name>".
 
 Handlers of the input events run as coroutines, so a handler may coroutine.sleep (the rest runs
 from the task list). Errors in one handler are reported and the next still runs.
@@ -323,8 +329,29 @@ local EVENTS = {
     },
     d3d_dp = { never = true },
     d3d_dip = { never = true },
-    dinput_button = { never = true },
-    dinput_state = { never = true },
+    dinput_button = {
+        -- the first pad as its own DirectInput driver numbers it (keys.c): a press blocked here stays up
+        -- for the game
+        xi = 'dinput_button',
+        run = function(xe)
+            local v = xe.id or 0
+            if v == 0xFFFFFFFF then v = -1 end -- the POV, centred
+            local e = { button = xe.key, state = v, injected = false, blocked = xe.blocked or false }
+            each('dinput_button', true, nil, e)
+            if e.blocked then xe.blocked = true end
+        end,
+    },
+    dinput_state = {
+        xi = 'dinput_state',
+        run = function(xe)
+            local data = xe.data or ''
+            if #data < 80 then return end
+            local keep = buffer(data, 0)
+            local pov = ffi.cast('uint32_t*', keep + 32)[0]
+            each('dinput_state', false, nil, { data = data, data_raw = ffi.cast(u8p, keep), size = #data,
+                pov = pov == 0xFFFFFFFF and -1 or pov, injected = false, blocked = false })
+        end,
+    },
 }
 
 ------------------------------------------------------------------------------------------------

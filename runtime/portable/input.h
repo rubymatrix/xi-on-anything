@@ -60,6 +60,15 @@ int input_xpad(int index, XPad* out);
 /* Rumble: motor speeds 0..65535 (XINPUT_VIBRATION), until the next call. */
 void input_rumble(int index, uint16_t low, uint16_t high);
 
+/* The same gamepad as its own driver shows it to DirectInput on Windows: a DIJOYSTATE (80 bytes:
+ * six axes 0..65535, two sliders, four POVs at 32, 32 buttons at 48), for addons written for those
+ * pads (Ashita's dinput_* events). PlayStation 4/5, Switch Pro and Stadia pads have their own button
+ * order and put the sticks on X/Y and Z/Rz, the triggers on Rx/Ry; others are as PadState. xbits[i]:
+ * the XPad buttons (input_xpad) that button i is, or INPUT_XPAD_LT/RT for a trigger, so the caller
+ * can keep it from the game. 0 if there is no such pad. */
+enum { INPUT_XPAD_LT = 0x10000, INPUT_XPAD_RT = 0x20000 };
+int input_pad_dinput(int index, uint8_t state[80], uint32_t xbits[32]);
+
 int input_pad_count(void);
 int input_pad_state(int index, PadState* out);
 const char* input_pad_name(int index);

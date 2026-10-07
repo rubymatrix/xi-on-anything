@@ -344,6 +344,71 @@ int input_xpad(int index, XPad* x)
     return 1;
 }
 
+int input_pad_dinput(int index, uint8_t state[80], uint32_t xbits[32])
+{
+    SDL_Gamepad* p = pad(index);
+    memset(state, 0, 80);
+    memset(xbits, 0, 32 * sizeof *xbits);
+    if (!p)
+        return 0;
+#define B(name) SDL_GAMEPAD_BUTTON_##name
+    enum { LT = B(COUNT), RT, NONE };
+    /* each pad's buttons in its own DirectInput order (XIUI's device schemes, after tCrossBar) */
+    static const int SONY[] = { B(WEST), B(SOUTH), B(EAST), B(NORTH), B(LEFT_SHOULDER), B(RIGHT_SHOULDER), LT, RT,
+        B(BACK), B(START), B(LEFT_STICK), B(RIGHT_STICK), B(GUIDE), B(TOUCHPAD), B(MISC1) };
+    static const int SWITCH[] = { B(SOUTH), B(EAST), B(WEST), B(NORTH), B(LEFT_SHOULDER), B(RIGHT_SHOULDER), LT, RT,
+        B(BACK), B(START), B(LEFT_STICK), B(RIGHT_STICK), B(GUIDE), B(MISC1) };
+    static const int STADIA[] = { B(SOUTH), B(EAST), B(WEST), B(NORTH), B(LEFT_SHOULDER), B(RIGHT_SHOULDER),
+        B(LEFT_STICK), B(RIGHT_STICK), B(BACK), B(START), B(GUIDE), RT, LT, NONE /* the assistant: SDL has no name */,
+        B(MISC1) };
+    static const int XBOX[] = { B(SOUTH), B(EAST), B(WEST), B(NORTH), B(LEFT_SHOULDER), B(RIGHT_SHOULDER), B(BACK),
+        B(START), B(LEFT_STICK), B(RIGHT_STICK), B(GUIDE) };
+    static const uint32_t XBIT[NONE] = { /* the XPad buttons (input_xpad) each is */
+        [B(DPAD_UP)] = 0x0001, [B(DPAD_DOWN)] = 0x0002, [B(DPAD_LEFT)] = 0x0004, [B(DPAD_RIGHT)] = 0x0008,
+        [B(START)] = 0x0010, [B(BACK)] = 0x0020, [B(LEFT_STICK)] = 0x0040, [B(RIGHT_STICK)] = 0x0080,
+        [B(LEFT_SHOULDER)] = 0x0100, [B(RIGHT_SHOULDER)] = 0x0200, [B(SOUTH)] = 0x1000, [B(EAST)] = 0x2000,
+        [B(WEST)] = 0x4000, [B(NORTH)] = 0x8000, [LT] = INPUT_XPAD_LT, [RT] = INPUT_XPAD_RT,
+    };
+#undef B
+    SDL_GamepadType type = SDL_GetGamepadType(p);
+    const int* order = XBOX;
+    size_t n = sizeof XBOX / sizeof *XBOX;
+    if (type == SDL_GAMEPAD_TYPE_PS4 || type == SDL_GAMEPAD_TYPE_PS5)
+        order = SONY, n = sizeof SONY / sizeof *SONY;
+    else if (type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO)
+        order = SWITCH, n = sizeof SWITCH / sizeof *SWITCH;
+    else if (SDL_GetGamepadVendor(p) == 0x18D1 && SDL_GetGamepadProduct(p) == 0x9400) /* Stadia */
+        order = STADIA, n = sizeof STADIA / sizeof *STADIA;
+    int32_t lt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+    int32_t rt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    for (size_t i = 0; i < n; ++i)
+    {
+        int b = order[i];
+        int down;
+        if (b == LT || b == RT)
+            down = (b == LT ? lt : rt) > 8192; /* a quarter of the way down */
+        else
+            down = b != NONE && SDL_GetGamepadButton(p, (SDL_GamepadButton)b);
+        state[48 + i] = down ? 0x80 : 0;
+        xbits[i] = b == NONE ? 0 : XBIT[b];
+    }
+    /* axes 0..65535, centred at 32768; the triggers 0 when up. X Y the left stick; Z Rz the right
+     * stick and Rx Ry the triggers, or as the Xbox pad has them: Z both triggers, Rx Ry the right stick */
+    int32_t lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX) + 32768;
+    int32_t ly = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY) + 32768;
+    int32_t rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX) + 32768;
+    int32_t ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY) + 32768;
+    int32_t axes[6] = { lx, ly, rx, lt * 2, rt * 2, ry };
+    if (order == XBOX)
+        axes[2] = 32768 + (lt - rt) / 2, axes[3] = rx, axes[4] = ry, axes[5] = 32768;
+    memcpy(state, axes, sizeof axes);
+    PadState s;
+    input_pad_state(index, &s);
+    memcpy(state + 32, &s.pov, 4);
+    memset(state + 36, 0xFF, 12); /* the other three POVs: centred */
+    return 1;
+}
+
 void input_rumble(int index, uint16_t low, uint16_t high)
 {
     SDL_Gamepad* p = pad(index);

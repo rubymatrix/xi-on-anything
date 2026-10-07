@@ -422,7 +422,10 @@ We own DirectInput, user32 and the SDL pump, so capture is simpler than on Windo
   `!` alt, `@` win/cmd, `#` apps, `+` shift, `%` only while chat closed, `$` only while chat open;
   Windower's `bind` syntax maps to the same table). A bound key is consumed and runs its command
   through the router. On macOS, `@` maps to Cmd.
-- XInput / controller events for Ashita's `xinput_*` events come from `XI_GetState`.
+- XInput / controller events for Ashita's `xinput_*` events come from `XI_GetState`, and so do its
+  `dinput_*` events: the first pad as its own driver numbers it on Windows (`input_pad_dinput`:
+  PlayStation, Switch Pro and Stadia orders, else Xbox's), so addons written for those pads (XIUI's
+  crossbar) read the buttons they expect. A press blocked in either kind is kept from the game.
 
 ## 13. Compat layer rules
 
