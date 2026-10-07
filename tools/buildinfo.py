@@ -67,6 +67,7 @@ def current(required=True):
         'addresses': b['addresses'],
         'hooks': b.get('hooks', {}),
         'wraps': b.get('wraps', {}),
+        'geometry': b.get('geometry', {}),
         'patches': b.get('patches', {}),
         'crt': b['crt'],
         'modern': b.get('modern', {}),
