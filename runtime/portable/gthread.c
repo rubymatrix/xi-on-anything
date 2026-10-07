@@ -55,6 +55,26 @@ int gt_holds(void)
 
 void gt_noyield(int on) { t_noyield += on ? 1 : -1; }
 
+void gt_save(GtSaved* s)
+{
+    s->t = t_self;
+    if (t_self)
+        s->g = t_self->g;
+    s->held = t_held;
+    s->noyield = t_noyield;
+}
+
+void gt_restore(const GtSaved* s)
+{
+    if (s->t && s->t == t_self)
+        t_self->g = s->g;
+    t_noyield = s->noyield;
+    if (t_held && !s->held)
+        gt_unlock();
+    else if (!t_held && s->held)
+        gt_lock();
+}
+
 /* Called at every loop's back edge. The clock is read only every 32nd call while another thread
  * waits: reading it at each was 8% of the game thread's time where the clock is slow (a virtual
  * machine's QueryPerformanceCounter), and 32 back edges are far shorter than the quantum. */

@@ -210,6 +210,10 @@ call:
 - **Faults**: an `ffi` access outside mapped memory is a host SIGSEGV/SIGBUS (macOS) or access
   violation (Windows). A guard around each Lua entry (`sigsetjmp` + signal handler on POSIX, SEH on
   Windows) unloads that addon and abandons its state (never `lua_close` a possibly corrupt state).
+  A fault inside a game call (`xi.memory.call`, a game function through `ffi`, the host's own game
+  calls) jumps past that call's restore, so the guard also puts back the thread's guest registers,
+  guest lock and no-yield count as they were at entry (`gt_save`/`gt_restore`): the game function the
+  hook interrupted resumes as it was. What the faulting function wrote stays written.
 - **Threading**: Lua is only entered from the thread that owns the addon host (the game's main
   thread) while holding the guest lock. Hooks that fire elsewhere (if the packet functions turn out
   to run on another guest thread) enter Lua only after taking a host recursive mutex that is always

@@ -436,12 +436,16 @@ static void guard_install(void)
  * state must not be used again). */
 static int guarded_pcall(Addon* a, lua_State* L, int nargs, int nres, int errfunc)
 {
+    /* what the guest code this hook interrupted expects back, should a guest call fault (gthread.h) */
+    GtSaved guest;
+    gt_save(&guest);
 #if !defined(_WIN32)
     sigjmp_buf jb, *saved = t_guard;
     guard_altstack();
     if (sigsetjmp(jb, 1))
     {
         t_guard = saved;
+        gt_restore(&guest);
         char msg[200];
         snprintf(msg, sizeof msg, "native fault (signal %d at %p): the addon is stopped", t_fault_sig, (void*)t_fault_addr);
         a->dead = 1;
@@ -458,6 +462,7 @@ static int guarded_pcall(Addon* a, lua_State* L, int nargs, int nres, int errfun
     if (__builtin_setjmp(jb))
     {
         t_guard = saved;
+        gt_restore(&guest);
         a->dead = 1;
         xi_log("%s: native fault %08lx: the addon is stopped", a->name, (unsigned long)t_fault_code);
         chatf("[%s] crashed in native code and was stopped (the game carries on)", a->name);
@@ -478,6 +483,7 @@ static int guarded_pcall(Addon* a, lua_State* L, int nargs, int nres, int errfun
                   ? EXCEPTION_CONTINUE_SEARCH
                   : EXCEPTION_EXECUTE_HANDLER)
     {
+        gt_restore(&guest);
         a->dead = 1;
         xi_log("%s: native fault %08x: the addon is stopped", a->name, GetExceptionCode());
         chatf("[%s] crashed in native code and was stopped (the game carries on)", a->name);
