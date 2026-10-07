@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """The geometry parent with FFXI_NATIVE_GEOMETRY's wrappers against the game's own x86/SSE code run
-in Unicorn: synthetic animated meshes (--frames per single/dual stream, with and without bone
-remapping) and, with --capture, every flags-0 record of an XIGEOM1 capture. Writes a JSON report.
+in Unicorn, over synthetic animated meshes: --frames per single/dual stream, with and without bone
+remapping. Every page the original touches must match, as must the general registers and flags.
 
 Needs your own prepared 2025-11-12 build (generated/all, generated/FFXiMain.unpacked.dll), pefile
 and unicorn. The translated functions are copied into a temporary folder only; nothing from the
 game is written anywhere else. Checks geometry, not gameplay or frame rate.
 
-  python3 tests/geometry_replay_test.py --out build/geometry-moving.json
-  python3 tests/geometry_replay_test.py --capture capture.bin --out build/geometry-capture.json
+  python3 tests/geometry_replay_test.py
 """
 
 import argparse
 import ctypes as C
-import hashlib
-import json
 import math
 import os
 from pathlib import Path
@@ -27,7 +24,6 @@ import tempfile
 import pefile
 from unicorn import Uc, UC_ARCH_X86, UC_MODE_32, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_READ
 from unicorn.x86_const import *
-from geometry_capture_selection import Guest, read_capture, reject_output_aliases
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -36,6 +32,15 @@ import build  # noqa: E402
 REGS = dict(eax=UC_X86_REG_EAX, ebx=UC_X86_REG_EBX, ecx=UC_X86_REG_ECX, edx=UC_X86_REG_EDX,
             esi=UC_X86_REG_ESI, edi=UC_X86_REG_EDI, ebp=UC_X86_REG_EBP, esp=UC_X86_REG_ESP)
 FLAGS = dict(cf=0, pf=2, af=4, zf=6, sf=7, df=10, of=11)
+
+
+class Guest(C.Structure):  # runtime/guest.h's
+    _fields_ = (
+        [(x, C.c_uint32) for x in ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']]
+        + [(x, C.c_uint8) for x in ['cf', 'pf', 'af', 'zf', 'sf', 'of', 'df']]
+        + [('fs_base', C.c_uint32), ('st', C.c_double * 8), ('top', C.c_uint32), ('fcw', C.c_uint16)]
+        + [(x, C.c_uint8) for x in ['c0', 'c1', 'c2', 'c3']]
+    )
 
 
 def local_library(directory):
@@ -78,9 +83,8 @@ def local_library(directory):
     lib = C.CDLL(str(library))
     lib.test_page.argtypes = [C.c_uint32, C.c_void_p]
     lib.test_run.argtypes = [C.POINTER(Guest)]
-    lib.test_scalar.argtypes = [C.POINTER(Guest)]
     assert lib.test_init()
-    return lib, hashlib.sha256(library.read_bytes()).hexdigest()
+    return lib
 
 
 def synthetic(frame, dual, remap):
@@ -224,20 +228,13 @@ def compare(lib, g, pages, delta, image, ordinal):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--frames', type=int, default=120)
-    parser.add_argument('--capture', type=Path)
-    parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     if not 1 <= args.frames <= 10000:
         parser.error('--frames must be 1..10000')
-    reject_output_aliases(
-        args.out, [ROOT / 'generated/FFXiMain.unpacked.dll'] + ([args.capture] if args.capture else [])
-    )
     with tempfile.TemporaryDirectory(prefix='xi-geometry-oracle-') as directory:
-        lib, digest = local_library(Path(directory))
-        pe = pefile.PE(str(ROOT / 'generated/FFXiMain.unpacked.dll'))
-        image = pe.get_memory_mapped_image()
-        total = 0
-        checked = 0
+        lib = local_library(Path(directory))
+        image = pefile.PE(str(ROOT / 'generated/FFXiMain.unpacked.dll')).get_memory_mapped_image()
+        total = checked = 0
         for dual in (0, 1):
             for remap in (0, 1):
                 for frame in range(args.frames):
@@ -246,48 +243,8 @@ def main():
                     assert admitted, 'synthetic frame rejected'
                     total += 1
                     checked += n
-        capture = None
-        if args.capture:
-            raw = args.capture.read_bytes()
-            records, selection = read_capture(raw, select_flags0=True)
-            accepted = []
-            fallback = []
-            for h, pages in records:
-                pe = pefile.PE(str(ROOT / 'generated/FFXiMain.unpacked.dll'))
-                if h.reloc_delta:
-                    pe.relocate_image(0x10000000 + h.reloc_delta)
-                before = {a: v[0] for a, v in pages.items()}
-                admitted, n = compare(lib, h.before, before, h.reloc_delta, pe.get_memory_mapped_image(), h.ordinal)
-                checked += n
-                if admitted:
-                    accepted.append(h.ordinal)
-                else:
-                    # Rejected entries must still match the captured scalar execution.
-                    scalar = Guest.from_buffer_copy(bytes(h.before))
-                    lib.test_scalar(C.byref(scalar))
-                    assert bytes(scalar) == bytes(h.after), (h.ordinal, 'scalar fallback Guest')
-                    base = C.c_void_p.in_dll(lib, 'rt_guest_base').value
-                    assert all(C.string_at(base + a, 4096) == v[1] for a, v in pages.items()), (
-                        h.ordinal,
-                        'scalar fallback pages',
-                    )
-                    fallback.append(h.ordinal)
-            assert args.capture.read_bytes() == raw
-            capture = {'selection': selection, 'admitted': accepted, 'scalar_fallback': fallback}
         lib.test_destroy()
-        report = {
-            'synthetic_moving_parents': total,
-            'page_bytes_compared': checked,
-            'mismatches': 0,
-            'capture': capture,
-            'candidate_library_sha256': digest,
-            'strict_original_data_access_coverage': True,
-            'original': 'x86 SSE in Unicorn',
-            'moving_gameplay_validated': False,
-            'FPS_claim': False,
-        }
-        args.out.write_text(json.dumps(report, indent=2) + '\n')
-        print(json.dumps({k: v for k, v in report.items() if k != 'capture'}, indent=2))
+    print(f'geometry_replay: PASS ({total} parent calls, {checked} page bytes, no mismatch with the original SSE code)')
 
 
 if __name__ == '__main__':

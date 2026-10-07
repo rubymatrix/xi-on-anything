@@ -14,8 +14,8 @@ C interface. It depends on no graphics API, so the Metal, D3D12 and Vulkan hosts
 The kernels keep the original SSE sequence of binary32 operations, with FMA and reassociation
 off. When a result is a NaN they redo the vertex one operation at a time, to keep SSE's NaN
 selection, quieting and negative indefinite. This is not the arithmetic of the translated scalar
-x87 path, which keeps more intermediate precision, so it stays opt-in until geometry and
-moving-picture comparisons accept it.
+x87 path, which keeps more intermediate precision. It stays opt-in on desktop, where it showed no
+gain (see Desktop measurements).
 
 Inputs and outputs are unaligned byte spans, not guest pointers. Each kernel reads every input
 before writing either 12-byte XYZ result, so outputs may alias matrices, source vertices or each
@@ -89,24 +89,20 @@ functions, unchanged, into a temporary folder, and runs the original x86/SSE par
 Unicorn. Nothing from the game is published.
 
 ```sh
-python3 tests/geometry_replay_test.py --out build/geometry-moving.json
-# also compare every flags-0 record of an XIGEOM1 capture
-python3 tests/geometry_replay_test.py --capture capture.bin --out build/geometry-capture.json
+python3 tests/geometry_replay_test.py
 ```
 
 On macOS ARM64, 480 animated parent calls (120 frames each for single and dual streams, with and
-without bone remapping) and 30 selected real captured inputs match the original SSE code. The
+without bone remapping) match the original SSE code. The
 comparison covers 128,180,224 bytes of complete mapped pages, the general registers and the
 modeled flags, and the guest's x87 registers and control state are unchanged. Every data access
 by the original code must fall in fixture or captured pages. The oracle supplies the boundary
 return address and the SSE feature flag for the run and restores both before comparing memory.
-The capture's two rejected records are left out, so this does not admit a whole capture or a
-whole frame. The capture is private and CI does not need it.
 
 The game-free adapter tests (58 admission cases, and the hook tests with and without a verified
 layout) pass on ARM64 macOS, Rosetta x86 and the Pixel Fold, and pass under the sanitizers on
-macOS. They check the geometry contract only. Live camera and animation, arrivals, shadows and
-spells still need checking in play.
+macOS. They check the geometry contract only; play is covered under Desktop
+measurements.
 
 ## Desktop measurements
 

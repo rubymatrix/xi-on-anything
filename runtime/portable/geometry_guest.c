@@ -59,21 +59,20 @@ static int read32(uint64_t address, uint32_t* value)
     *value = rd32((uint32_t)address);
     return 1;
 }
-/* Guard results: 0 admitted; 8 out of bounds or no work; 9 alias; 10 unmapped page; 11 count or
- * index mismatch; 13 over GEOMETRY_MAX_WORK. */
-static unsigned check_input(const Written* a, uint64_t address, uint64_t bytes, int check_pages)
+/* an input the parent reads: it must not overlap the stack or an output, and with check_pages its
+ * pages must be mapped */
+static int clear(const Written* a, uint64_t address, uint64_t bytes, int check_pages)
 {
     Span r;
-    if (!span(address, bytes, &r))
-        return 8;
-    if (overlap(r, a->stack))
-        return 9;
+    if (!span(address, bytes, &r) || overlap(r, a->stack))
+        return 0;
     for (unsigned j = 0; j < a->count; ++j)
         if (overlap(r, a->output[j]))
-            return 9;
-    return check_pages && !mapped(r) ? 10 : 0;
+            return 0;
+    return !check_pages || mapped(r);
 }
-static unsigned geometry_alias_guard(const Guest* g, const GeometryLayout* layout)
+/* whether the batch is in bounds, has work, aliases nothing it writes and reads only mapped pages */
+static int geometry_alias_guard(const Guest* g, const GeometryLayout* layout)
 {
     uint32_t header, indices, object, counts, raw_duplicates;
     uint16_t primary;
@@ -81,93 +80,63 @@ static unsigned geometry_alias_guard(const Guest* g, const GeometryLayout* layou
     if (!read32(mesh + 0x42, &header) || !read32(mesh + 0x48, &indices) ||
         !read32(mesh + 0x5e, &object) || !read32(layout->counts, &counts) ||
         !read32((uint64_t)object + 0x60, &raw_duplicates))
-        return 10;
+        return 0;
     uint32_t rigid = counts & 65535u, weighted = counts >> 16;
     /* no array scans or reads through unused pointers when there is no work */
     if ((int32_t)raw_duplicates < 0 || (!rigid && !weighted))
-        return 8;
+        return 0;
     uint32_t duplicates = raw_duplicates;
-    if (!read16(header, &primary))
-        return 10;
-    if (primary != rigid)
-        return 11;
+    if (!read16(header, &primary) || primary != rigid)
+        return 0;
     uint64_t count = (uint64_t)rigid + weighted + duplicates;
     if (count > 65535u || g->esp < 256u || g->esp > UINT32_MAX - 4u)
-        return 8;
+        return 0;
     uint16_t model_flags;
-    if (!read16(mesh + 0x32, &model_flags))
-        return 10;
     Span mode_range;
-    if (!span(mesh + 0x34, 1, &mode_range) || !mapped(mode_range))
-        return 10;
+    if (!read16(mesh + 0x32, &model_flags) || !span(mesh + 0x34, 1, &mode_range) || !mapped(mode_range))
+        return 0;
     int dual = rd8((uint32_t)(mesh + 0x34)) & 1;
     /* bounds the scans below and the batch itself (in work units, not time) before any output or
      * array pointer is followed */
     uint64_t work = ((uint64_t)rigid + 2ull * weighted + 2ull * duplicates) * (dual ? 2u : 1u);
     if (work > GEOMETRY_MAX_WORK)
-        return 13;
+        return 0;
     Written a;
     a.count = dual ? 4 : 2;
-    if (!span((uint64_t)g->esp - 256u, 260, &a.stack))
-        return 8;
-    if (!mapped(a.stack))
-        return 10;
+    if (!span((uint64_t)g->esp - 256u, 260, &a.stack) || !mapped(a.stack))
+        return 0;
     for (unsigned j = 0; j < a.count; ++j)
     {
         uint32_t output;
-        if (!read32((uint64_t)object + 0x8eu + j * 4, &output))
-            return 10;
-        if (!span(output, count * 12, &a.output[j]))
-            return 8;
-        if (overlap(a.output[j], a.stack))
-            return 9;
+        if (!read32((uint64_t)object + 0x8eu + j * 4, &output) || !span(output, count * 12, &a.output[j]) ||
+            overlap(a.output[j], a.stack))
+            return 0;
         for (unsigned k = 0; k < j; ++k)
             if (overlap(a.output[j], a.output[k]))
-                return 9;
+                return 0;
         if (!mapped(a.output[j]))
-            return 10;
+            return 0;
     }
-    unsigned result;
-#define GUARD_INPUT(address, bytes, pages)                                                                            \
-    do                                                                                                                \
-    {                                                                                                                 \
-        result = check_input(&a, (uint64_t)(address), (uint64_t)(bytes), pages);                                      \
-        if (result)                                                                                                   \
-            return result;                                                                                            \
-    } while (0)
     /* metadata the parent reads must not alias an output; unused fields are not read */
-    GUARD_INPUT(mesh + 0x32, 0x30, 0);
-    GUARD_INPUT((uint64_t)object + 0x5c, 0x42, 0);
-    GUARD_INPUT(header, 2, 0);
-    GUARD_INPUT(layout->info, 4, 0);
-    GUARD_INPUT(layout->callback, 4, 0);
-    GUARD_INPUT(layout->palette, 4, 0);
-    GUARD_INPUT(layout->counts, 4, 0);
     uint32_t info;
-    if (!read32(layout->info, &info))
-        return 10;
-    GUARD_INPUT((uint64_t)info + 9, 4, 0);
-    GUARD_INPUT(indices, ((uint64_t)rigid + weighted) * 4, 0);
+    if (!clear(&a, mesh + 0x32, 0x30, 0) || !clear(&a, (uint64_t)object + 0x5c, 0x42, 0) ||
+        !clear(&a, header, 2, 0) || !clear(&a, layout->info, 4, 0) || !clear(&a, layout->callback, 4, 0) ||
+        !clear(&a, layout->palette, 4, 0) || !clear(&a, layout->counts, 4, 0) || !read32(layout->info, &info) ||
+        !clear(&a, (uint64_t)info + 9, 4, 0) || !clear(&a, indices, ((uint64_t)rigid + weighted) * 4, 0))
+        return 0;
     uint64_t source_bytes = (uint64_t)rigid * 24 + (uint64_t)weighted * 56;
     uint32_t source;
-    if (!read32((uint64_t)object + 0x6e, &source))
-        return 10;
-    GUARD_INPUT(source, source_bytes, 1);
-    if (dual)
-    {
-        if (!read32((uint64_t)object + 0x76, &source))
-            return 10;
-        GUARD_INPUT(source, source_bytes, 1);
-    }
+    if (!read32((uint64_t)object + 0x6e, &source) || !clear(&a, source, source_bytes, 1))
+        return 0;
+    if (dual && (!read32((uint64_t)object + 0x76, &source) || !clear(&a, source, source_bytes, 1)))
+        return 0;
     /* The descriptor words actually used, mapped as one span: a rigid descriptor's second word is
      * unused, so a final rigid descriptor's need not be mapped. Collects the bones (at most 128)
      * they name, so only the remap entries in use are read below. */
     uint64_t descriptor_bytes = weighted ? ((uint64_t)rigid + weighted) * 4 : (uint64_t)rigid * 4 - 2;
     Span descriptors;
-    if (!span(indices, descriptor_bytes, &descriptors))
-        return 8;
-    if (!mapped(descriptors))
-        return 10;
+    if (!span(indices, descriptor_bytes, &descriptors) || !mapped(descriptors))
+        return 0;
     uint32_t used[4] = {0, 0, 0, 0};
     for (uint32_t j = 0; j < rigid + weighted; ++j)
     {
@@ -187,21 +156,15 @@ static unsigned geometry_alias_guard(const Guest* g, const GeometryLayout* layou
     if (duplicates)
     {
         uint32_t list;
-        if (!read32((uint64_t)object + 0x5c, &list))
-            return 10;
-        GUARD_INPUT(list, (uint64_t)duplicates * 2, 1);
+        if (!read32((uint64_t)object + 0x5c, &list) || !clear(&a, list, (uint64_t)duplicates * 2, 1))
+            return 0;
         for (uint32_t j = 0; j < duplicates; ++j)
-        {
-            uint16_t index = rd16((uint32_t)((uint64_t)list + (uint64_t)j * 2));
-            if (index >= rigid + weighted)
-                return 11;
-        }
+            if (rd16((uint32_t)((uint64_t)list + (uint64_t)j * 2)) >= rigid + weighted)
+                return 0;
     }
     uint32_t matrix_base, remap = 0;
-    if (!read32(layout->palette, &matrix_base))
-        return 10;
-    if ((model_flags & 0x80u) && !read32(mesh + 0x3c, &remap))
-        return 10;
+    if (!read32(layout->palette, &matrix_base) || ((model_flags & 0x80u) && !read32(mesh + 0x3c, &remap)))
+        return 0;
     uint64_t matrix_first = UINT64_MAX, matrix_end = 0;
     for (unsigned bone = 0; bone < 128; ++bone)
         if (used[bone >> 5] & (1u << (bone & 31)))
@@ -210,15 +173,12 @@ static unsigned geometry_alias_guard(const Guest* g, const GeometryLayout* layou
             if (model_flags & 0x80u)
             {
                 uint64_t address = (uint64_t)remap + bone * 2u;
-                GUARD_INPUT(address, 2, 0);
-                if (!read16(address, &slot))
-                    return 10;
+                if (!clear(&a, address, 2, 0) || !read16(address, &slot))
+                    return 0;
             }
             Span matrix;
-            if (!span((uint64_t)matrix_base + (uint64_t)slot * 64, 64, &matrix))
-                return 8;
-            if (!mapped(matrix))
-                return 10;
+            if (!span((uint64_t)matrix_base + (uint64_t)slot * 64, 64, &matrix) || !mapped(matrix))
+                return 0;
             if (matrix.begin < matrix_first)
                 matrix_first = matrix.begin;
             if (matrix.end > matrix_end)
@@ -226,9 +186,7 @@ static unsigned geometry_alias_guard(const Guest* g, const GeometryLayout* layou
         }
     /* one span from the first to the last matrix used: may reject an alias in an unused gap
      * between them, never reads that gap */
-    GUARD_INPUT(matrix_first, matrix_end - matrix_first, 0);
-#undef GUARD_INPUT
-    return 0;
+    return clear(&a, matrix_first, matrix_end - matrix_first, 0);
 }
 
 /* the layout's addresses with the module's relocation applied; 0 if one is unset or wraps */
@@ -267,7 +225,7 @@ static int admitted(Guest* g, const GeometryLayout* layout)
         return 0;
     if (rd8(info + 9) || rd8(info + 12))
         return 0;
-    return geometry_alias_guard(g, layout) == 0;
+    return geometry_alias_guard(g, layout);
 }
 
 int geometry_guest_run(Guest* g, const GeometryLayout* layout, GuestFn body)

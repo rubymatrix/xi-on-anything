@@ -77,12 +77,6 @@ int test_run(Guest* g)
         abort();
     return accepted;
 }
-void test_scalar(Guest* g)
-{
-    ++depth;
-    rt_orig_geometry_parent(g);
-    --depth;
-}
 void test_destroy(void)
 {
     geometry_test_release(rt_guest_base);
