@@ -335,8 +335,12 @@ As VanaCore, on the plain buffer (0x1C header, then packets: u16 id:9/size:7, u1
 2. Per packet, in order: Ashita addons' `packet_in`/`packet_out` (original + `modified`, `blocked`,
    `injected`, chunk), then Windower `incoming chunk`/`outgoing chunk` (id, data, modified,
    injected, blocked; return a string to replace, true to block).
-3. Drop blocked, append injected (padded, last sequence number, also passed through the handlers
-   with `injected = true`), carry over what doesn't fit.
+3. Drop blocked, append injected (padded, last sequence number), carry over what doesn't fit. An
+   addon's packet (`AddOutgoingPacket`, `packets.inject`) goes through the handlers with
+   `injected = true` when it is injected, as Ashita does: LuAshitacast re-injects a cast under a flag
+   it clears straight after. One injected while another is handled, or while the queue drains, waits
+   for the next buffer and is handled there, so an addon that injects for every packet costs a
+   packet a buffer rather than a hang (at most 256 wait per direction).
 4. Outgoing is rebuilt in a 0x2000-byte host buffer (`gheap`), handed to the original encrypt.
 
 ### 10.2 Windower's packet-derived events and state

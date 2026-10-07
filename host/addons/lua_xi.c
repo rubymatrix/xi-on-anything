@@ -631,7 +631,7 @@ static int p_inject(lua_State* L)
     int out = lua_toboolean(L, 1);
     size_t n;
     const char* s = luaL_checklstring(L, 2, &n);
-    xi_packet_inject(out, (const uint8_t*)s, n);
+    xi_packet_inject_handled(out, (const uint8_t*)s, n);
     return 0;
 }
 
