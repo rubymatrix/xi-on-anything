@@ -5,11 +5,13 @@
         known build or its .text is byte-identical to one (then its metadata carries over)
   python tools/newbuild.py unpack --game <folder>
         copy and unpack the retail DLLs into generated/images/<label>/, known build or not
-  python tools/newbuild.py carry --from <old label> --to <new label> [--write] [--only modern]
+  python tools/newbuild.py carry --from <old label> --to <new label> [--write] [--only modern|geometry]
         map every address the old build's entry names (builds.json addresses, hooks, modern and
         crt, the manual verdicts in discovery/verdicts.py) onto the new image; --write adds the new
         build to meta/builds.json and discovery/verdicts.py. Unmapped addresses are listed for a
-        hand read. --only: just that section, written into a build builds.json already has.
+        hand read. --only: just that section, written into a build builds.json already has. The
+        geometry addresses are carried all or none, and never their layout: on the new build,
+        tests/geometry_replay_test.py decides it.
   python tools/newbuild.py meta --from <old label> --to <new label> --module FFXi.dll
         a module whose .text is byte-identical to the old build's: its metadata, with the new hash
   python tools/newbuild.py dis --label <build> --at <hex> [--module FFXi.dll] [--before 32] [--count 16]
@@ -356,6 +358,9 @@ def carry(old_label, new_label, write, only=None):
         put('wrap', k, a, b, how)
         if b:
             entry['wraps'][k] = '0x%08x' % b
+    geometry = map_geometry_globals(old_entry, main_old, main_new, put)
+    if geometry and all(k in entry['wraps'] for k in GEOMETRY_WRAPS):
+        entry['geometry'] = geometry
     report.append('FFXiMain.dll host/modern.c')
     entry['modern'] = map_modern(old_entry, main_old, main_new, put)
     report.append('FFXiMain.dll difftest CRT slice')
@@ -408,7 +413,7 @@ def carry(old_label, new_label, write, only=None):
         json.dump(doc, f, indent=2)
         f.write('\n')
     write_verdicts(new_label, ts, new_verdicts, old_label,
-                   [line.strip() for line in report if 'UNMAPPED' in line and not line.lstrip().startswith(('address', 'hook', 'crt'))])
+                   [line.strip() for line in report if 'UNMAPPED' in line and not line.lstrip().startswith(('address', 'hook', 'crt', 'geometry'))])
     print('\nwrote meta/builds.json (%s, version %s) and discovery/verdicts.py' % (new_label, entry['version']))
 
 
@@ -428,7 +433,41 @@ def map_modern(old_entry, main_old, main_new, put):
     return out
 
 
-SECTIONS = {'modern': map_modern}
+GEOMETRY_WRAPS = ('geometry_parent', 'geometry_feature_sse', 'geometry_feature_sse2', 'geometry_rigid',
+                  'geometry_weighted')
+
+
+def map_geometry_globals(old_entry, main_old, main_new, put):
+    """runtime/portable/geometry_guest.c's globals (as data, from the code that names them), all or
+    None; without the layout."""
+    out = {}
+    for k, v in old_entry.get('geometry', {}).items():
+        if k == 'layout':
+            continue
+        a = int(v, 16)
+        b, how = map_data(main_old, main_new, a, sites=16)
+        put('geometry', k, a, b, how)
+        out[k] = '0x%08x' % b if b else None
+    return out if out and all(out.values()) else None
+
+
+def map_geometry(old_entry, main_old, main_new, put):
+    """The geometry_* wraps (function entries) and the globals, all or nothing."""
+    wraps = {}
+    for k in GEOMETRY_WRAPS:
+        if k in old_entry.get('wraps', {}):
+            a = int(old_entry['wraps'][k], 16)
+            b, how = map_code(main_old, main_new, a)
+            put('wrap', k, a, b, how)
+            wraps[k] = '0x%08x' % b if b else None
+    geometry = map_geometry_globals(old_entry, main_old, main_new, put)
+    if not geometry or len(wraps) < len(GEOMETRY_WRAPS) or not all(wraps.values()):
+        return {}
+    return {'wraps': wraps, 'geometry': geometry}
+
+
+# a section's mapper returns the entry's keys it sets; wraps is shared, so it is added to, not replaced
+SECTIONS = {'modern': lambda *a: {'modern': map_modern(*a)}, 'geometry': map_geometry}
 
 
 def carry_section(old_entry, new_label, section, main_old, main_new, put, report, failed, write):
@@ -440,13 +479,28 @@ def carry_section(old_entry, new_label, section, main_old, main_new, put, report
     if failed:
         print('\n%d unmapped: read them by hand (newbuild.py dis in both builds) and fix them in '
               'meta/builds.json after --write' % len(failed))
-    if not write:
+    if section == 'geometry' and not out:
+        print('\ngeometry: nothing written (every address must map); add them by hand, then run '
+              'tests/geometry_replay_test.py')
+    elif section == 'geometry':
+        print('\ngeometry: a layout stays only if every address is unchanged; otherwise prepare the new '
+              'build and run tests/geometry_replay_test.py')
+    if not write or not out:
         return
     with open(buildinfo.BUILDS) as f:
         doc = json.load(f)
     if new_label not in doc['builds']:
         raise SystemExit('%s is not in meta/builds.json: carry it without --only first' % new_label)
-    doc['builds'][new_label][section] = out
+    build_entry = doc['builds'][new_label]
+    if section == 'geometry':
+        # a verified layout stays only while every address it was verified with does
+        old = build_entry.get('geometry', {})
+        same = {k: v for k, v in old.items() if k != 'layout'} == out['geometry'] and all(
+            build_entry.get('wraps', {}).get(k) == v for k, v in out['wraps'].items())
+        if same:
+            out['geometry'] = old
+    for key, value in out.items():
+        build_entry[key] = dict(build_entry.get('wraps', {}), **value) if key == 'wraps' else value
     with open(buildinfo.BUILDS, 'w') as f:
         json.dump(doc, f, indent=2)
         f.write('\n')

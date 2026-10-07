@@ -432,11 +432,12 @@ install folder. By hand:
    global the character list hangs from, read by gamecore), `present_site` (the return address of
    the game's `IDirect3DDevice8::Present` call, used on Windows), the CRT functions the
    differential test compares, host/modern.c's menu addresses (the `modern` section; a build
-   without all of them builds with Config > Modern and Config > Menus off), and the manual verdicts
-   in `discovery/verdicts.py`. `--only modern --write` carries just that section into a build
-   `meta/builds.json` already has. `--write` adds
-   the build to `meta/builds.json` and `discovery/verdicts.py`. Addresses it cannot map come with
-   a hint (how their neighbours moved); check each with
+   without all of them builds with Config > Modern and Config > Menus off), the skinning kernels'
+   functions and globals (the `geometry` section, all or none, without its layout; see step 4),
+   and the manual verdicts in `discovery/verdicts.py`. `--only modern --write` or
+   `--only geometry --write` carries just that section into a build `meta/builds.json` already
+   has. `--write` adds the build to `meta/builds.json` and `discovery/verdicts.py`. Addresses it
+   cannot map come with a hint (how their neighbours moved); check each with
    `python tools/newbuild.py dis --label <build> --at <addr>` in both builds and fill it in.
 
 3. **Metadata.** A DLL whose `.text` is identical to the previous build's carries its metadata
@@ -461,6 +462,11 @@ install folder. By hand:
 
    On Windows also run `python tools\build.py difftest` (expect 0 mismatches) and
    `python tools\build.py host`.
+
+   If `carry` wrote a `geometry` section, run `python3 tests/geometry_replay_test.py` (needs
+   `pefile` and `unicorn`). It compares `FFXI_NATIVE_GEOMETRY`'s kernels with the new build's own
+   SSE code; when it passes, set `"layout": 1` in the section and rebuild. Without a layout the
+   build keeps the translated skinning.
 
 5. **Play it.** Sign in, zone in, fight, and zone again. A crash like
 

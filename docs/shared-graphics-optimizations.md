@@ -2,6 +2,7 @@
 
 CPU skinning kernels that keep the game's own SSE arithmetic, and guarded adapters that let the
 recompiled client use them in place of the translated x87 code. They are off by default: set
+
 `FFXI_NATIVE_GEOMETRY=1` to use them, on the verified `2025-11-12` build only. The work came from
 the [Android port](android.md); the last sections cover what of that port carries over to the
 desktop renderers, which are unchanged.
@@ -24,9 +25,9 @@ other. The caller must own those spans for the whole call. `geometry_simd_suppor
 host floating-point controls once per batch without changing them; if they are unsupported, the
 caller runs the original path. The arithmetic may set floating-point status flags.
 
-The kernels are linked into the portable game hosts. `FFXI_NATIVE_GEOMETRY=1` installs the
-adapters only for the verified `2025-11-12` layout in `meta/builds.json`; other builds keep the
-translation. No global CPUID or feature-byte change is made. Generated game C, captures and game
+The kernels are linked into the portable game hosts. `FFXI_NATIVE_GEOMETRY=1` installs the adapters
+only for a build whose `meta/builds.json` entry has a verified `geometry` layout; other builds keep
+the translation. No global CPUID or feature-byte change is made. Generated game C, captures and game
 files are not in the repository.
 
 ### Tests
@@ -85,20 +86,22 @@ CFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' python3 tests/geom
 ```
 
 `tests/geometry_replay_test.py` compares the adapter with the game's own code. It needs your own
-prepared `2025-11-12` build, `generated/all`, `pefile` and `unicorn`. It copies the translated
-functions, unchanged, into a temporary folder, and runs the original x86/SSE parent separately in
-Unicorn. Nothing from the game is published.
+prepared build with geometry addresses in `meta/builds.json`, `generated/all`, `pefile` and
+`unicorn`. It first checks that the code names each global (`info` in both feature getters, the rest
+in the parent): the adapter reads them only for its guards, so a wrong one could still give matching
+output. It copies the translated functions, unchanged, into a temporary folder, and runs the
+original x86/SSE parent separately in Unicorn. Nothing from the game is published.
 
 ```sh
 python3 tests/geometry_replay_test.py
 ```
 
 On macOS ARM64, 480 animated parent calls (120 frames each for single and dual streams, with and
-without bone remapping) match the original SSE code. The
-comparison covers 128,180,224 bytes of complete mapped pages, the general registers and the
-modeled flags, and the guest's x87 registers and control state are unchanged. Every data access
-by the original code must fall in fixture or captured pages. The oracle supplies the boundary
-return address and the SSE feature flag for the run and restores both before comparing memory.
+without bone remapping) match the original SSE code. The comparison covers every page the fixture
+maps (the mesh's, and those from the first global to the last), the general registers and the
+modeled flags, and the guest's x87 registers and control state are unchanged. Every data access by
+the original code must fall in those pages. The oracle supplies the boundary return address and the
+SSE feature flag for the run and restores both before comparing memory.
 
 The game-free adapter tests (58 admission cases, and the hook tests with and without a verified
 layout) pass on ARM64 macOS, Rosetta x86 and the Pixel Fold, and pass under the sanitizers on
@@ -110,7 +113,7 @@ measurements.
 On Linux x86-64 (Bazzite 44, Ryzen AI Max+ 395 with Radeon 8060S, the desktop Vulkan
 renderer), with a `2025-11-12` HorizonXI install and the committed replay scenes:
 
-- `tests/geometry_replay_test.py` passes on x86-64: 480 animated parent calls, 125,829,120 bytes
+- `tests/geometry_replay_test.py` passes on x86-64: 480 animated parent calls, 76,677,120 bytes
   of mapped pages, no mismatches with the original SSE code in Unicorn.
 - Frame captures 2, 6 and 10 s into seven scenes (city, crowds, spells, dawn and noon), with the
   adapter off, on and off again, show no defect: the same characters, poses and lighting. Pixels
