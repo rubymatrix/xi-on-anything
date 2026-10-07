@@ -501,7 +501,8 @@ function Target:GetLastTargetName() return cstr(game.target('LastTargetName')) e
 function Target:GetRawStructure() return proxy('target_t', game.base('target')) end
 function Target:GetRawStructureWindow() return proxy('targetwindow_t', game.base('target_window')) end
 
--- Ashita's force flag has no counterpart in the game's call (SetTarget(entity, 1, 0)).
+-- Ashita's force flag has no counterpart in the game's call (SetTarget(actor, 1, 0)). An entity with
+-- no actor (out of render range) is not targeted.
 function Target:SetTarget(index, force)
     return game.set_target_index(index)
 end

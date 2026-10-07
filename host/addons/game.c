@@ -1019,10 +1019,13 @@ int xi_game_set_target(uint32_t index)
     static const uint8_t op_ecx[] = {0x8B, 0x0D}, op_call[] = {0x50, 0xE8};
     if (!imm_after(site, 2, op_ecx, 2, &g) || !imm_after(site, 0x17, op_call, 2, &rel))
         return 0;
+    /* The game's SetTarget takes the entity's actor, not the entity: it reads the entity back from the
+     * actor's +0x70 (0x10158060 on 2025-11-12). An entity out of render range has no actor. */
     uint32_t fn = site + 0x1B + rel, target = xi_game_rd32(g), ent = xi_game_entity(index);
-    if (target == 0 || ent == 0)
+    uint32_t actor = ent ? xi_game_rd32(ent + XI_OFS_entity_ActorPointer) : 0;
+    if (target == 0 || actor == 0 || xi_game_rd32(actor + 0x70) != ent)
         return 0;
-    uint32_t args[3] = {ent, 1, 0};
+    uint32_t args[3] = {actor, 1, 0};
     guest_thiscall(fn, target, 3, args);
     return 1;
 #endif

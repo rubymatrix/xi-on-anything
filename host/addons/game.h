@@ -142,7 +142,7 @@ typedef enum xi_game_ptr
     XI_P_RECAST_SPELL,   /* int16_t[1025] spell recast timers (1/60 s) */
     XI_P_PET_MP,         /* u8 pet MP%, in the pet status block (0x068 copy) */
     XI_P_PET_BLOCK,      /* pet status block: +8 u16 pet index, +0xB MP%, +0xC u32 TP */
-    XI_P_SET_TARGET,     /* a call site of target_t::SetTarget(entity_t*, 1, 0) (thiscall) */
+    XI_P_SET_TARGET,     /* a call site of target_t::SetTarget(actor, 1, 0) (thiscall) */
     XI_P_COUNT
 } xi_game_ptr;
 
@@ -195,8 +195,9 @@ int32_t xi_game_spell_recast(uint32_t id); /* 1/60 s, -1 */
 
 int xi_game_pet(uint32_t* mpp, uint32_t* tp, uint32_t* index); /* 1 if the player has a pet */
 
-/* Targets entity `index` the way the game's own call sites do (target_t::SetTarget(entity, 1, 0)
- * through guest_thiscall). 1 if called. Not available in XI_GAME_NO_GUEST_CALL builds. */
+/* Targets entity `index` the way the game's own call sites do (target_t::SetTarget with the entity's
+ * actor, 1, 0, through guest_thiscall). 1 if called; 0 when the entity has no actor (out of render
+ * range). Not available in XI_GAME_NO_GUEST_CALL builds. */
 int xi_game_set_target(uint32_t index);
 
 /* Ashita's GetLoginStatus: 0 not logged in (no character block), 1 logging in / zoning (block
