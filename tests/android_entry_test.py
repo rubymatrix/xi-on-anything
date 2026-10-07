@@ -29,7 +29,6 @@ BOOLEANS = {
     'fast-sync': 'FFXI_ANDROID_FAST_SYNC',
     'trim-uniforms': 'FFXI_ANDROID_TRIM_UNIFORMS',
     'dont-care-loads': 'FFXI_ANDROID_DONT_CARE_LOADS',
-    'shadow-diagnostic': 'FFXI_ANDROID_SKIP_GAME_SHADOW_PASSES',
 }
 
 
@@ -62,14 +61,9 @@ def cases(worker, geometry):
         yield LOGIN + [flag], 4, None
         on = option == 'encode-cache' or (option == 'native-geometry' and geometry)
         yield LOGIN, 42, (key, '1' if on else '0')
-    for option, key, values in (
-        ('control', 'FFXI_CONTROL', ('0', '54300')),
-        ('shadow-map-budget', 'FFXI_ANDROID_SHADOW_MAP_BUDGET', ('0', '1', '2', '3')),
-        ('shadow-map-interval', 'FFXI_ANDROID_SHADOW_MAP_INTERVAL', ('1', '2', '3', '4')),
-    ):
-        for value in ('0', '1', '2', '3', '4', '5', '54300', '54301', '', '-1', '01', '1x'):
-            expected = 42 if value in values else 4
-            yield LOGIN + ['--android-' + option, value], expected, (key, value) if expected == 42 else None
+    for value in ('0', '1', '2', '3', '4', '5', '54300', '54301', '', '-1', '01', '1x'):
+        expected = 42 if value in ('0', '54300') else 4
+        yield LOGIN + ['--android-control', value], expected, ('FFXI_CONTROL', value) if expected == 42 else None
     for option, key in (
         ('pass-trace', 'FFXI_ANDROID_PASS_TRACE'),
         ('probe-query-diag', 'FFXI_ANDROID_PROBE_QUERY_DIAG'),
@@ -82,6 +76,9 @@ def cases(worker, geometry):
         'unknown',
         'policy-snapshot',
         'frontend-policy-snapshot',
+        'shadow-diagnostic',
+        'shadow-map-budget',
+        'shadow-map-interval',
         'diagnostics',
         'sample-hz',
         'backend-cost',

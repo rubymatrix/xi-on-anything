@@ -49,62 +49,6 @@
 #define E_NOINTERFACE 0x80004002u
 #define E_OUTOFMEMORY 0x8007000Eu
 
-#if defined(FFXI_ANDROID_VULKAN)
-/* Android shadow-map diagnostics (android_frontend_policy.h), off unless asked for; they change the
- * picture. The render targets the game's projected character shadows sample (the first 8 found) are
- * remembered; a budget of N draws only the first N of them, an interval of N redraws those every Nth
- * frame. */
-static uint32_t g_android_shadow_targets[8];
-static uint32_t g_android_shadow_target_count;
-static uint32_t g_android_shadow_frame;
-#include "android_frontend_policy.h"
-static XiFrontendPolicy g_android_frontend_policy;
-static int android_shadow_budget(void)
-{
-    return g_android_frontend_policy.budget;
-}
-static int android_shadow_diagnostic(void)
-{
-    return g_android_frontend_policy.skip || g_android_frontend_policy.budget > 0;
-}
-static int android_shadow_interval(void)
-{
-    return g_android_frontend_policy.interval;
-}
-static int android_shadow_target_index(uint32_t guest)
-{
-    if (!guest)
-        return -1;
-    for (uint32_t i = 0; i < g_android_shadow_target_count; ++i)
-        if (g_android_shadow_targets[i] == guest)
-            return (int)i;
-    return -1;
-}
-static int android_shadow_target(uint32_t guest)
-{
-    return android_shadow_target_index(guest) >= 0;
-}
-static int android_shadow_target_skipped(uint32_t guest)
-{
-    if (g_android_frontend_policy.skip)
-        return 1;
-    int budget = android_shadow_budget(), index = android_shadow_target_index(guest);
-    if (budget <= 0 || index < 0)
-        return 0;
-    if (index >= budget)
-        return 1;
-    /* between redraws the map keeps its last contents, and the shadows still sample it */
-    int interval = android_shadow_interval();
-    return interval > 1 && g_android_shadow_frame % (uint32_t)interval != 0;
-}
-static void android_remember_shadow_target(uint32_t guest)
-{
-    if (!guest || android_shadow_target(guest) || g_android_shadow_target_count == 8)
-        return;
-    g_android_shadow_targets[g_android_shadow_target_count++] = guest;
-}
-#endif
-
 /* D3DFORMAT */
 #define FMT_A8R8G8B8 21u
 #define FMT_X8R8G8B8 22u
@@ -1210,9 +1154,6 @@ static void capture_frame(Obj* bb)
 
 static void IDirect3DDevice8_Present(Guest* g)
 {
-#if defined(FFXI_ANDROID_VULKAN)
-    ++g_android_shadow_frame;
-#endif
     cap_present();
     scene_present();
     ui_present();
@@ -1637,10 +1578,6 @@ static void apply_targets(void);
 static void IDirect3DDevice8_Clear(Guest* g)
 {
     apply_targets();
-#if defined(FFXI_ANDROID_VULKAN)
-    if (android_shadow_diagnostic() && android_shadow_target_skipped(g_dev.rt))
-        RET(D3D_OK, 7);
-#endif
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
     int32_t few[4 * 16], *rects = n <= 16 ? few : (int32_t*)malloc(16u * n);
@@ -3626,37 +3563,18 @@ static int menu_target(const Obj* o)
  * the game's; 2 never. */
 static int game_shadow_hidden(const GfxDraw* d)
 {
-#if defined(FFXI_ANDROID_VULKAN)
-    int diagnostic = android_shadow_diagnostic();
-#else
-    const int diagnostic = 0;
-#endif
-    if (d->vs.rhw || !d->pipe.blend || (!diagnostic && d->fs.prog))
+    if (d->vs.rhw || !d->pipe.blend || d->fs.prog)
         return 0;
-    /* the diagnostics find the projected shadows whatever gameshadows says (the Android back end has
-     * no scene effects: it reads 0) */
     float mode = gfx_fx_get("gameshadows");
-    if (!diagnostic)
-    {
-        if (mode == 1.0f)
-            return 0;
-        if (mode != 2.0f && !(gfx_fx_get("sun_casters") != 2.0f && gfx_sun_shadows_shown()))
-            return 0;
-    }
+    if (mode == 1.0f)
+        return 0;
+    if (mode != 2.0f && !(gfx_fx_get("sun_casters") != 2.0f && gfx_sun_shadows_shown()))
+        return 0;
     for (int i = 0; i < d->fs.nstages && i < 8; ++i)
     {
         const Obj* t = obj(g_dev.cur.tex[i]);
         if (d->fs.st[i].tex == 1 && d->fs.st[i].projected && t && t->kind == O_TEXTURE && (t->usage & USAGE_RENDERTARGET))
-        {
-#if defined(FFXI_ANDROID_VULKAN)
-            if (diagnostic)
-            {
-                android_remember_shadow_target(g_dev.cur.tex[i]);
-                return android_shadow_target_skipped(g_dev.cur.tex[i]);
-            }
-#endif
             return 1;
-        }
     }
     return 0;
 }
@@ -3664,39 +3582,9 @@ static int game_shadow_hidden(const GfxDraw* d)
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
     uint32_t up_data, uint32_t up_stride, uint32_t n)
 {
-#if defined(FFXI_ANDROID_VULKAN)
-    if (android_shadow_diagnostic())
-    {
-        /* skip the passes that draw a shadow map over the budget (every one, with the skip option);
-         * a 1024x1024 target is remembered before the check, so that a budget of 1 keeps one map */
-        Obj* active = obj(g_dev.rt);
-        if (active && active->kind == O_TEXTURE && (active->usage & USAGE_RENDERTARGET) && active->width == 1024 &&
-            active->height == 1024)
-            android_remember_shadow_target(g_dev.rt);
-        if (android_shadow_target_skipped(g_dev.rt))
-        {
-            g_scene.st_game_shadows++;
-            return;
-        }
-    }
-#endif
     GfxDraw* d = &g_draw;
     if (!build_draw(d))
         return;
-#if defined(FFXI_ANDROID_VULKAN)
-    if (android_shadow_diagnostic() && d->pipe.blend && !d->vs.rhw && d->depth.zenable && !d->depth.zwrite)
-    {
-        /* a blended 3D draw that tests depth but writes none, sampling a 1024x1024 render target:
-         * a projected shadow, and that target its map */
-        for (int si = 0; si < 8; ++si)
-        {
-            Obj* tex = obj(g_dev.cur.tex[si]);
-            if (tex && tex->kind == O_TEXTURE && (tex->usage & USAGE_RENDERTARGET) && tex->width == 1024 &&
-                tex->height == 1024 && tex->nsubs && tex->subs[0])
-                android_remember_shadow_target(tex->subs[0]);
-        }
-    }
-#endif
     if (game_shadow_hidden(d))
     {
         g_scene.st_game_shadows++;
@@ -4435,11 +4323,6 @@ static uint32_t make_vtbl(const char* iface, const char* const* names)
 
 void d3d8_init(void)
 {
-#if defined(FFXI_ANDROID_VULKAN)
-    /* host64 calls this on its startup thread, once android_main has set the launch options and
-     * before any guest code runs */
-    g_android_frontend_policy = xi_frontend_policy_read();
-#endif
     thunk_register(D3D8);
 }
 

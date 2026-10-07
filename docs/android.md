@@ -72,9 +72,6 @@ before the portable host starts.
 | `--android-worker-const-fx 1` | Skip worker drains for this back end's fixed Modern FX responses; requires worker 1. |
 | `--android-cache-sampled 1`, `--android-bounded-area 1` | Experimental cache of sampled-image layouts, and bounded render areas. |
 | `--android-fast-sync 1`, `--android-trim-uniforms 1`, `--android-dont-care-loads 1` | Experimental fence, uniform and attachment-load controls. Each needs its own correctness and timing checks. |
-| `--android-shadow-diagnostic 1` | Skips identified game shadow work, which changes the picture. Only for measuring the most that work can cost. |
-| `--android-shadow-map-budget 0..3` | 0 (the default) keeps every shadow map; higher values limit them and change the shadows. |
-| `--android-shadow-map-interval 1..4` | 1 (the default) updates the shadow maps every frame; higher values reuse older maps. |
 | `--android-bench-dir PATH` | Write frame times and markers (`frames.csv`, `markers.jsonl`) to PATH; refuses to overwrite either file. One branch per frame when off. |
 | `--android-control 54300` | Enable the existing control port, loopback only; default 0. |
 | `--fps-divisor 0` | Uncapped, for measurements; divisor 2 is 30 FPS. |

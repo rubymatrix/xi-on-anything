@@ -14,7 +14,6 @@ def main():
     with tempfile.TemporaryDirectory(prefix='xi-policy-') as directory:
         out = Path(directory)
         tests = [
-            ('android_frontend_policy_test.c', [], [[]]),
             ('gfx_launch_policy_test.cpp', [], [[]]),
             ('gfx_pass_plan_test.cpp', [], [[]]),
             ('gfx_visibility_storage_lifecycle_test.cpp', [], [[]]),

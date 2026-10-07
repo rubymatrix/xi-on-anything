@@ -31,8 +31,6 @@ enum AndroidOptionType
     OPTION_WORKER,
     OPTION_GEOMETRY,
     OPTION_CONTROL,
-    OPTION_SHADOW_BUDGET,
-    OPTION_SHADOW_INTERVAL,
 };
 
 static const struct AndroidOption
@@ -56,9 +54,6 @@ static const struct AndroidOption
     {"--android-bench-dir", "FFXI_BENCH_DIR", OPTION_TEXT},
     {"--android-addons", "FFXI_ADDONS", OPTION_TEXT},
     {"--android-readback", "FFXI_ASYNC_READBACK", OPTION_BOOLEAN},
-    {"--android-shadow-diagnostic", "FFXI_ANDROID_SKIP_GAME_SHADOW_PASSES", OPTION_BOOLEAN},
-    {"--android-shadow-map-budget", "FFXI_ANDROID_SHADOW_MAP_BUDGET", OPTION_SHADOW_BUDGET},
-    {"--android-shadow-map-interval", "FFXI_ANDROID_SHADOW_MAP_INTERVAL", OPTION_SHADOW_INTERVAL},
     {"--android-fast-sync", "FFXI_ANDROID_FAST_SYNC", OPTION_BOOLEAN},
     {"--android-trim-uniforms", "FFXI_ANDROID_TRIM_UNIFORMS", OPTION_BOOLEAN},
     {"--android-dont-care-loads", "FFXI_ANDROID_DONT_CARE_LOADS", OPTION_BOOLEAN},
@@ -73,10 +68,6 @@ static int android_option_valid(enum AndroidOptionType type, const char* value)
     /* Upstream control.lua binds only loopback; adb forwards this port. */
     if (type == OPTION_CONTROL)
         return !strcmp(value, "0") || !strcmp(value, "54300");
-    if (type == OPTION_SHADOW_BUDGET)
-        return value[0] >= '0' && value[0] <= '3' && !value[1];
-    if (type == OPTION_SHADOW_INTERVAL)
-        return value[0] >= '1' && value[0] <= '4' && !value[1];
     if (strcmp(value, "0") && strcmp(value, "1"))
         return 0;
 #if !defined(FFXI_RENDER_WORKER_BUILD)
@@ -157,9 +148,6 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
     setenv("FFXI_RENDER_WORKER_DIAGNOSTICS", "0", 1);
     setenv("FFXI_RENDER_WORKER_MAILBOX", "0", 1);
     setenv("FFXI_RENDER_WORKER_CONST_FX", "0", 1);
-    setenv("FFXI_ANDROID_SKIP_GAME_SHADOW_PASSES", "0", 1);
-    setenv("FFXI_ANDROID_SHADOW_MAP_BUDGET", "0", 1);
-    setenv("FFXI_ANDROID_SHADOW_MAP_INTERVAL", "1", 1);
     setenv("FFXI_ANDROID_FAST_SYNC", "0", 1);
     setenv("FFXI_ANDROID_TRIM_UNIFORMS", "0", 1);
     setenv("FFXI_ANDROID_DONT_CARE_LOADS", "0", 1);
@@ -272,10 +260,9 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
     }
     fprintf(
         stderr,
-        "[android] render policy fast-sync=%s trim-uniforms=%s dont-care-loads=%s cache-sampled=%s bounded-area=%s shadow-map-budget=%s shadow-map-interval=%s\n",
+        "[android] render policy fast-sync=%s trim-uniforms=%s dont-care-loads=%s cache-sampled=%s bounded-area=%s\n",
         getenv("FFXI_ANDROID_FAST_SYNC"), getenv("FFXI_ANDROID_TRIM_UNIFORMS"), getenv("FFXI_ANDROID_DONT_CARE_LOADS"),
-        getenv("FFXI_ANDROID_CACHE_SAMPLED"), getenv("FFXI_ANDROID_BOUNDED_AREA"),
-        getenv("FFXI_ANDROID_SHADOW_MAP_BUDGET"), getenv("FFXI_ANDROID_SHADOW_MAP_INTERVAL"));
+        getenv("FFXI_ANDROID_CACHE_SAMPLED"), getenv("FFXI_ANDROID_BOUNDED_AREA"));
     setenv("FFXI_NATIVE_GEOMETRY", getenv("FFXI_ANDROID_NATIVE_GEOMETRY"), 1);
     fprintf(stderr, "[android] native ARM64 entry; async-readback=%s\n", getenv("FFXI_ASYNC_READBACK"));
     int ret = xi_host_main(argc, argv);
