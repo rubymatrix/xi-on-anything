@@ -322,7 +322,9 @@ local EVENTS = {
         xi = 'xinput_button',
         run = function(xe)
             if (xe.id or 0) ~= 0 then return end
-            local e = { button = xe.key, state = xe.down and 1 or 0, injected = false, blocked = xe.blocked or false }
+            -- button 0 (the D-pad up) comes without key when released
+            local e = { button = xe.key or 0, state = xe.down and 1 or 0, injected = false,
+                blocked = xe.blocked or false }
             each('xinput_button', true, nil, e)
             if e.blocked then xe.blocked = true end
         end,

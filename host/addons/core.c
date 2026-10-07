@@ -914,7 +914,7 @@ static void push_event(lua_State* L, const XiEvent* e)
         lua_pushinteger(L, e->delta);
         lua_setfield(L, -2, "delta");
     }
-    if (e->key || e->vk)
+    if (e->key || e->vk || e->down) /* a press of key 0 too (XInput's D-pad up) */
     {
         lua_pushinteger(L, e->key);
         lua_setfield(L, -2, "key");
