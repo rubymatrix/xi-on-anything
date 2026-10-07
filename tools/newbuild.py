@@ -479,11 +479,12 @@ def carry_section(old_entry, new_label, section, main_old, main_new, put, report
     if failed:
         print('\n%d unmapped: read them by hand (newbuild.py dis in both builds) and fix them in '
               'meta/builds.json after --write' % len(failed))
-    if section == 'geometry':
-        print('\n' + ('geometry: nothing written (every address must map); add them by hand, then run '
-                      'tests/geometry_replay_test.py' if not out else
-                      'geometry: a layout stays only if every address is unchanged; otherwise prepare the new '
-                      'build and run tests/geometry_replay_test.py'))
+    if section == 'geometry' and not out:
+        print('\ngeometry: nothing written (every address must map); add them by hand, then run '
+              'tests/geometry_replay_test.py')
+    elif section == 'geometry':
+        print('\ngeometry: a layout stays only if every address is unchanged; otherwise prepare the new '
+              'build and run tests/geometry_replay_test.py')
     if not write or not out:
         return
     with open(buildinfo.BUILDS) as f:

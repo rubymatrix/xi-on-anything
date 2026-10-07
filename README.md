@@ -430,9 +430,9 @@ install folder. By hand:
    without all of them builds with Config > Modern and Config > Menus off), the skinning kernels'
    functions and globals (the `geometry` section, all or none, without its layout; see step 4),
    and the manual verdicts in `discovery/verdicts.py`. `--only modern --write` or
-   `--only geometry --write` carries just that section into a build `meta/builds.json` already has. `--write` adds
-   the build to `meta/builds.json` and `discovery/verdicts.py`. Addresses it cannot map come with
-   a hint (how their neighbours moved); check each with
+   `--only geometry --write` carries just that section into a build `meta/builds.json` already
+   has. `--write` adds the build to `meta/builds.json` and `discovery/verdicts.py`. Addresses it
+   cannot map come with a hint (how their neighbours moved); check each with
    `python tools/newbuild.py dis --label <build> --at <addr>` in both builds and fill it in.
 
 3. **Metadata.** A DLL whose `.text` is identical to the previous build's carries its metadata
