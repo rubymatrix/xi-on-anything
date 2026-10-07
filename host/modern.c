@@ -271,6 +271,8 @@ static float get(const Row* r)
         return g_setup.fps_divisor ? (float)*g_setup.fps_divisor : 1.0f;
     if (!strcmp(r->key, "@ui"))
         return g_ui_aspect;
+    if (!strcmp(r->key, "@occlusion"))
+        return (float)d3d8_occlusion();
     if (!strncmp(r->key, "@hide", 5))
         return g_hide >> atoi(r->key + 5) & 1 ? 0.0f : 1.0f;
     if (!strcmp(r->key, "@addon"))
@@ -306,6 +308,11 @@ static void set(const Row* r, float v)
     {
         g_ui_aspect = v;
         user32_set_ui_aspect(v);
+        g_host_touched = 1;
+    }
+    else if (!strcmp(r->key, "@occlusion"))
+    {
+        d3d8_set_occlusion((int)v);
         g_host_touched = 1;
     }
     else if (!strncmp(r->key, "@hide", 5))
@@ -362,7 +369,10 @@ static void slide(const Row* r, int dir)
     set(r, r->lo + (r->hi - r->lo) * t / SLIDER_STEPS);
 }
 
+/* Android's renderer has no scene effects (its gfx_fx_get is 0), so the rows set through them,
+ * effects and draw distances alike, are not shown there */
 static const Row MODERN_ROWS[] = {
+#if !defined(FFXI_ANDROID_VULKAN)
     { "Modern Effects", "fx", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
         "Ambient occlusion, fog, light, shadows and the rest below." },
     { "Ambient Occlusion", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
@@ -391,6 +401,14 @@ static const Row MODERN_ROWS[] = {
     { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
+#endif
+#if defined(FFXI_ANDROID_VULKAN)
+    { "Occlusion Check", "@occlusion", CHOICE, 3, { "Off", "Delayed", "Exact" }, { 0, 1, 2 }, 0, 0,
+        "What walls hide from the game's checks. Off treats all as seen; Delayed asks the last frames; Exact waits." },
+#else /* no Delayed: without Android's per-probe history it makes characters flicker (d3d8.c lock_rect) */
+    { "Occlusion Check", "@occlusion", CHOICE, 2, { "Off", "Exact" }, { 0, 2 }, 0, 0,
+        "What walls hide from the game's checks. Off treats all as seen; Exact waits for the GPU." },
+#endif
     { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
     { "Interface Shape", "@ui", CHOICE, 3, { "Full", "16:9", "4:3" }, { 0, 16.0f / 9.0f, 4.0f / 3.0f }, 0, 0,
         "Keeps the menus in a box of this shape on a wide screen." },
@@ -406,11 +424,13 @@ static const Row DISPLAY_ROWS[] = {
         "How large the menus and text are drawn." },
     { "Background Resolution", "@bg", CHOICE, 3, { "4096", "6144", "8192" }, { 4096, 6144, 8192 }, 0, 0,
         "The size the world is drawn at before it fits the window. From the next start." },
+#if !defined(FFXI_ANDROID_VULKAN) /* scene effects, as MODERN_ROWS */
     { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
     { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
         "Sharper ground and walls at an angle." },
     { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "The frame rate, in the screen's top left corner." },
+#endif
 };
 
 static const Row MENUS_ROWS[] = {
@@ -563,8 +583,8 @@ static void save(void)
         FILE* f = fopen(path, "w");
         if (f)
         {
-            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
-                (double)g_ui_aspect, g_hide);
+            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\nocclusion=%d\n",
+                g_setup.fps_divisor ? *g_setup.fps_divisor : 1u, (double)g_ui_aspect, g_hide, d3d8_occlusion());
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
             fclose(f);
@@ -2447,6 +2467,8 @@ void modern_init(const ModernSetup* setup)
         if (g_hide >> HIDE_OLD_MAGIC_TRUST & 1)
             g_hide = (g_hide & ~(1u << HIDE_OLD_MAGIC_TRUST)) | 1u << HIDE_TRUST;
     }
+    if (cfg_value(path, "occlusion", buf, sizeof buf))
+        d3d8_set_occlusion((int)strtol(buf, NULL, 10));
     if (cfg_value(path, "game_shadows", buf, sizeof buf))
     {
         long v = strtol(buf, NULL, 10);

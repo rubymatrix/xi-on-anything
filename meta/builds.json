@@ -541,6 +541,10 @@
         "callback": "0x104595c4",
         "palette": "0x104553a0",
         "counts": "0x10459468"
+      },
+      "android_wraps": {
+        "probe_ctor": "0x1006c070",
+        "probe_dtor": "0x1006c080"
       }
     }
   }

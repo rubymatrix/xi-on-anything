@@ -187,6 +187,8 @@ typedef struct GfxDraw
     GfxDepthKey depth;
     const uint32_t* vs_tokens; /* the shader behind vs.prog / fs.prog */
     const uint32_t* ps_tokens;
+    uint32_t vs_token_count, ps_token_count; /* their lengths in words, END included; 0 unknown (the
+                                              * render worker then draws directly) */
     GfxU u;
     GfxTex* tex[8];
     GfxSampler samp[8];
@@ -243,6 +245,17 @@ void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t 
  * and a new copy queued behind this frame's work. Only the first read of a level waits. For
  * read-only locks the game polls every frame (FFXI's occlusion probe). */
 void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch);
+#if defined(FFXI_ANDROID_VULKAN)
+/* gfx_tex_read_async with a history per key (one object's lifetime, chosen by the caller): the newest
+ * finished copy from an earlier frame at most max_age frames old, or the current pixels when there is
+ * none, and a new copy queued. Key 0, max_age 0, a second read of a key in one frame, and a read with
+ * no room for its history read the current pixels, as gfx_tex_read. */
+void gfx_tex_read_async_keyed(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch, uint64_t key,
+                              uint32_t max_age);
+/* Counts one occlusion-probe read in the frame statistics: whether its key was known, and whether
+ * asynchronous reads were on. */
+void gfx_android_probe_read(int known_key, int async_enabled);
+#endif
 /* A rectangle between textures of one format. */
 void gfx_copy(GfxTex* src, uint32_t sface, uint32_t slevel, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h,
     GfxTex* dst, uint32_t dface, uint32_t dlevel, uint32_t dx, uint32_t dy);

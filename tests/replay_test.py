@@ -7,9 +7,12 @@ in tools/replay/scenes/.
 """
 import json
 import os
+import socket
 import struct
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 
@@ -337,6 +340,45 @@ class Report(Folder):
 
 
 class Runner(Folder):
+    def server(self, code):
+        """A stand-in replay server: a Python process running code, its output in server.log."""
+        log = os.path.join(self.dir, 'server.log')
+        with open(log, 'w') as f:
+            p = subprocess.Popen([sys.executable, '-u', '-c', code], stdout=f, stderr=subprocess.STDOUT)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p, log
+
+    def test_the_server_is_waited_for_until_it_listens(self):
+        p, log = self.server("import time; time.sleep(0.3); print('12:00:00 [server] 2 scenes'); time.sleep(30)")
+        replay.wait_server(p, log, timeout=10)
+        self.assertIsNone(p.poll())
+
+    def test_a_server_that_stops_ends_the_wait(self):
+        p, log = self.server("raise SystemExit('bad suite')")
+        with self.assertRaises(SystemExit):
+            replay.wait_server(p, log, timeout=10)
+
+    def test_a_port_the_last_run_left_in_time_wait_is_free(self):
+        with socket.socket() as srv:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as the game's listener (control.lua)
+            srv.bind(('127.0.0.1', 0))
+            srv.listen(1)
+            port = srv.getsockname()[1]
+            cli = socket.create_connection(('127.0.0.1', port))
+            conn, _ = srv.accept()
+            conn.close()  # the listening side closes first, as the game's does: its port is left in TIME_WAIT
+            cli.close()
+        time.sleep(0.2)
+        replay.wait_port_free(port, wait=0)
+
+    def test_a_port_still_listened_on_is_taken(self):
+        with socket.socket() as srv:
+            srv.bind(('127.0.0.1', 0))
+            srv.listen(1)
+            with self.assertRaises(SystemExit):
+                replay.wait_port_free(srv.getsockname()[1], wait=0)
+
     def test_events_are_read_once_and_whole(self):
         path = self.write('frames.csv', 'f,1\nm,2,begin|1|rain|weather|109\nm,3,mark|1|ra')
         events = replay.Events(path)

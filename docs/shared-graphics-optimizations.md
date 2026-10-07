@@ -1,9 +1,11 @@
-# Shared geometry kernels
+# Shared graphics work from the Android port
 
 CPU skinning kernels that keep the game's own SSE arithmetic, and guarded adapters that let the
 recompiled client use them in place of the translated x87 code. They are off by default: set
-`FFXI_NATIVE_GEOMETRY=1` to use them, on builds with a verified layout (today `2025-11-12`). The
-work came from the Android port; the desktop renderers are unchanged.
+
+`FFXI_NATIVE_GEOMETRY=1` to use them, on the verified `2025-11-12` build only. The work came from
+the [Android port](android.md); the last sections cover what of that port carries over to the
+desktop renderers, which are unchanged.
 
 ## Geometry kernels
 
@@ -127,3 +129,59 @@ renderer), with a `2025-11-12` HorizonXI install and the committed replay scenes
 
 So on this desktop the adapter matches the game's SSE code and draws the same scenes, with no
 regression and no gain that rises above the noise. macOS and Windows frame rates are not measured.
+
+## Android build
+
+See [Android build and controls](android.md). It includes the Android SDL host and APK tooling and
+a native C++ Vulkan renderer with a BCn fallback, keyed asynchronous visibility, launch-time
+policy controls and a command/descriptor cache. The dependency pass planner, preserved-mask
+visibility storage and render worker are included but off, with their tests and the measurements
+that argued against them. None of it replaces `gfx_vulkan.c`, Metal or D3D12 on desktop.
+
+Offscreen tests on the Fold pass for formats, render state, keyed histories and lifetimes,
+bounded areas, pass planning and encoding. The preserved-mask fixture passes 44,093,573 checks
+with no mismatches in each of three runs with it enabled; the keyed readback and worker-mailbox
+tests also pass three runs. These fixtures exercise changing GPU contents and ownership; they do
+not show that delayed visibility matches in the game.
+
+Desktop frame rates have not been measured for the Android code; for the geometry adapter, see
+"Desktop measurements" above.
+
+## Porting to the desktop renderers
+
+| Work | Porting decision |
+| --- | --- |
+| Keyed asynchronous visibility | Android only. Desktop answers the occlusion probe without a GPU read (below), so there is nothing for it to save. |
+| Command/descriptor encoding | Not the Android cache: each desktop renderer has its own binding policy (below). Measure reuse per renderer, with the sun-shadow work. |
+| Pass/load-store reduction | Keep experimental. The Android preserved-mask rewrite showed no clear gain on its own, and needs correct invalidation, attachment contents and Modern FX interaction. |
+| Launch-time controls | Read new launch-only controls once, outside hot loops. On Android the cache only won back overhead added by local experimental options; it is not a desktop gain. |
+| Render worker | Shelve the current FIFO design. It was slower in the Android comparison; a separate thread alone does not give useful overlap. |
+
+Visibility on desktop is decided in the shared Direct3D 8 front end (`d3d8.c`, `lock_rect`), so
+Vulkan, D3D12 and Metal all get the same policy. The game's 16x16 occlusion probe reads fully
+visible with no GPU read (`FFXI_PROBE=gpu` reads it), and the sun's sky probe reads the newest
+completed copy, a frame or more late, through `gfx_tex_read_async`, which all three renderers
+implement. So there is no synchronous wait on desktop for keyed visibility to remove: the Android
+speedup came from replacing the Android baseline's exact reads (`FFXI_PROBE=gpu`) and does not
+carry over. Keyed visibility stays Android-only until a desktop renderer reads probes exactly.
+
+Each desktop renderer already has its own binding policy: Vulkan pushes descriptors per draw
+(`vkCmdPushDescriptorSetKHR`), D3D12 binds root descriptor tables, and Metal skips unchanged
+vertex buffers (`g_bound`). With Modern FX at the standard settings, `FFXI_PROFILE` on Linux puts
+most of the Vulkan renderer's encode time in replaying sun-shadow casters (24 to 83 ms a frame in
+Markets, 7 to 10 ms with `sun_casters=1`), so binding reuse there belongs with that work, measured
+per renderer, not with the Android cache.
+
+## Pixel Fold measurements
+
+An earlier 29-scene comparison on the Pixel Fold measured Markets at 24.82 to 60.16 FPS and Mines
+at 22.96 to 57.72 FPS; heavy crowds stayed below 30 FPS and seven lighting or weather scenes got
+slower. That build changed the Vulkan backend, geometry and visibility policy together, so it
+shows nothing about these kernels alone and gives no desktop estimate.
+
+The first geometry-only Android run, off/on/off, measured 15.033 / 16.831 / 15.677 FPS, with one
+candidate and unequal thermal and clock conditions. Thirty selected captured inputs matched the
+original SSE output, but neither result validates the portable implementation in a desktop game.
+The parent oracle adds synthetic motion and selected real inputs. For Linux, see "Desktop
+measurements" above; game FPS on macOS and Windows, and the Android renderer's fidelity in live
+motion, are still open.

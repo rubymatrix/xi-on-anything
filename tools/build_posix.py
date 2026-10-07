@@ -7,6 +7,8 @@
   python3 tools/build_posix.py host64 --game <folder>    the game host, with SDL3
   python3 tools/build_posix.py gfxtest                   the graphics back end and the D3D8 front end,
         offscreen, without the game (tests/gfx_test.c, tests/d3d8_test.c)
+  python3 tools/build_posix.py vfstest                   the game's paths to host paths (runtime/portable/vfs.c),
+        without the game (tests/vfs_test.c)
   python3 tools/build_posix.py datuitest --game <folder>  the game's UI art read from its DATs (host/datui.c):
         parse checks, and renders in build/datui/ (tests/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
@@ -339,6 +341,14 @@ def gfxtest():
     run(['build/d3d8_test'])
 
 
+def vfstest():
+    """runtime/portable/vfs.c on this host, with plat_posix.c: tests/vfs_test.c."""
+    os.makedirs(os.path.join(ROOT, 'build'), exist_ok=True)
+    run(CC + CFLAGS + ['-o', 'build/vfs_test', 'tests/vfs_test.c', 'runtime/portable/vfs.c', 'runtime/portable/plat_posix.c',
+                       '-lpthread'])
+    run(['build/vfs_test'])
+
+
 def datuitest(game):
     """host/datui.c against the install's DATs; renders the windows and lobby into build/datui/."""
     os.makedirs(os.path.join(ROOT, 'build', 'datui'), exist_ok=True)
@@ -484,7 +494,7 @@ APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'datuitest', 'app', 'kit'])
+    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'datuitest', 'app', 'kit'])
     ap.add_argument('--out', default='build/kit')  # kit: where it goes
     ap.add_argument('--kit')  # host64: build from this kit
     ap.add_argument('--game', default=os.path.expanduser('~/SquareEnix/FINAL FANTASY XI'))
@@ -506,6 +516,8 @@ def main():
     args = ap.parse_args()
     if args.target == 'gfxtest':
         return gfxtest()
+    if args.target == 'vfstest':
+        return vfstest()
     if args.target == 'kit':
         return kit(args.out)
     game = os.path.abspath(args.game)
