@@ -1100,7 +1100,14 @@ static void (*g_present_hook)(void);
 
 void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
 
-void d3d8_set_occlusion(int mode) { g_occlusion = mode >= 0 && mode <= 2 ? mode : 0; }
+void d3d8_set_occlusion(int mode)
+{
+#if defined(FFXI_ANDROID_VULKAN)
+    g_occlusion = mode >= 0 && mode <= 2 ? mode : 0;
+#else
+    g_occlusion = mode == 2 ? 2 : 0; /* Delayed is Android's alone (lock_rect); FFXI_PROBE still reaches it */
+#endif
+}
 int d3d8_occlusion(void) { return g_occlusion; }
 
 void d3d8_screen_size(uint32_t* w, uint32_t* h)
@@ -3900,7 +3907,7 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
              *   free; the flare writes no depth, so the late answer does not feed back into the next.
              * - 1, the newest copy the GPU has finished, a few frames late: per probe where its lifetime
              *   is known (Android's probe wraps; other probes read exactly there), else the target's newest,
-             *   which makes characters flicker.
+             *   which makes characters flicker, so only Android's menu offers it.
              * - 2, exactly: the CPU waits for the scene so far (7-8 ms a frame at a 4096x4096 background).
              * FFXI_PROBE=gpu reads exactly; FFXI_ASYNC_READBACK=1 makes that late (Android: always late),
              * and on desktop also reads other small read-only locks late. */

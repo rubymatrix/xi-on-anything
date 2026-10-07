@@ -35,7 +35,7 @@ unchanged.
   - texture filtering up to 16x, and longer draw and character distances
   - 30 or 60 fps
   - interface shape: full width, 16:9 or 4:3
-  - the occlusion check: off (everything counts as seen, the fastest), delayed or exact
+  - the occlusion check: off (everything counts as seen, the fastest) or exact
 - **Widescreen and ultrawide**: the 3D view widens with the window instead of stretching a 4:3
   view, the interface can stay 16:9 in the middle of an ultrawide, and nameplates keep their shape.
 - **A native sign-in screen** in the game's own window themes and font, with the password kept in

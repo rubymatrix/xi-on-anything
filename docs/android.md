@@ -92,7 +92,9 @@ exactly where the probe's lifetime is unknown; 2 Exact waits for the GPU every
 probe. On the Pixel Fold, in a camera sweep through Markets and the crowd and
 spell scenes (alternating runs), Off was 3.5-5.4% faster than Delayed in every
 scene, with a shorter tail (player-crowd's 99th-percentile frame 38 ms against
-63-68 ms); Exact runs at a fifth to a third of their speed.
+63-68 ms); Exact runs at a fifth to a third of their speed. Desktop's menu has no
+Delayed: there the late answer is the render target's newest copy, not each
+probe's, and makes characters flicker.
 
 ## Correctness checks
 
