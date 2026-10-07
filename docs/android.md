@@ -7,13 +7,13 @@ back ends keep their own build paths.
 
 The APK is a debug client. It signs in to a LandSandBoat server with the
 account given in `run.args` as `--user` and `--pass`; the sign-in screen and
-saved sessions are not offered. It contains no password, game files, captures or generated game code:
-bring your own compatible client installation and local test server. The C++
-back end does not implement the Modern FX extensions; the game's own D3D8
-lighting, fog, textures and shadows work. Config > Modern and Display show only
-the settings that apply here: Occlusion Check, Frame Rate, Interface Shape and
-the window and resolution settings. A controller or keyboard is
-recommended. On-screen buttons are enabled by the activity's `touch_controls`
+saved sessions are not offered. It contains no password, game files, captures or
+generated game code: bring your own compatible client installation and local
+test server. The C++ back end does not implement the Modern FX extensions; the
+game's own D3D8 lighting, fog, textures and shadows work. Config > Modern and
+Display show only the settings that apply here: Occlusion Check, Frame Rate,
+Interface Shape and the window and resolution settings. A controller or keyboard
+is recommended. On-screen buttons are enabled by the activity's `touch_controls`
 boolean extra.
 
 ## Build on macOS or Linux
@@ -85,8 +85,8 @@ diagnostics in the generated code (scalar, capture) are not included, and the
 Android entry rejects their options.
 
 The game's occlusion check is Config > Modern's Occlusion Check, live, and kept
-as `occlusion` in `modern.cfg` in the data folder: 0 Off (the default, as on desktop) answers that
-everything is visible, without waiting for the GPU; 1 Delayed uses each probe's
+as `occlusion` in `modern.cfg` in the data folder: 0 Off (the default, as on
+desktop) answers that everything is visible, without waiting for the GPU; 1 Delayed uses each probe's
 answer the GPU finished in an earlier frame, up to 16 frames old, and reads
 exactly where the probe's lifetime is unknown; 2 Exact waits for the GPU every
 probe. On the Pixel Fold, in a camera sweep through Markets and the crowd and

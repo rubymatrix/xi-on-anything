@@ -140,7 +140,7 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
     setenv("FFXI_DISCORD", "0", 1);
     setenv("FFXI_VSYNC", "0", 1);
     setenv("FFXI_CONTROL", "0", 1);
-    /* the occlusion probe as the occlusion setting says (gfx_fx.c; d3d8.c lock_rect), not forced */
+    /* the occlusion probe as Config > Modern's Occlusion Check says (d3d8_set_occlusion), not forced */
     unsetenv("FFXI_PROBE");
     setenv("FFXI_ASYNC_READBACK", "0", 1);
     setenv("FFXI_FPS", "0", 1);

@@ -9,8 +9,8 @@ extern "C"
 #endif
 
     /* FFXI_BENCH_DIR enables the collector. The directory must exist; frames.csv and
-     * markers.jsonl must not.
-     * Returns 0 disabled, 1 enabled, -1 failed. Call once before the game starts. */
+     * markers.jsonl must not. Returns 0 disabled, 1 enabled, -1 failed. Call once before the game
+     * starts. */
     int benchmark_init(void);
     /* At the start of the host's Present hook. Costs one branch when disabled. */
     void benchmark_frame(void);
