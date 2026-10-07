@@ -304,8 +304,11 @@ def host64_kit(game, kitdir):
     addon_cflags, _ = addons(make=False)
     inc = ['-I', 'third_party/sdl3/include'] + thirdparty.flags('mbedtls') + addon_cflags
     objs += compile_stale(k['device_sources'], 'build/obj/host64-kit', inc)
-    libs = [os.path.join(kitdir, 'lib', l) for l in k['libs']]
-    run(CXX + ['-o', 'build/host64'] + objs + ['-Wl,--start-group'] + libs + ['-Wl,--end-group'] + k['system'] + ['-rdynamic'])
+    libs = [os.path.join(kitdir, 'lib', l) for l in k['libs'] if l != 'libxi.a']
+    # libxi.a whole, as the other builds link every object: addons find win32_ffi.c's and gdifont_ffi.c's
+    # functions by name (ffi.C), so nothing references them and an archive would leave them out
+    xi = ['-Wl,--whole-archive', os.path.join(kitdir, 'lib', 'libxi.a'), '-Wl,--no-whole-archive']
+    run(CXX + ['-o', 'build/host64'] + objs + xi + ['-Wl,--start-group'] + libs + ['-Wl,--end-group'] + k['system'] + ['-rdynamic'])
     buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build/host64 from the kit; run: build/host64 --game %s --server <name>' % shlex.quote(game))
 
