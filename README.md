@@ -24,6 +24,9 @@ XI on Anything runs on Apple silicon Macs today, with more platforms planned.
 username, password and one-time code, or a server launcher's token; pick the server in the
 sign-in screen's Settings.
 
+Experimental: an [Android build](docs/android.md), tested on a Pixel Fold. Desktop defaults are
+unchanged.
+
 ## What's better than the original
 
 - **A Modern page in the game's own Config menu**, next to Gameplay, Windows and the rest:

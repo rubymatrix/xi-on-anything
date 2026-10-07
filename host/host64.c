@@ -103,6 +103,9 @@
 #include "vfs.h"
 #include "geometry_guest.h"
 #include "build.h" /* FFXI_VERSION */
+#if defined(FFXI_ANDROID_VULKAN)
+#include "benchmark.h"
+#endif
 
 extern const RtModule rt_module_ffxi; /* recomp.py --module ffxi */
 
@@ -154,7 +157,7 @@ static void find_fps_global(void)
         {
             g_fps_global = rd32(a + sizeof PAT);
             rt_log("[recomp] frame-rate divisor: global %08x (code at %08x), set to %u (%u fps)\n", g_fps_global, a,
-                g_fps_divisor, 60 / g_fps_divisor);
+                g_fps_divisor, g_fps_divisor ? 60 / g_fps_divisor : 0);
             return;
         }
     rt_log("[recomp] frame-rate divisor: not found; the game keeps its own frame rate\n");
@@ -702,6 +705,9 @@ static void shadow_focus(void)
 
 static void present_hook(void)
 {
+#if defined(FFXI_ANDROID_VULKAN)
+    benchmark_frame();
+#endif
     if (g_profile_shims)
     {
         static uint64_t last;
@@ -910,9 +916,9 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--fps-divisor"))
         {
             long d = strtol(argv[i + 1], NULL, 10);
-            if (d < 1 || d > 60)
+            if (d < 0 || d > 60)
             {
-                fprintf(stderr, "--fps-divisor: 1 (60 fps), 2 (30 fps, as shipped), ...\n");
+                fprintf(stderr, "--fps-divisor: 0 (uncapped), 1 (60 fps), 2 (30 fps, as shipped), ...\n");
                 return 2;
             }
             g_fps_divisor = (uint32_t)d;
@@ -1070,6 +1076,10 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+#if defined(FFXI_ANDROID_VULKAN)
+    if (benchmark_init(lsb.user) < 0)
+        return 1;
+#endif
     if (lsb.user)
     {
         /* a LandSandBoat server: sign in before anything is loaded, so a refusal costs nothing */
