@@ -106,6 +106,15 @@ python3 tests/android_build_test.py
 python3 tests/android_entry_test.py
 ```
 
+Visibility storage's shaders are compiled into `gfx_visibility_storage.inc` from
+the GLSL beside it. After changing one, rebuild the arrays with glslang 16.5.0
+(the version `android_deps.py` pins); without `--write` the tool only checks
+them:
+
+```sh
+python3 tools/visibility_storage_spv.py --glslang /path/to/glslang --write
+```
+
 The policy test covers pass dependencies, fixed controls, resource versions,
 worker snapshots and queues, completion, failure and shutdown, and the frame
 collector. The build test covers object-cache invalidation, agreement between

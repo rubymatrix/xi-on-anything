@@ -131,8 +131,9 @@ bool history_eligible(const Ref& ref, uint64_t frame, uint64_t completedSerial, 
 
 #ifndef GFX_VISIBILITY_STORAGE_MODEL_ONLY
 #if defined(FFXI_ANDROID_VULKAN)
-// Embedded from the independently validated standalone storage shaders.
-// Preserve EarlyFragmentTests and literal full BGRA writes; no runtime compiler substitution.
+// Compiled from gfx_visibility_storage_{quad.vert,sample.vert,mask_mrt.frag,sample.frag} (glslang 16.5.0,
+// Vulkan 1.1); tools/visibility_storage_spv.py checks or rewrites them. Preserve EarlyFragmentTests and
+// literal full BGRA writes; no runtime compiler substitution.
 static const uint32_t visibilityQuadSpv[] = {
     0x7230203,  0x10300,    0x8000b,    0x76,       0x0,        0x20011,    0x1,        0x6000b,    0x1,
     0x4c534c47, 0x6474732e, 0x3035342e, 0x0,        0x3000e,    0x0,        0x1,        0x8000f,    0x0,
