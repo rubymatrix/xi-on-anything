@@ -47,7 +47,7 @@ checks the library's hash against its build metadata and sets the matching
 minimum API. The signing key is created in the dependency directory. Neither the
 build nor packaging installs an APK or changes device settings.
 
-The APK is `build/android/xi-native-test.apk`, package `dev.rdbell.xionandroid`.
+The APK is `build/android/xi-native-test.apk`, package `com.rubymatrix.xionanything`.
 Before replacing an existing installation, keep a copy of its APK, data and
 configuration. The app reads `run.args` from its external files directory, one
 literal argument per line (no shell expansion). Give `--game`, `--data-dir`, the
