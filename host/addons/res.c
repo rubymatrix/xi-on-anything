@@ -150,7 +150,7 @@ static int file_exists(const char* path)
     return 1;
 }
 
-/* A relative path through the overlays, then the install. */
+/* A relative path through the overlays, then the install, in whatever case they have it */
 static int resolve(const char* rel, char* out, size_t n)
 {
     for (int i = 0; i < g_overlays; ++i)
@@ -1134,6 +1134,21 @@ static size_t find_block(const uint8_t* r, size_t n, size_t want)
     return 0;
 }
 
+/* The older 0xC00-byte records (an era install's item files, HorizonXI's): a weapon's and armour's
+ * level, slots, races and jobs two bytes before parse_item_fields reads them, then a weapon's damage
+ * and delay at 0x1C (as LandSandBoat's item tables have them) */
+static void parse_legacy_fields(ResItem* it, const uint8_t* r, int kind)
+{
+    if (kind != RES_ITEM_WEAPON && kind != RES_ITEM_ARMOR)
+        return;
+    it->level = rd16(r + 0x0E);
+    it->slots = rd16(r + 0x10);
+    it->races = rd16(r + 0x12);
+    it->jobs = rd32(r + 0x14);
+    if (kind == RES_ITEM_WEAPON)
+        it->damage = rd16(r + 0x1C), it->delay = (int16_t)rd16(r + 0x1E);
+}
+
 static void parse_item_fields(ResItem* it, const uint8_t* r, int kind)
 {
     switch (kind)
@@ -1310,6 +1325,8 @@ static void load_item_file(uint32_t fid, int kind, uint16_t want, int l)
             }
             if (!legacy || kind == RES_ITEM_MONSTROSITY)
                 parse_item_fields(it, r, kind);
+            else
+                parse_legacy_fields(it, r, kind);
             if (have_num)
                 it->article = num;
             uint8_t* raw = arena_alloc(blk);
