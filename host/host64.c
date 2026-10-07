@@ -26,7 +26,8 @@
  * older name for it. With --session nothing is redirected: the game's hosts resolve through DNS,
  * as retail's do, and --server is not used.
  *
- * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped.
+ * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped;
+ * 0 uncapped.
  *
  * --aspect auto|off|<w:h>: the 3D scene's aspect ratio. auto (the default) follows the window's
  * shape, so a widescreen window shows more to the sides instead of a 4:3 view stretched across it.
