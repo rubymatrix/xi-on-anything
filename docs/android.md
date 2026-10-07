@@ -62,7 +62,7 @@ before the portable host starts.
 
 | Argument | Behavior and limits |
 | --- | --- |
-| `--android-native-geometry 1` | The shared NEON geometry adapter, guarded, for the verified 2025-11-12 layout. SSE float32 arithmetic differs from the scalar x87 intermediates. Unsupported state falls back. |
+| `--android-native-geometry 0` | On by default where the build has the verified 2025-11-12 layout: the shared NEON geometry kernels, which compute what the original's SSE path does (the translated code keeps x87 intermediates). Unsupported state falls back. 0 turns it off. |
 | `--android-readback 1` | Forces Delayed for the occlusion check (below), for the keyed visibility experiments that require it. |
 | `--android-encode-cache 0` | On by default: reuses identical command bindings and descriptors, with invalidation. 0 turns it off. |
 | `--android-pass-plan 1` | Experimental pass planner, from pass dependencies. It runs fewer passes but has not shown a useful FPS gain on its own. |

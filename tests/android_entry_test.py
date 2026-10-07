@@ -60,7 +60,8 @@ def cases(worker, geometry):
             expected = 42 if value == '0' or (value == '1' and available) else 4
             yield args, expected, (key, value) if expected == 42 else None
         yield LOGIN + [flag], 4, None
-        yield LOGIN, 42, (key, '1' if option == 'encode-cache' else '0')
+        on = option == 'encode-cache' or (option == 'native-geometry' and geometry)
+        yield LOGIN, 42, (key, '1' if on else '0')
     for option, key, values in (
         ('control', 'FFXI_CONTROL', ('0', '54300')),
         ('shadow-map-budget', 'FFXI_ANDROID_SHADOW_MAP_BUDGET', ('0', '1', '2', '3')),

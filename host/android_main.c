@@ -171,7 +171,8 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
     unsetenv("FFXI_ANDROID_PASS_TRACE");
     unsetenv("FFXI_ANDROID_PROBE_QUERY_DIAG");
     setenv("FFXI_ANDROID_ENCODE_CACHE", "1", 1);
-    setenv("FFXI_ANDROID_NATIVE_GEOMETRY", "0", 1);
+    /* the shared kernels (geometry_guest.c) where this client's layout is verified: the original's SSE results */
+    setenv("FFXI_ANDROID_NATIVE_GEOMETRY", FFXI_GEOMETRY_LAYOUT == 1 ? "1" : "0", 1);
     setenv("FFXI_NATIVE_GEOMETRY", "0", 1);
     /* Android-only control options are consumed before the portable host sees argv. */
     for (int i = 1; i + 1 < argc;)
