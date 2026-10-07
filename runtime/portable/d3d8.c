@@ -61,15 +61,15 @@ static uint32_t g_android_shadow_frame;
 static XiFrontendPolicy g_android_frontend_policy;
 static int android_shadow_budget(void)
 {
-    return xi_frontend_budget(&g_android_frontend_policy);
+    return g_android_frontend_policy.budget;
 }
 static int android_shadow_diagnostic(void)
 {
-    return xi_frontend_diagnostic(&g_android_frontend_policy);
+    return g_android_frontend_policy.skip || g_android_frontend_policy.budget > 0;
 }
 static int android_shadow_interval(void)
 {
-    return xi_frontend_interval(&g_android_frontend_policy);
+    return g_android_frontend_policy.interval;
 }
 static int android_shadow_target_index(uint32_t guest)
 {
@@ -86,7 +86,7 @@ static int android_shadow_target(uint32_t guest)
 }
 static int android_shadow_target_skipped(uint32_t guest)
 {
-    if (xi_frontend_skip(&g_android_frontend_policy))
+    if (g_android_frontend_policy.skip)
         return 1;
     int budget = android_shadow_budget(), index = android_shadow_target_index(guest);
     if (budget <= 0 || index < 0)
@@ -3949,7 +3949,7 @@ static void android_probe_hooks_init(void)
         rt_wrap_probe_ctor = android_wrap_probe_ctor;
         rt_wrap_probe_dtor = android_wrap_probe_dtor;
         g_android_probe_hooks = 1;
-        rt_log("[recomp] d3d8: Android probe lifetime hooks admitted ctor=%08x dtor=%08x; async is opt-in age16\n", c,
+        rt_log("[recomp] d3d8: Android probe lifetime hooks admitted ctor=%08x dtor=%08x; delayed reads up to 16 frames old\n", c,
                d);
     }
     else
@@ -3998,50 +3998,55 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
         GfxTex* g = surface_gpu(s, &face, &level);
         if (!s->gpu_locked && !(s->usage & USAGE_DEPTHSTENCIL))
         {
-            /* The game's per-frame probe decides what is drawn from these pixels: a copy even a frame
-             * old makes characters flicker. So the read waits (the back end commits each frame in
-             * chunks, so the wait is the frame's tail); FFXI_ASYNC_READBACK=1 trades that for
-             * the newest finished copy. */
-            static int async = -1, visible = -1;
+            /* The game's 16x16 occlusion probe (FFXiMain 0x1006c8c0: CopyRects of a 16x16 target, a
+             * read-only lock, bit 7 of the blue byte counted over 8x8 samples: 0 hidden .. 256 fully
+             * visible) decides what is drawn from these pixels. The occlusion setting (gfx_fx.c) says how
+             * it is answered:
+             * - 0, fully visible, with no wait for the GPU. That draws what the probe would have hidden,
+             *   which the depth test hides anyway. Not so the sky probe: the sun's lens flare draws with
+             *   no depth test, so it is the probe that hides it behind walls. It reads a frame late, for
+             *   free; the flare writes no depth, so the late answer does not feed back into the next.
+             * - 1, the newest copy the GPU has finished, a few frames late: per probe where its lifetime
+             *   is known (Android's probe wraps; other probes read exactly there), else the target's newest,
+             *   which makes characters flicker.
+             * - 2, exactly: the CPU waits for the scene so far (7-8 ms a frame at a 4096x4096 background).
+             * FFXI_PROBE=gpu reads exactly; FFXI_ASYNC_READBACK=1 makes that late (Android: always late),
+             * and on desktop also reads other small read-only locks late. */
+            static int async = -1, forced = -1;
             if (async < 0)
                 async = getenv("FFXI_ASYNC_READBACK") && getenv("FFXI_ASYNC_READBACK")[0] == '1';
-#if defined(FFXI_ANDROID_VULKAN)
-            /* Android reads the probe for real: from its keyed history with FFXI_ASYNC_READBACK=1 when
-             * its lifetime is known, else exactly, as every other lock */
-            (void)visible;
-            if ((flags & LOCK_READONLY) && s->width == 16 && s->height == 16)
+            if (forced < 0)
             {
-                g_probe_sky = 0;
-                gfx_android_probe_read(probe_key != 0, async);
-            }
-            if (async && probe_key)
-                gfx_tex_read_async_keyed(g, face, level, GUEST_PTR(bits), pitch, probe_key, 16);
-            else
-                gfx_tex_read(g, face, level, GUEST_PTR(bits), pitch);
+                int gpu = getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu");
+#if defined(FFXI_ANDROID_VULKAN)
+                forced = async ? 1 : gpu ? 2 : 0;
 #else
-            if (visible < 0)
-                visible = !(getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu"));
-            /* The game's 16x16 occlusion probe (FFXiMain 0x1006c8c0: CopyRects of a 16x16 target,
-             * a read-only lock, bit 7 of the blue byte counted over 8x8 samples: 0 hidden .. 256
-             * fully visible) reads fully visible, with no wait for the GPU. Reading it for real
-             * stalls the CPU on the whole scene every frame (7-8 ms at a 4096x4096 background),
-             * and a late answer makes characters flicker; answering visible draws what the probe
-             * would have hidden, which the depth test hides anyway. FFXI_PROBE=gpu reads it.
-             * Not so the sky probe: the sun's lens flare draws without a depth test, so it is the
-             * probe that hides it behind walls. That one reads a frame late, for free; the flare
-             * writes no depth, so the late answer does not feed back into the next. */
+                forced = gpu ? (async ? 1 : 2) : 0;
+#endif
+            }
             int probe = (flags & LOCK_READONLY) && s->width == 16 && s->height == 16, sky = probe && g_probe_sky;
+            float setting = forced ? 0.0f : gfx_fx_get("occlusion");
+            int mode = forced ? forced : setting >= 2.0f ? 2 : setting >= 1.0f ? 1 : 0;
             if (probe)
                 g_probe_sky = 0;
-            if (visible && sky)
-                gfx_tex_read_async(g, face, level, GUEST_PTR(bits), pitch);
-            else if (visible && probe)
+#if defined(FFXI_ANDROID_VULKAN)
+            if (probe)
+                gfx_android_probe_read(probe_key != 0, mode == 1);
+            if (probe && mode == 1) /* a probe whose lifetime is not known reads exactly */
+                probe_key ? gfx_tex_read_async_keyed(g, face, level, GUEST_PTR(bits), pitch, probe_key, 16)
+                          : gfx_tex_read(g, face, level, GUEST_PTR(bits), pitch);
+            else
+#endif
+            if (probe && mode == 0 && !sky)
                 memset(GUEST_PTR(bits), 0xFF, (size_t)pitch * s->height);
+            else if (probe && (mode == 1 || (mode == 0 && sky)))
+                gfx_tex_read_async(g, face, level, GUEST_PTR(bits), pitch);
+#if !defined(FFXI_ANDROID_VULKAN)
             else if (async && (flags & LOCK_READONLY) && s->width * s->height <= 128 * 128)
                 gfx_tex_read_async(g, face, level, GUEST_PTR(bits), pitch);
+#endif
             else
                 gfx_tex_read(g, face, level, GUEST_PTR(bits), pitch);
-#endif
         }
         if (!(flags & LOCK_READONLY) && !(s->usage & USAGE_DEPTHSTENCIL))
             s->gpu_locked = 1;
@@ -4430,9 +4435,7 @@ void d3d8_init(void)
 #if defined(FFXI_ANDROID_VULKAN)
     /* host64 calls this on its startup thread, once android_main has set the launch options and
      * before any guest code runs */
-    const char* policy = getenv("FFXI_ANDROID_FRONTEND_POLICY_SNAPSHOT");
-    xi_frontend_policy_configure(&g_android_frontend_policy, policy && policy[0] == '1' && !policy[1]);
-    rt_log("[recomp] d3d8: Android frontend policy snapshot=%d\n", g_android_frontend_policy.snapshot);
+    g_android_frontend_policy = xi_frontend_policy_read();
 #endif
     thunk_register(D3D8);
 }

@@ -85,7 +85,7 @@ def main():
             + shlex.split(os.environ.get('CFLAGS', '')),
             check=True,
         )
-        for mode in ('off', 'account', 'existing-frame', 'existing-marker', 'write-fail', 'clock-back', 'records'):
+        for mode in ('off', 'existing-frame', 'existing-marker', 'write-fail', 'clock-back', 'records'):
             case = out / mode
             case.mkdir()
             subprocess.run([str(exe), mode, str(case)], check=True, timeout=60)

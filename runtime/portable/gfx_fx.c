@@ -117,6 +117,10 @@ static const struct
     /* ray tracing: the bounce light and the occlusion traced through the frame's casters (rt_capture), where
      * the GPU can; off unless asked for */
     { "rt", offsetof(GfxFxSettings, rt), 0.0f },
+    /* not an effect: how the game's occlusion probe is answered (d3d8.c, lock_rect): 0 fully visible,
+     * 1 the newest copy the GPU has finished, 2 exactly, waiting for the GPU (Config > Modern's
+     * Occlusion Check) */
+    { "occlusion", offsetof(GfxFxSettings, occlusion), 0.0f },
 };
 
 static float* fx_setting(const char* key)

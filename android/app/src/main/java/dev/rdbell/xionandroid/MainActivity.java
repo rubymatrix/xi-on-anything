@@ -221,7 +221,7 @@ public final class MainActivity extends SDLActivity {
         }
         return new String[] {"--game", new File(base, "game").getPath(), "--data-dir", data.getPath(), "--reg",
                 new File(base, "ffxi.reg").getPath(), "--reg-overlay", new File(data, "settings.reg").getPath(),
-                "--user-dir", new File(data, "USER").getPath(), "--server", "127.0.0.1", "--user", "hxitest",
+                "--user-dir", new File(data, "USER").getPath(), "--server", "127.0.0.1",
                 "--fps-divisor", "2", "--aspect", "off"};
     }
 }

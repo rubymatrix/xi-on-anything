@@ -12,12 +12,10 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-LOGIN = ['--user', 'hxitest', '--pass', 'synthetic-test-only']
+LOGIN = ['--user', 'tester', '--pass', 'synthetic-test-only']
 BOOLEANS = {
     'native-geometry': 'FFXI_ANDROID_NATIVE_GEOMETRY',
     'readback': 'FFXI_ASYNC_READBACK',
-    'policy-snapshot': 'FFXI_ANDROID_POLICY_SNAPSHOT',
-    'frontend-policy-snapshot': 'FFXI_ANDROID_FRONTEND_POLICY_SNAPSHOT',
     'encode-cache': 'FFXI_ANDROID_ENCODE_CACHE',
     'pass-plan': 'FFXI_ANDROID_PASS_PLAN',
     'render-worker': 'FFXI_RENDER_WORKER',
@@ -38,9 +36,10 @@ BOOLEANS = {
 def cases(worker, geometry):
     # Each tuple specifies argv, exit code, and optionally an environment key/value.
     yield [], 3, None
-    yield ['--user', 'hxitest'], 3, None
-    yield ['--user', 'hxitest', '--pass', ''], 3, None
-    yield ['--user', 'other', '--pass', 'synthetic'], 3, None
+    yield ['--user', 'tester'], 3, None
+    yield ['--user', 'tester', '--pass', ''], 3, None
+    yield ['--user', '', '--pass', 'synthetic'], 3, None
+    yield ['--user', 'other', '--pass', 'synthetic-test-only'], 42, None
     yield LOGIN, 42, None
     for option in ('session', 'auth'):
         yield LOGIN + ['--' + option, 'synthetic'], 3, None
@@ -61,7 +60,7 @@ def cases(worker, geometry):
             expected = 42 if value == '0' or (value == '1' and available) else 4
             yield args, expected, (key, value) if expected == 42 else None
         yield LOGIN + [flag], 4, None
-        yield LOGIN, 42, (key, '0')
+        yield LOGIN, 42, (key, '1' if option == 'encode-cache' else '0')
     for option, key, values in (
         ('control', 'FFXI_CONTROL', ('0', '54300')),
         ('shadow-map-budget', 'FFXI_ANDROID_SHADOW_MAP_BUDGET', ('0', '1', '2', '3')),
@@ -80,6 +79,8 @@ def cases(worker, geometry):
         yield LOGIN + ['--android-' + option], 4, None
     for option in (
         'unknown',
+        'policy-snapshot',
+        'frontend-policy-snapshot',
         'diagnostics',
         'sample-hz',
         'backend-cost',
@@ -104,7 +105,6 @@ def cases(worker, geometry):
     for code, option in enumerate(('gfx', 'format', 'state', 'async', 'area', 'pass-plan', 'visibility-storage'), 43):
         args = ['--android-' + option + '-test']
         yield args, code, None
-        yield ['--user', 'other'] + args, 3, None
         if worker:
             yield ['--android-worker-mailbox', '1', '--android-render-worker', '1'] + args, code, None
     yield ['--android-fast-sync', '1'] + LOGIN + ['--android-fast-sync', '0'], 42, ('FFXI_ANDROID_FAST_SYNC', '0')
@@ -156,7 +156,7 @@ def main():
                 log = (data / 'host64.log').read_text()
                 assert result.returncode == expected, (worker, geometry, args, result.returncode, expected, log)
                 if expected == 42:
-                    assert 'test:arg=hxitest\n' in log, log
+                    assert 'test:arg=tester\n' in log or 'test:arg=other\n' in log, log
                     assert 'test:arg=synthetic-test-only\n' in log, log
                     if setting:
                         assert f'test:env={setting[1]}\n' in log, (setting, log)

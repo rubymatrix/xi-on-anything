@@ -48,8 +48,6 @@ static const struct AndroidOption
     {"--android-worker-const-fx", "FFXI_RENDER_WORKER_CONST_FX", OPTION_WORKER},
     {"--android-visibility-storage", "FFXI_ANDROID_VISIBILITY_STORAGE", OPTION_BOOLEAN},
     {"--android-visibility-storage-stats", "FFXI_ANDROID_VISIBILITY_STORAGE_DIAGNOSTICS", OPTION_BOOLEAN},
-    {"--android-frontend-policy-snapshot", "FFXI_ANDROID_FRONTEND_POLICY_SNAPSHOT", OPTION_BOOLEAN},
-    {"--android-policy-snapshot", "FFXI_ANDROID_POLICY_SNAPSHOT", OPTION_BOOLEAN},
     {"--android-native-geometry", "FFXI_ANDROID_NATIVE_GEOMETRY", OPTION_GEOMETRY},
     {"--android-encode-cache", "FFXI_ANDROID_ENCODE_CACHE", OPTION_BOOLEAN},
     {"--android-pass-plan", "FFXI_ANDROID_PASS_PLAN", OPTION_BOOLEAN},
@@ -151,8 +149,8 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
     setenv("FFXI_DISCORD", "0", 1);
     setenv("FFXI_VSYNC", "0", 1);
     setenv("FFXI_CONTROL", "0", 1);
-    /* the occlusion probe is read from the GPU, not answered "visible" as on the desktop by default */
-    setenv("FFXI_PROBE", "gpu", 1);
+    /* the occlusion probe as the occlusion setting says (gfx_fx.c; d3d8.c lock_rect), not forced */
+    unsetenv("FFXI_PROBE");
     setenv("FFXI_ASYNC_READBACK", "0", 1);
     setenv("FFXI_FPS", "0", 1);
     setenv("FFXI_RENDER_WORKER", "0", 1);
@@ -172,18 +170,9 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
     setenv("FFXI_ANDROID_VISIBILITY_STORAGE_DIAGNOSTICS", "0", 1);
     unsetenv("FFXI_ANDROID_PASS_TRACE");
     unsetenv("FFXI_ANDROID_PROBE_QUERY_DIAG");
-    setenv("FFXI_ANDROID_ENCODE_CACHE", "0", 1);
-    setenv("FFXI_ANDROID_POLICY_SNAPSHOT", "0", 1);
-    setenv("FFXI_ANDROID_FRONTEND_POLICY_SNAPSHOT", "0", 1);
+    setenv("FFXI_ANDROID_ENCODE_CACHE", "1", 1);
     setenv("FFXI_ANDROID_NATIVE_GEOMETRY", "0", 1);
     setenv("FFXI_NATIVE_GEOMETRY", "0", 1);
-    /* a test app: one local account, never a saved profile */
-    for (int i = 1; i + 1 < argc; i++)
-        if (!strcmp(argv[i], "--user") && strcmp(argv[i + 1], "hxitest"))
-        {
-            fprintf(stderr, "[android] local test app only accepts hxitest\n");
-            return 3;
-        }
     /* Android-only control options are consumed before the portable host sees argv. */
     for (int i = 1; i + 1 < argc;)
     {
@@ -261,22 +250,23 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
         fprintf(stderr, "[android] game worker mailbox requires async readback=1\n");
         return 4;
     }
-    int local_user = 0, explicit_password = 0;
+    /* a LandSandBoat account given in run.args: the sign-in screen and saved sessions are untried here */
+    int user = 0, password = 0;
     for (int i = 1; i + 1 < argc; ++i)
     {
-        if (!strcmp(argv[i], "--user") && !strcmp(argv[i + 1], "hxitest"))
-            local_user = 1;
+        if (!strcmp(argv[i], "--user") && argv[i + 1][0])
+            user = 1;
         if (!strcmp(argv[i], "--pass") && argv[i + 1][0])
-            explicit_password = 1;
+            password = 1;
         if (!strcmp(argv[i], "--session") || !strcmp(argv[i], "--auth"))
         {
-            fprintf(stderr, "[android] local test entry requires explicit hxitest login\n");
+            fprintf(stderr, "[android] sign in with --user and --pass\n");
             return 3;
         }
     }
-    if (!local_user || !explicit_password)
+    if (!user || !password)
     {
-        fprintf(stderr, "[android] supply --user hxitest and --pass in private run.args; saved sign-in is disabled\n");
+        fprintf(stderr, "[android] supply --user and --pass in private run.args\n");
         return 3;
     }
     fprintf(
@@ -286,8 +276,7 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
         getenv("FFXI_ANDROID_CACHE_SAMPLED"), getenv("FFXI_ANDROID_BOUNDED_AREA"),
         getenv("FFXI_ANDROID_SHADOW_MAP_BUDGET"), getenv("FFXI_ANDROID_SHADOW_MAP_INTERVAL"));
     setenv("FFXI_NATIVE_GEOMETRY", getenv("FFXI_ANDROID_NATIVE_GEOMETRY"), 1);
-    fprintf(stderr, "[android] native ARM64 local test entry; real GPU probes, async-readback=%s\n",
-            getenv("FFXI_ASYNC_READBACK"));
+    fprintf(stderr, "[android] native ARM64 entry; async-readback=%s\n", getenv("FFXI_ASYNC_READBACK"));
     int ret = xi_host_main(argc, argv);
     fprintf(stderr, "[android] host exit %d\n", ret);
     gfx_worker_shutdown();

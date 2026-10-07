@@ -1077,7 +1077,7 @@ int main(int argc, char** argv)
         }
     }
 #if defined(FFXI_ANDROID_VULKAN)
-    if (benchmark_init(lsb.user) < 0)
+    if (benchmark_init() < 0)
         return 1;
 #endif
     if (lsb.user)

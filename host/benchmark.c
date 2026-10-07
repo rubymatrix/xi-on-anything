@@ -61,7 +61,7 @@ static void failed(void)
     benchmark_close();
 }
 
-int benchmark_init(const char* account)
+int benchmark_init(void)
 {
     if (initialized)
         return active ? 1 : 0;
@@ -69,11 +69,6 @@ int benchmark_init(const char* account)
     const char* dir = getenv("FFXI_BENCH_DIR");
     if (!dir || !*dir)
         return 0;
-    if (!account || strcmp(account, "hxitest"))
-    {
-        rt_log("[benchmark] only the explicitly supplied local hxitest account is admitted\n");
-        return -1;
-    }
     char frame_path[2048], marker_path[2048];
     int nf = snprintf(frame_path, sizeof frame_path, "%s/frames.csv", dir);
     int nm = snprintf(marker_path, sizeof marker_path, "%s/markers.jsonl", dir);

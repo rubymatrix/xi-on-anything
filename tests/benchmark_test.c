@@ -1,6 +1,6 @@
 /* host/benchmark.c with a stub clock and real files: enabling, refusals, failures and the records.
  *
- *   benchmark_test off|account|existing-frame|existing-marker|write-fail|clock-back|records <dir>
+ *   benchmark_test off|existing-frame|existing-marker|write-fail|clock-back|records <dir>
  *
  * Built and run by tests/android_policy_test.py. */
 #include "benchmark.h"
@@ -90,7 +90,7 @@ int main(int argc, char** argv)
     if (!strcmp(mode, "off"))
     {
         unsetenv("FFXI_BENCH_DIR");
-        assert(benchmark_init(NULL) == 0);
+        assert(benchmark_init() == 0);
         for (unsigned i = 0; i < 100000; i++)
             benchmark_frame();
         assert(clock_reads == 0 && !benchmark_enabled());
@@ -98,28 +98,23 @@ int main(int argc, char** argv)
     else
     {
         setenv("FFXI_BENCH_DIR", argv[2], 1);
-        if (!strcmp(mode, "account"))
-        {
-            assert(benchmark_init("other") == -1);
-            assert(access(frame, F_OK) != 0 && access(mark, F_OK) != 0);
-        }
-        else if (!strcmp(mode, "existing-frame"))
+        if (!strcmp(mode, "existing-frame"))
         {
             original(frame);
-            assert(benchmark_init("hxitest") == -1);
+            assert(benchmark_init() == -1);
             retained(frame);
             assert(access(mark, F_OK) != 0);
         }
         else if (!strcmp(mode, "existing-marker"))
         {
             original(mark);
-            assert(benchmark_init("hxitest") == -1);
+            assert(benchmark_init() == -1);
             retained(mark);
             assert(access(frame, F_OK) != 0);
         }
         else if (!strcmp(mode, "write-fail"))
         {
-            assert(benchmark_init("hxitest") == 1);
+            assert(benchmark_init() == 1);
             fail_write = 1;
             ticks += 2000000000ull;
             benchmark_frame();
@@ -127,14 +122,14 @@ int main(int argc, char** argv)
         }
         else if (!strcmp(mode, "clock-back"))
         {
-            assert(benchmark_init("hxitest") == 1);
+            assert(benchmark_init() == 1);
             --ticks;
             benchmark_frame();
             assert(!benchmark_enabled());
         }
         else if (!strcmp(mode, "records"))
         {
-            assert(benchmark_init("hxitest") == 1);
+            assert(benchmark_init() == 1);
             assert(FFXI_BenchmarkMark("stress phase start", "mixed-32", 234, 32));
             assert(!FFXI_BenchmarkMark("bad\"label", "mixed-32", 234, 32));
             assert(!FFXI_BenchmarkMark(NULL, "mixed-32", 234, 32));

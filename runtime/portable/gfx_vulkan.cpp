@@ -2898,9 +2898,7 @@ void fit_swap()
 void init(void* window, int vsync)
 {
 #if defined(FFXI_ANDROID_VULKAN)
-    const char* snapshot = std::getenv("FFXI_ANDROID_POLICY_SNAPSHOT");
-    launchPolicy.configure(snapshot && snapshot[0] == '1' && !snapshot[1]);
-    std::fprintf(stderr, "[gfx-vulkan] immutable launch policy=%d\n", launchPolicy.snapshot());
+    launchPolicy.configure();
 #endif
     g.window = static_cast<SDL_Window*>(window);
     g.vsync = vsync != 0;

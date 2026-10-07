@@ -391,6 +391,8 @@ static const Row MODERN_ROWS[] = {
     { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
+    { "Occlusion Check", "occlusion", CHOICE, 3, { "Off", "Delayed", "Exact" }, { 0, 1, 2 }, 0, 0,
+        "What walls hide from the game's checks. Off treats all as seen; Delayed asks the last frames; Exact waits." },
     { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
     { "Interface Shape", "@ui", CHOICE, 3, { "Full", "16:9", "4:3" }, { 0, 16.0f / 9.0f, 4.0f / 3.0f }, 0, 0,
         "Keeps the menus in a box of this shape on a wide screen." },

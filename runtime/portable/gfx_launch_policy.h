@@ -2,7 +2,7 @@
 #include <cstdlib>
 
 // The Android renderer's FFXI_ANDROID_* switches ("1" turns one on), set by the launcher before
-// gfx_init. With a snapshot they are read once, at configure; without, at every get.
+// gfx_init and read once there, not per draw.
 namespace gfxpolicy
 {
 class LaunchPolicy
@@ -17,26 +17,20 @@ public:
         FastSync,
         Count
     };
-    void configure(bool snapshot)
+    void configure()
     {
-        snapshot_ = snapshot;
-        if (snapshot_)
-            for (unsigned i = 0; i < Count; ++i)
-                values_[i] = read(Flag(i));
+        for (unsigned i = 0; i < Count; ++i)
+        {
+            const char* p = std::getenv(names_[i]);
+            values_[i] = p && p[0] == '1' && !p[1];
+        }
     }
-    bool get(Flag flag) const { return snapshot_ ? values_[flag] : read(flag); }
-    bool snapshot() const { return snapshot_; }
+    bool get(Flag flag) const { return values_[flag]; }
 
 private:
-    static bool read(Flag flag)
-    {
-        const char* p = std::getenv(names_[flag]);
-        return p && p[0] == '1' && !p[1];
-    }
     inline static constexpr const char* names_[Count] = {"FFXI_ANDROID_CACHE_SAMPLED", "FFXI_ANDROID_BOUNDED_AREA",
                                                          "FFXI_ANDROID_TRIM_UNIFORMS", "FFXI_ANDROID_DONT_CARE_LOADS",
                                                          "FFXI_ANDROID_FAST_SYNC"};
-    bool snapshot_ = false;
     bool values_[Count] = {};
 };
 }

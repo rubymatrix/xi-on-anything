@@ -5,9 +5,9 @@ a C++ Vulkan back end. It uses no Wine, GameNative, FEX or DXVK. It shares the
 geometry adapter with the desktop hosts; the desktop Metal, D3D12 and C Vulkan
 back ends keep their own build paths.
 
-The APK is a debug test client. It signs in only with the account given
-explicitly as `--user hxitest` with `--pass`; it is not a launcher for saved
-accounts. It contains no password, game files, captures or generated game code:
+The APK is a debug client. It signs in to a LandSandBoat server with the
+account given in `run.args` as `--user` and `--pass`; the sign-in screen and
+saved sessions are not offered. It contains no password, game files, captures or generated game code:
 bring your own compatible client installation and local test server. The C++
 back end does not implement the Modern FX extensions; the game's own D3D8
 lighting, fog, textures and shadows work. A controller or keyboard is
@@ -49,7 +49,7 @@ The APK is `build/android/xi-native-test.apk`, package `dev.rdbell.xionandroid`.
 Before replacing an existing installation, keep a copy of its APK, data and
 configuration. The app reads `run.args` from its external files directory, one
 literal argument per line (no shell expansion). Give `--game`, `--data-dir`, the
-registry paths, `--server`, `--user hxitest` and `--pass` there. Without both,
+registry paths, `--server`, `--user` and `--pass` there. Without both,
 the app exits instead of showing the sign-in screen. Never commit that file. Without `run.args`, the built-in command line uses the server 127.0.0.1
 (loopback), not a public game service.
 
@@ -63,10 +63,8 @@ before the portable host starts.
 | Argument | Behavior and limits |
 | --- | --- |
 | `--android-native-geometry 1` | The shared NEON geometry adapter, guarded, for the verified 2025-11-12 layout. SSE float32 arithmetic differs from the scalar x87 intermediates. Unsupported state falls back. |
-| `--android-readback 1` | Keyed GPU visibility completed in an earlier frame, up to 16 frames old. Exact readback in the current frame stays the default, and the fallback for unknown callers or lifetimes, unsupported subresources and history misses. Delayed visibility can change results in moving scenes. |
-| `--android-policy-snapshot 1` | Read the back end's launch controls once. Avoids re-reading the experimental controls; not a gain over unmodified upstream. |
-| `--android-frontend-policy-snapshot 1` | The same snapshot for the Android shadow diagnostics. |
-| `--android-encode-cache 1` | Reuse identical command bindings and descriptors, with invalidation. On its own it made small differences in trials. |
+| `--android-readback 1` | Forces Delayed for the occlusion check (below), for the keyed visibility experiments that require it. |
+| `--android-encode-cache 0` | On by default: reuses identical command bindings and descriptors, with invalidation. 0 turns it off. |
 | `--android-pass-plan 1` | Experimental pass planner, from pass dependencies. It runs fewer passes but has not shown a useful FPS gain on its own. |
 | `--android-visibility-storage 1` | Experimental visibility transform (preserved masks, full pixels). Requires readback 1, worker, planner and bounded area 0, and no pass or query trace. Crowd scenes ran at about the same speed in earlier trials. |
 | `--android-render-worker 1` | Experimental FIFO render thread. Slower in earlier game trials. |
@@ -77,7 +75,7 @@ before the portable host starts.
 | `--android-shadow-diagnostic 1` | Skips identified game shadow work, which changes the picture. Only for measuring the most that work can cost. |
 | `--android-shadow-map-budget 0..3` | 0 (the default) keeps every shadow map; higher values limit them and change the shadows. |
 | `--android-shadow-map-interval 1..4` | 1 (the default) updates the shadow maps every frame; higher values reuse older maps. |
-| `--android-bench-dir PATH` | Write frame times and markers (`frames.csv`, `markers.jsonl`) to PATH, for the test account only; refuses to overwrite either file. One branch per frame when off. |
+| `--android-bench-dir PATH` | Write frame times and markers (`frames.csv`, `markers.jsonl`) to PATH; refuses to overwrite either file. One branch per frame when off. |
 | `--android-control 54300` | Enable the existing control port, loopback only; default 0. |
 | `--fps-divisor 0` | Uncapped, for measurements; divisor 2 is 30 FPS. |
 
@@ -86,6 +84,15 @@ The diagnostic statistics (`--android-worker-stats`,
 overhead; leave them out of performance comparisons. The older geometry
 diagnostics in the generated code (scalar, capture) are not included, and the
 Android entry rejects their options.
+
+The game's occlusion check is Config > Modern's Occlusion Check, the `occlusion`
+key of `android-fx.txt` (live): 0 Off (the default, as on desktop) answers that
+everything is visible, without waiting for the GPU; 1 Delayed uses each probe's
+answer the GPU finished in an earlier frame, up to 16 frames old, and reads
+exactly where the probe's lifetime is unknown; 2 Exact waits for the GPU every
+probe. On the Pixel Fold, Off and Delayed ran at the same speed in a camera
+sweep through the Markets and crowd scenes; Exact, in fixed-camera runs, at a
+fifth to a third of that.
 
 ## Correctness checks
 
