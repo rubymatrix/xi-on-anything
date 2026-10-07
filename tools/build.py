@@ -53,6 +53,10 @@ def write_build_h():
         lines.append('#define FFXI_HOOK_%s 0x%08xu /* rt_hook_%s runs here */' % (k.upper(), int(v, 16), k))
     for k, v in BUILD['wraps'].items():
         lines.append('#define FFXI_WRAP_%s 0x%08xu /* rt_wrap_%s may replace this function */' % (k.upper(), int(v, 16), k))
+    geometry = BUILD.get('geometry', {})
+    lines.append('#define FFXI_GEOMETRY_LAYOUT %d' % geometry.get('layout', 0))
+    for k in ('info', 'callback', 'palette', 'counts'):
+        lines.append('#define FFXI_GEOMETRY_%s 0x%08xu' % (k.upper(), int(geometry.get(k, '0'), 16)))
     for k, v in BUILD['crt'].items():
         a = int(v, 16)
         lines.append('#define CRT_%s 0x%08xu' % (k.upper(), a))
@@ -75,12 +79,13 @@ def write_build_h():
         f.write(text)
 
 
-PORTABLE =['runtime\\runtime.c', 'runtime\\portable\\plat_win.c', 'runtime\\portable\\gwin.c',
+PORTABLE = ['runtime\\runtime.c', 'runtime\\portable\\plat_win.c', 'runtime\\portable\\gwin.c',
             'runtime\\portable\\gthread.c', 'runtime\\portable\\thunk.c', 'runtime\\portable\\pe.c',
             'runtime\\portable\\k32.c', 'runtime\\portable\\gamecore.c', 'runtime\\portable\\vfs.c',
             'runtime\\portable\\kobj.c', 'runtime\\portable\\k32_io.c', 'runtime\\portable\\gamecore_slots.c',
             'runtime\\portable\\reg.c', 'runtime\\portable\\ole.c', 'runtime\\portable\\gamecore_files.c',
-            'runtime\\portable\\k32_misc.c', 'runtime\\portable\\gamecore_presence.c']
+            'runtime\\portable\\k32_misc.c', 'runtime\\portable\\gamecore_presence.c',
+            'runtime\\portable\\geometry_simd.c', 'runtime\\portable\\geometry_guest.c']
 
 
 def msvc_env(arch='x86'):
@@ -224,7 +229,8 @@ GFX_LIBS = ['d3d12.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dxguid.lib']
 HOST_BASE = ['runtime\\portable\\user32.c', 'runtime\\portable\\d3d8.c', 'runtime\\portable\\dsound.c',
              'runtime\\portable\\input.c', 'runtime\\portable\\dinput.c', 'runtime\\portable\\ws2.c', 'host\\host64.c',
              'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\cexi.c', 'host\\discord.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c',
-             'host\\keychain.c', 'host\\appdefaults.c', 'runtime\\portable\\sampler_win.c']
+             'host\\keychain.c', 'host\\appdefaults.c', 'runtime\\portable\\sampler_win.c',
+             'runtime\\portable\\geometry_hooks.c']
 HOST_SOURCES = HOST_BASE + GFX_SOURCES
 # the sign-in screen's: stb_image
 HOST_INCLUDES = ['/I', 'third_party\\stb']

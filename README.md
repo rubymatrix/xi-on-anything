@@ -384,6 +384,7 @@ the log reports each one: `[recomp] dats: era-dats, 163 files`.
 | `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU. By default it answers "visible" at once, which saves 7–8 ms a frame. |
 | `FFXI_DRAWLOG=<file>` | While `<file>.go` exists, write the next frame's draws to `<file>` (return addresses on the guest stack, texture, vertex box), then remove `.go`. For finding which game code draws what. |
 | `FFXI_ASYNC_READBACK=1` | Small read-only surface locks take the newest finished copy instead of waiting for the GPU. |
+| `FFXI_NATIVE_GEOMETRY=1` | Skin characters with [SSE-order kernels](docs/shared-graphics-optimizations.md) (NEON or SSE2) instead of the translated x87 code, on builds with a verified layout (2025-11-12). The same output as the original's SSE path; no measured FPS gain on desktop. |
 | `FFXI_CACHE_DIR` | Where the pipeline cache goes. Default `~/Library/Caches/FFXI`. |
 | `FFXI_RECOMP_TRACE=1` | Log every shim call, and every failed `CreateFileA` / `FindFirstFileA` path. |
 | `FFXI_RECOMP_MISSING=1` | Log imports that have no shim. |
@@ -483,7 +484,8 @@ runtime/portable/  64-bit hosts: plat.h (+ plat_win.c, plat_posix.c), gwin (gues
                    pe (image loader), k32*/kobj/vfs/reg/ole (Win32; vfs also does the DAT overlays),
                    gamecore* (our own gamecore), user32 + input + dinput + dsound (SDL3),
                    d3d8 (the D3D8 front end), ws2 (sockets), gfx.h (the graphics back end):
-                   gfx_metal.m (Metal) + gfx_msl*.c (D3D8 state and shaders -> MSL), gfx_null.c (elsewhere)
+                   gfx_metal.m (Metal) + gfx_msl*.c (D3D8 state and shaders -> MSL), gfx_null.c (elsewhere),
+                   geometry_* (SSE-order skinning kernels and their guarded adapters, opt-in)
 host/              ffximain.c: the 32-bit stand-in FFXiMain.dll; host64.c: the 64-bit game host;
                    lsb_login.c: the LandSandBoat sign-in
 tests/             difftest.c (original vs translation), boot.c (x86), boot64.c (x64),

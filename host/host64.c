@@ -101,6 +101,7 @@
 #include "ws2.h"
 #include "plat.h"
 #include "vfs.h"
+#include "geometry_guest.h"
 #include "build.h" /* FFXI_VERSION */
 
 extern const RtModule rt_module_ffxi; /* recomp.py --module ffxi */
@@ -1248,6 +1249,7 @@ int main(int argc, char** argv)
     ole_register_class(CLSID_FxFileManager, FFXI_BASE);
     ole_register_class(CLSID_FFXiEntry, FFXI_BASE);
     gamecore_init();
+    geometry_hooks_init();
     d3d8_setup();
     d3d8_set_present_hook(present_hook);
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL };
