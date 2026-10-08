@@ -2003,7 +2003,7 @@ typedef struct Caster
     size_t vblen[GFX_NSTREAMS];
     const uint8_t* ibp;
     size_t iblen;
-    const GfxU* up; /* the uniforms, as bound */
+    const GfxU* up; /* the uniforms, as bound: its g_caster_u, not the ring's copy */
     VkImageView tex[8]; /* only for an alpha test */
     GfxSampler samp[8];
     VkPrimitiveTopology prim;
@@ -2018,6 +2018,10 @@ typedef struct Caster
 
 static Caster* g_casters;
 static uint32_t g_ncasters, g_casters_cap;
+/* each caster's uniforms in host memory (g_casters[i].up is &g_caster_u[i]), as gfx_d3d12.c keeps them: the
+ * ring is write-combined, and reading it back is uncached - sun_cache_update's copy from it took 40 ms of
+ * a 50 ms frame in Bastok Markets */
+static GfxU* g_caster_u;
 
 static void casters_clear(void) { g_ncasters = 0; }
 
@@ -2067,9 +2071,13 @@ static Caster* caster_new(const GfxDraw* d)
     {
         g_casters_cap = g_casters_cap ? g_casters_cap * 2 : 1024;
         g_casters = (Caster*)realloc(g_casters, g_casters_cap * sizeof(Caster));
+        g_caster_u = (GfxU*)realloc(g_caster_u, g_casters_cap * sizeof(GfxU));
+        for (uint32_t i = 0; i < g_ncasters; ++i)
+            g_casters[i].up = &g_caster_u[i];
     }
-    Caster* c = &g_casters[g_ncasters++];
+    Caster* c = &g_casters[g_ncasters];
     memset(c, 0, sizeof *c);
+    c->up = &g_caster_u[g_ncasters++];
     c->lib.vs = d->vs, c->lib.fs = d->fs;
     c->vs = tokens_kept(d->vs.prog, 0, d->vs_tokens), c->ps = tokens_kept(d->fs.prog, 1, d->ps_tokens);
     c->zbias = d->zbias;
@@ -2150,12 +2158,15 @@ static void draw_encode(const GfxDraw* d)
     VkBuffer ub;
     VkDeviceSize uoff;
     GfxU* u = (GfxU*)ring(sizeof(GfxU), RING_ALIGN, &ub, &uoff);
-    memcpy(u, &d->u, need);
     if (d->caster && !g_rt_face && !g_rt_level && depth)
         g_rt->depth_world = depth;
     Caster* rec = d->caster && g_fxs.fx != 0.0f && g_fxs.sun > 0.0f ? caster_new(d) : NULL;
+    /* put together in host memory (a caster's in its g_caster_u) and copied to the write-combined ring once */
+    GfxU own;
+    GfxU* hu = rec ? &g_caster_u[g_ncasters - 1] : &own;
+    memcpy(hu, &d->u, need);
     if (rec)
-        rec->ub = ub, rec->uoff = uoff, rec->up = u;
+        rec->ub = ub, rec->uoff = uoff;
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
         VkDescriptorBufferInfo* b = &bi[1 + s];
@@ -2194,13 +2205,14 @@ static void draw_encode(const GfxDraw* d)
         if (rem)
             for (int r = 0; r < GFX_NREGS; ++r)
                 if (d->vs.el[r].used && d->vs.el[r].stream == s)
-                    u->offset[r] += (int32_t)rem;
+                    hu->offset[r] += (int32_t)rem;
         w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w[nw].dstBinding = B_STREAM0 + (uint32_t)s;
         w[nw].descriptorCount = 1;
         w[nw].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[nw++].pBufferInfo = b;
     }
+    memcpy(u, hu, need);
     bi[0] = (VkDescriptorBufferInfo){ ub, uoff, sizeof(GfxU) };
     w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     w[nw].dstBinding = B_U;
@@ -3573,13 +3585,21 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
                 continue;
             }
         }
+        /* a copy's vertex offset moves to its own vertices (cache_copy) before ubuf is written: like the
+         * ring, ubuf is write-combined and not read back */
+        GfxU moved;
+        if (copy)
+        {
+            memcpy(&moved, src, sizeof moved);
+            if (!cache_copy(ce, c, &moved))
+            {
+                ce->dead = 1;
+                continue;
+            }
+            src = &moved;
+        }
         memcpy(ce->ubuf_p, src, sizeof(GfxU));
         ce->c.ub = ce->ubuf, ce->c.uoff = 0, ce->c.up = (const GfxU*)ce->ubuf_p;
-        if (copy && !cache_copy(ce, c, (GfxU*)ce->ubuf_p))
-        {
-            ce->dead = 1;
-            continue;
-        }
         ce->c.has_pos = c->has_pos;
         memcpy(ce->c.clip0, c->clip0, 16);
         memcpy(ce->pos, pos, 12);
