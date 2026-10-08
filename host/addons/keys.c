@@ -402,7 +402,7 @@ static void xpad(uint32_t user, XPad* pad)
     static uint16_t last[4], held[4];
     if (user > 3)
         return;
-    if (user == 0)
+    if (user == 0 && xi_addon_count()) /* no addon, no DIJOYSTATE to build each read */
     {
         uint32_t kept = dinput_pad();
         pad->buttons &= (uint16_t)~kept;

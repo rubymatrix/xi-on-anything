@@ -212,6 +212,7 @@ ffi.cdef[[ typedef struct { uint32_t dwPacketNumber; uint16_t wButtons; uint8_t 
 local pad_state = ffi.new('xi_xinput_state_t')
 local pad_ptr = ffi.cast('uint8_t*', pad_state)
 local pad_buttons, pad_packet = 0, 0
+local dinput_buf = u8arr(80) -- the DIJOYSTATE of the last dinput_state
 local function poll_pad()
     local buttons, lt, rt, lx, ly, rx, ry = xi.ashita_native.xpad(0)
     if not buttons then return nil end
@@ -348,9 +349,10 @@ local EVENTS = {
         run = function(xe)
             local data = xe.data or ''
             if #data < 80 then return end
-            local keep = buffer(data, 0)
-            local pov = ffi.cast('uint32_t*', keep + 32)[0]
-            each('dinput_state', false, nil, { data = data, data_raw = ffi.cast(u8p, keep), size = #data,
+            -- one buffer for every read (as pad_state): this is raised each time the game reads the pad
+            ffi.copy(dinput_buf, data, 80)
+            local pov = ffi.cast('uint32_t*', dinput_buf + 32)[0]
+            each('dinput_state', false, nil, { data = data, data_raw = ffi.cast(u8p, dinput_buf), size = #data,
                 pov = pov == 0xFFFFFFFF and -1 or pov, injected = false, blocked = false })
         end,
     },
