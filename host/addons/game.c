@@ -161,6 +161,7 @@ static struct
     int state;
     uint32_t hit;   /* where the pattern matched */
     uint32_t match; /* the pattern hit plus offset */
+    uint32_t bound; /* the key item getters' table count, once read (key_bit) */
     uint32_t value;
 } ptrs[XI_P_COUNT];
 
@@ -800,14 +801,19 @@ static int key_bit(int which, uint32_t id)
     if (t == 0)
         return -1;
     /* the table count is the getter's own bound (KEYITEMS_IMM32/IMM8): past it is the next table */
-    uint32_t hit = ptrs[which].hit, tables = 0;
-    uint8_t op = xi_game_rd8(hit + 8);
-    if (op == 0x3D)
-        tables = xi_game_rd32(hit + 9);
-    else if (op == 0x83)
-        tables = xi_game_rd8(hit + 10);
-    if (tables == 0 || tables > 1024)
-        return -1;
+    uint32_t tables = ptrs[which].bound;
+    if (tables == 0)
+    {
+        uint32_t hit = ptrs[which].hit;
+        uint8_t op = xi_game_rd8(hit + 8);
+        if (op == 0x3D)
+            tables = xi_game_rd32(hit + 9);
+        else if (op == 0x83)
+            tables = xi_game_rd8(hit + 10);
+        if (tables == 0 || tables > 1024)
+            return -1;
+        ptrs[which].bound = tables;
+    }
     if (id >= tables * 32)
         return 0;
     uint32_t w;
