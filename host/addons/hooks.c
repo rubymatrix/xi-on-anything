@@ -385,11 +385,14 @@ typedef struct Inject
     uint8_t data[];
 } Inject;
 static Inject* g_inject[2];
-/* Injected packets being handled, or the queue being drained: a packet injected meanwhile waits for
- * the next buffer and is handled there, so an addon that injects for every packet it sees costs a
- * packet a buffer rather than a hang. */
+/* How deep injected packets are being handled (or the queue drained). A packet injected from a
+ * handler is handled at once, as Ashita does, one level deep: LuAshitacast blocks an
+ * injected action and re-injects it under a flag it clears when AddOutgoingPacket returns, so its
+ * re-injection must reach the handlers before then. Deeper, a packet waits for the next buffer, so an
+ * addon that injects for every packet it sees costs a few packets a buffer rather than a hang. */
 static int g_handling;
 enum { INJECT_MAX = 256 }; /* queued per direction; more are dropped */
+enum { INJECT_DEPTH = 2 };
 
 /* the header's size is the padded length, in 4-byte units (the id stays the one written) */
 static void set_size(uint8_t* p, size_t padded)
@@ -473,7 +476,7 @@ void xi_packet_inject_handled(int outgoing, const uint8_t* p, size_t n)
 {
     if (n < 4 || n > 0x1FC)
         return;
-    if (g_handling)
+    if (g_handling >= INJECT_DEPTH)
     {
         queue_packet(outgoing, p, n, 0);
         return;
