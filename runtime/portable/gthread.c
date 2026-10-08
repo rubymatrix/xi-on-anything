@@ -59,7 +59,7 @@ void gt_save(GtSaved* s)
 {
     s->t = t_self;
     if (t_self)
-        s->g = t_self->g;
+        s->g = t_self->g, s->seh = rd32(t_self->teb);
     s->held = t_held;
     s->noyield = t_noyield;
 }
@@ -67,7 +67,7 @@ void gt_save(GtSaved* s)
 void gt_restore(const GtSaved* s)
 {
     if (s->t && s->t == t_self)
-        t_self->g = s->g;
+        t_self->g = s->g, wr32(t_self->teb, s->seh);
     t_noyield = s->noyield;
     if (t_held && !s->held)
         gt_unlock();
