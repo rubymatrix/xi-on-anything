@@ -389,7 +389,8 @@ static Inject* g_inject[2];
  * handler is handled at once, as Ashita does, one level deep: LuAshitacast blocks an
  * injected action and re-injects it under a flag it clears when AddOutgoingPacket returns, so its
  * re-injection must reach the handlers before then. Deeper, a packet waits for the next buffer, so an
- * addon that injects for every packet it sees costs a few packets a buffer rather than a hang. */
+ * addon that injects for every packet it sees costs packets rather than a hang: each such chain
+ * carries on a buffer at a time, and they add up to INJECT_MAX, past which more are dropped. */
 static int g_handling;
 enum { INJECT_MAX = 256 }; /* queued per direction; more are dropped */
 enum { INJECT_DEPTH = 2 };
