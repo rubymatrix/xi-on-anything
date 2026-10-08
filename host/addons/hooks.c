@@ -380,27 +380,57 @@ static Last g_last[2][0x200];
 typedef struct Inject
 {
     size_t size;
+    int handled; /* already through the addons' handlers (xi_packet_inject_handled) */
     struct Inject* next;
     uint8_t data[];
 } Inject;
 static Inject* g_inject[2];
+/* How deep injected packets are being handled (or the queue drained). A packet injected from a
+ * handler is handled at once, as Ashita does, one level deep: LuAshitacast blocks an
+ * injected action and re-injects it under a flag it clears when AddOutgoingPacket returns, so its
+ * re-injection must reach the handlers before then. Deeper, a packet waits for the next buffer, so an
+ * addon that injects for every packet it sees costs packets rather than a hang: each such chain
+ * carries on a buffer at a time, and they add up to INJECT_MAX, past which more are dropped. */
+static int g_handling;
+enum { INJECT_MAX = 256 }; /* queued per direction; more are dropped */
+enum { INJECT_DEPTH = 2 };
 
-void xi_packet_inject(int outgoing, const uint8_t* p, size_t n)
+/* the header's size is the padded length, in 4-byte units (the id stays the one written) */
+static void set_size(uint8_t* p, size_t padded)
+{
+    uint16_t h = (uint16_t)((p[0] | p[1] << 8) & 0x1FF);
+    h |= (uint16_t)((padded / 4) << 9);
+    p[0] = (uint8_t)h, p[1] = (uint8_t)(h >> 8);
+}
+
+static void queue_packet(int outgoing, const uint8_t* p, size_t n, int handled)
 {
     if (n < 4 || n > 0x1FC)
         return;
+    Inject** tail = &g_inject[outgoing];
+    unsigned queued = 0;
+    while (*tail)
+        tail = &(*tail)->next, ++queued;
+    if (queued >= INJECT_MAX)
+    {
+        xi_log_once(outgoing ? "inject-out" : "inject-in", "packets: %d %s packets already wait; more are dropped",
+            INJECT_MAX, outgoing ? "outgoing" : "incoming");
+        return;
+    }
     size_t padded = (n + 3) & ~(size_t)3;
     Inject* in = (Inject*)calloc(1, sizeof *in + padded);
+    if (!in)
+        return;
     in->size = padded;
+    in->handled = handled;
     memcpy(in->data, p, n);
-    /* the header's size is the padded length, in 4-byte units */
-    uint16_t h = (uint16_t)((in->data[0] | in->data[1] << 8) & 0x1FF);
-    h |= (uint16_t)((padded / 4) << 9);
-    in->data[0] = (uint8_t)h, in->data[1] = (uint8_t)(h >> 8);
-    Inject** tail = &g_inject[outgoing];
-    while (*tail)
-        tail = &(*tail)->next;
+    set_size(in->data, padded);
     *tail = in;
+}
+
+void xi_packet_inject(int outgoing, const uint8_t* p, size_t n)
+{
+    queue_packet(outgoing, p, n, 0);
 }
 
 size_t xi_packet_last(int outgoing, uint16_t id, uint8_t* out, size_t cap, uint64_t* when_ms)
@@ -424,10 +454,10 @@ static size_t one_packet(int outgoing, const uint8_t* p, size_t size, const uint
     e.sequence = (uint32_t)(p[2] | p[3] << 8);
     e.injected = injected;
     e.data = p, e.size = size;
-    static uint8_t mod[0x200];
+    e.chunk = chunk, e.chunk_size = chunk_size;
+    uint8_t mod[0x200]; /* its own: an addon's handler may inject, which handles that packet here too */
     memcpy(mod, p, size);
     e.mod = mod, e.mod_size = size, e.mod_cap = 0x1FC;
-    e.chunk = chunk, e.chunk_size = chunk_size;
     xi_raise(&e);
     if (e.blocked)
         return 0;
@@ -439,11 +469,28 @@ static size_t one_packet(int outgoing, const uint8_t* p, size_t size, const uint
         return 0;
     memset(out, 0, padded);
     memcpy(out, e.mod, n);
-    /* an addon that changed the size: the header follows (the id stays the one it wrote) */
-    uint16_t h = (uint16_t)((out[0] | out[1] << 8) & 0x1FF);
-    h |= (uint16_t)((padded / 4) << 9);
-    out[0] = (uint8_t)h, out[1] = (uint8_t)(h >> 8);
+    set_size(out, padded); /* an addon that changed the size: the header follows */
     return padded;
+}
+
+void xi_packet_inject_handled(int outgoing, const uint8_t* p, size_t n)
+{
+    if (n < 4 || n > 0x1FC)
+        return;
+    if (g_handling >= INJECT_DEPTH)
+    {
+        queue_packet(outgoing, p, n, 0);
+        return;
+    }
+    uint8_t in[0x200] = {0}, out[0x200];
+    size_t padded = (n + 3) & ~(size_t)3;
+    memcpy(in, p, n);
+    set_size(in, padded);
+    ++g_handling;
+    size_t w = one_packet(outgoing, in, padded, NULL, 0, 1, out, sizeof out);
+    --g_handling;
+    if (w)
+        queue_packet(outgoing, out, w, 1);
 }
 
 /* The buffer (header + packets) through the addons into out; its new size. */
@@ -482,18 +529,34 @@ static size_t process(int outgoing, const uint8_t* buf, size_t size, uint8_t* ou
         memcpy(out + o, buf + off, size - off);
         o += size - off;
     }
-    /* the addons' own packets, with the buffer's last sequence number */
-    Inject** pp = &g_inject[outgoing];
-    while (*pp)
+    /* the addons' own packets, with the buffer's last sequence number; those injected meanwhile wait
+     * for the next buffer */
+    Inject* list = g_inject[outgoing];
+    g_inject[outgoing] = NULL;
+    ++g_handling;
+    while (list)
     {
-        Inject* in = *pp;
+        Inject* in = list;
         if (o + in->size > cap)
             break; /* the rest wait for the next buffer */
         in->data[2] = (uint8_t)seq, in->data[3] = (uint8_t)(seq >> 8);
-        size_t w = one_packet(outgoing, in->data, in->size, buf + 0x1C, size - 0x1C, 1, out + o, cap - o);
+        size_t w = in->size;
+        if (in->handled)
+            memcpy(out + o, in->data, w);
+        else
+            w = one_packet(outgoing, in->data, in->size, buf + 0x1C, size - 0x1C, 1, out + o, cap - o);
         o += w;
-        *pp = in->next;
+        list = in->next;
         free(in);
+    }
+    --g_handling;
+    if (list) /* what didn't fit goes first next time */
+    {
+        Inject** tail = &list;
+        while (*tail)
+            tail = &(*tail)->next;
+        *tail = g_inject[outgoing];
+        g_inject[outgoing] = list;
     }
     return o;
 }

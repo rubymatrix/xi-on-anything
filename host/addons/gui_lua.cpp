@@ -773,6 +773,16 @@ int hand_GetVisible(lua_State* L)
     return 1;
 }
 
+// Obsolete in ImGui 1.92 and missing from Ashita's annotations, but bound by Ashita (gen_imgui_lua.py
+// UNANNOTATED): the current window's font scale.
+int hand_SetWindowFontScale(lua_State* L)
+{
+    float scale = (float)luaL_checknumber(L, 1);
+    if (!guarded() && cur_window() && scale > 0.0f) // inside a window, and above 0 (NaN too), as ImGui requires
+        ImGui::SetWindowFontScale(scale);
+    return 0;
+}
+
 int hand_SetVisible(lua_State* L)
 {
     // Called as mgr:SetVisible(v) (per the annotations); tolerate mgr.SetVisible(v) too.

@@ -341,6 +341,60 @@ static int hook(const void* ev, int ww, int wh)
     }
 }
 
+/* The first pad as its own driver shows it to DirectInput (input_pad_dinput), read when the game reads
+ * it: each change of a button or the D-pad is a dinput_button event (key = its DIJOYSTATE offset, 48 +
+ * the button or 32 the POV; id = 0x80 or 0, or the POV's hundredths of a degree, 0xFFFFFFFF centred),
+ * and each read a dinput_state event (data = the DIJOYSTATE). A press an addon blocks is kept from the
+ * game until released, as xinput_button's are: its XPad bits, cleared in the pad the game gets. */
+static uint32_t dinput_pad(void)
+{
+    static uint8_t last[80];
+    static uint32_t held_bits[33]; /* per button, and the POV's [32] */
+    static int connected;
+    uint8_t now[80];
+    uint32_t xbits[32];
+    if (!input_pad_dinput(0, now, xbits))
+    {
+        connected = 0;
+        memset(held_bits, 0, sizeof held_bits);
+        return 0;
+    }
+    if (!connected) /* nothing pressed, the D-pad centred, as when it was last seen */
+    {
+        connected = 1;
+        memset(last, 0, sizeof last);
+        memset(last + 32, 0xFF, 16);
+    }
+    for (unsigned i = 0; i < 33; ++i)
+    {
+        unsigned ofs = i < 32 ? 48 + i : 32;
+        uint32_t v = 0, was = 0;
+        memcpy(&v, now + ofs, i < 32 ? 1 : 4);
+        memcpy(&was, last + ofs, i < 32 ? 1 : 4);
+        if (v == was)
+            continue;
+        XiEvent e;
+        memset(&e, 0, sizeof e);
+        e.name = "dinput_button";
+        e.key = ofs, e.id = v, e.down = i < 32 ? v != 0 : v != 0xFFFFFFFFu;
+        xi_raise(&e);
+        if (e.down && (e.blocked || e.handled))
+            held_bits[i] = i < 32 ? xbits[i] : 0x000F; /* the POV: the D-pad's bits */
+        if (!e.down)
+            held_bits[i] = 0;
+    }
+    memcpy(last, now, sizeof last);
+    XiEvent st;
+    memset(&st, 0, sizeof st);
+    st.name = "dinput_state";
+    st.data = now, st.size = sizeof now;
+    xi_raise(&st);
+    uint32_t held = 0;
+    for (unsigned i = 0; i < 33; ++i)
+        held |= held_bits[i];
+    return held;
+}
+
 /* XInput, as the game reads it (dinput_xpad_hook): each button change is an xinput_button event
  * (key = the bit in wButtons, down); a press an addon blocks is kept from the game until released. */
 static void xpad(uint32_t user, XPad* pad)
@@ -348,6 +402,15 @@ static void xpad(uint32_t user, XPad* pad)
     static uint16_t last[4], held[4];
     if (user > 3)
         return;
+    if (user == 0 && xi_addon_count()) /* no addon, no DIJOYSTATE to build each read */
+    {
+        uint32_t kept = dinput_pad();
+        pad->buttons &= (uint16_t)~kept;
+        if (kept & INPUT_XPAD_LT)
+            pad->lt = 0;
+        if (kept & INPUT_XPAD_RT)
+            pad->rt = 0;
+    }
     uint16_t now = pad->buttons, changed = (uint16_t)(now ^ last[user]);
     for (unsigned b = 0; changed && b < 16; ++b)
     {

@@ -405,6 +405,12 @@ static void match_case(char* path)
     }
 }
 
+void vfs_match_case(char* host_path)
+{
+    if (plat_path_sep != '\\')
+        match_case(host_path);
+}
+
 int vfs_host_path(const char* guest, char* host, size_t n)
 {
     char full[1024], mapped[1400];
@@ -435,8 +441,7 @@ int vfs_host_path(const char* guest, char* host, size_t n)
                 *p = plat_path_sep;
     if (!to_utf8(mapped, host, n))
         return 0;
-    if (plat_path_sep != '\\')
-        match_case(host);
+    vfs_match_case(host);
     return 1;
 }
 
