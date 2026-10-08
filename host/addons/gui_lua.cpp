@@ -778,7 +778,7 @@ int hand_GetVisible(lua_State* L)
 int hand_SetWindowFontScale(lua_State* L)
 {
     float scale = (float)luaL_checknumber(L, 1);
-    if (!guarded() && cur_window()) // inside a window, as ImGui requires
+    if (!guarded() && cur_window() && scale > 0.0f) // inside a window, and above 0 (NaN too), as ImGui requires
         ImGui::SetWindowFontScale(scale);
     return 0;
 }
