@@ -245,12 +245,26 @@ static void default_settings(const char* path, const SigninSetup* su)
         { "0023", 0 }, { "0029", 12 }, { "0034", 1 }, { "0035", 1 }, { "0036", 0 }, { "0037", 960 },
         { "0038", 540 }, { "0040", 0 },
     };
+    /* the background (the square the world is drawn at before it fits the window): 2048 on a screen of
+     * 1920x1080 or less, in pixels, either way up - every effect's cost goes with its pixels, and at 4096 a
+     * ROG Ally's GPU drew Bastok Markets at 32 fps, at 2048 at 56 - else 4096, as when the screen is unknown */
+    uint32_t bg = 4096;
+    const SDL_DisplayMode* dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+    if (dm && dm->w > 0 && dm->h > 0)
+    {
+        float d = dm->pixel_density > 0.0f ? dm->pixel_density : 1.0f;
+        uint32_t a = (uint32_t)(dm->w * d + 0.5f), b = (uint32_t)(dm->h * d + 0.5f);
+        if ((a > b ? a : b) <= 1920 && (a > b ? b : a) <= 1080)
+            bg = 2048;
+    }
     fprintf(f, "REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI]\r\n");
     for (size_t i = 0; i < sizeof VALUES / sizeof *VALUES; ++i)
     {
         uint32_t v = VALUES[i].v;
         const char* n = VALUES[i].name;
-        if (!strcmp(n, "0034") && su->default_mode >= 0 && su->default_mode <= 3)
+        if (!strcmp(n, "0003") || !strcmp(n, "0004"))
+            v = bg;
+        else if (!strcmp(n, "0034") && su->default_mode >= 0 && su->default_mode <= 3)
             v = (uint32_t)su->default_mode;
         else if (!strcmp(n, "0001") && su->default_w >= 640)
             v = (uint32_t)su->default_w;
@@ -1345,7 +1359,6 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     SDL_strlcpy(out->data_dir, dir, sizeof out->data_dir);
     config_path(dir, "signin.cfg", cfg_path, sizeof cfg_path);
     config_path(dir, "settings.reg", out->settings_reg, sizeof out->settings_reg);
-    default_settings(out->settings_reg, setup);
 
     Config* c = &u->cfg;
     c->remember = 1, c->theme = 1;
@@ -1376,6 +1389,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         free(u);
         return -1;
     }
+    default_settings(out->settings_reg, setup); /* after SDL_Init: its background follows the screen's size */
     int read_keychain = 0;
     if (setup->password)
         SDL_strlcpy(u->password, setup->password, sizeof u->password);

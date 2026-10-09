@@ -422,7 +422,7 @@ static const Row DISPLAY_ROWS[] = {
         "The window's size." },
     { "UI Scale", "@menu", LIST, 0, { 0 }, { 0 }, 0, 0,
         "How large the menus and text are drawn." },
-    { "Background Resolution", "@bg", CHOICE, 3, { "4096", "6144", "8192" }, { 4096, 6144, 8192 }, 0, 0,
+    { "Background Resolution", "@bg", CHOICE, 4, { "2048", "4096", "6144", "8192" }, { 2048, 4096, 6144, 8192 }, 0, 0,
         "The size the world is drawn at before it fits the window. From the next start." },
 #if !defined(FFXI_ANDROID_VULKAN) /* scene effects, as MODERN_ROWS */
     { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
