@@ -355,6 +355,62 @@ int vfs_overlay_path(const char* guest, char* host, size_t n)
     return 1;
 }
 
+static int same_ci(const char* a, const char* b)
+{
+    for (; *a && lower((unsigned char)*a) == lower((unsigned char)*b); ++a, ++b)
+    {
+    }
+    return lower((unsigned char)*a) == lower((unsigned char)*b);
+}
+
+/* The last component of path (after sep, its last separator) as its folder has it in another case,
+ * written over it (the same length: only the case differs). 0 if the folder has no such entry. */
+static int other_case(char* path, char* sep)
+{
+    *sep = 0;
+    PlatDir* d = plat_dir_open(sep == path ? "/" : path);
+    *sep = plat_path_sep;
+    if (!d)
+        return 0;
+    const char* e;
+    while ((e = plat_dir_next(d)) && !same_ci(e, sep + 1))
+    {
+    }
+    if (e)
+        memcpy(sep + 1, e, strlen(e));
+    plat_dir_close(d);
+    return e != NULL;
+}
+
+/* A path on a case-sensitive host as Windows would find it: each component that is not there is
+ * replaced by the one its folder has under another case (installs mix "ROM\119\50.dat" with the
+ * game's "50.DAT"). Unchanged when the path is there, and from the first component that is not
+ * there in any case (a file about to be created keeps the game's name). */
+static void match_case(char* path)
+{
+    PlatStat st;
+    if (plat_stat(path, &st))
+        return;
+    for (char* e = path + 1;; ++e)
+    {
+        if (*e && *e != plat_path_sep)
+            continue;
+        char end = *e;
+        *e = 0;
+        char* sep = strrchr(path, plat_path_sep);
+        int there = plat_stat(path, &st) || (sep && other_case(path, sep));
+        *e = end;
+        if (!there || !end)
+            return;
+    }
+}
+
+void vfs_match_case(char* host_path)
+{
+    if (plat_path_sep != '\\')
+        match_case(host_path);
+}
+
 int vfs_host_path(const char* guest, char* host, size_t n)
 {
     char full[1024], mapped[1400];
@@ -383,7 +439,10 @@ int vfs_host_path(const char* guest, char* host, size_t n)
         for (char* p = mapped; *p; ++p)
             if (*p == '\\')
                 *p = plat_path_sep;
-    return to_utf8(mapped, host, n);
+    if (!to_utf8(mapped, host, n))
+        return 0;
+    vfs_match_case(host);
+    return 1;
 }
 
 const char* vfs_cwd(void)

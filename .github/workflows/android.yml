@@ -1,0 +1,86 @@
+# Game-free checks of the Android port: the policy, build and entry tests (tests/android_*_test.py)
+# with Linux GCC and Clang and macOS Clang, and an NDK build of the Android GPU and TLS test fixtures.
+name: Android
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'host/android_main.c'
+      - 'host/benchmark.*'
+      - 'host/host64.c'
+      - 'runtime/portable/d3d8.c'
+      - 'runtime/portable/gfx.h'
+      - 'runtime/portable/gfx_*'
+      - 'runtime/portable/present_rect.h'
+      - 'tests/android_*'
+      - 'tests/benchmark_test.c'
+      - 'tests/gfx_*'
+      - 'tools/android*.py'
+      - 'tools/build*.py'
+      - 'meta/builds.json'
+      - '.github/workflows/android.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - 'host/android_main.c'
+      - 'host/benchmark.*'
+      - 'host/host64.c'
+      - 'runtime/portable/d3d8.c'
+      - 'runtime/portable/gfx.h'
+      - 'runtime/portable/gfx_*'
+      - 'runtime/portable/present_rect.h'
+      - 'tests/android_*'
+      - 'tests/benchmark_test.c'
+      - 'tests/gfx_*'
+      - 'tools/android*.py'
+      - 'tools/build*.py'
+      - 'meta/builds.json'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            cc: clang
+            cxx: clang++
+          - os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+          - os: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Android policy, build and entry checks
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          python3 tests/android_policy_test.py
+          python3 tests/android_build_test.py
+          python3 tests/android_entry_test.py
+
+  android-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;27.0.12077973'
+      - name: Build Android dependencies and game-free GPU fixture
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          python3 tools/android_deps.py
+          python3 tools/build_android.py gfxtest --native-tls --test gfx_async
+          python3 tools/build_android.py tls-test --native-tls

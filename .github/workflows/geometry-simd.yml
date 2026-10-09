@@ -1,0 +1,80 @@
+# Game-free checks of the shared geometry kernels and their guarded adapters (tests/geometry_simd_test.py,
+# tests/geometry_guest_test.py) with macOS Clang, Linux GCC and Clang, and Windows MSVC, and under the
+# sanitizers on macOS and Linux.
+name: Shared geometry
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/portable/geometry_*'
+      - 'tests/geometry_*'
+      - 'host/host64.c'
+      - 'meta/builds.json'
+      - 'tools/build.py'
+      - 'tools/build_posix.py'
+      - 'tools/buildinfo.py'
+      - '.github/workflows/geometry-simd.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/portable/geometry_*'
+      - 'tests/geometry_*'
+      - 'host/host64.c'
+      - 'meta/builds.json'
+      - 'tools/build.py'
+      - 'tools/build_posix.py'
+      - 'tools/buildinfo.py'
+      - '.github/workflows/geometry-simd.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            cc: clang
+            cxx: clang++
+          - os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+          - os: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+          - os: windows-2022
+            cc: cl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: SIMD and scalar differential checks
+        if: runner.os != 'Windows'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          python3 tests/geometry_simd_test.py
+          python3 tests/geometry_guest_test.py
+      - name: Address and undefined-behavior checks
+        if: runner.os != 'Windows'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+          CFLAGS: '-fsanitize=address,undefined -fno-omit-frame-pointer'
+        run: |
+          python3 tests/geometry_simd_test.py
+          python3 tests/geometry_guest_test.py
+      - name: MSVC x64 differential checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CC: cl
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio x64 tools unavailable' }
+          & cmd.exe /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && python tests/geometry_simd_test.py && python tests/geometry_guest_test.py"
+          exit $LASTEXITCODE

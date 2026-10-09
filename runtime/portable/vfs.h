@@ -18,6 +18,11 @@ void vfs_mount(const char* guest_prefix, const char* host_prefix);
 int vfs_full_path(const char* guest, char* out, size_t n);
 /* The host path for a guest path. 0 if it maps nowhere. */
 int vfs_host_path(const char* guest, char* host, size_t n);
+/* A host path as Windows would find it: on a case-sensitive host, each component that is not there
+ * becomes its folder's entry under another case (installs ship "ROM/119/50.dat" for the game's
+ * "50.DAT"), in place. For host code that opens the install's files itself (the addon host's
+ * resources). */
+void vfs_match_case(char* host_path);
 
 /* DAT overlays, as XIPivot does them: a host folder laid out like the install's ROM*\ and sound*\
  * folders. A guest path through "ROM<n>\" or "sound<n>\" whose rest is in an overlay opens the

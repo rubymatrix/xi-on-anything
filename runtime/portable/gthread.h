@@ -36,6 +36,21 @@ int gt_holds(void);
  * calls into the guest (the addon host's Lua states). Blocking shims still release the lock. */
 void gt_noyield(int on);
 
+/* This thread's guest registers, SEH chain head, lock and no-yield count, for a host guard around code
+ * that calls into the guest (the addon host's): a fault inside a guest call jumps past that call's own
+ * restore, and the guest code the host interrupted would resume with the abandoned callee's esp, ebx,
+ * esi, edi, ebp and x87 stack, and fs:[0] naming an SEH frame on the stack it gave up. gt_restore puts
+ * back what gt_save took. Other guest memory the callee wrote stays written. */
+typedef struct GtSaved
+{
+    GThread* t; /* none yet: nothing to restore */
+    Guest g;
+    uint32_t seh; /* the TEB's fs:[0] */
+    int held, noyield;
+} GtSaved;
+void gt_save(GtSaved* s);
+void gt_restore(const GtSaved* s);
+
 /* Win32 last-error of the current guest thread (the TEB's LastErrorValue, fs:[0x34]). */
 void gt_set_error(uint32_t e);
 uint32_t gt_get_error(void);

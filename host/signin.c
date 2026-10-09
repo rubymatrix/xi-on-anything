@@ -245,12 +245,26 @@ static void default_settings(const char* path, const SigninSetup* su)
         { "0023", 0 }, { "0029", 12 }, { "0034", 1 }, { "0035", 1 }, { "0036", 0 }, { "0037", 960 },
         { "0038", 540 }, { "0040", 0 },
     };
+    /* the background (the square the world is drawn at before it fits the window): 2048 on a screen of
+     * 1920x1080 or less, in pixels, either way up - every effect's cost goes with its pixels, and at 4096 a
+     * ROG Ally's GPU drew Bastok Markets at 32 fps, at 2048 at 56 - else 4096, as when the screen is unknown */
+    uint32_t bg = 4096;
+    const SDL_DisplayMode* dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+    if (dm && dm->w > 0 && dm->h > 0)
+    {
+        float d = dm->pixel_density > 0.0f ? dm->pixel_density : 1.0f;
+        uint32_t a = (uint32_t)(dm->w * d + 0.5f), b = (uint32_t)(dm->h * d + 0.5f);
+        if ((a > b ? a : b) <= 1920 && (a > b ? b : a) <= 1080)
+            bg = 2048;
+    }
     fprintf(f, "REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI]\r\n");
     for (size_t i = 0; i < sizeof VALUES / sizeof *VALUES; ++i)
     {
         uint32_t v = VALUES[i].v;
         const char* n = VALUES[i].name;
-        if (!strcmp(n, "0034") && su->default_mode >= 0 && su->default_mode <= 3)
+        if (!strcmp(n, "0003") || !strcmp(n, "0004"))
+            v = bg;
+        else if (!strcmp(n, "0034") && su->default_mode >= 0 && su->default_mode <= 3)
             v = (uint32_t)su->default_mode;
         else if (!strcmp(n, "0001") && su->default_w >= 640)
             v = (uint32_t)su->default_w;
@@ -451,6 +465,8 @@ typedef struct Widget
     const char* opt[MAX_OPTS];
     float x0, y0, x1, y1; /* where it was drawn, for the mouse */
     float ox0[MAX_OPTS], ox1[MAX_OPTS];
+    float tx, ts; /* W_TEXT / W_SECRET: where its first shown character was drawn, and the text scale */
+    int skip;     /* ... and how many characters scrolled off its left */
 } Widget;
 
 typedef struct Ui
@@ -458,6 +474,10 @@ typedef struct Ui
     Config cfg;
     char password[128], otp[32];
     int screen, focus, sub; /* sub: the option of a choice the cursor is on */
+    int caret, anchor;      /* the focused field's caret, and the other end of its selection (= caret: none) */
+    int caret_id;           /* the control they are for */
+    int dragging;           /* a selection being dragged out with the left button */
+    int down_w, down_o;     /* the button or choice's option the left button went down on, else -1 */
     Widget w[8];
     int nw;
     char status[512];
@@ -537,6 +557,9 @@ static void build(Ui* u)
     static const char* const ONOFF[] = { "ON", "OFF" },
                              *const THEMES[] = { "1", "2", "3", "4", "5", "6", "7", "8" },
                              *const SPACE[] = { "Own Space", "In Place" };
+    Widget old[8];
+    int nold = u->nw;
+    memcpy(old, u->w, sizeof old);
     u->nw = 0;
     if (u->screen == SCREEN_SIGNIN)
     {
@@ -555,8 +578,29 @@ static void build(Ui* u)
         options(u, ID_SPACE, "Full Screen", 2, SPACE);
         add(u, W_BUTTON, ID_BACK, "Back", NULL, 0);
     }
+    /* add() starts each control blank, and the mouse needs where the last frame drew it */
+    for (int i = 0; i < u->nw && i < nold; ++i)
+        if (old[i].id == u->w[i].id)
+        {
+            Widget *n = &u->w[i], *o = &old[i];
+            memcpy(&n->x0, &o->x0, 4 * sizeof o->x0);
+            memcpy(n->ox0, o->ox0, sizeof o->ox0), memcpy(n->ox1, o->ox1, sizeof o->ox1);
+            n->tx = o->tx, n->ts = o->ts, n->skip = o->skip;
+        }
     if (u->focus >= u->nw)
         u->focus = u->nw - 1;
+    /* the caret is for one field: another focused, it starts at the end of its text */
+    int id = u->focus >= 0 && u->w[u->focus].text ? u->w[u->focus].id : -1;
+    if (id != u->caret_id)
+    {
+        u->caret_id = id;
+        u->caret = u->anchor = id >= 0 ? (int)strlen(u->w[u->focus].text) : 0;
+    }
+    else if (id >= 0)
+    {
+        int len = (int)strlen(u->w[u->focus].text);
+        u->caret = u->caret > len ? len : u->caret, u->anchor = u->anchor > len ? len : u->anchor;
+    }
 }
 
 /* the option a choice is set to */
@@ -676,18 +720,56 @@ static void activate(Ui* u, int i)
         start_signin(u);
 }
 
+/* the focused field, if it is one and can be edited */
+static Widget* field(Ui* u)
+{
+    if (u->focus < 0 || u->focus >= u->nw)
+        return NULL;
+    Widget* w = &u->w[u->focus];
+    return w->kind == W_TEXT || w->kind == W_SECRET ? w : NULL;
+}
+
+/* the selection's ends */
+static void sel_range(const Ui* u, int* lo, int* hi)
+{
+    *lo = u->caret < u->anchor ? u->caret : u->anchor;
+    *hi = u->caret < u->anchor ? u->anchor : u->caret;
+}
+
+/* removes [lo, hi) of the field, the caret at lo */
+static void erase(Ui* u, Widget* w, int lo, int hi)
+{
+    size_t len = strlen(w->text);
+    memmove(w->text + lo, w->text + hi, len - hi + 1);
+    u->caret = u->anchor = lo;
+}
+
+/* the selection removed; whether there was one */
+static int erase_selection(Ui* u, Widget* w)
+{
+    int lo, hi;
+    sel_range(u, &lo, &hi);
+    if (lo == hi)
+        return 0;
+    erase(u, w, lo, hi);
+    return 1;
+}
+
 static void type(Ui* u, const char* s)
 {
-    if (u->focus < 0 || u->focus >= u->nw || busy())
+    Widget* w = field(u);
+    if (!w || busy())
         return;
-    Widget* w = &u->w[u->focus];
-    if (w->kind != W_TEXT && w->kind != W_SECRET)
-        return;
+    erase_selection(u, w);
     size_t len = strlen(w->text);
     for (; *s && len + 1 < w->cap; ++s)
         if (*s >= ' ' && *s <= '~') /* the font's ASCII */
-            w->text[len++] = *s;
-    w->text[len] = 0;
+        {
+            memmove(w->text + u->caret + 1, w->text + u->caret, len - u->caret + 1);
+            w->text[u->caret++] = *s;
+            ++len;
+        }
+    u->anchor = u->caret;
     u->focus_time = SDL_GetTicks();
 }
 
@@ -1096,6 +1178,27 @@ static void cursor(Ui* u, float x, float y, float k)
     uidraw_quads(&u->menu.tex, &q, 1);
 }
 
+/* what a field shows: its text, or a * for each character of a password */
+static void shown_text(const Widget* c, char* out, size_t n)
+{
+    size_t len = strlen(c->text);
+    if (len > n - 1)
+        len = n - 1;
+    if (c->kind == W_SECRET)
+        memset(out, '*', len);
+    else
+        memcpy(out, c->text, len);
+    out[len] = 0;
+}
+
+/* how wide characters [from, to) of s are in the typed-text font */
+static float span(const Ui* u, const char* s, int from, int to, float ts)
+{
+    char part[160];
+    snprintf(part, sizeof part, "%.*s", to - from, s + from);
+    return ui_text_width(&u->ink, part, ts);
+}
+
 /* Draws the screen and records where each control is */
 static void draw(Ui* u, int w, int h)
 {
@@ -1193,24 +1296,35 @@ static void draw(Ui* u, int w, int h)
             uidraw_quads(&u->menu.tex, f, 3);
             c->x0 = X(cx), c->y0 = Y(top), c->x1 = X(right), c->y1 = Y(top + 16);
             char shown[160];
-            size_t len = strlen(c->text);
-            if (c->kind == W_SECRET)
-            {
-                len = len < sizeof shown - 1 ? len : sizeof shown - 1;
-                memset(shown, '*', len);
-                shown[len] = 0;
-            }
-            else
-                SDL_strlcpy(shown, c->text, sizeof shown);
-            /* the end of a long entry, as fields scroll */
+            shown_text(c, shown, sizeof shown);
+            int len = (int)strlen(shown), ci = u->caret < len ? u->caret : len;
+            /* scrolled so the caret shows (an unfocused entry shows its end) */
             float ts = k * 0.9375f, tx = X(cx + 14), room = (right - cx - 30) * k;
-            const char* v = shown;
-            while (*v && ui_text_width(&u->ink, v, ts) > room)
-                ++v;
-            typed(u, v, tx, Y(top + 0.5f), ts, WHITE);
-            if (focused && !busy() && (now - u->focus_time) / 500 % 2 == 0)
+            int skip = 0;
+            if (focused)
+                while (skip < ci && span(u, shown, skip, ci, ts) > room)
+                    ++skip;
+            else
+                while (skip < len && span(u, shown, skip, len, ts) > room)
+                    ++skip;
+            int end = len;
+            while (end > skip && span(u, shown, skip, end, ts) > room)
+                --end;
+            c->tx = tx, c->ts = ts, c->skip = skip;
+            if (focused && u->anchor != u->caret)
             {
-                float x = tx + ui_text_width(&u->ink, v, ts) + 1 * k;
+                int lo, hi;
+                sel_range(u, &lo, &hi);
+                lo = lo < skip ? skip : lo > end ? end : lo, hi = hi < skip ? skip : hi > end ? end : hi;
+                uidraw_rect(tx + span(u, shown, skip, lo, ts), Y(top + 1), tx + span(u, shown, skip, hi, ts), Y(top + 15),
+                    0xA04870C8u);
+            }
+            char vis[160];
+            snprintf(vis, sizeof vis, "%.*s", end - skip, shown + skip);
+            typed(u, vis, tx, Y(top + 0.5f), ts, WHITE);
+            if (focused && !busy() && (now - u->focus_time) / 500 % 2 == 0 && ci >= skip && ci <= end)
+            {
+                float x = tx + span(u, shown, skip, ci, ts) + 1 * k;
                 uidraw_rect(x, Y(top + 2), x + 1.5f * k, Y(top + 14), 0xFFE0E0E0u);
             }
             if (focused)
@@ -1252,6 +1366,90 @@ static int hit(const Ui* u, float x, float y, int* opt)
                 return i;
         }
     return -1;
+}
+
+/* the character boundary of field c nearest x, as it was drawn */
+static int caret_at(const Ui* u, const Widget* c, float x)
+{
+    char shown[160];
+    shown_text(c, shown, sizeof shown);
+    int len = (int)strlen(shown);
+    float prev = 0;
+    for (int i = c->skip; i < len; ++i)
+    {
+        float next = span(u, shown, c->skip, i + 1, c->ts);
+        if (x < c->tx + (prev + next) * 0.5f)
+            return i;
+        prev = next;
+    }
+    return len;
+}
+
+/* the cursor onto what the pointer is over (a choice's pill, else the control), with its sound */
+static void hover(Ui* u, int i, int o)
+{
+    if (i < 0 || (i == u->focus && (u->w[i].kind != W_CHOICE || o == u->sub)))
+        return;
+    int screen = u->screen;
+    focus_on(u, i);
+    if (o >= 0)
+        u->sub = o;
+    if (u->screen == screen)
+        sound(u, SND_MOVE);
+}
+
+/* the left button, or the pointer moving; x, y in the window's pixels */
+static void mouse(Ui* u, const SDL_Event* e, float d)
+{
+    int o;
+    if (e->type == SDL_EVENT_MOUSE_MOTION)
+    {
+        Widget* f = field(u);
+        if (u->dragging && f && (e->motion.state & SDL_BUTTON_LMASK))
+        {
+            u->caret = caret_at(u, f, e->motion.x * d);
+            u->focus_time = SDL_GetTicks();
+        }
+        else
+        {
+            u->dragging = 0;
+            hover(u, hit(u, e->motion.x * d, e->motion.y * d, &o), o);
+        }
+    }
+    else if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_LEFT)
+    {
+        int i = hit(u, e->button.x * d, e->button.y * d, &o);
+        u->dragging = 0, u->down_w = -1;
+        if (i < 0)
+            return;
+        Widget* w = &u->w[i];
+        hover(u, i, o);
+        if (w->text)
+        {
+            /* into a field: the caret where it was clicked, a second click selecting it all */
+            u->caret_id = w->id;
+            u->caret = u->anchor = caret_at(u, w, e->button.x * d);
+            if (e->button.clicks >= 2)
+                u->anchor = 0, u->caret = (int)strlen(w->text);
+            else
+                u->dragging = 1;
+            u->focus_time = SDL_GetTicks();
+        }
+        else
+            u->down_w = i, u->down_o = o;
+    }
+    else if (e->type == SDL_EVENT_MOUSE_BUTTON_UP && e->button.button == SDL_BUTTON_LEFT)
+    {
+        /* a button acts on release over it; away from it, nothing */
+        int i = hit(u, e->button.x * d, e->button.y * d, &o), w = u->down_w;
+        u->dragging = 0, u->down_w = -1;
+        if (w >= 0 && i == w && o == u->down_o)
+        {
+            if (o >= 0)
+                u->sub = o;
+            activate(u, i);
+        }
+    }
 }
 
 static void key_act(Ui* u, const SDL_KeyboardEvent* e);
@@ -1296,6 +1494,24 @@ static void key_act(Ui* u, const SDL_KeyboardEvent* e)
         else
             activate(u, u->focus);
     }
+    else if (f && f->text && (k == SDLK_LEFT || k == SDLK_RIGHT || k == SDLK_HOME || k == SDLK_END))
+    {
+        /* the caret along the text; Shift holds the selection's other end, and without it a
+         * selection gives way to the end the caret goes toward */
+        int len = (int)strlen(f->text), lo, hi, to = u->caret;
+        sel_range(u, &lo, &hi);
+        if (k == SDLK_HOME || (cmd && k == SDLK_LEFT))
+            to = 0;
+        else if (k == SDLK_END || (cmd && k == SDLK_RIGHT))
+            to = len;
+        else if (!shift && lo != hi)
+            to = k == SDLK_LEFT ? lo : hi;
+        else
+            to = u->caret + (k == SDLK_LEFT ? -1 : 1);
+        u->caret = to < 0 ? 0 : to > len ? len : to;
+        if (!shift)
+            u->anchor = u->caret;
+    }
     else if (f && f->kind == W_CHOICE && (k == SDLK_LEFT || k == SDLK_RIGHT))
     {
         /* the cursor along the row's buttons, as a Config page's */
@@ -1311,10 +1527,34 @@ static void key_act(Ui* u, const SDL_KeyboardEvent* e)
     }
     else if (f && (f->kind == W_BUTTON || f->kind == W_CHOICE) && k == SDLK_SPACE)
         activate(u, u->focus);
-    else if (f && f->text && k == SDLK_BACKSPACE && !busy())
+    else if (f && f->text && (k == SDLK_BACKSPACE || k == SDLK_DELETE) && !busy())
     {
-        size_t len = strlen(f->text);
-        f->text[cmd ? 0 : len ? len - 1 : 0] = 0;
+        int len = (int)strlen(f->text);
+        if (!erase_selection(u, f))
+        {
+            if (k == SDLK_BACKSPACE && cmd)
+                erase(u, f, 0, u->caret); /* to the start */
+            else if (k == SDLK_BACKSPACE && u->caret > 0)
+                erase(u, f, u->caret - 1, u->caret);
+            else if (k == SDLK_DELETE && u->caret < len)
+                erase(u, f, u->caret, u->caret + 1);
+        }
+    }
+    else if (f && f->text && k == SDLK_A && cmd)
+        u->anchor = 0, u->caret = (int)strlen(f->text);
+    else if (f && f->kind == W_TEXT && (k == SDLK_C || k == SDLK_X) && cmd)
+    {
+        /* a password is neither copied nor cut */
+        int lo, hi;
+        sel_range(u, &lo, &hi);
+        if (lo != hi)
+        {
+            char part[256];
+            SDL_strlcpy(part, f->text + lo, (size_t)(hi - lo + 1) < sizeof part ? (size_t)(hi - lo + 1) : sizeof part);
+            SDL_SetClipboardText(part);
+            if (k == SDLK_X && !busy())
+                erase(u, f, lo, hi);
+        }
     }
     else if (f && f->text && k == SDLK_V && cmd)
     {
@@ -1345,7 +1585,6 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     SDL_strlcpy(out->data_dir, dir, sizeof out->data_dir);
     config_path(dir, "signin.cfg", cfg_path, sizeof cfg_path);
     config_path(dir, "settings.reg", out->settings_reg, sizeof out->settings_reg);
-    default_settings(out->settings_reg, setup);
 
     Config* c = &u->cfg;
     c->remember = 1, c->theme = 1;
@@ -1376,6 +1615,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         free(u);
         return -1;
     }
+    default_settings(out->settings_reg, setup); /* after SDL_Init: its background follows the screen's size */
     int read_keychain = 0;
     if (setup->password)
         SDL_strlcpy(u->password, setup->password, sizeof u->password);
@@ -1493,7 +1733,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             if (!sewave_load(u->host_game, (uint32_t)i + 1, &u->snd[i]))
                 fprintf(stderr, "[signin] no sound effect %d in the install\n", i + 1);
     u->opened = u->anim_at = u->focus_time = SDL_GetTicks();
-    u->press_w = -1;
+    u->press_w = u->down_w = -1;
     int result = 0;
     for (int done = 0; !done;)
     {
@@ -1510,21 +1750,9 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
                 type(u, e.text.text);
             else if (e.type == SDL_EVENT_KEY_DOWN)
                 key(u, &e.key);
-            else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT)
-            {
-                float d = SDL_GetWindowPixelDensity(win);
-                int o, i = hit(u, e.button.x * d, e.button.y * d, &o);
-                if (i >= 0)
-                {
-                    if (i != u->focus && u->w[i].kind != W_BUTTON && u->w[i].kind != W_CHOICE)
-                        sound(u, SND_MOVE); /* into a field; a button's is its press */
-                    focus_on(u, i);
-                    if (o >= 0)
-                        u->sub = o;
-                    if (u->w[i].kind == W_BUTTON || u->w[i].kind == W_CHOICE)
-                        activate(u, i);
-                }
-            }
+            else if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                     e.type == SDL_EVENT_MOUSE_BUTTON_UP)
+                mouse(u, &e, SDL_GetWindowPixelDensity(win));
             build(u);
         }
 

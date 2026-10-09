@@ -175,6 +175,7 @@ def host64(env, out):
         buildinfo.current()  # exits: run tools/prepare.py first
     build.write_build_h()
     build.translate()
+    build.rt_shaders(env)  # generated/gfx_rt_dxil.h, which gfx_d3d12.c includes (GFX_RT_NONE without dxc)
     gen = lambda sub: ['generated/%s/%s' % (sub, f) for f in sorted(os.listdir(os.path.join(ROOT, 'generated', sub)))
                        if f.endswith('.c')]
     sdl_inc, sdl_lib = build.sdl3()

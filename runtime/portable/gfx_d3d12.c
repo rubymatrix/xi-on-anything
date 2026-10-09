@@ -39,6 +39,7 @@
 #include "cachedir.h"
 #include "gfx.h"
 #include "gfx_hlsl.h"
+#include "gfx_rt_dxil.h"
 
 #define FRAMES 3
 #define GFX_PROBES 8 /* reads of one surface per frame that keep their own history */
@@ -257,7 +258,7 @@ typedef struct FxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft,
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
-        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse;
+        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -393,6 +394,8 @@ void gfx_prof_shim(uint64_t ns)
         g_prof.shim_ns += ns;
 }
 
+static uint32_t g_pixel_fallbacks; /* draws lit per vertex while their per-pixel pipeline builds (the profile) */
+
 /* at each Present: every two seconds, the average frame and where it went */
 static void prof_frame(uint64_t present_start)
 {
@@ -431,6 +434,9 @@ static void prof_frame(uint64_t present_start)
             fprintf(stderr, "%s%s %llu", any++ ? ", " : "[gfx]   skipped draws (2 s): ", WHY[i], (unsigned long long)g_prof.skips[i]);
     if (any)
         fprintf(stderr, "\n");
+    if (g_pixel_fallbacks)
+        fprintf(stderr, "[gfx]   lit per vertex while their per-pixel pipelines build (2 s): %u draws\n", g_pixel_fallbacks);
+    g_pixel_fallbacks = 0;
     if (g_fx_ran || g_fx_no_depth || g_fx_no_proj || g_fx_not_ready || g_pipes_building)
         fprintf(stderr, "[gfx]   scene effects (2 s): ran %u, no depth %u, no perspective %u, not ready %u; %ld pipelines building\n",
             g_fx_ran, g_fx_no_depth, g_fx_no_proj, g_fx_not_ready, (long)g_pipes_building);
@@ -1619,7 +1625,7 @@ static ID3D12PipelineState* build_pipeline(const PipeKey* k, const uint32_t* vs,
     memset(&pd, 0, sizeof pd);
     pd.pRootSignature = g_root;
     pd.VS.pShaderBytecode = ID3D10Blob_GetBufferPointer(s->vs), pd.VS.BytecodeLength = ID3D10Blob_GetBufferSize(s->vs);
-    if (!shadow || alpha_tested(&k->lib.fs))
+    if (!shadow || alpha_tested(&k->lib.fs) || k->color != DXGI_FORMAT_UNKNOWN) /* (the bounce light's map is in colour) */
         pd.PS.pShaderBytecode = ID3D10Blob_GetBufferPointer(s->ps), pd.PS.BytecodeLength = ID3D10Blob_GetBufferSize(s->ps);
     D3D12_RENDER_TARGET_BLEND_DESC* c = &pd.BlendState.RenderTarget[0];
     uint32_t wm = k->pipe.write_mask;
@@ -1663,6 +1669,16 @@ static ID3D12PipelineState* build_pipeline(const PipeKey* k, const uint32_t* vs,
         pd.DepthStencilState.BackFace = st;
     }
     pd.PrimitiveTopologyType = (D3D12_PRIMITIVE_TOPOLOGY_TYPE)k->topo;
+    /* the capture (ray tracing's rt_capture): the position streamed out, nothing drawn */
+    static const D3D12_SO_DECLARATION_ENTRY so_pos[2] = { { 0, "SV_Position", 0, 0, 4, 0 }, { 0, "TEXCOORD", 0, 0, 4, 0 } };
+    static const UINT so_stride = 32; /* the position, then an alpha test's first texture coordinates */
+    if (k->lib.vs.shadow == 2)
+    {
+        pd.StreamOutput.pSODeclaration = so_pos, pd.StreamOutput.NumEntries = k->lib.fs.alpha_func ? 2 : 1;
+        pd.StreamOutput.pBufferStrides = &so_stride, pd.StreamOutput.NumStrides = 1;
+        pd.StreamOutput.RasterizedStream = D3D12_SO_NO_RASTERIZED_STREAM;
+        pd.PS.pShaderBytecode = NULL, pd.PS.BytecodeLength = 0;
+    }
     pd.NumRenderTargets = k->color != DXGI_FORMAT_UNKNOWN ? 1 : 0;
     pd.RTVFormats[0] = (DXGI_FORMAT)k->color;
     pd.DSVFormat = (DXGI_FORMAT)k->dsv;
@@ -1828,6 +1844,7 @@ static ID3D12PipelineState* pipeline(const GfxDraw* d, GfxTex* ds)
     ID3D12PipelineState* p = pipeline_for(&k, d->vs_tokens, d->ps_tokens);
     if (!p && k.lib.vs.pixel)
     {
+        g_pixel_fallbacks++;
         /* lit per pixel, still building: lit per vertex meanwhile (a new mix of the game's lights
          * would blink the object out while its pipeline builds) */
         k.lib.vs.pixel = 0;
@@ -2007,7 +2024,7 @@ typedef struct Caster
     uint32_t vlen[GFX_NSTREAMS];
     GfxBuf* ib;            /* the indices' static buffer, or NULL */
     const uint8_t* icpu;   /* the indices on the CPU */
-    GfxTex* tex[8];        /* only for an alpha test */
+    GfxTex* tex[8];        /* for an alpha test, and the bounce light's map (in colour) */
     GfxSampler samp[8];
     float wv[16];          /* its world-view matrix (fixed function: is it placed, or a character?) */
     int32_t uidx;          /* its uniforms in g_caster_u (the cache's copy is made from them), or -1 */
@@ -2328,8 +2345,8 @@ static void scene_mips(const GfxDraw* d)
         return;
     uint32_t tw, th;
     color_size(&tw, &th);
-    if (tw * th < 1024)
-        return; /* not the sun flare's 16x16 occlusion probe */
+    if (tw < 512 || th < 512)
+        return; /* onto a large target only: not the flare's probe, nor the game's 256x256 targets (gfx_metal.m) */
     for (int i = 0; i < 8; ++i)
     {
         GfxTex* t = d->tex[i];
@@ -2450,8 +2467,7 @@ static void draw_encode(const GfxDraw* d)
     if (rec)
     {
         rec->ugpu = ugpu;
-        if (alpha_tested(&d->fs))
-            memcpy(rec->tex, bound_tex, sizeof bound_tex), memcpy(rec->samp, bound_samp, sizeof bound_samp);
+        memcpy(rec->tex, bound_tex, sizeof bound_tex), memcpy(rec->samp, bound_samp, sizeof bound_samp);
     }
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
@@ -2750,6 +2766,13 @@ static const struct
     FXS(gameshadows, 0.0f),
     /* how much of the sun's shadows stay in a Mog House (gfx_set_moghouse), 0 none to 1 all */
     FXS(moghouse, 0.0f),
+    /* the sun's light thrown on by what it lights (bounce light): its strength (0 none), how far a lit
+     * surface throws it, and how far from the camera it is gathered (the map it is gathered from) */
+    FXS(gi, 0.0f), FXS(gi_radius, 6.0f), FXS(gi_distance, 48.0f), /* (off unless asked for: Config > Modern's Bounce Light) */
+    /* ray tracing: the world made for rays each frame (rt_capture) where the device can, the bounce light
+     * and the occlusion traced through it; 0, the default, none (the bounce light from its map alone, the
+     * occlusion from the depth); debug=clay shows it */
+    FXS(rt, 0.0f),
 };
 #undef FXS
 
@@ -2864,7 +2887,8 @@ static void fx_config(void)
     const char* dbg = getenv("FFXI_FX_DEBUG"); /* also by name */
     if (dbg)
         g_fxs.debug = !strcmp(dbg, "ao") ? 1.0f : !strcmp(dbg, "fog") ? 2.0f : !strcmp(dbg, "bloom") ? 3.0f
-            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f : (float)atof(dbg);
+            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f
+            : !strcmp(dbg, "gi") ? 6.0f : !strcmp(dbg, "gi_split") ? 7.0f : !strcmp(dbg, "clay") ? 8.0f : (float)atof(dbg);
     for (size_t i = 0; i < FX_NSETTINGS; ++i)
         g_fx_start[i] = *(float*)((char*)&g_fxs + FX_SETTINGS[i].at);
     /* where Config > Modern writes it (host/modern.c fx_file): FFXI_CACHE_DIR's when that is set */
@@ -2886,7 +2910,9 @@ static void fx_config(void)
 typedef struct FxU
 {
     float proj[4], zp[4], vp[4], size[4], ao[4], grade[4], hand[4], up[4], sun[4], suncol[4], sunuv[4], fogc[4], fogp[4],
-        bloom[4], rays[4], shadow[4], lmat[16], smap[4], smap2[4], reproj[16], hist[4], lmatn[16], smapn[4], smapn2[4], aop[4];
+        bloom[4], rays[4], shadow[4], lmat[16], smap[4], smap2[4], reproj[16], hist[4], lmatn[16], smapn[4], smapn2[4], aop[4],
+        gimat[16], giinv[16], gi[4], gip[4];
+    uint32_t rtp[4]; /* ray tracing's world (gfx_rt.hlsl says what each holds) */
 } FxU;
 
 /* a target of the effects': one level (or the occlusion's depth: four), each level's state its own */
@@ -2911,11 +2937,12 @@ typedef struct SunTex
 #define FX_HALF DXGI_FORMAT_R16G16B16A16_FLOAT
 #define FX_Z DXGI_FORMAT_R32_FLOAT
 #define FX_COLOR DXGI_FORMAT_B8G8R8A8_UNORM /* the game's color targets (comp, aa and mip draw onto them) */
+#define GI_MAP 1024 /* the bounce light's map's texels across */
 
 static struct
 {
     volatile LONG state; /* 0 not asked for, 1 building, 2 ready, 3 failed */
-    ID3D12PipelineState *ao, *blur, *bright, *down, *gauss, *raymask, *rays, *temporal, *linz, *zmip, *comp, *aa, *mip;
+    ID3D12PipelineState *ao, *blur, *bright, *down, *gauss, *raymask, *rays, *temporal, *linz, *zmip, *comp, *aa, *mip, *gi, *gitemp;
     uint32_t cmp; /* the comparison sampler's slot (the shadow maps') */
     FxTex lz;     /* the occlusion's depth: view z at its size and three levels below (fx_linz, fx_zmip) */
     FxTex aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
@@ -2929,11 +2956,19 @@ static struct
     uint64_t eased_serial;
     float fog_on, fogc[3], up[3], sun[3], suncol[3];
     float sunw[3]; /* toward the sun in the world, as the last lit draw gave it, and the frame it was seen */
+    float sun0[3], sunt[3], sunp; /* the sun's glide from its last step (sun0) to the game's (sunt), sunp of the way */
     uint64_t sunw_seen;
     float direct; /* how much of the game's light is the sun's, eased: the shadows fade with it */
     int fogc_set;
     float last_cam[3]; /* where the camera was at the last scene (a jump is a new place) */
     SunTex smap, smapn; /* the sun's maps: far, near */
+    /* the bounce light: the casters near the camera as the sun sees them, depth and colour (with three
+     * levels below, for the gather's wide reads); the gather at half the occlusion's size; the gather
+     * after the temporal pass, this frame's and the one before */
+    SunTex gimap;
+    FxTex gicol, gi0, gi1, gih[2]; /* (gi1: the traced bounce light's smoothing, rt_giblur) */
+    int gih_at;
+    uint64_t gih_serial, prev_serial; /* the frames the bounce's history and the camera's (prev_view) were kept */
     /* the shadows' profile (FFXI_PROFILE): frames, frames with their own sun, with a map, the fewest
      * and most casters; casters drawn live, from the cache, skipped (no pipeline yet) */
     uint32_t st_frames, st_own, st_map, st_cmin, st_cmax, st_drawn_this, st_cached, st_live, st_replayed, st_skipped, st_beyond;
@@ -2971,10 +3006,12 @@ static void fx_build(void)
         g_fx.comp = fx_pipeline(vs, "fx_comp", FX_COLOR);
         g_fx.aa = fx_pipeline(vs, "fx_fxaa", FX_COLOR);
         g_fx.mip = fx_pipeline(vs, "fx_mip", FX_COLOR);
+        g_fx.gi = fx_pipeline(vs, "fx_gi", FX_HALF);
+        g_fx.gitemp = fx_pipeline(vs, "fx_gitemp", FX_HALF);
         ID3D10Blob_Release(vs);
     }
     int ok = vs && g_fx.ao && g_fx.blur && g_fx.bright && g_fx.down && g_fx.gauss && g_fx.raymask && g_fx.rays && g_fx.temporal &&
-        g_fx.linz && g_fx.zmip && g_fx.comp && g_fx.aa && g_fx.mip;
+        g_fx.linz && g_fx.zmip && g_fx.comp && g_fx.aa && g_fx.mip && g_fx.gi && g_fx.gitemp;
     fprintf(stderr, ok ? "[recomp] gfx: scene effects ready\n" : "[recomp] gfx: scene effects failed: the scene goes through as it was\n");
     InterlockedExchange(&g_fx.state, ok ? 2 : 3);
 }
@@ -3378,7 +3415,7 @@ static void sun_cache_forget_tex(const GfxTex* t)
     for (uint32_t i = 0; i < g_ncasters; ++i)
         for (int k = 0; k < 8; ++k)
             if (g_casters[i].tex[k] == t)
-                g_casters[i].n = 0, g_casters[i].tex[k] = NULL;
+                g_casters[i].n = alpha_tested(&g_casters[i].lib.fs) ? 0 : g_casters[i].n, g_casters[i].tex[k] = NULL;
 }
 
 /* gone from the cache's view: not seen for SUN_CACHE_FRAMES, and the camera has moved on from where it was */
@@ -3669,6 +3706,8 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
             /* what it draws with as of this frame (a copy's buffers are its own: cache_copy) */
             Caster was = ce->c;
             ce->c = *c;
+            if (!alpha_tested(&c->lib.fs)) /* its textures are the bounce light's, which draws this frame's alone */
+                memset(ce->c.tex, 0, sizeof ce->c.tex);
             if (copy && !fresh)
                 memcpy(ce->c.va, was.va, sizeof was.va), ce->c.iva = was.iva;
         }
@@ -3829,9 +3868,19 @@ static int beyond_map(const SunCascade* k, const float* p)
     return (fmaxf(fabsf(m[0]), fabsf(m[1])) - 1.0f) * 0.5f * k->across > 96.0f;
 }
 
-/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). How many
- * were drawn; -1 when the map was not even cleared (it still holds an earlier frame's) */
-static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCascade* k, int cache)
+/* is a world point more than margin units outside the cascade's sides? */
+static int beyond_by(const SunCascade* k, const float* p, float margin)
+{
+    float q[4] = { p[0], p[1], p[2], 1.0f }, m[4];
+    xform4(m, q, k->S);
+    return (fmaxf(fabsf(m[0]), fabsf(m[1])) - 1.0f) * 0.5f * k->across > margin;
+}
+
+/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). With col,
+ * the bounce light's: every caster (whoever casts) in its own colour as well, through its own pixel
+ * function, unfogged. How many were drawn; -1 when the map was not even cleared (it still holds an
+ * earlier frame's) */
+static int sun_draw(SunTex* t, FxTex* col, const float* invP, const float* invV, const SunCascade* k, int cache)
 {
     float clip_world[16], M[16];
     mat_mul(clip_world, invP, invV);
@@ -3843,7 +3892,15 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
     sun_state(t, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = heap_cpu(&g_dsv, t->dsv);
     ID3D12GraphicsCommandList_ClearDepthStencilView(l, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
-    ID3D12GraphicsCommandList_OMSetRenderTargets(l, 0, NULL, FALSE, &dsv);
+    if (col)
+    {
+        static const float black[4] = { 0, 0, 0, 0 };
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = fx_out(col, 0);
+        ID3D12GraphicsCommandList_ClearRenderTargetView(l, rtv, black, 0, NULL);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(l, 1, &rtv, FALSE, &dsv);
+    }
+    else
+        ID3D12GraphicsCommandList_OMSetRenderTargets(l, 0, NULL, FALSE, &dsv);
     D3D12_VIEWPORT v = { 0, 0, (float)k->size, (float)k->size, 0, 1 };
     D3D12_RECT sc = { 0, 0, k->size, k->size };
     ID3D12GraphicsCommandList_RSSetViewports(l, 1, &v);
@@ -3862,9 +3919,9 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
                 continue;
             /* sun_casters 1: characters alone cast - the zone's shadows are baked into its colours
              * already, and the game tints them for the hour and the weather */
-            if ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep))
+            if (!col && ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep)))
                 continue;
-            if (cs->has_wpos && beyond_map(k, cs->wpos))
+            if (cs->has_wpos && (col ? beyond_by(k, cs->wpos, 16.0f) : beyond_map(k, cs->wpos)))
             {
                 g_fx.st_beyond++;
                 continue;
@@ -3900,8 +3957,10 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
         memset(&pk, 0, sizeof pk);
         pk.lib = cs->lib;
         pk.lib.vs.shadow = 1, pk.lib.vs.pixel = 0;
-        int at = alpha_tested(&cs->lib.fs);
-        if (!at)
+        int at = alpha_tested(&cs->lib.fs), tex = at || col;
+        if (col)
+            pk.lib.fs.fog = 0, pk.pipe.write_mask = 15; /* its colour as the sun sees it: no fog of the camera's */
+        else if (!at)
         {
             /* the position alone: one pipeline serves every draw with the same vertex layout */
             GfxVsKey* vk = &pk.lib.vs;
@@ -3913,7 +3972,7 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
             memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
         }
         pk.depth.zenable = 1, pk.depth.zwrite = 1, pk.depth.zfunc = 2; /* LESS */
-        pk.color = DXGI_FORMAT_UNKNOWN, pk.dsv = DXGI_FORMAT_D32_FLOAT;
+        pk.color = col ? FX_COLOR : DXGI_FORMAT_UNKNOWN, pk.dsv = DXGI_FORMAT_D32_FLOAT;
         pk.cull = 1, pk.fill = 3; /* both faces: a caster's back faces cast as well */
         pk.topo = (uint8_t)topology_type(cs->prim);
         ID3D12PipelineState* p = pipeline_for(&pk, cs->vs, cs->ps);
@@ -3935,7 +3994,7 @@ static int sun_draw(SunTex* t, const float* invP, const float* invV, const SunCa
             ID3D12GraphicsCommandList_SetGraphicsRootShaderResourceView(l, ROOT_STREAM0 + st, cs->va[st] ? cs->va[st] : dummy);
         }
         ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(l, ROOT_U, ugpu);
-        if (at)
+        if (tex)
         {
             uint32_t bind[16];
             for (int tx = 0; tx < 8; ++tx)
@@ -4015,7 +4074,7 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     sun_fit(s, invV, L, 0.5f, dfar, SUN_MAP, &far_k);
     if (!sun_target(&g_fx.smap, SUN_MAP))
         return 0;
-    int drawn = sun_draw(&g_fx.smap, invP, invV, &far_k, 1);
+    int drawn = sun_draw(&g_fx.smap, NULL, invP, invV, &far_k, 1);
     memcpy(u->lmat, far_k.lmat, 64);
     u->smap[1] = far_k.texel, u->smap[2] = far_k.bias, u->smap[3] = far_k.soft;
     u->smap2[0] = far_k.slope, u->smap2[3] = far_k.range;
@@ -4024,16 +4083,604 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     if (dnear > 0.0f && sun_target(&g_fx.smapn, nsize))
     {
         sun_fit(s, invV, L, 0.5f, tnear, nsize, &near_k);
-        if (sun_draw(&g_fx.smapn, invP, invV, &near_k, 1) >= 0) /* not an earlier frame's map through this one's matrix */
+        if (sun_draw(&g_fx.smapn, NULL, invP, invV, &near_k, 1) >= 0) /* not an earlier frame's map through this one's matrix */
         {
             memcpy(u->lmatn, near_k.lmat, 64);
             u->smapn[0] = near_k.texel, u->smapn[1] = near_k.bias, u->smapn[2] = near_k.soft, u->smapn[3] = near_k.slope;
             u->smapn2[0] = near_k.range, u->smapn2[1] = 1.0f;
         }
     }
+    /* the bounce light's map: this frame's casters over the first gi_distance units the camera sees, in
+     * colour, 1024 across (light thrown a few units wants no finer), and its levels below */
+    u->gi[0] = 0.0f;
+    float gd = fminf(fmaxf(g_fxs.gi_distance, 8.0f), dfar);
+    if (g_fxs.gi > 0.0f && sun_target(&g_fx.gimap, GI_MAP) && fx_tex(&g_fx.gicol, FX_COLOR, GI_MAP, GI_MAP, 4))
+    {
+        SunCascade gk;
+        float inv[16];
+        sun_fit(s, invV, L, 0.5f, gd, GI_MAP, &gk);
+        if (sun_draw(&g_fx.gimap, &g_fx.gicol, invP, invV, &gk, 0) > 0 && mat_inverse(inv, gk.lmat))
+        {
+            FxU mu;
+            memset(&mu, 0, sizeof mu);
+            D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&mu);
+            for (int lv = 1; lv < 4 && ua; ++lv)
+            {
+                uint32_t in = fx_in(&g_fx.gicol, lv - 1);
+                fx_pass(fx_out(&g_fx.gicol, lv), g_fx.mip, 0, 0, (float)(GI_MAP >> lv), (float)(GI_MAP >> lv), ua, &in, 1, 0, 0);
+            }
+            /* the reach in the map's uv; the level read where a texel is about a quarter of it */
+            float r = fmaxf(g_fxs.gi_radius, 0.5f);
+            memcpy(u->gimat, gk.lmat, 64), memcpy(u->giinv, inv, 64);
+            u->gi[0] = 1.0f, u->gi[1] = r / gk.across, u->gi[2] = r;
+            u->gi[3] = fminf(fmaxf(log2f(r / (4.0f * gk.texel)), 0.0f), 3.0f);
+            u->gip[3] = gd;
+        }
+    }
     g_fx.st_across = far_k.across;
     g_fx.st_cached = g_ncache;
     return drawn > 0;
+}
+
+/* --- ray tracing (rt) -------------------------------------------------------------------------------------------
+ * The world for rays, made from the frame's casters as the sun's maps are: each drawn once more through
+ * its own vertex function (the capture key, GfxVsKey.shadow 2: the position on into this frame's view
+ * space, divided through), its triangles streamed out (stream output) one after another into one buffer,
+ * and one acceleration structure built over them all, every frame - a structure over a single instance of
+ * it on top. The casters out of view come from the sun's cache, through the camera they were drawn with.
+ * Rays are traced inline (ray queries) from the scene effects' passes, gfx_rt.hlsl's, built with dxc at
+ * build time (generated/gfx_rt_dxil.h); with no such device, or no dxc at build time, none are. */
+#define RT_REACH 150.0f /* the cache's casters further than this from the camera are left out */
+
+static struct
+{
+    int tried, ok;
+    ID3D12Device5* dev;
+    ID3D12PipelineState *clay, *gi, *ao, *giblur;
+    ID3D12RootSignature* croot; /* the normals' compute passes': eight root constants */
+    ID3D12PipelineState *nclear, *nsum, *nresolve;
+    ID3D12Resource *so, *count, *blas, *blas2, *tlas, *scratch, *nrm, *table; /* (blas2: the alpha-tested) */
+    uint64_t so_size, count_size, blas_size, blas2_size, tlas_size, scratch_size, nrm_size, table_size;
+    D3D12_RESOURCE_STATES so_state, count_state, nrm_state;
+    int32_t so_srv, tlas_srv; /* the triangles (a structured buffer of float4) and the structure, in the heap */
+    int32_t nrm_srv, nrm_uav, table_uav; /* the corners' smooth normals (rt_nresolve), the table that finds them */
+    ID3D12Resource* tab; /* the alpha tests' table (gfx_rt.hlsl alpha_holds) */
+    uint64_t tab_size;
+    D3D12_RESOURCE_STATES tab_state;
+    int32_t tab_srv;
+    uint32_t nsolid, nalpha; /* this frame's solid triangles, alpha-tested casters */
+    /* why the sun's cache gave none (the profile) */
+    uint32_t st_c_gone, st_c_seen, st_c_far, st_c_none;
+    uint32_t verts;           /* this frame's: three a triangle */
+    uint64_t serial;          /* the frame they were made (0: none yet) */
+    /* the profile: casters captured, from the cache, skipped (no pipeline yet), triangles */
+    uint32_t st_live, st_cached, st_skipped, st_frames;
+    uint64_t st_tris;
+} g_ray;
+
+static int g_root_heap; /* the root signature reads the heap directly (shader model 6.6's ResourceDescriptorHeap) */
+
+static ID3DBlob* rt_blob(const unsigned char* p, size_t n)
+{
+    ID3DBlob* b = NULL;
+    if (FAILED(D3DCreateBlob(n, &b)))
+        return NULL;
+    memcpy(ID3D10Blob_GetBufferPointer(b), p, n);
+    return b;
+}
+
+/* whether rays can be traced here (asking once) */
+static int rt_init(void)
+{
+    if (g_ray.tried)
+        return g_ray.ok;
+    g_ray.tried = 1;
+#ifdef GFX_RT_NONE
+    fprintf(stderr, "[recomp] gfx: ray tracing: not built (no dxc at build time)\n");
+    return 0;
+#else
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5;
+    D3D12_FEATURE_DATA_SHADER_MODEL sm = { D3D_SHADER_MODEL_6_6 };
+    memset(&o5, 0, sizeof o5);
+    if (!g_root_heap || FAILED(ID3D12Device_CheckFeatureSupport(g_dev, D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof o5)) ||
+        o5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1 || FAILED(ID3D12Device_CheckFeatureSupport(g_dev, D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm)) ||
+        sm.HighestShaderModel < D3D_SHADER_MODEL_6_6 ||
+        FAILED(ID3D12Device_QueryInterface(g_dev, &IID_ID3D12Device5, (void**)&g_ray.dev)))
+    {
+        fprintf(stderr, "[recomp] gfx: ray tracing: not on this device (tier %d, shader model %x, heap %d)\n", (int)o5.RaytracingTier,
+            (unsigned)sm.HighestShaderModel, g_root_heap);
+        return 0;
+    }
+    ID3DBlob* vs = rt_blob(RT_rt_vs, sizeof RT_rt_vs);
+    const struct { const unsigned char* code; size_t n; ID3D12PipelineState** p; DXGI_FORMAT fmt; } ps[] = {
+        { RT_rt_clay, sizeof RT_rt_clay, &g_ray.clay, FX_COLOR }, { RT_rt_gi, sizeof RT_rt_gi, &g_ray.gi, FX_HALF },
+        { RT_rt_ao, sizeof RT_rt_ao, &g_ray.ao, FX_HALF }, { RT_rt_giblur, sizeof RT_rt_giblur, &g_ray.giblur, FX_HALF },
+    };
+    g_ray.ok = 1;
+    for (size_t i = 0; i < sizeof ps / sizeof ps[0]; ++i)
+    {
+        ID3DBlob* f = rt_blob(ps[i].code, ps[i].n);
+        *ps[i].p = own_pipeline(vs, f, ps[i].fmt, 0);
+        g_ray.ok &= *ps[i].p != NULL;
+        if (f)
+            ID3D10Blob_Release(f);
+    }
+    if (vs)
+        ID3D10Blob_Release(vs);
+    g_ray.so_srv = g_ray.tlas_srv = g_ray.nrm_srv = g_ray.nrm_uav = g_ray.table_uav = g_ray.tab_srv = -1;
+    D3D12_ROOT_PARAMETER cp;
+    memset(&cp, 0, sizeof cp);
+    cp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    cp.Constants.ShaderRegister = 0, cp.Constants.Num32BitValues = 8;
+    cp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC crd = { 1, &cp, 0, NULL, D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED };
+    ID3DBlob *cblob = NULL, *cerr = NULL;
+    if (SUCCEEDED(D3D12SerializeRootSignature(&crd, D3D_ROOT_SIGNATURE_VERSION_1, &cblob, &cerr)))
+        ID3D12Device_CreateRootSignature(g_dev, 0, ID3D10Blob_GetBufferPointer(cblob), ID3D10Blob_GetBufferSize(cblob),
+            &IID_ID3D12RootSignature, (void**)&g_ray.croot);
+    if (cblob)
+        ID3D10Blob_Release(cblob);
+    if (cerr)
+        ID3D10Blob_Release(cerr);
+    const struct { const unsigned char* code; size_t n; ID3D12PipelineState** p; } cs[] = {
+        { RT_rt_nclear, sizeof RT_rt_nclear, &g_ray.nclear }, { RT_rt_nsum, sizeof RT_rt_nsum, &g_ray.nsum },
+        { RT_rt_nresolve, sizeof RT_rt_nresolve, &g_ray.nresolve },
+    };
+    for (size_t i = 0; i < sizeof cs / sizeof cs[0]; ++i)
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC cd;
+        memset(&cd, 0, sizeof cd);
+        cd.pRootSignature = g_ray.croot;
+        cd.CS.pShaderBytecode = cs[i].code, cd.CS.BytecodeLength = cs[i].n;
+        if (!g_ray.croot || FAILED(ID3D12Device_CreateComputePipelineState(g_dev, &cd, &IID_ID3D12PipelineState, (void**)cs[i].p)))
+            *cs[i].p = NULL, g_ray.ok = 0;
+    }
+    fprintf(stderr, g_ray.ok ? "[recomp] gfx: ray tracing ready\n" : "[recomp] gfx: ray tracing: its pipelines failed\n");
+    return g_ray.ok;
+#endif
+}
+
+int gfx_rt_supported(void) { return rt_init(); }
+
+/* a buffer of the GPU's own of at least need bytes in *r (made again, half as large again, when it is
+ * smaller), in state; uav: the acceleration structures' and scratch's */
+static int rt_buffer(ID3D12Resource** r, uint64_t* size, uint64_t need, D3D12_RESOURCE_STATES state, int uav)
+{
+    if (*r && *size >= need)
+        return 0;
+    if (*r)
+        defer((IUnknown*)*r, NULL, -1), *r = NULL;
+    need = (need + need / 2 + 65535) & ~(uint64_t)65535;
+    D3D12_HEAP_PROPERTIES hp = { D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0 };
+    D3D12_RESOURCE_DESC rd = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, need, 1, 1, 1, DXGI_FORMAT_UNKNOWN, { 1, 0 },
+        D3D12_TEXTURE_LAYOUT_ROW_MAJOR, uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE };
+    if (FAILED(ID3D12Device_CreateCommittedResource(g_dev, &hp, D3D12_HEAP_FLAG_NONE, &rd, state, NULL, &IID_ID3D12Resource, (void**)r)))
+    {
+        fprintf(stderr, "[recomp] gfx: ray tracing: a buffer of %llu bytes failed\n", (unsigned long long)need);
+        *r = NULL, *size = 0;
+        return -1;
+    }
+    *size = need;
+    return 1;
+}
+
+static void rt_uav_barrier(void)
+{
+    D3D12_RESOURCE_BARRIER b;
+    memset(&b, 0, sizeof b);
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; /* every UAV: the scratch is shared by both builds */
+    ID3D12GraphicsCommandList_ResourceBarrier(list(), 1, &b);
+}
+
+/* one caster to capture: what it draws, through which matrix (clip space to this frame's view space),
+ * and its triangles */
+typedef struct RtItem
+{
+    const Caster* c;
+    const GfxU* u; /* a cache entry's own uniforms (NULL: the caster's, ugpu) */
+    float m[16];
+    uint32_t tris;
+    uint8_t alpha; /* traced through its alpha test (rt_alpha) */
+} RtItem;
+
+/* traced through its alpha test: an alpha-tested caster whose vertex function gives texture coordinates
+ * and whose first stage's texture is there (else it is traced solid) */
+static int rt_alpha(const Caster* c)
+{
+    /* the zone's and its placed objects' (leaves, grass); a character's (hair, a cape's fringe) is traced
+     * solid, so the bounce light's and occlusion's rays (gfx_rt.hlsl trace_solid) still meet characters */
+    return (c->fixed || c->keep) && alpha_tested(&c->lib.fs) && c->lib.vs.ntex >= 1 && c->tex[0] && c->tex[0]->srv >= 0 && c->tex[0]->type == GFX_TEX_2D;
+}
+
+/* a view in the heap at *slot (a new slot, the old one let go once the GPU is past it): a buffer of float4s
+ * read (SRV, uav 0) or written (UAV: 1 structured, 2 raw) */
+static int rt_view(int32_t* slot, ID3D12Resource* r, uint64_t size, int uav)
+{
+    defer(NULL, &g_srv, *slot);
+    if ((*slot = heap_alloc(&g_srv)) < 0)
+        return 0;
+    if (!uav)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC v;
+        memset(&v, 0, sizeof v);
+        v.Format = DXGI_FORMAT_UNKNOWN, v.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        v.Buffer.NumElements = (UINT)(size / 16), v.Buffer.StructureByteStride = 16;
+        ID3D12Device_CreateShaderResourceView(g_dev, r, &v, heap_cpu(&g_srv, *slot));
+        return 1;
+    }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC v;
+    memset(&v, 0, sizeof v);
+    v.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    if (uav == 2)
+        v.Format = DXGI_FORMAT_R32_TYPELESS, v.Buffer.NumElements = (UINT)(size / 4), v.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    else
+        v.Format = DXGI_FORMAT_UNKNOWN, v.Buffer.NumElements = (UINT)(size / 16), v.Buffer.StructureByteStride = 16;
+    ID3D12Device_CreateUnorderedAccessView(g_dev, r, NULL, &v, heap_cpu(&g_srv, *slot));
+    return 1;
+}
+
+/* The world's smooth normals for its verts corners (gfx_rt.hlsl rt_nclear, rt_nsum, rt_nresolve): the
+ * table cleared, each triangle's face summed into the places of its corners, each corner given its place's */
+static void rt_normals(ID3D12GraphicsCommandList* l, uint32_t verts)
+{
+    uint32_t slots = 1024;
+    while (slots < verts * 2u && slots < (1u << 26))
+        slots *= 2;
+    int ng = rt_buffer(&g_ray.nrm, &g_ray.nrm_size, (uint64_t)verts * 16, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 1);
+    int tg = rt_buffer(&g_ray.table, &g_ray.table_size, (uint64_t)slots * 16, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 1);
+    if (ng < 0 || tg < 0)
+        return;
+    if (ng > 0)
+        g_ray.nrm_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if ((ng > 0 || g_ray.nrm_srv < 0) && (!rt_view(&g_ray.nrm_srv, g_ray.nrm, g_ray.nrm_size, 0) ||
+            !rt_view(&g_ray.nrm_uav, g_ray.nrm, g_ray.nrm_size, 1)))
+        return;
+    if ((tg > 0 || g_ray.table_uav < 0) && !rt_view(&g_ray.table_uav, g_ray.table, g_ray.table_size, 2))
+        return;
+    slots = (uint32_t)(g_ray.table_size / 16); /* (made larger than asked: all of it is used) */
+    while (slots & (slots - 1))
+        slots &= slots - 1;
+    if (g_ray.nrm_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        barrier(g_ray.nrm, g_ray.nrm_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    g_ray.nrm_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    uint32_t k[8] = { (uint32_t)g_ray.so_srv, (uint32_t)g_ray.table_uav, (uint32_t)g_ray.nrm_uav, verts / 3, slots - 1, verts, 0, 0 };
+    ID3D12GraphicsCommandList_SetComputeRootSignature(l, g_ray.croot);
+    ID3D12GraphicsCommandList_SetComputeRoot32BitConstants(l, 0, 8, k, 0);
+    ID3D12GraphicsCommandList_SetPipelineState(l, g_ray.nclear);
+    ID3D12GraphicsCommandList_Dispatch(l, (slots + 255) / 256, 1, 1);
+    rt_uav_barrier();
+    ID3D12GraphicsCommandList_SetPipelineState(l, g_ray.nsum);
+    ID3D12GraphicsCommandList_Dispatch(l, (verts / 3 + 255) / 256, 1, 1);
+    rt_uav_barrier();
+    ID3D12GraphicsCommandList_SetPipelineState(l, g_ray.nresolve);
+    ID3D12GraphicsCommandList_Dispatch(l, (verts + 255) / 256, 1, 1);
+    barrier(g_ray.nrm, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    g_ray.nrm_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+    g_bound_pso = NULL; /* the game's next draw sets its own again */
+}
+
+static uint32_t rt_tris(const Caster* c)
+{
+    if (c->prim == GFX_TRIANGLELIST)
+        return c->n / 3;
+    if (c->prim == GFX_TRIANGLESTRIP)
+        return c->n >= 3 ? c->n - 2 : 0;
+    return 0;
+}
+
+static ID3D12PipelineState* rt_pipeline(const Caster* c)
+{
+    PipeKey pk;
+    memset(&pk, 0, sizeof pk);
+    pk.lib = c->lib;
+    GfxVsKey* vk = &pk.lib.vs;
+    vk->shadow = 2, vk->pixel = 0;
+    /* the position alone, as the sun's depth maps draw it - and an alpha test's texture coordinates */
+    int alpha = rt_alpha(c);
+    vk->lighting = vk->normalize = vk->localviewer = vk->specular = 0;
+    vk->src_diffuse = vk->src_specular = vk->src_ambient = vk->src_emissive = 0;
+    vk->nlights = 0, memset(vk->light_type, 0, sizeof vk->light_type);
+    vk->fog_vertex = vk->range_fog = 0, vk->flat = 0;
+    if (!alpha)
+        vk->ntex = 0, memset(vk->tci, 0, sizeof vk->tci), memset(vk->ttf, 0, sizeof vk->ttf);
+    memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
+    pk.lib.fs.alpha_func = alpha ? c->lib.fs.alpha_func : 0; /* (build_pipeline: streamed out with them) */
+    pk.color = DXGI_FORMAT_UNKNOWN, pk.dsv = DXGI_FORMAT_UNKNOWN;
+    pk.cull = 1, pk.fill = 3;
+    pk.topo = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    return pipeline_for(&pk, c->vs, c->ps);
+}
+
+/* The world for this frame's rays (invP the projection's inverse, view the camera): 1 when it was made */
+static int rt_capture(const float* invP, const float* view, const float* cam)
+{
+    static RtItem* items;
+    static uint32_t cap;
+    uint32_t n = 0, total = g_ncasters + g_ncache;
+    if (!rt_init() || !total)
+        return 0;
+    if (cap < total)
+        cap = total + total / 2, items = (RtItem*)realloc(items, cap * sizeof *items);
+    uint64_t verts = 0;
+    for (uint32_t i = 0; i < total; ++i)
+    {
+        RtItem* it = &items[n];
+        if (i < g_ncasters)
+        {
+            it->c = &g_casters[i], it->u = NULL;
+            memcpy(it->m, invP, 64);
+        }
+        else
+        {
+            Cached* ce = &g_cache[i - g_ncasters];
+            if (ce->dead || cached_expired(ce) || !ce->c.n)
+            {
+                g_ray.st_c_gone++;
+                continue;
+            }
+            if (ce->seen == g_serial)
+            {
+                g_ray.st_c_seen++;
+                continue;
+            }
+            if (ce->c.has_pos)
+            {
+                float dx = ce->pos[0] - cam[0], dy = ce->pos[1] - cam[1], dz = ce->pos[2] - cam[2];
+                if (dx * dx + dy * dy + dz * dz > RT_REACH * RT_REACH)
+                {
+                    g_ray.st_c_far++;
+                    continue;
+                }
+            }
+            else
+                g_ray.st_c_none++;
+            it->c = &ce->c, it->u = &ce->u;
+            mat_mul(it->m, ce->clip_world, view);
+        }
+        if (!it->c->n || !(it->tris = rt_tris(it->c)))
+            continue;
+        it->alpha = (uint8_t)rt_alpha(it->c);
+        if (!rt_pipeline(it->c))
+        {
+            g_ray.st_skipped++;
+            continue;
+        }
+        verts += (uint64_t)it->tris * 3;
+        n++;
+    }
+    if (!n || verts > (1u << 26))
+        return 0;
+    /* the solid first, then the alpha-tested: the structure's two geometries */
+    {
+        static RtItem* tmp;
+        static uint32_t tcap;
+        if (tcap < n)
+            tcap = cap, tmp = (RtItem*)realloc(tmp, tcap * sizeof *tmp);
+        uint32_t k = 0;
+        for (int pass = 0; pass < 2; ++pass)
+            for (uint32_t i = 0; i < n; ++i)
+                if (items[i].alpha == pass)
+                    tmp[k++] = items[i];
+        memcpy(items, tmp, n * sizeof *items);
+    }
+    /* the buffers: the triangles (and their count, which stream output keeps), the structures */
+    int grown = rt_buffer(&g_ray.so, &g_ray.so_size, verts * 32, D3D12_RESOURCE_STATE_STREAM_OUT, 0);
+    if (grown < 0 || rt_buffer(&g_ray.count, &g_ray.count_size, 16, D3D12_RESOURCE_STATE_COPY_DEST, 0) < 0)
+        return 0;
+    if (grown > 0)
+        g_ray.so_state = D3D12_RESOURCE_STATE_STREAM_OUT;
+    if (!g_ray.count_state)
+        g_ray.count_state = D3D12_RESOURCE_STATE_COPY_DEST;
+    if (grown > 0 || g_ray.so_srv < 0)
+    {
+        defer(NULL, &g_srv, g_ray.so_srv);
+        if ((g_ray.so_srv = heap_alloc(&g_srv)) < 0)
+            return 0;
+        D3D12_SHADER_RESOURCE_VIEW_DESC v;
+        memset(&v, 0, sizeof v);
+        v.Format = DXGI_FORMAT_UNKNOWN, v.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        v.Buffer.NumElements = (UINT)(g_ray.so_size / 16), v.Buffer.StructureByteStride = 16;
+        ID3D12Device_CreateShaderResourceView(g_dev, g_ray.so, &v, heap_cpu(&g_srv, g_ray.so_srv));
+    }
+    ID3D12GraphicsCommandList* l = list();
+    /* the count from 0 */
+    Alloc z = ring(16, 16);
+    if (!z.cpu)
+        return 0;
+    memset(z.cpu, 0, 16);
+    if (g_ray.count_state != D3D12_RESOURCE_STATE_COPY_DEST)
+        barrier(g_ray.count, g_ray.count_state, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12GraphicsCommandList_CopyBufferRegion(l, g_ray.count, 0, z.res, z.off, 4);
+    barrier(g_ray.count, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_STREAM_OUT);
+    g_ray.count_state = D3D12_RESOURCE_STATE_STREAM_OUT;
+    if (g_ray.so_state != D3D12_RESOURCE_STATE_STREAM_OUT)
+        barrier(g_ray.so, g_ray.so_state, D3D12_RESOURCE_STATE_STREAM_OUT), g_ray.so_state = D3D12_RESOURCE_STATE_STREAM_OUT;
+    D3D12_STREAM_OUTPUT_BUFFER_VIEW sv = { ID3D12Resource_GetGPUVirtualAddress(g_ray.so), g_ray.so_size,
+        ID3D12Resource_GetGPUVirtualAddress(g_ray.count) };
+    ID3D12GraphicsCommandList_OMSetRenderTargets(l, 0, NULL, FALSE, NULL);
+    D3D12_VIEWPORT vp = { 0, 0, 1, 1, 0, 1 };
+    D3D12_RECT sc = { 0, 0, 1, 1 };
+    ID3D12GraphicsCommandList_RSSetViewports(l, 1, &vp);
+    ID3D12GraphicsCommandList_RSSetScissorRects(l, 1, &sc);
+    ID3D12GraphicsCommandList_SOSetTargets(l, 0, 1, &sv);
+    D3D12_GPU_VIRTUAL_ADDRESS dummy = ID3D12Resource_GetGPUVirtualAddress(g_dummy), mlive = 0;
+    uint32_t done = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const RtItem* it = &items[i];
+        const Caster* cs = it->c;
+        D3D12_GPU_VIRTUAL_ADDRESS m = it->u ? ring_bytes(it->m, 64) : mlive ? mlive : (mlive = ring_bytes(it->m, 64));
+        D3D12_GPU_VIRTUAL_ADDRESS ugpu = it->u ? ring_bytes(it->u, sizeof *it->u) : cs->ugpu;
+        if (!m || !ugpu)
+            break; /* (the ring is full: the rest would not match the count) */
+        set_pso(rt_pipeline(cs));
+        set_topology(topology(cs->prim));
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(l, ROOT_SHADOW, m);
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(l, ROOT_U, ugpu);
+        for (int st = 0; st < GFX_NSTREAMS; ++st)
+        {
+            if (cs->vb[st])
+                buf_state(cs->vb[st], BUF_READ);
+            ID3D12GraphicsCommandList_SetGraphicsRootShaderResourceView(l, ROOT_STREAM0 + st, cs->va[st] ? cs->va[st] : dummy);
+        }
+        if (cs->itype)
+        {
+            if (cs->ib)
+                buf_state(cs->ib, BUF_READ);
+            D3D12_INDEX_BUFFER_VIEW ibv = { cs->iva, cs->n * cs->itype, cs->itype == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT };
+            ID3D12GraphicsCommandList_IASetIndexBuffer(l, &ibv);
+            ID3D12GraphicsCommandList_DrawIndexedInstanced(l, cs->n, 1, 0, 0, 0);
+        }
+        else
+            ID3D12GraphicsCommandList_DrawInstanced(l, cs->n, 1, cs->vstart, 0);
+        done++;
+        if (it->u)
+            g_ray.st_cached++;
+        else
+            g_ray.st_live++;
+    }
+    D3D12_STREAM_OUTPUT_BUFFER_VIEW none;
+    memset(&none, 0, sizeof none);
+    ID3D12GraphicsCommandList_SOSetTargets(l, 0, 1, &none);
+    g_targets_bound = 0;
+    unbind();
+    uint64_t vsolid = 0, valpha = 0;
+    uint32_t nalpha = 0;
+    for (uint32_t i = 0; i < done; ++i)
+        *(items[i].alpha ? &valpha : &vsolid) += (uint64_t)items[i].tris * 3, nalpha += items[i].alpha;
+    verts = vsolid + valpha;
+    if (!verts)
+        return 0;
+    /* the alpha tests' table: each one's first triangle, its texture, its sampler, its test */
+    g_ray.nsolid = (uint32_t)(vsolid / 3), g_ray.nalpha = nalpha;
+    if (nalpha)
+    {
+        Alloc t = ring((size_t)nalpha * 16, 16);
+        int tg = rt_buffer(&g_ray.tab, &g_ray.tab_size, (uint64_t)nalpha * 16, D3D12_RESOURCE_STATE_COPY_DEST, 0);
+        if (!t.cpu || tg < 0)
+            return 0;
+        if (tg > 0)
+            g_ray.tab_state = D3D12_RESOURCE_STATE_COPY_DEST;
+        if ((tg > 0 || g_ray.tab_srv < 0) && !rt_view(&g_ray.tab_srv, g_ray.tab, g_ray.tab_size, 0))
+            return 0;
+        uint32_t* e = (uint32_t*)t.cpu, first = (uint32_t)(vsolid / 3);
+        for (uint32_t i = 0; i < done; ++i)
+        {
+            const RtItem* it = &items[i];
+            if (!it->alpha)
+                continue;
+            const GfxU* gu = it->u ? it->u : it->c->uidx >= 0 ? &g_caster_u[it->c->uidx] : NULL;
+            float ref = gu ? gu->params[1] : 128.0f;
+            GfxTex* tx = it->c->tex[0];
+            tex_state(tx, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            e[0] = first, e[1] = (uint32_t)tx->srv, e[2] = sampler_slot(&it->c->samp[0]);
+            e[3] = (uint32_t)it->c->lib.fs.alpha_func << 8 | (uint32_t)fminf(fmaxf(ref, 0.0f), 255.0f);
+            e += 4, first += it->tris;
+        }
+        if (g_ray.tab_state != D3D12_RESOURCE_STATE_COPY_DEST)
+            barrier(g_ray.tab, g_ray.tab_state, D3D12_RESOURCE_STATE_COPY_DEST);
+        ID3D12GraphicsCommandList_CopyBufferRegion(l, g_ray.tab, 0, t.res, t.off, (UINT64)nalpha * 16);
+        barrier(g_ray.tab, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        g_ray.tab_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+    }
+    barrier(g_ray.so, D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    g_ray.so_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    /* a structure over the solid triangles and one over the alpha-tested ones, then the one over both: two
+     * instances, masks 1 and 2 - the bounce light's and occlusion's rays (mask 1) skip the leaves and grass
+     * whole, where culling their triangles alone still walked their boxes (Lufaise's grass: 9 ms a frame) */
+    D3D12_RAYTRACING_GEOMETRY_DESC g[2];
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bl[2], tl;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bp[2], tp;
+    ID3D12Resource** blas[2] = { &g_ray.blas, &g_ray.blas2 };
+    uint64_t* blas_size[2] = { &g_ray.blas_size, &g_ray.blas2_size };
+    memset(g, 0, sizeof g), memset(bl, 0, sizeof bl), memset(bp, 0, sizeof bp), memset(&tl, 0, sizeof tl);
+    uint64_t scratch = 0;
+    UINT ninst = 0;
+    for (int k = 0; k < 2; ++k)
+    {
+        uint64_t first = k ? vsolid : 0, count = k ? valpha : vsolid;
+        if (!count)
+            continue;
+        g[k].Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        g[k].Flags = k ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g[k].Triangles.VertexBuffer.StartAddress = ID3D12Resource_GetGPUVirtualAddress(g_ray.so) + first * 32;
+        g[k].Triangles.VertexBuffer.StrideInBytes = 32;
+        g[k].Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT, g[k].Triangles.VertexCount = (UINT)count;
+        bl[k].Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        bl[k].Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        bl[k].NumDescs = 1, bl[k].DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY, bl[k].pGeometryDescs = &g[k];
+        ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(g_ray.dev, &bl[k], &bp[k]);
+        if (bp[k].ScratchDataSizeInBytes > scratch)
+            scratch = bp[k].ScratchDataSizeInBytes;
+        if (rt_buffer(blas[k], blas_size[k], bp[k].ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, 1) < 0)
+            return 0;
+        ninst++;
+    }
+    Alloc inst = ring(2 * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_RAYTRACING_INSTANCE_DESCS_BYTE_ALIGNMENT);
+    if (!inst.cpu)
+        return 0;
+    tl.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    tl.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    tl.NumDescs = ninst, tl.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY, tl.InstanceDescs = inst.gpu;
+    ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(g_ray.dev, &tl, &tp);
+    if (tp.ScratchDataSizeInBytes > scratch)
+        scratch = tp.ScratchDataSizeInBytes;
+    if (rt_buffer(&g_ray.scratch, &g_ray.scratch_size, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 1) < 0)
+        return 0;
+    int tgrown = rt_buffer(&g_ray.tlas, &g_ray.tlas_size, tp.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, 1);
+    if (tgrown < 0)
+        return 0;
+    if (tgrown > 0 || g_ray.tlas_srv < 0)
+    {
+        defer(NULL, &g_srv, g_ray.tlas_srv);
+        if ((g_ray.tlas_srv = heap_alloc(&g_srv)) < 0)
+            return 0;
+        D3D12_SHADER_RESOURCE_VIEW_DESC v;
+        memset(&v, 0, sizeof v);
+        v.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        v.RaytracingAccelerationStructure.Location = ID3D12Resource_GetGPUVirtualAddress(g_ray.tlas);
+        ID3D12Device_CreateShaderResourceView(g_dev, NULL, &v, heap_cpu(&g_srv, g_ray.tlas_srv));
+    }
+    /* each instance's InstanceID: 0 the solid, 1 the alpha-tested (gfx_rt.hlsl: their triangles' offset) */
+    D3D12_RAYTRACING_INSTANCE_DESC* id = (D3D12_RAYTRACING_INSTANCE_DESC*)inst.cpu;
+    memset(id, 0, 2 * sizeof *id);
+    UINT ni = 0;
+    for (int k = 0; k < 2; ++k)
+        if (bl[k].NumDescs)
+        {
+            id[ni].Transform[0][0] = id[ni].Transform[1][1] = id[ni].Transform[2][2] = 1.0f;
+            id[ni].InstanceID = (UINT)k, id[ni].InstanceMask = k ? 2 : 1;
+            id[ni].AccelerationStructure = ID3D12Resource_GetGPUVirtualAddress(*blas[k]);
+            ni++;
+        }
+    ID3D12GraphicsCommandList4* l4 = NULL;
+    if (FAILED(ID3D12GraphicsCommandList_QueryInterface(l, &IID_ID3D12GraphicsCommandList4, (void**)&l4)))
+        return 0;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd;
+    memset(&bd, 0, sizeof bd);
+    bd.ScratchAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(g_ray.scratch);
+    for (int k = 0; k < 2; ++k)
+        if (bl[k].NumDescs)
+        {
+            bd.DestAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(*blas[k]);
+            bd.Inputs = bl[k];
+            ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(l4, &bd, 0, NULL);
+            rt_uav_barrier(); /* (the scratch is shared) */
+        }
+    bd.DestAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(g_ray.tlas);
+    bd.Inputs = tl;
+    ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(l4, &bd, 0, NULL);
+    rt_uav_barrier();
+    ID3D12GraphicsCommandList4_Release(l4);
+    rt_normals(l, (uint32_t)verts);
+    barrier(g_ray.so, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    g_ray.so_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+    g_ray.verts = (uint32_t)verts, g_ray.serial = g_serial;
+    g_ray.st_tris += verts / 3, g_ray.st_frames++;
+    return 1;
 }
 
 /* The finished scene anti-aliased (g_fxs.aa: FXAA), within its viewport, before the interface goes on */
@@ -4156,10 +4803,21 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         for (int j = 0; j < 3; ++j)
             w[j] = s->sun_dir[0] * vinv[j] + s->sun_dir[1] * vinv[4 + j] + s->sun_dir[2] * vinv[8 + j];
         normalize3(w);
-        /* the sun moves on in steps of a quarter degree: the shadows' edges hold still between them */
-        float dot = w[0] * g_fx.sunw[0] + w[1] * g_fx.sunw[1] + w[2] * g_fx.sunw[2];
-        if (!g_fx.sunw_seen || dot < 0.99999f)
-            memcpy(g_fx.sunw, w, 12);
+        /* the sun moves on in the game's steps (a quarter degree each game minute, every 2.4 s): the shadows
+         * glide from each to the next over the 150 frames to it rather than jump - long at dawn and dusk, a
+         * jump of their whole edge (a step past a few degrees, a new hour or place, is taken at once) */
+        float dot = w[0] * g_fx.sunt[0] + w[1] * g_fx.sunt[1] + w[2] * g_fx.sunt[2];
+        if (!g_fx.sunw_seen || dot < 0.995f)
+            memcpy(g_fx.sunw, w, 12), memcpy(g_fx.sun0, w, 12), memcpy(g_fx.sunt, w, 12), g_fx.sunp = 1.0f;
+        else if (dot < 0.999995f) /* (past the noise of the game's own, short of its quarter-degree step) */
+            memcpy(g_fx.sun0, g_fx.sunw, 12), memcpy(g_fx.sunt, w, 12), g_fx.sunp = 0.0f;
+        if (g_fx.sunp < 1.0f)
+        {
+            g_fx.sunp = fminf(g_fx.sunp + 1.0f / 150.0f, 1.0f);
+            for (int j = 0; j < 3; ++j)
+                g_fx.sunw[j] = g_fx.sun0[j] + (g_fx.sunt[j] - g_fx.sun0[j]) * g_fx.sunp;
+            normalize3(g_fx.sunw);
+        }
         g_fx.sunw_seen = g_serial;
         fx_ease(g_fx.suncol, s->sun_color, 3, 0.1f);
     }
@@ -4193,6 +4851,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
         {
             u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+            u.gi[0] *= g_fxs.gi * day;
             if (day >= 0.25f)
                 g_sun_shown = g_serial;
         }
@@ -4213,19 +4872,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
      * size, and not a jump away */
     {
         float vinv2[16], m[16];
-        int ok = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0].res && g_fx.hist[0].w == aw &&
-            g_fx.hist[0].h == ah && mat_inverse(vinv2, s->view);
-        if (ok)
+        int cam = g_fx.prev_serial && g_fx.prev_serial + 1 == g_serial && mat_inverse(vinv2, s->view);
+        if (cam)
         {
             float dx = vinv2[12] - g_fx.prev_cam[0], dy = vinv2[13] - g_fx.prev_cam[1], dz = vinv2[14] - g_fx.prev_cam[2];
-            ok = dx * dx + dy * dy + dz * dz < 25.0f;
+            cam = dx * dx + dy * dy + dz * dz < 25.0f;
         }
-        if (ok)
+        if (cam)
         {
             mat_mul(m, vinv2, g_fx.prev_view);
             mat_mul(u.reproj, m, g_fx.prev_proj);
-            u.hist[0] = 1.0f;
+            u.hist[0] = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0].res && g_fx.hist[0].w == aw &&
+                g_fx.hist[0].h == ah ? 1.0f : 0.0f;
+            /* the bounce light's too, at its own size */
+            u.gip[0] = g_fx.gih_serial && g_fx.gih_serial + 1 == g_serial && g_fx.gih[0].res && g_fx.gih[0].w == (aw + 1) / 2 &&
+                g_fx.gih[0].h == (ah + 1) / 2 ? 1.0f : 0.0f;
         }
+        g_fx.prev_serial = g_serial;
         u.hist[1] = (float)fmod((double)g_serial * 0.6180339887, 1.0); /* the pattern's turn: a golden-ratio step */
         u.hist[2] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f);
         memcpy(g_fx.prev_view, s->view, 64), memcpy(g_fx.prev_proj, s->proj, 64);
@@ -4245,12 +4908,30 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
     if (occlusion && !lz)
         u.ao[1] = 0.0f;
     int temporal = occlusion && g_fxs.temporal > 0.0f && fx_tex(&g_fx.hist[0], FX_HALF, aw, ah, 1) && fx_tex(&g_fx.hist[1], FX_HALF, aw, ah, 1);
+    /* the world for rays, before the passes that trace them */
+    int rt = 0;
+    if ((g_fxs.rt > 0.0f || (int)g_fxs.debug == 8) && have_v)
+    {
+        float invP[16];
+        rt = mat_inverse(invP, s->proj) && rt_capture(invP, s->view, vinv + 12);
+        if (rt)
+            u.rtp[0] = g_ray.nsolid, u.rtp[1] = (uint32_t)(g_ray.tab_srv >= 0 ? g_ray.tab_srv : 0), u.rtp[2] = (uint32_t)g_ray.so_srv,
+            u.rtp[3] = g_ray.nalpha;
+    }
+    uint32_t gw = (aw + 1) / 2, gh = (ah + 1) / 2;
+    int gi = u.gi[0] > 0.0f && fx_tex(&g_fx.gi0, FX_HALF, gw, gh, 1) && fx_tex(&g_fx.gih[0], FX_HALF, gw, gh, 1) &&
+        fx_tex(&g_fx.gih[1], FX_HALF, gw, gh, 1) && (!rt || fx_tex(&g_fx.gi1, FX_HALF, gw, gh, 1));
+    if (!gi)
+        u.gi[0] = 0.0f;
+    u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
+    if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
+        u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
     D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&u);
     if (!ua)
         return;
     fx_copy(color, &g_fx.src);
     float fw = (float)aw, fh = (float)ah, fbw = (float)bw, fbh = (float)bh;
-    uint32_t in[6];
+    uint32_t in[7];
     FxTex* ao_out = NULL;
     if (occlusion)
     {
@@ -4277,18 +4958,62 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             }
         }
         fx_pass(fx_out(&g_fx.ao0, 0), g_fx.ao, 0, 0, fw, fh, ua, in, 4, 0, 0);
-        in[0] = fx_in(&g_fx.ao0, 0);
-        fx_pass(fx_out(&g_fx.ao1, 0), g_fx.blur, 0, 0, fw, fh, ua, in, 1, 1, 0);
-        in[0] = fx_in(&g_fx.ao1, 0);
-        fx_pass(fx_out(&g_fx.ao0, 0), g_fx.blur, 0, 0, fw, fh, ua, in, 1, 0, 1);
-        ao_out = &g_fx.ao0;
+        /* traced (rt): the occlusion from rays in the world, the sun's as fx_ao found it; ao1 then holds it */
+        FxTex *a = &g_fx.ao0, *b = &g_fx.ao1;
+        if (rt && u.ao[1] > 0.0f)
+        {
+            in[0] = fx_in(&g_fx.ao0, 0), in[1] = fx_depth(depth), in[2] = (uint32_t)g_ray.tlas_srv;
+            fx_pass(fx_out(&g_fx.ao1, 0), g_ray.ao, 0, 0, fw, fh, ua, in, 3, 0, 0);
+            a = &g_fx.ao1, b = &g_fx.ao0;
+        }
+        in[0] = fx_in(a, 0);
+        fx_pass(fx_out(b, 0), g_fx.blur, 0, 0, fw, fh, ua, in, 1, 1, 0);
+        in[0] = fx_in(b, 0);
+        fx_pass(fx_out(a, 0), g_fx.blur, 0, 0, fw, fh, ua, in, 1, 0, 1);
+        ao_out = a;
         if (temporal)
         {
             int to = g_fx.hist_at ^ 1;
-            in[0] = fx_in(&g_fx.ao0, 0), in[1] = fx_in(&g_fx.hist[g_fx.hist_at], 0);
+            in[0] = fx_in(a, 0), in[1] = fx_in(&g_fx.hist[g_fx.hist_at], 0);
             fx_pass(fx_out(&g_fx.hist[to], 0), g_fx.temporal, 0, 0, fw, fh, ua, in, 2, 0, 0);
             ao_out = &g_fx.hist[to];
             g_fx.hist_at = to, g_fx.hist_serial = g_serial;
+        }
+    }
+    /* the bounce light: gathered from its map at half the occlusion's size, then over frames */
+    FxTex* gi_out = NULL;
+    if (gi)
+    {
+        sun_state(&g_fx.gimap, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (rt)
+        {
+            /* traced (rt): rays from each texel into the world, the light they meet as the frame or the
+             * sun saw it; smoothed twice (one texel apart, then two) before the temporal pass */
+            in[0] = fx_depth(depth), in[1] = (uint32_t)g_ray.tlas_srv, in[2] = (uint32_t)g_ray.so_srv, in[3] = fx_in(&g_fx.src, 0);
+            in[4] = ao_out ? fx_in(ao_out, 0) : SRV_NULL_2D, in[5] = (uint32_t)g_fx.gimap.srv, in[6] = fx_in(&g_fx.gicol, -1);
+            fx_pass(fx_out(&g_fx.gi0, 0), g_ray.gi, 0, 0, (float)gw, (float)gh, ua, in, 7, 0, 0);
+            in[0] = fx_in(&g_fx.gi0, 0);
+            fx_pass(fx_out(&g_fx.gi1, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 1, 1);
+            in[0] = fx_in(&g_fx.gi1, 0);
+            fx_pass(fx_out(&g_fx.gi0, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 2, 2);
+            in[0] = fx_in(&g_fx.gi0, 0);
+            fx_pass(fx_out(&g_fx.gi1, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 4, 4);
+            in[0] = fx_in(&g_fx.gi1, 0);
+            fx_pass(fx_out(&g_fx.gi0, 0), g_ray.giblur, 0, 0, (float)gw, (float)gh, ua, in, 1, 1, 1);
+        }
+        else
+        {
+            in[0] = fx_depth(depth), in[1] = (uint32_t)g_fx.gimap.srv, in[2] = fx_in(&g_fx.gicol, -1);
+            fx_pass(fx_out(&g_fx.gi0, 0), g_fx.gi, 0, 0, (float)gw, (float)gh, ua, in, 3, 0, 0);
+        }
+        gi_out = &g_fx.gi0;
+        if (u.gip[1] > 0.0f)
+        {
+            int to = g_fx.gih_at ^ 1;
+            in[0] = fx_in(&g_fx.gi0, 0), in[1] = fx_in(&g_fx.gih[g_fx.gih_at], 0);
+            fx_pass(fx_out(&g_fx.gih[to], 0), g_fx.gitemp, 0, 0, (float)gw, (float)gh, ua, in, 2, 0, 0);
+            gi_out = &g_fx.gih[to];
+            g_fx.gih_at = to, g_fx.gih_serial = g_serial;
         }
     }
     if (u.bloom[1] > 0.0f)
@@ -4324,8 +5049,15 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
     in[3] = u.bloom[1] > 0.0f ? fx_in(&g_fx.b1a, 0) : SRV_NULL_2D;
     in[4] = u.bloom[1] > 0.0f ? fx_in(&g_fx.b2a, 0) : SRV_NULL_2D;
     in[5] = u.rays[0] > 0.0f ? fx_in(&g_fx.rb, 0) : SRV_NULL_2D;
+    in[6] = gi_out ? fx_in(gi_out, 0) : SRV_NULL_2D;
     tex_state(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    fx_pass(target_view(color, 0, 0), g_fx.comp, vx, vy, vw, vh, ua, in, 6, 0, 0);
+    fx_pass(target_view(color, 0, 0), g_fx.comp, vx, vy, vw, vh, ua, in, 7, 0, 0);
+    if (rt && (int)g_fxs.debug == 8)
+    {
+        in[0] = fx_depth(depth), in[1] = (uint32_t)g_ray.tlas_srv, in[2] = (uint32_t)g_ray.so_srv, in[3] = (uint32_t)g_ray.nrm_srv;
+        tex_state(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        fx_pass(target_view(color, 0, 0), g_ray.clay, vx, vy, vw, vh, ua, in, 4, 0, 0);
+    }
     color->scene = 0; /* the effects changed it: its mips are behind (scene_mips) */
 }
 
@@ -4357,6 +5089,13 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
                 last = now;
                 g_fx.st_frames = g_fx.st_own = g_fx.st_map = g_fx.st_cmax = g_fx.st_live = g_fx.st_replayed = g_fx.st_skipped = 0;
                 g_fx.st_beyond = 0;
+                if (g_ray.st_frames)
+                    fprintf(stderr, "[recomp] gfx: ray tracing: %u frames; casters %u live, %u from the cache, %u waiting for "
+                        "pipelines; %llu triangles a frame; the cache's left out: %u gone, %u drawn live, %u too far, %u with no place\n",
+                        g_ray.st_frames, g_ray.st_live, g_ray.st_cached, g_ray.st_skipped, (unsigned long long)(g_ray.st_tris / g_ray.st_frames),
+                        g_ray.st_c_gone, g_ray.st_c_seen, g_ray.st_c_far, g_ray.st_c_none);
+                g_ray.st_frames = g_ray.st_live = g_ray.st_cached = g_ray.st_skipped = 0, g_ray.st_tris = 0;
+                g_ray.st_c_gone = g_ray.st_c_seen = g_ray.st_c_far = g_ray.st_c_none = 0;
             }
         }
         g_fx.st_drawn_this = 0;
@@ -4472,20 +5211,29 @@ static ID3D12RootSignature* make_root(void)
     p[ROOT_SHADOW].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     p[ROOT_SHADOW].Descriptor.ShaderRegister = 2;
     p[ROOT_SHADOW].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    /* stream output for ray tracing's capture, and the heap read directly (ResourceDescriptorHeap) for its
+     * passes - without that, where the device has not got it, the same signature with neither */
     D3D12_ROOT_SIGNATURE_DESC rd = { ROOT_COUNT, p, 0, NULL,
         D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS | D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
-            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS };
-    ID3DBlob *blob = NULL, *err = NULL;
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS | D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT |
+            D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED };
     ID3D12RootSignature* root = NULL;
-    if (FAILED(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err)))
-        fprintf(stderr, "[recomp] gfx: root signature: %s\n", err ? (const char*)ID3D10Blob_GetBufferPointer(err) : "?");
-    else if (FAILED(ID3D12Device_CreateRootSignature(g_dev, 0, ID3D10Blob_GetBufferPointer(blob), ID3D10Blob_GetBufferSize(blob),
-                 &IID_ID3D12RootSignature, (void**)&root)))
-        root = NULL;
-    if (blob)
-        ID3D10Blob_Release(blob);
-    if (err)
-        ID3D10Blob_Release(err);
+    for (int tries = 0; tries < 2 && !root; ++tries)
+    {
+        ID3DBlob *blob = NULL, *err = NULL;
+        if (tries)
+            rd.Flags &= ~(D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT | D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED);
+        if (FAILED(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err)))
+            fprintf(stderr, "[recomp] gfx: root signature: %s\n", err ? (const char*)ID3D10Blob_GetBufferPointer(err) : "?");
+        else if (FAILED(ID3D12Device_CreateRootSignature(g_dev, 0, ID3D10Blob_GetBufferPointer(blob), ID3D10Blob_GetBufferSize(blob),
+                     &IID_ID3D12RootSignature, (void**)&root)))
+            root = NULL;
+        if (blob)
+            ID3D10Blob_Release(blob);
+        if (err)
+            ID3D10Blob_Release(err);
+        g_root_heap = root && !tries;
+    }
     return root;
 }
 

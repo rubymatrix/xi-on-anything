@@ -1,6 +1,6 @@
 {
   "format": "ffxi-recomp-builds/1",
-  "comment": "Every retail build the recompiler knows: the files it takes (SHA-256 of the retail, packed DLLs), their metadata, and the handful of addresses the runtime and tests name directly. hooks: instructions where host64 steps in (recomp.py --hooks); a build without one lacks that feature. tools/prepare.py picks the build whose FFXiMain.dll hash matches the install; tools/build.py writes these addresses to generated/build.h. Addresses only, no bytes. version: the client version string patch.ver carries (what the lobby's version check sees); 30260805_0 is read from the retail file, 30260903_0 and 30251226_0 follow the same pattern (PE timestamp date) for installs that ship no patch.ver. modern: host/modern.c's menu addresses (Config > Modern and Config > Menus): functions, globals, vtables and menu-table entries; a build without every one of them builds with the feature off.",
+  "comment": "Every retail build the recompiler knows: the files it takes (SHA-256 of the retail, packed DLLs), their metadata, and the handful of addresses the runtime and tests name directly. hooks: instructions where host64 steps in (recomp.py --hooks); a build without one lacks that feature. tools/prepare.py picks the build whose FFXiMain.dll hash matches the install; tools/build.py writes these addresses to generated/build.h. Addresses only, no bytes. version: the client version string patch.ver carries (what the lobby's version check sees); 30260805_0 is read from the retail file, 30260903_0 and 30251226_0 follow the same pattern (PE timestamp date) for installs that ship no patch.ver. modern: host/modern.c's menu addresses (Config > Modern and Config > Menus): functions, globals, vtables and menu-table entries; a build without every one of them builds with the feature off. wraps: functions host64 may replace (rt_wrap_*). geometry: the globals runtime/portable/geometry_guest.c reads, and the layout (struct offsets and calling contracts) tests/geometry_replay_test.py verified against the build's own SSE code; a build without it keeps the translated skinning.",
   "builds": {
     "2026-08-22": {
       "FFXiMain.dll": {
@@ -98,6 +98,8 @@
         "config_inst": "0x10662718",
         "config_vtbl": "0x10337798",
         "window_part": "0x101181d0",
+        "window_scroll": "0x10118530",
+        "window_help": "0x101186a0",
         "menus_end": "0x10376270",
         "menus_conf1win": "0x10375064",
         "action_lists": "0x1036f390",
@@ -373,6 +375,8 @@
         "config_inst": "0x1062da78",
         "config_vtbl": "0x10335650",
         "window_part": "0x10117dd0",
+        "window_scroll": "0x10118130",
+        "window_help": "0x101182a0",
         "menus_end": "0x1037417c",
         "menus_conf1win": "0x10372f70",
         "action_lists": "0x1036d398",
@@ -465,6 +469,8 @@
         "config_inst": "0x1062d970",
         "config_vtbl": "0x10335608",
         "window_part": "0x10117dc0",
+        "window_scroll": "0x10118120",
+        "window_help": "0x10118290",
         "menus_end": "0x10374138",
         "menus_conf1win": "0x10372f2c",
         "action_lists": "0x1036d398",
@@ -522,7 +528,23 @@
         "parse_input": "0x10080bd0",
         "write_line": "0x100765d0",
         "packet_decrypt": "0x100dd400",
-        "packet_encrypt": "0x100dd2d0"
+        "packet_encrypt": "0x100dd2d0",
+        "geometry_parent": "0x1002efe0",
+        "geometry_feature_sse": "0x1000d560",
+        "geometry_feature_sse2": "0x1000d590",
+        "geometry_rigid": "0x100307c0",
+        "geometry_weighted": "0x10030850"
+      },
+      "geometry": {
+        "layout": 1,
+        "info": "0x10454538",
+        "callback": "0x104595c4",
+        "palette": "0x104553a0",
+        "counts": "0x10459468"
+      },
+      "android_wraps": {
+        "probe_ctor": "0x1006c070",
+        "probe_dtor": "0x1006c080"
       }
     }
   }

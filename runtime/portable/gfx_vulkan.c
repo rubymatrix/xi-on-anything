@@ -93,11 +93,14 @@ enum
     B_U = 0,
     B_STREAM0 = 1,
     B_SHADOW = 5,
+    B_RT_OUT = 6, /* captured for ray tracing (GfxVsKey.shadow 2): the corners written, where and how, the indices */
+    B_RT_C = 7,
     B_TEX0 = 8,
     B_WATER_U = 16,
     B_WATER_COL = 17,
     B_WATER_DEPTH = 18,
-    B_COUNT = 19,
+    B_RT_IDX = 19,
+    B_COUNT = 20,
 };
 
 #define VK_CHECK(x)                                                                                                   \
@@ -151,6 +154,12 @@ struct GfxBuf
     uint32_t size;
     uint64_t used;
     uint64_t up_last, up_prev; /* the frames of its last two uploads (buf_volatile) */
+    /* the bytes it was last filled from, which the caller keeps (gfx.h; d3d8.c: the buffer's own memory),
+     * as gfx_d3d12.c keeps them: draw_clip0 reads them instead of p, which is write-combined. The sun
+     * cache's copies (cache_copy) still read p: they are made when the scene is done, and by then the
+     * game may have written newer bytes here than the draw had */
+    const uint8_t* cpu;
+    uint32_t cpu_size;
 };
 
 typedef struct Chunk
@@ -164,7 +173,7 @@ typedef struct Chunk
 /* what a frame let go of, destroyed once the GPU is past it */
 typedef struct Trash
 {
-    int kind; /* 0 image, 1 view, 2 buffer */
+    int kind; /* 0 image, 1 view, 2 buffer, 3 acceleration structure */
     uint64_t h;
     VmaAllocation mem;
 } Trash;
@@ -191,6 +200,7 @@ static uint32_t g_qfam;
 static VmaAllocator g_vma;
 static VkPhysicalDeviceProperties g_props;
 static int g_has_bc, g_has_aniso, g_has_lines, g_has_mirror_once, g_has_large_points;
+static int g_has_rt; /* ray queries and acceleration structures, and what rt_capture needs besides (gfx_init) */
 static float g_max_aniso;
 static VkFormat g_depth_format; /* D24S8 and D24X8: D32_SFLOAT_S8_UINT where the device has it */
 static PFN_vkCmdPushDescriptorSetKHR p_push;
@@ -428,6 +438,8 @@ static void empty_trash(Frame* f)
             vmaDestroyImage(g_vma, (VkImage)(uintptr_t)t->h, t->mem);
         else if (t->kind == 1)
             vkDestroyImageView(g_dev, (VkImageView)(uintptr_t)t->h, NULL);
+        else if (t->kind == 3)
+            vkDestroyAccelerationStructureKHR(g_dev, (VkAccelerationStructureKHR)(uintptr_t)t->h, NULL);
         else
             vmaDestroyBuffer(g_vma, (VkBuffer)(uintptr_t)t->h, t->mem);
     }
@@ -771,6 +783,7 @@ void gfx_buf_upload(GfxBuf* b, const void* data, uint32_t size)
     if (size > b->size)
         size = b->size;
     sun_cache_forget(b->b); /* new contents: the cache's copy of what it drew is no longer it */
+    b->cpu = (const uint8_t*)data, b->cpu_size = size;
     if (b->up_last != g_serial)
         b->up_prev = b->up_last, b->up_last = g_serial;
     if (b->used > completed())
@@ -1319,12 +1332,13 @@ static uint32_t* copy_tok(const uint32_t* t, uint32_t* n)
 }
 
 /* GLSL to a shader module: one stage of a text with both (GFX_VS / GFX_FS) */
+/* text as SPIR-V: a vertex (0), fragment (1) or compute (2) function, GFX_VS, GFX_FS or GFX_CS defined */
 static VkShaderModule compile_glsl(const char* text, int fragment)
 {
     size_t n = strlen(text);
     char* src = (char*)malloc(n + 64);
-    snprintf(src, n + 64, "#version 450\n#define %s\n%s", fragment ? "GFX_FS" : "GFX_VS", text);
-    glslang_stage_t stage = fragment ? GLSLANG_STAGE_FRAGMENT : GLSLANG_STAGE_VERTEX;
+    snprintf(src, n + 64, "#version 460\n#define %s\n%s", fragment == 2 ? "GFX_CS" : fragment ? "GFX_FS" : "GFX_VS", text);
+    glslang_stage_t stage = fragment == 2 ? GLSLANG_STAGE_COMPUTE : fragment ? GLSLANG_STAGE_FRAGMENT : GLSLANG_STAGE_VERTEX;
     glslang_input_t in = { 0 };
     in.language = GLSLANG_SOURCE_GLSL;
     in.stage = stage;
@@ -1401,7 +1415,7 @@ static VkBlendOp blend_op(uint32_t op)
 /* a pipeline from two modules (fs may be null: depth alone) and the fixed state the key gives */
 static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, const VkPipelineColorBlendAttachmentState* blend,
     VkFormat color, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill, const VkDynamicState* dyn,
-    uint32_t ndyn)
+    uint32_t ndyn, int discard)
 {
     VkPipelineShaderStageCreateInfo st[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
@@ -1414,6 +1428,7 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
     vp.viewportCount = vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     rs.polygonMode = fill;
+    rs.rasterizerDiscardEnable = discard ? VK_TRUE : VK_FALSE; /* (ray tracing's capture: the vertex function's writes alone) */
     rs.cullMode = VK_CULL_MODE_NONE;
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rs.lineWidth = 1.0f;
@@ -1497,10 +1512,12 @@ static const Lib* library(const LibKey* k, const uint32_t* vs, const uint32_t* p
     char* src = gfx_glsl_generate(&k->vs, &k->fs, vs, ps);
     if (src)
     {
-        int depth_only = k->vs.shadow && !alpha_tested(&k->fs); /* nothing for the fragments to do */
+        /* captured for ray tracing: no fragments at all. (The sun's maps draw depth alone unless alpha-tested,
+         * but the bounce light's draws its casters in colour: build_pipeline leaves the function out.) */
+        int none = k->vs.shadow == 2;
         l->vm = compile_glsl(src, 0);
-        l->fm = l->vm && !depth_only ? compile_glsl(src, 1) : VK_NULL_HANDLE;
-        l->ok = l->vm && (l->fm || depth_only);
+        l->fm = l->vm && !none ? compile_glsl(src, 1) : VK_NULL_HANDLE;
+        l->ok = l->vm && (l->fm || none);
         free(src);
     }
     else
@@ -1526,6 +1543,8 @@ static VkPipeline build_pipeline(const PipeKey* k, const uint32_t* vs, const uin
 {
     const Lib* l = library(&k->lib, vs, ps);
     VkShaderModule vm = l->vm, fm = l->fm;
+    if (k->lib.vs.shadow && !alpha_tested(&k->lib.fs) && !k->pipe.write_mask) /* depth alone: nothing for the fragments to do */
+        fm = VK_NULL_HANDLE;
     VkPipeline p = VK_NULL_HANDLE;
     if (l->ok)
     {
@@ -1553,7 +1572,8 @@ static VkPipeline build_pipeline(const PipeKey* k, const uint32_t* vs, const uin
         static const VkPrimitiveTopology TOPO[3] = { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
         p = make_pipeline(vm, fm, g_layout, &b, (VkFormat)k->color, (VkFormat)k->depth, (VkFormat)k->stencil, TOPO[k->topo],
-            k->fill ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL, DRAW_DYNAMIC, sizeof DRAW_DYNAMIC / sizeof DRAW_DYNAMIC[0]);
+            k->fill ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL, DRAW_DYNAMIC, sizeof DRAW_DYNAMIC / sizeof DRAW_DYNAMIC[0],
+            k->lib.vs.shadow == 2);
     }
     return p;
 }
@@ -1945,8 +1965,8 @@ static void scene_mips(const GfxDraw* d)
         return;
     uint32_t tw, th;
     color_size(&tw, &th);
-    if (tw * th < 1024)
-        return; /* not the sun flare's 16x16 occlusion probe */
+    if (tw < 512 || th < 512)
+        return; /* onto a large target only: not the flare's probe, nor the game's 256x256 targets (gfx_metal.m) */
     for (int i = 0; i < 8; ++i)
     {
         GfxTex* t = d->tex[i];
@@ -1990,7 +2010,7 @@ typedef struct Caster
     size_t vblen[GFX_NSTREAMS];
     const uint8_t* ibp;
     size_t iblen;
-    const GfxU* up; /* the uniforms, as bound */
+    const GfxU* up; /* the uniforms, as bound: its g_caster_u, not the ring's copy */
     VkImageView tex[8]; /* only for an alpha test */
     GfxSampler samp[8];
     VkPrimitiveTopology prim;
@@ -2005,6 +2025,10 @@ typedef struct Caster
 
 static Caster* g_casters;
 static uint32_t g_ncasters, g_casters_cap;
+/* each caster's uniforms in host memory (g_casters[i].up is &g_caster_u[i]), as gfx_d3d12.c keeps them: the
+ * ring is write-combined, and reading it back is uncached - sun_cache_update's copy from it took 40 ms of
+ * a 50 ms frame in Bastok Markets */
+static GfxU* g_caster_u;
 
 static void casters_clear(void) { g_ncasters = 0; }
 
@@ -2017,7 +2041,12 @@ static int draw_clip0(const GfxDraw* d, float out[4])
     {
         base[s] = NULL, have[s] = 0;
         if (d->buf[s])
-            base[s] = (const uint8_t*)d->buf[s]->p + d->buf_off[s], have[s] = d->buf[s]->size > d->buf_off[s] ? d->buf[s]->size - d->buf_off[s] : 0;
+        {
+            const GfxBuf* b = d->buf[s];
+            const uint8_t* p = b->cpu ? b->cpu : (const uint8_t*)b->p;
+            uint32_t n = b->cpu ? b->cpu_size : b->size;
+            base[s] = p + d->buf_off[s], have[s] = n > d->buf_off[s] ? n - d->buf_off[s] : 0;
+        }
         else if (d->data[s])
             base[s] = (const uint8_t*)d->data[s], have[s] = d->size[s];
     }
@@ -2054,9 +2083,13 @@ static Caster* caster_new(const GfxDraw* d)
     {
         g_casters_cap = g_casters_cap ? g_casters_cap * 2 : 1024;
         g_casters = (Caster*)realloc(g_casters, g_casters_cap * sizeof(Caster));
+        g_caster_u = (GfxU*)realloc(g_caster_u, g_casters_cap * sizeof(GfxU));
+        for (uint32_t i = 0; i < g_ncasters; ++i)
+            g_casters[i].up = &g_caster_u[i];
     }
-    Caster* c = &g_casters[g_ncasters++];
+    Caster* c = &g_casters[g_ncasters];
     memset(c, 0, sizeof *c);
+    c->up = &g_caster_u[g_ncasters++];
     c->lib.vs = d->vs, c->lib.fs = d->fs;
     c->vs = tokens_kept(d->vs.prog, 0, d->vs_tokens), c->ps = tokens_kept(d->fs.prog, 1, d->ps_tokens);
     c->zbias = d->zbias;
@@ -2137,12 +2170,15 @@ static void draw_encode(const GfxDraw* d)
     VkBuffer ub;
     VkDeviceSize uoff;
     GfxU* u = (GfxU*)ring(sizeof(GfxU), RING_ALIGN, &ub, &uoff);
-    memcpy(u, &d->u, need);
     if (d->caster && !g_rt_face && !g_rt_level && depth)
         g_rt->depth_world = depth;
     Caster* rec = d->caster && g_fxs.fx != 0.0f && g_fxs.sun > 0.0f ? caster_new(d) : NULL;
+    /* put together in host memory (a caster's in its g_caster_u) and copied to the write-combined ring once */
+    GfxU own;
+    GfxU* hu = rec ? &g_caster_u[g_ncasters - 1] : &own;
+    memcpy(hu, &d->u, need);
     if (rec)
-        rec->ub = ub, rec->uoff = uoff, rec->up = u;
+        rec->ub = ub, rec->uoff = uoff;
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
         VkDescriptorBufferInfo* b = &bi[1 + s];
@@ -2181,13 +2217,14 @@ static void draw_encode(const GfxDraw* d)
         if (rem)
             for (int r = 0; r < GFX_NREGS; ++r)
                 if (d->vs.el[r].used && d->vs.el[r].stream == s)
-                    u->offset[r] += (int32_t)rem;
+                    hu->offset[r] += (int32_t)rem;
         w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w[nw].dstBinding = B_STREAM0 + (uint32_t)s;
         w[nw].descriptorCount = 1;
         w[nw].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[nw++].pBufferInfo = b;
     }
+    memcpy(u, hu, need);
     bi[0] = (VkDescriptorBufferInfo){ ub, uoff, sizeof(GfxU) };
     w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     w[nw].dstBinding = B_U;
@@ -2226,7 +2263,7 @@ static void draw_encode(const GfxDraw* d)
         w[nw].descriptorCount = 1;
         w[nw].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[nw++].pImageInfo = &ii[i];
-        if (rec && alpha_tested(&d->fs))
+        if (rec)
             rec->tex[i] = view, rec->samp[i] = sk;
     }
     if (water)
@@ -2412,8 +2449,16 @@ static const char FX_GLSL[] =
     "  vec4 smapn;  // its texel in world units, depth bias, penumbra, slope\n"
     "  vec4 smapn2; // its depth units, 1 when it is there, 1 for hard edges\n"
     "  vec4 aop;    // the occlusion's taps this frame\n"
+    "  mat4 gimat;  // the bounce light: view space to its map\n"
+    "  mat4 giinv;  // its map back to view space\n"
+    "  vec4 gi;     // its strength (0: none), its reach in the map's uv and in world units, the level read\n"
+    "  vec4 gip;    // 1 when its frame before is there, that one's weight, its samples, how far it reaches\n"
     "} u;\n"
+    "#ifdef FX_RT\n" /* (ray tracing's passes: RT_GLSL's counts too) */
+    "layout(push_constant) uniform FxPC { ivec2 dir; ivec2 pad; uvec4 rtp; } pc;\n"
+    "#else\n"
     "layout(push_constant) uniform FxPC { ivec2 dir; } pc;\n"
+    "#endif\n"
     "#ifdef GFX_VS\n"
     "layout(location = 0) out vec2 vuv;\n"
     "void main() {\n"
@@ -2432,6 +2477,7 @@ static const char FX_GLSL[] =
     "layout(set = 0, binding = 6) uniform sampler2D t5;\n"
     "layout(set = 0, binding = 7) uniform sampler2DShadow smc;  /* t1 with a compare sampler */\n"
     "layout(set = 0, binding = 8) uniform sampler2DShadow smnc; /* t2 with a compare sampler */\n"
+    "layout(set = 0, binding = 9) uniform sampler2D t6;\n"
     "const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);\n"
     "float view_z(float d) {\n"
     "  d = (d - u.zp.z) / max(u.zp.w - u.zp.z, 1e-6);\n"
@@ -2575,6 +2621,85 @@ static const char FX_GLSL[] =
     "  float facing = smoothstep(0.1, 0.4, dot(N, -P) / dist);\n"
     "  oc = vec4(clamp(1.0 - 3.0 * facing * sum / float(NS), 0.0, 1.0), dist, mp, sh);\n"
     "}\n"
+    "#endif\n"
+    "\n"
+    /* the bounce light (gfx_hlsl.c's fx_gi, which says what each step does): depth at t0, the map's depth
+     * at t1, its colour at t2; rgb the light, a the distance */
+    "#ifdef FX_GI\n"
+    "vec3 normal_at(vec2 px, vec3 P) {\n"
+    "  vec3 r = pos_at(t0, px + vec2(1, 0)) - P, l = P - pos_at(t0, px - vec2(1, 0));\n"
+    "  vec3 d = pos_at(t0, px + vec2(0, 1)) - P, t = P - pos_at(t0, px - vec2(0, 1));\n"
+    "  vec3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  vec3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  vec3 nc = cross(dx, dy);\n"
+    "  vec3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
+    "  return dot(N, P) > 0.0 ? -N : N;\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 px = floor(u.vp.xy + vuv * u.vp.zw) + 0.5;\n"
+    "  vec3 P = pos_at(t0, px);\n"
+    "  float dist = P.z * u.hand.x;\n"
+    "  oc = vec4(0.0);\n"
+    "  if (dist <= 0.0) return;\n"
+    "  oc.a = dist;\n"
+    "  vec4 q = u.gimat * vec4(P, 1.0);\n"
+    "  vec2 e = abs(q.xy);\n"
+    "  float edge = (1.0 - smoothstep(0.8, 0.95, max(e.x, e.y))) * (1.0 - smoothstep(0.7 * u.gip.w, u.gip.w, dist));\n"
+    "  if (edge <= 0.0 || q.z >= 1.0) return;\n"
+    "  vec3 N = normal_at(px, P);\n"
+    "  vec2 uv = vec2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5), sz = vec2(textureSize(t1, 0));\n"
+    "  const int BAYER[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);\n"
+    "  ivec2 cell = ivec2(gl_FragCoord.xy) & 3;\n"
+    "  float k = fract((float(BAYER[cell.y * 4 + cell.x]) + 0.5) / 16.0 + u.hist.y);\n"
+    "  int NS = max(int(u.gip.z), 1);\n"
+    "  float r2 = u.gi.z * u.gi.z;\n"
+    "  vec3 sum = vec3(0.0);\n"
+    "  for (int i = 0; i < NS; ++i) {\n"
+    "    float t = (float(i) + k) / float(NS), a = float(i) * 2.3999632 + k * 6.2831853;\n"
+    "    vec2 us = uv + vec2(cos(a), sin(a)) * (sqrt(t) * u.gi.y);\n"
+    "    if (any(lessThanEqual(us, vec2(0.0))) || any(greaterThanEqual(us, vec2(1.0)))) continue;\n"
+    "    float zs = texelFetch(t1, ivec2(us * sz), 0).r;\n"
+    "    if (zs >= 1.0) continue;\n"
+    "    vec4 x = u.giinv * vec4(us.x * 2.0 - 1.0, 1.0 - us.y * 2.0, zs, 1.0);\n"
+    "    vec3 v = x.xyz / x.w - P;\n"
+    "    float dd = dot(v, v) + 1e-4;\n"
+    "    vec3 vn = v * inversesqrt(dd);\n"
+    "    float w = clamp(dot(N, vn), 0.0, 1.0) * clamp(0.25 - 0.75 * dot(u.sun.xyz, vn), 0.0, 1.0) * r2 / (dd + 0.25 * r2) *\n"
+    "      clamp(2.0 - dd / r2, 0.0, 1.0);\n"
+    "    sum += textureLod(t2, us, u.gi.w).rgb * w;\n"
+    "  }\n"
+    "  oc.rgb = sum * (u.gi.x * edge / float(NS));\n"
+    "}\n"
+    "#endif\n"
+    "\n"
+    "#ifdef FX_GITEMP\n"
+    "void main() {\n"
+    "  vec4 c = texelFetch(t0, ivec2(gl_FragCoord.xy), 0);\n"
+    "  oc = c;\n"
+    "  if (c.a <= 0.0 || u.gip.x == 0.0) return;\n"
+    "  vec2 px = u.vp.xy + vuv * u.vp.zw;\n"
+    "  vec3 P = view_pos(px, c.a * u.hand.x);\n"
+    "  vec4 pcl = u.reproj * vec4(P, 1.0);\n"
+    "  if (pcl.w <= 1e-4) return;\n"
+    "  vec2 puv = vec2(pcl.x / pcl.w * 0.5 + 0.5, 0.5 - pcl.y / pcl.w * 0.5);\n"
+    "  if (any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0)))) return;\n"
+    "  vec4 h = texture(t1, puv);\n"
+    "  if (!(h.a > 0.0) || abs(h.a - pcl.w) > 0.04 * pcl.w) return;\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy), hi = textureSize(t0, 0) - 1;\n"
+    "  vec3 lo = c.rgb, up = c.rgb;\n"
+    "  for (int dy = -1; dy <= 1; ++dy)\n"
+    "    for (int dx = -1; dx <= 1; ++dx) {\n"
+    "      vec4 t = texelFetch(t0, clamp(p + ivec2(dx, dy), ivec2(0), hi), 0);\n"
+    "      if (t.a > 0.0 && abs(t.a - c.a) < 0.05 * c.a) lo = min(lo, t.rgb), up = max(up, t.rgb);\n"
+    "    }\n"
+    "  vec3 give = 0.1 * (up - lo) + 0.01;\n"
+    "  oc = vec4(mix(c.rgb, clamp(h.rgb, lo - give, up + give), u.gip.y), c.a);\n"
+    "}\n"
+    "#endif\n"
+    "\n"
+    /* one level of the bounce light's map from the level above: the average of the 2x2 over it */
+    "#ifdef FX_MIP\n"
+    "void main() { oc = texture(t0, vuv); }\n"
     "#endif\n"
     "\n"
     "#ifdef FX_BLUR\n"
@@ -2740,15 +2865,40 @@ static const char FX_GLSL[] =
     "  return w > 0.0 ? s / w : vec3(1.0);\n"
     "}\n"
     "vec3 screen(vec3 a, vec3 b) { return 1.0 - (1.0 - clamp(a, 0.0, 1.0)) * (1.0 - clamp(b, 0.0, 1.0)); }\n"
+    /* the bounce light at uv from its half size: the four round it, each as near in distance as it is */
+    "vec3 gi_at(vec2 uv, float dist) {\n"
+    "  if (dist <= 0.0) return vec3(0.0);\n"
+    "  ivec2 sz = textureSize(t6, 0), hi = sz - 1;\n"
+    "  vec2 g = uv * vec2(sz) - 0.5, f = fract(g);\n"
+    "  ivec2 i0 = ivec2(floor(g));\n"
+    "  vec3 s = vec3(0.0);\n"
+    "  float w = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    ivec2 o = ivec2(k & 1, k >> 1);\n"
+    "    vec4 t = texelFetch(t6, clamp(i0 + o, ivec2(0), hi), 0);\n"
+    "    float bw = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y);\n"
+    "    float dw = t.a > 0.0 ? 1.0 / (1e-3 + abs(t.a - dist) / dist) : 1e-3;\n"
+    "    s += t.rgb * bw * dw, w += bw * dw;\n"
+    "  }\n"
+    "  return w > 0.0 ? s / w : vec3(0.0);\n"
+    "}\n"
     "void main() {\n"
     "  vec2 px = gl_FragCoord.xy;\n"
     "  vec4 c = texelFetch(t0, ivec2(px), 0);\n"
     "  int dbg = int(u.grade.w);\n"
     "  vec3 os = u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0 ? ao_at(vuv, view_z(depth_at(t2, px)) * u.hand.x) : vec3(1.0);\n"
-    "  float o = os.x, sun = mix(1.0, os.y, u.smap.x) * mix(1.0, os.z, u.shadow.x);\n"
+    /* what glows (a lamp's glass, a lit doorway: near white in a colour) is light, not a surface: the occlusion
+     * leaves it, as it greyed the lamps it stood next to */
+    "  float o = mix(os.x, 1.0, smoothstep(0.6, 0.95, max(c.r, max(c.g, c.b)))), sun = mix(1.0, os.y, u.smap.x) * mix(1.0, os.z, u.shadow.x);\n"
     "  if (dbg == 1) { oc = vec4(o, o, o, c.a); return; }\n"
     "  if (dbg == 5) { oc = vec4(vec3(sun), c.a); return; }\n"
+    /* the bounce light (t6) on the surface's own colour, mostly where the sun does not reach (gfx_hlsl.c) */
+    "  vec3 gl = u.gi.x > 0.0 ? gi_at(vuv, view_z(depth_at(t2, px)) * u.hand.x) : vec3(0.0);\n"
+    "  if (dbg == 6) { oc = vec4(gl * 3.0, c.a); return; }\n"
+    "  if (dbg == 7 && px.x < u.vp.x + u.vp.z * 0.5) gl = vec3(0.0);\n"
+    "  vec3 base = c.rgb;\n"
     "  c.rgb *= mix(1.0, o, u.ao.y) * sun;\n"
+    "  c.rgb += base * gl * mix(1.0, o, u.ao.y) * (1.0 - 0.75 * mix(1.0, os.y, u.smap.x));\n"
     "  float f = 0.0;\n"
     "  if (u.fogc.a > 0.0) {\n"
     "    float z = view_z(depth_at(t2, px));\n"
@@ -2777,19 +2927,24 @@ static const char FX_GLSL[] =
     "  c.rgb = screen(c.rgb, add);\n"
     "  vec3 x = mix(vec3(dot(c.rgb, LUMA)), c.rgb, u.grade.y);\n"
     "  x = clamp(x, 0.0, 1.0);\n"
-    "  x = mix(x, x * x * (3.0 - 2.0 * x), u.grade.z);\n"
+    /* the contrast curve leaves what nothing was drawn on (no depth). (The game's sky dome has depth: it
+     * stands round the camera, no farther than the walls, so the curve still darkens it.) */
+    "  x = mix(x, x * x * (3.0 - 2.0 * x), u.grade.z * (view_z(depth_at(t2, px)) != 0.0 ? 1.0 : 0.0));\n"
     "  c.rgb = mix(c.rgb, x, u.grade.x);\n"
     "  oc = c;\n"
     "}\n"
     "#endif\n"
     "#endif\n";
 
+#define GI_MAP 1024 /* the bounce light's map's texels across */
+#define GI_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+
 static struct
 {
     int tried;
     VkShaderModule vs;
     VkPipeline ao_pipe, blur_pipe, bright_pipe, down_pipe, gauss_pipe, raymask_pipe, rays_pipe, comp_pipe, temporal_pipe, aa_pipe,
-        linz_pipe, zmip_pipe;
+        linz_pipe, zmip_pipe, gi_pipe, gitemp_pipe, mip_pipe;
     VkFormat comp_fmt, aa_fmt;
     GfxTex* lz;     /* the occlusion's depth: view z at its size and three levels below (FX_LINZ, FX_ZMIP) */
     GfxTex* aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
@@ -2801,6 +2956,14 @@ static struct
     float last_cam[3]; /* where the camera was at the last scene (a jump is a new place) */
     VkSampler samp, cmp;
     GfxTex *smap, *smapn, *sdummy; /* the sun's shadow maps (far, near), a stand-in */
+    /* the bounce light: the casters near the camera as the sun sees them, depth and colour (with three
+     * levels below); the gather at half the occlusion's size; after the temporal pass, this frame's and
+     * the one before; the sampler that reads the colour's levels (samp reads level 0 alone) */
+    GfxTex *gimap, *gicol, *gi0, *gi1, *gih[2]; /* (gi1: the traced bounce light's smoothing, rt_giblur) */
+    int gih_at;
+    uint64_t gih_serial, prev_serial; /* the frames the bounce's history and the camera (prev_view) were kept */
+    VkSampler mipsamp;
+    uint32_t mip_in; /* fx_pass: the inputs read through mipsamp (a bit each) */
     float focus[3];                /* the player's place in the world (gfx_set_focus) */
     int has_focus;
     /* what the fog and rays follow, eased from frame to frame (fx_ease) */
@@ -2808,6 +2971,7 @@ static struct
     uint64_t eased_serial;
     float fog_on, fogc[3], up[3], sun[3], suncol[3];
     float sunw[3]; /* toward the sun in the world, as the last lit draw gave it, and the frame it was seen */
+    float sun0[3], sunt[3], sunp; /* the sun's glide from its last step (sun0) to the game's (sunt), sunp of the way */
     float direct;  /* how much of the game's light is the sun's, eased */
     uint64_t sunw_seen;
     /* the shadows' profile (FFXI_PROFILE) */
@@ -2877,7 +3041,7 @@ static VkPipeline fx_pipeline(const char* name, VkFormat fmt)
         b.colorWriteMask = 0xF;
         static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
         p = make_pipeline(g_fx.vs, fs, g_fx_layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            VK_POLYGON_MODE_FILL, dyn, 2);
+            VK_POLYGON_MODE_FILL, dyn, 2, 0);
     }
     if (fs)
         vkDestroyShaderModule(g_dev, fs, NULL);
@@ -2892,13 +3056,13 @@ static int fx_init(void)
         return g_fx.ao_pipe != VK_NULL_HANDLE;
     g_fx.tried = 1;
     /* the passes' bindings: their uniforms, six textures, the two sun maps with a compare sampler */
-    VkDescriptorSetLayoutBinding b[9];
+    VkDescriptorSetLayoutBinding b[10];
     b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-    for (uint32_t i = 1; i < 9; ++i)
+    for (uint32_t i = 1; i < 10; ++i)
         b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    dl.bindingCount = 9;
+    dl.bindingCount = 10;
     dl.pBindings = b;
     VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_fx_dsl));
     VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8 };
@@ -2920,9 +3084,16 @@ static int fx_init(void)
     g_fx.temporal_pipe = fx_pipeline("TEMPORAL", F16);
     g_fx.linz_pipe = fx_pipeline("LINZ", F32);
     g_fx.zmip_pipe = fx_pipeline("ZMIP", F32);
+    g_fx.gi_pipe = fx_pipeline("GI", F16);
+    g_fx.gitemp_pipe = fx_pipeline("GITEMP", F16);
+    g_fx.mip_pipe = fx_pipeline("MIP", GI_FORMAT);
     VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     si.magFilter = si.minFilter = VK_FILTER_LINEAR;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.mipsamp));
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.maxLod = 0.25f;
     VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.samp));
     /* 1 where the point is no deeper than the map; filtered where the device filters depth */
@@ -2935,7 +3106,8 @@ static int fx_init(void)
     VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.cmp));
     g_fx.sdummy = tex_create(GFX_TEX_2D, F_D16, 1, 1, 1, GFX_USE_DEPTH, VK_FORMAT_D32_SFLOAT, 1);
     if (!g_fx.ao_pipe || !g_fx.blur_pipe || !g_fx.bright_pipe || !g_fx.down_pipe || !g_fx.gauss_pipe || !g_fx.raymask_pipe ||
-        !g_fx.rays_pipe || !g_fx.temporal_pipe || !g_fx.linz_pipe || !g_fx.zmip_pipe || !g_fx.sdummy)
+        !g_fx.rays_pipe || !g_fx.temporal_pipe || !g_fx.linz_pipe || !g_fx.zmip_pipe || !g_fx.gi_pipe || !g_fx.gitemp_pipe ||
+        !g_fx.mip_pipe || !g_fx.sdummy)
     {
         g_fx.ao_pipe = VK_NULL_HANDLE;
         return 0;
@@ -2984,7 +3156,8 @@ static void image_copy(GfxTex* src, GfxTex* dst, VkImageAspectFlags aspect)
 }
 
 /* one full-screen triangle into a level of target (within vp, x y w h; NULL: all of it), reading
- * in[0..n) as t0.., and the sun maps sh[0..2) through the compare sampler; load keeps what is there */
+ * in[0..n) as t0.. (up to seven), and the sun maps sh[0..2) through the compare sampler; load keeps
+ * what is there */
 static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, const float* vp, const VkImageView* in, int n,
     const VkImageView* sh, const int32_t* dir)
 {
@@ -3009,18 +3182,20 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
     vkCmdSetViewport(cb, 0, 1, &v);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    VkWriteDescriptorSet w[9];
+    VkWriteDescriptorSet w[10];
     VkDescriptorBufferInfo bi = { g_fx.ub, g_fx.uoff, sizeof(FxU) };
-    VkDescriptorImageInfo ii[8];
+    VkDescriptorImageInfo ii[9];
     w[0] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     w[0].dstBinding = 0;
     w[0].descriptorCount = 1;
     w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     w[0].pBufferInfo = &bi;
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < 9; ++i)
     {
-        if (i < 6)
-            ii[i] = (VkDescriptorImageInfo){ g_fx.samp, i < n && in[i] ? in[i] : g_dummy2d->view, VK_IMAGE_LAYOUT_GENERAL };
+        int t = i < 6 ? i : i == 8 ? 6 : -1; /* bindings 1..6 are t0..t5, 9 is t6; 7 and 8 the sun maps */
+        if (t >= 0)
+            ii[i] = (VkDescriptorImageInfo){ (g_fx.mip_in >> t) & 1 ? g_fx.mipsamp : g_fx.samp, t < n && in[t] ? in[t] : g_dummy2d->view,
+                VK_IMAGE_LAYOUT_GENERAL };
         else
             ii[i] = (VkDescriptorImageInfo){ g_fx.cmp, sh && sh[i - 6] ? sh[i - 6] : g_fx.sdummy->view, VK_IMAGE_LAYOUT_GENERAL };
         w[1 + i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -3029,7 +3204,7 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
         w[1 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[1 + i].pImageInfo = &ii[i];
     }
-    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, 9, w);
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, 10, w);
     int32_t d2[2] = { dir ? dir[0] : 0, dir ? dir[1] : 0 };
     vkCmdPushConstants(cb, g_fx_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8, d2);
     vkCmdDraw(cb, 3, 1, 0, 0);
@@ -3422,13 +3597,21 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
                 continue;
             }
         }
+        /* a copy's vertex offset moves to its own vertices (cache_copy) before ubuf is written: like the
+         * ring, ubuf is write-combined and not read back */
+        GfxU moved;
+        if (copy)
+        {
+            memcpy(&moved, src, sizeof moved);
+            if (!cache_copy(ce, c, &moved))
+            {
+                ce->dead = 1;
+                continue;
+            }
+            src = &moved;
+        }
         memcpy(ce->ubuf_p, src, sizeof(GfxU));
         ce->c.ub = ce->ubuf, ce->c.uoff = 0, ce->c.up = (const GfxU*)ce->ubuf_p;
-        if (copy && !cache_copy(ce, c, (GfxU*)ce->ubuf_p))
-        {
-            ce->dead = 1;
-            continue;
-        }
         ce->c.has_pos = c->has_pos;
         memcpy(ce->c.clip0, c->clip0, 16);
         memcpy(ce->pos, pos, 12);
@@ -3454,8 +3637,10 @@ static GfxTex* sun_target(GfxTex** t, int size)
     return fx_tex(t, VK_FORMAT_D32_SFLOAT, (uint32_t)size, (uint32_t)size, GFX_USE_DEPTH, 1);
 }
 
-/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache) */
-static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, const SunCascade* k, int cache)
+/* the casters into one cascade's map: this frame's, and the zone's kept from before (cache). With col,
+ * the bounce light's: every caster (whoever casts) in its own colour as well, through its own pixel
+ * function, unfogged (gfx_d3d12.c's) */
+static uint32_t sun_draw(GfxTex* target, GfxTex* col, const float* invP, const float* invV, const SunCascade* k, int cache)
 {
     float clip_world[16], M[16];
     gfx_mat_mul(clip_world, invP, invV);
@@ -3473,6 +3658,16 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
     ri.renderArea.extent = (VkExtent2D){ (uint32_t)k->size, (uint32_t)k->size };
     ri.layerCount = 1;
     ri.pDepthAttachment = &da;
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    if (col)
+    {
+        ca.imageView = attachment_view(col, 0, 0);
+        ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &ca;
+    }
     vkCmdBeginRendering(cb, &ri);
     /* y up, as the draws' (set_viewport): the map's rows as sun_look reads them */
     VkViewport v = { 0, (float)k->size, (float)k->size, -(float)k->size, 0, 1 };
@@ -3491,10 +3686,10 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
             cs = &g_casters[i];
             if (!mb)
                 memcpy(ring(64, RING_ALIGN, &mb, &moff), M, 64);
-            /* sun_casters 1: characters alone cast; 2: the zone alone */
-            if ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep))
+            /* sun_casters 1: characters alone cast; 2: the zone alone (the bounce light's map has them all) */
+            if (!col && ((g_fxs.sun_casters == 1.0f && (cs->fixed || cs->keep)) || (g_fxs.sun_casters == 2.0f && !cs->fixed && !cs->keep)))
                 continue;
-            /* more than 96 units outside the map's sides: no shadow of it falls in it */
+            /* more than 96 units outside the map's sides (the bounce light's: 16): no shadow of it falls in it */
             if (cs->has_pos)
             {
                 float h[4];
@@ -3504,7 +3699,7 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
                     float q[3] = { h[0] / h[3], h[1] / h[3], h[2] / h[3] };
                     float mx = q[0] * k->S[0] + q[1] * k->S[4] + q[2] * k->S[8] + k->S[12];
                     float my = q[0] * k->S[1] + q[1] * k->S[5] + q[2] * k->S[9] + k->S[13];
-                    float edge = 1.0f + 96.0f * 2.0f / k->across;
+                    float edge = 1.0f + (col ? 16.0f : 96.0f) * 2.0f / k->across;
                     if (fabsf(mx) > edge || fabsf(my) > edge)
                         continue;
                 }
@@ -3538,8 +3733,10 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
         memset(&pk, 0, sizeof pk);
         pk.lib = cs->lib;
         pk.lib.vs.shadow = 1, pk.lib.vs.pixel = 0, pk.lib.vs.water = 0, pk.lib.fs.water = 0;
-        int at = alpha_tested(&cs->lib.fs);
-        if (!at)
+        int at = alpha_tested(&cs->lib.fs), tex = at || col;
+        if (col)
+            pk.lib.fs.fog = 0, pk.pipe.write_mask = 15; /* its colour as the sun sees it: no fog of the camera's */
+        else if (!at)
         {
             /* the position alone: one pipeline serves every draw with the same vertex layout */
             GfxVsKey* vk = &pk.lib.vs;
@@ -3550,7 +3747,7 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
             memset(vk->tci, 0, sizeof vk->tci), memset(vk->ttf, 0, sizeof vk->ttf);
             memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
         }
-        pk.color = VK_FORMAT_UNDEFINED, pk.depth = VK_FORMAT_D32_SFLOAT;
+        pk.color = col ? (uint32_t)col->vf : VK_FORMAT_UNDEFINED, pk.depth = VK_FORMAT_D32_SFLOAT;
         pk.topo = cs->prim == VK_PRIMITIVE_TOPOLOGY_POINT_LIST ? 0
             : cs->prim == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || cs->prim == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ? 1 : 2;
         VkPipeline ps = pipeline_for(&pk, cs->vs, cs->ps);
@@ -3606,7 +3803,7 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
             w[nw].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             w[nw++].pBufferInfo = &bi[2 + st];
         }
-        if (at)
+        if (tex)
             for (int t = 0; t < 8; ++t)
             {
                 int wanted = cs->lib.fs.prog || t < cs->lib.fs.nstages ? cs->lib.fs.st[t].tex : 0;
@@ -3635,6 +3832,8 @@ static uint32_t sun_draw(GfxTex* target, const float* invP, const float* invV, c
     g_dirty = 1;
     g_bound = VK_NULL_HANDLE;
     target->used = g_serial, target->rec = g_cb_index;
+    if (col)
+        col->used = g_serial, col->rec = g_cb_index;
     return drawn;
 }
 
@@ -3657,7 +3856,7 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     gfx_sun_fit(s, invV, L, 0.5f, dfar, GFX_SUN_MAP, &far);
     if (!sun_target(&g_fx.smap, GFX_SUN_MAP))
         return 0;
-    uint32_t drawn = sun_draw(g_fx.smap, invP, invV, &far, 1);
+    uint32_t drawn = sun_draw(g_fx.smap, NULL, invP, invV, &far, 1);
     memcpy(u->lmat, far.lmat, 64);
     u->smap[1] = far.texel, u->smap[2] = far.bias, u->smap[3] = far.soft;
     u->smap2[0] = far.slope, u->smap2[3] = far.range;
@@ -3675,14 +3874,973 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
     if (dnear > 0.0f && sun_target(&g_fx.smapn, nsize))
     {
         gfx_sun_fit(s, invV, L, 0.5f, tnear, nsize, &near);
-        sun_draw(g_fx.smapn, invP, invV, &near, 1);
+        sun_draw(g_fx.smapn, NULL, invP, invV, &near, 1);
         memcpy(u->lmatn, near.lmat, 64);
         u->smapn[0] = near.texel, u->smapn[1] = near.bias, u->smapn[2] = near.soft, u->smapn[3] = near.slope;
         u->smapn2[0] = near.range, u->smapn2[1] = 1.0f;
     }
+    /* the bounce light's map: this frame's casters over the first gi_distance units the camera sees, in
+     * colour, 1024 across, and its levels below (gfx_d3d12.c's) */
+    u->gi[0] = 0.0f;
+    float gd = fminf(fmaxf(g_fxs.gi_distance, 8.0f), dfar);
+    if (g_fxs.gi > 0.0f && sun_target(&g_fx.gimap, GI_MAP) && fx_tex(&g_fx.gicol, GI_FORMAT, GI_MAP, GI_MAP, GFX_USE_RT, 4))
+    {
+        SunCascade gk;
+        float inv[16];
+        gfx_sun_fit(s, invV, L, 0.5f, gd, GI_MAP, &gk);
+        if (sun_draw(g_fx.gimap, g_fx.gicol, invP, invV, &gk, 0) && gfx_mat_inverse(inv, gk.lmat))
+        {
+            fx_uniforms(u); /* (the levels read none of them, but the pass binds them) */
+            for (uint32_t lv = 1; lv < 4; ++lv)
+            {
+                VkImageView prev = level_view(g_fx.gicol, lv - 1);
+                fx_pass(g_fx.gicol, lv, 0, g_fx.mip_pipe, NULL, &prev, 1, NULL, NULL);
+            }
+            float r = fmaxf(g_fxs.gi_radius, 0.5f);
+            memcpy(u->gimat, gk.lmat, 64), memcpy(u->giinv, inv, 64);
+            u->gi[0] = 1.0f, u->gi[1] = r / gk.across, u->gi[2] = r;
+            u->gi[3] = fminf(fmaxf(log2f(r / (4.0f * gk.texel)), 0.0f), 3.0f);
+            u->gip[3] = gd;
+        }
+    }
     g_fx.st_across = far.across;
     g_fx.st_cached = g_ncache;
     return drawn != 0;
+}
+
+/* --- ray tracing (rt) -------------------------------------------------------------------------------------------
+ * The world for rays (gfx_d3d12.c's, which says more; gfx_metal.m's the same way), made from the frame's
+ * casters as the sun's maps are: each drawn once more through its own vertex function (the capture key,
+ * GfxVsKey.shadow 2: rasterization off, the function run once a corner of its triangles, writing each
+ * corner's point in this frame's view space into one buffer - gfx_msl.c emit_rt_index), a structure built
+ * over the solid triangles and one over the alpha-tested, and one over both on top, every frame. The casters
+ * out of view come from the sun's cache, through the camera they were drawn with. Rays are traced inline
+ * (ray queries) from the scene effects' passes (RT_GLSL). Where the device cannot (g_has_rt), none are. */
+#define RT_REACH 150.0f /* the cache's casters further than this from the camera are left out */
+#define RT_TEXS 1024    /* the alpha tests' textures a frame (set 1 of the passes): those past it are traced solid */
+#define RT_TEXS_S "1024"
+
+/* Ray tracing's passes (gfx_rt.hlsl's, gfx_metal.m RT_MSL's, as GLSL ray queries): compiled with FX_GLSL
+ * around them (rt_fx_pipeline puts this in its fragment part, FX_RT and FX_RT_<NAME> defined). Set 0 as
+ * the passes' (FxU at 0, t0..t6) and the world: the structure at 10 (two instances, custom index 0 the
+ * solid triangles, mask 1, and 1 the alpha-tested, mask 2), the corners at 11 (two vec4s each: the point,
+ * then the first texture coordinates and the diffuse alpha), their smooth normals at 12, the alpha tests'
+ * table at 13 (each its first triangle, its texture in set 1, stage 0's alpha op << 2 and its arguments
+ * << 8 and << 16, its test: D3DCMPFUNC << 8 | reference | the texture factor's alpha << 16); set 1 the
+ * alpha tests' textures, each with its own sampler. pc.rtp: the solid triangles' count, the alpha tests'. */
+static const char RT_GLSL[] =
+    "#ifdef FX_RT\n"
+    "layout(set = 0, binding = 10) uniform accelerationStructureEXT world;\n"
+    "layout(std430, set = 0, binding = 11) readonly buffer RtTri { vec4 tri[]; };\n"
+    "layout(std430, set = 0, binding = 12) readonly buffer RtNrm { vec4 nrm[]; };\n"
+    "layout(std430, set = 0, binding = 13) readonly buffer RtTab { uvec4 tab[]; };\n"
+    "layout(set = 1, binding = 0) uniform sampler2D texs[" RT_TEXS_S "];\n"
+    "vec3 rt_view_dir(vec2 px) { return normalize(view_pos(px, u.hand.x)); }\n"
+    "vec3 rt_corner(uint prim, uint k) { return tri[(prim * 3u + k) * 2u].xyz; }\n"
+    "vec3 rt_tri_normal(uint prim, vec3 dir) {\n"
+    "  vec3 a = rt_corner(prim, 0u), b = rt_corner(prim, 1u), c = rt_corner(prim, 2u);\n"
+    "  vec3 n = cross(b - a, c - a);\n"
+    "  n = dot(n, n) > 1e-20 ? normalize(n) : -dir;\n"
+    "  return dot(n, dir) > 0.0 ? -n : n;\n"
+    "}\n"
+    "vec3 rt_smooth_normal(uint prim, vec2 bary, vec3 geo) {\n"
+    "  vec3 n = nrm[prim * 3u].xyz * (1.0 - bary.x - bary.y) + nrm[prim * 3u + 1u].xyz * bary.x + nrm[prim * 3u + 2u].xyz * bary.y;\n"
+    "  if (dot(n, n) < 1e-8) return geo;\n"
+    "  n = normalize(n);\n"
+    "  return dot(n, geo) < 0.0 ? -n : n;\n"
+    "}\n"
+    /* does an alpha-tested triangle (prim, of all of them) let a ray through where it meets it (bary)? */
+    "bool rt_alpha_holds(uint prim, vec2 bary) {\n"
+    "  uint lo = 0u, hi = pc.rtp.y;\n"
+    "  while (hi - lo > 1u) { uint mid = (lo + hi) / 2u; if (tab[mid].x <= prim) lo = mid; else hi = mid; }\n"
+    "  uvec4 e = tab[lo];\n"
+    "  vec3 uv = tri[prim * 6u + 1u].xyz * (1.0 - bary.x - bary.y) + tri[prim * 6u + 3u].xyz * bary.x + tri[prim * 6u + 5u].xyz * bary.y;\n"
+    "  float ta = textureLod(texs[nonuniformEXT(e.y)], uv.xy, 0.0).a;\n"
+    "  float tf = float((e.w >> 16) & 255u) / 255.0, ar[2];\n"
+    "  for (int i = 0; i < 2; ++i) {\n"
+    "    uint x = (e.z >> (8 + 8 * i)) & 255u, w = x & 15u;\n"
+    "    float v = w == 2u ? ta : w == 3u ? tf : w <= 1u ? uv.z : 1.0;\n"
+    "    ar[i] = (x & 16u) != 0u ? 1.0 - v : v;\n"
+    "  }\n"
+    "  uint op = (e.z >> 2) & 63u;\n"
+    "  float a = op == 1u ? uv.z : op == 2u ? ar[0] : op == 3u ? ar[1] : op == 4u ? ar[0] * ar[1] : op == 5u ? ar[0] * ar[1] * 2.0 :\n"
+    "    op == 6u ? ar[0] * ar[1] * 4.0 : op == 7u ? ar[0] + ar[1] : ta;\n"
+    "  a = clamp(a, 0.0, 1.0) * 255.0;\n"
+    "  float ref = float(e.w & 255u);\n"
+    "  switch ((e.w >> 8) & 255u) {\n"
+    "  case 1u: return false;\n"
+    "  case 2u: return a < ref;\n"
+    "  case 3u: return abs(a - ref) < 0.5;\n"
+    "  case 4u: return a <= ref;\n"
+    "  case 5u: return a > ref;\n"
+    "  case 6u: return abs(a - ref) >= 0.5;\n"
+    "  case 7u: return a >= ref;\n"
+    "  default: return true;\n"
+    "  }\n"
+    "}\n"
+    /* the nearest hit along a ray, t in [tmin, tmax]; prim the triangle (of all of them; -1 none), bary where */
+    "float rt_trace(vec3 o, vec3 d, float tmin, float tmax, out int prim, out vec2 bary) {\n"
+    "  rayQueryEXT q;\n"
+    "  rayQueryInitializeEXT(q, world, gl_RayFlagsNoneEXT, 0xFFu, o, tmin, d, tmax);\n"
+    "  while (rayQueryProceedEXT(q))\n"
+    "    if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&\n"
+    "        rt_alpha_holds(pc.rtp.x + uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), rayQueryGetIntersectionBarycentricsEXT(q, false)))\n"
+    "      rayQueryConfirmIntersectionEXT(q);\n"
+    "  prim = -1, bary = vec2(0.0);\n"
+    "  if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return tmax;\n"
+    "  prim = rayQueryGetIntersectionPrimitiveIndexEXT(q, true) + (rayQueryGetIntersectionInstanceCustomIndexEXT(q, true) != 0 ? int(pc.rtp.x) : 0);\n"
+    "  bary = rayQueryGetIntersectionBarycentricsEXT(q, true);\n"
+    "  return rayQueryGetIntersectionTEXT(q, true);\n"
+    "}\n"
+    /* the nearest hit among the solid triangles alone (the bounce light's and occlusion's rays pass the leaves) */
+    "float rt_trace_solid(vec3 o, vec3 d, float tmin, float tmax, out int prim) {\n"
+    "  rayQueryEXT q;\n"
+    "  rayQueryInitializeEXT(q, world, gl_RayFlagsOpaqueEXT, 0x01u, o, tmin, d, tmax);\n"
+    "  while (rayQueryProceedEXT(q)) {}\n"
+    "  prim = -1;\n"
+    "  if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return tmax;\n"
+    "  prim = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);\n"
+    "  return rayQueryGetIntersectionTEXT(q, true);\n"
+    "}\n"
+    "bool rt_blocked(vec3 o, vec3 d, float tmin, float tmax) {\n"
+    "  rayQueryEXT q;\n"
+    "  rayQueryInitializeEXT(q, world, gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, o, tmin, d, tmax);\n"
+    "  while (rayQueryProceedEXT(q))\n"
+    "    if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&\n"
+    "        rt_alpha_holds(pc.rtp.x + uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), rayQueryGetIntersectionBarycentricsEXT(q, false)))\n"
+    "      rayQueryConfirmIntersectionEXT(q);\n"
+    "  return rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;\n"
+    "}\n"
+    "const uint RT_BAYER[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);\n"
+    "vec2 rt_pattern(vec2 pos, int i) {\n"
+    "  ivec2 cell = ivec2(pos) & 3;\n"
+    "  float k = fract((float(RT_BAYER[cell.y * 4 + cell.x]) + 0.5) / 16.0 + u.hist.y + float(i) * 0.6180340);\n"
+    "  uint h = (uint(pos.x) * 73856093u) ^ (uint(pos.y) * 19349663u);\n"
+    "  float j = fract(float(h & 1023u) / 1024.0 + u.hist.y * 1.3247180 + float(i) * 0.7548777);\n"
+    "  return vec2(k, j);\n"
+    "}\n"
+    "void rt_basis(vec3 N, out vec3 t, out vec3 s) {\n"
+    "  t = abs(N.y) < 0.99 ? normalize(cross(N, vec3(0, 1, 0))) : normalize(cross(N, vec3(1, 0, 0)));\n"
+    "  s = cross(N, t);\n"
+    "}\n"
+    "vec3 rt_hemi(vec3 N, float a, float b) {\n"
+    "  vec3 t, s;\n"
+    "  rt_basis(N, t, s);\n"
+    "  float r = sqrt(a), phi = 6.2831853 * b;\n"
+    "  return normalize(t * (r * cos(phi)) + s * (r * sin(phi)) + N * sqrt(max(1.0 - a, 0.0)));\n"
+    "}\n"
+    "vec3 rt_normal_at(vec2 px, vec3 P) {\n"
+    "  vec3 r = pos_at(t0, px + vec2(1, 0)) - P, l = P - pos_at(t0, px - vec2(1, 0));\n"
+    "  vec3 d = pos_at(t0, px + vec2(0, 1)) - P, t = P - pos_at(t0, px - vec2(0, 1));\n"
+    "  vec3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  vec3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  vec3 nc = cross(dx, dy);\n"
+    "  vec3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
+    "  return dot(N, P) > 0.0 ? -N : N;\n"
+    "}\n"
+    "#ifdef FX_RT_CLAY\n"
+    /* debug=clay (8): the world as the rays see it. The depth at t0. */
+    "float rt_sun_seen(vec3 p, vec3 n, vec3 g, vec2 pos, int rays) {\n"
+    "  float nl = dot(n, u.sun.xyz);\n"
+    "  if (nl <= 0.0) return 0.0;\n"
+    "  vec3 t, s;\n"
+    "  rt_basis(u.sun.xyz, t, s);\n"
+    "  vec3 o = p + g * 0.02 + n * 0.03;\n"
+    "  float spread = 0.035, tmin = max(u.smap2.z, 0.05), lit = 0.0;\n"
+    "  for (int i = 0; i < rays; ++i) {\n"
+    "    vec2 rn = rt_pattern(pos, i + 3);\n"
+    "    float rr = sqrt(rn.x) * spread, phi = 6.2831853 * rn.y;\n"
+    "    vec3 d = normalize(u.sun.xyz + t * (rr * cos(phi)) + s * (rr * sin(phi)));\n"
+    "    lit += rt_blocked(o, d, tmin, 500.0) ? 0.0 : 1.0;\n"
+    "  }\n"
+    "  return smoothstep(0.0, 0.2, nl) * lit / float(rays);\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 px = floor(u.vp.xy + vuv * u.vp.zw) + 0.5;\n"
+    "  float z = view_z(depth_at(t0, px));\n"
+    "  float drawn = z != 0.0 ? length(view_pos(px, z)) : 0.0;\n"
+    "  vec3 d = rt_view_dir(px);\n"
+    "  int prim;\n"
+    "  vec2 bary;\n"
+    "  float t = rt_trace(vec3(0.0), d, 0.05, 2000.0, prim, bary);\n"
+    "  if (prim < 0) { oc = drawn > 0.0 ? vec4(0.1, 0.2, 0.9, 1) : vec4(0.35, 0.45, 0.6, 1); return; }\n"
+    "  vec3 g = rt_tri_normal(uint(prim), d), n = rt_smooth_normal(uint(prim), bary, g), p = d * t;\n"
+    "  float sky = 0.25 + 0.15 * dot(n, u.up.xyz);\n"
+    "  float lit = sky + (u.sun.w > 0.0 ? 0.7 * clamp(dot(n, u.sun.xyz), 0.0, 1.0) * rt_sun_seen(p, n, g, gl_FragCoord.xy, 8) : 0.0);\n"
+    "  vec3 c = vec3(lit);\n"
+    "  if (drawn <= 0.0) c *= vec3(1.0, 0.85, 0.2);\n"
+    "  else if (abs(t - drawn) > max(0.05 * drawn, 0.3)) c *= t < drawn ? vec3(1.0, 0.3, 0.3) : vec3(0.3, 0.4, 1.0);\n"
+    "  oc = vec4(c, 1);\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef FX_RT_GI\n"
+    /* the bounce light traced. t0 the depth, t1 the scene as drawn, t2 the occlusion and sun (z), t3 and t4
+     * the bounce map's depth and colour */
+    "vec3 rt_radiance(vec3 Q) {\n"
+    "  float qd = Q.z * u.hand.x;\n"
+    "  if (qd > 0.05) {\n"
+    "    vec2 ndc = vec2(Q.x * u.proj.x + Q.z * u.proj.z, Q.y * u.proj.y + Q.z * u.proj.w) / qd;\n"
+    "    vec2 q = u.vp.xy + vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
+    "    if (all(greaterThanEqual(q, u.vp.xy)) && all(lessThan(q, u.vp.xy + u.vp.zw - 1.0))) {\n"
+    "      float sd = view_z(depth_at(t0, q + 0.5)) * u.hand.x;\n"
+    "      if (sd > 0.0 && abs(sd - qd) < 0.03 * qd + 0.1) {\n"
+    "        vec3 c = texelFetch(t1, ivec2(q + 0.5), 0).rgb;\n"
+    "        float sun = textureLod(t2, (q - u.vp.xy) / u.vp.zw, 0.0).z;\n"
+    "        return c * mix(1.0, sun, u.smap.x);\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "  if (u.gi.x > 0.0) {\n"
+    "    vec4 lc = u.gimat * vec4(Q, 1.0);\n"
+    "    if (all(lessThan(abs(lc.xy), vec2(0.98))) && lc.z < 1.0) {\n"
+    "      vec2 uv = vec2(lc.x * 0.5 + 0.5, 0.5 - lc.y * 0.5);\n"
+    "      float z = texelFetch(t3, ivec2(uv * vec2(textureSize(t3, 0))), 0).r;\n"
+    "      if (lc.z - z < 0.002) return textureLod(t4, uv, 0.0).rgb;\n"
+    "    }\n"
+    "  }\n"
+    "  return vec3(0.0);\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 px = floor(u.vp.xy + vuv * u.vp.zw) + 0.5;\n"
+    "  vec3 P = pos_at(t0, px);\n"
+    "  float dist = P.z * u.hand.x;\n"
+    "  if (dist <= 0.0) { oc = vec4(0.0); return; }\n"
+    "  float fade = 1.0 - smoothstep(0.7 * u.gip.w, u.gip.w, dist);\n"
+    "  if (fade <= 0.0) { oc = vec4(0.0, 0.0, 0.0, dist); return; }\n"
+    "  vec3 N = rt_normal_at(px, P);\n"
+    "  vec3 o = P + N * (0.02 + 0.002 * dist);\n"
+    "  int NS = max(int(u.gip.z), 1);\n"
+    "  vec3 sum = vec3(0.0);\n"
+    "  for (int i = 0; i < NS; ++i) {\n"
+    "    vec2 rn = rt_pattern(gl_FragCoord.xy, i);\n"
+    "    vec3 d = rt_hemi(N, rn.x, rn.y);\n"
+    "    int prim;\n"
+    "    float t = rt_trace_solid(o, d, 0.0, u.gi.z, prim);\n"
+    "    if (prim < 0) continue;\n"
+    "    vec3 Q = o + d * t, nq = rt_tri_normal(uint(prim), d);\n"
+    "    sum += rt_radiance(Q + nq * 0.02);\n"
+    "  }\n"
+    "  oc = vec4(sum * (u.gi.x * fade / float(NS)), dist);\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef FX_RT_AO\n"
+    /* the occlusion traced: fx_ao's result (t0) with x traced; the depth at t1 */
+    "void main() {\n"
+    "  vec4 c = texelFetch(t0, ivec2(gl_FragCoord.xy), 0);\n"
+    "  if (c.y <= 0.0) { oc = c; return; }\n"
+    "  vec2 px = floor(u.vp.xy + vuv * u.vp.zw) + 0.5;\n"
+    "  vec3 P = pos_at(t1, px);\n"
+    "  vec3 r = pos_at(t1, px + vec2(1, 0)) - P, l = P - pos_at(t1, px - vec2(1, 0));\n"
+    "  vec3 d = pos_at(t1, px + vec2(0, 1)) - P, t = P - pos_at(t1, px - vec2(0, 1));\n"
+    "  vec3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
+    "  vec3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
+    "  vec3 nc = cross(dx, dy);\n"
+    "  vec3 N = dot(nc, nc) > 1e-24 ? normalize(nc) : -normalize(P);\n"
+    "  if (dot(N, P) > 0.0) N = -N;\n"
+    "  vec3 o = P + N * (0.01 + 0.002 * c.y);\n"
+    "  float R = u.ao.x, occl = 0.0;\n"
+    "  const int NS = 6;\n"
+    "  for (int i = 0; i < NS; ++i) {\n"
+    "    vec2 rn = rt_pattern(gl_FragCoord.xy, i + 7);\n"
+    "    vec3 dd = rt_hemi(N, rn.x, rn.y);\n"
+    "    int prim;\n"
+    "    float th = rt_trace_solid(o, dd, 0.0, R, prim);\n"
+    "    if (prim >= 0) { float f = 1.0 - th / R; occl += f * f; }\n"
+    "  }\n"
+    "  c.x = clamp(1.0 - occl / float(NS), 0.0, 1.0);\n"
+    "  oc = c;\n"
+    "}\n"
+    "#endif\n"
+    "#endif\n"
+    "#ifdef FX_RT_GIBLUR\n"
+    /* the bounce light smoothed: a 5x5 at the step pc.dir, by how near each distance is (needs no world) */
+    "void main() {\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy), hi = textureSize(t0, 0) - 1;\n"
+    "  vec4 c = texelFetch(t0, p, 0);\n"
+    "  if (c.a <= 0.0) { oc = c; return; }\n"
+    "  const float K[3] = float[3](0.375, 0.25, 0.0625);\n"
+    "  vec3 s = vec3(0.0);\n"
+    "  float sw = 0.0;\n"
+    "  for (int y = -2; y <= 2; ++y)\n"
+    "    for (int x = -2; x <= 2; ++x) {\n"
+    "      vec4 t = texelFetch(t0, clamp(p + ivec2(x, y) * pc.dir, ivec2(0), hi), 0);\n"
+    "      float k = K[abs(x)] * K[abs(y)] * (t.a > 0.0 ? clamp(1.0 - abs(t.a - c.a) / (0.04 * c.a), 0.0, 1.0) : 0.0);\n"
+    "      s += t.rgb * k, sw += k;\n"
+    "    }\n"
+    "  oc = vec4(sw > 0.0 ? s / sw : c.rgb, c.a);\n"
+    "}\n"
+    "#endif\n";
+
+/* The world's smooth normals (gfx_rt.hlsl rt_nclear, rt_nsum, rt_nresolve), compute: the corners that share
+ * a place (to 1/256 of a unit) found through a hash table, each place summing its faces' normals (in
+ * 1/4096ths), each corner taking its place's average unless it turns more than 60 degrees from its own face.
+ * Bindings (pushed): the table 0 (four words a slot: its tag, the sum), the corners 1, the normals 2;
+ * NC (push constants): the triangles' count, the table's mask (its slots less one), the corners' count.
+ * RT_NCLEAR, RT_NSUM or RT_NRESOLVE picks the pass. */
+static const char RT_NORMALS_GLSL[] =
+    "layout(local_size_x = 256) in;\n"
+    "layout(push_constant) uniform NC { uint tris, mask, verts, pad; } n;\n"
+    "layout(std430, set = 0, binding = 0) buffer Table { uint table[]; };\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer Tri { vec4 tri[]; };\n"
+    "layout(std430, set = 0, binding = 2) writeonly buffer Nrm { vec4 nrm[]; };\n"
+    "uvec3 rt_key(vec3 p) { return uvec3(ivec3(floor(p * 256.0 + 0.5))); }\n"
+    "uint rt_hash(uvec3 k) { return (k.x * 73856093u) ^ (k.y * 19349663u) ^ (k.z * 83492791u); }\n"
+    "uint rt_tag(uvec3 k) { return ((k.x * 2654435761u) ^ (k.y * 2246822519u) ^ (k.z * 3266489917u)) | 1u; }\n"
+    "uint rt_slot(vec3 p, bool make) {\n"
+    "  uvec3 k = rt_key(p);\n"
+    "  uint h = rt_hash(k) & n.mask, tag = rt_tag(k);\n"
+    "  for (uint i = 0u; i < 64u; ++i) {\n"
+    "    uint slot = (h + i) & n.mask;\n"
+    "    uint was = make ? atomicCompSwap(table[slot * 4u], 0u, tag) : table[slot * 4u];\n"
+    "    if (was == tag || (make && was == 0u)) return slot;\n"
+    "    if (!make && was == 0u) break;\n"
+    "  }\n"
+    "  return n.mask + 1u;\n"
+    "}\n"
+    "vec3 rt_corner(uint t, uint k) { return tri[(t * 3u + k) * 2u].xyz; }\n"
+    "void main() {\n"
+    "  uint id = gl_GlobalInvocationID.x;\n"
+    "#if defined(RT_NCLEAR)\n"
+    "  if (id <= n.mask) table[id * 4u] = table[id * 4u + 1u] = table[id * 4u + 2u] = table[id * 4u + 3u] = 0u;\n"
+    "#elif defined(RT_NSUM)\n"
+    "  if (id >= n.tris) return;\n"
+    "  vec3 v[3] = vec3[3](rt_corner(id, 0u), rt_corner(id, 1u), rt_corner(id, 2u));\n"
+    "  vec3 f = cross(v[1] - v[0], v[2] - v[0]);\n"
+    "  if (!(dot(f, f) > 1e-14)) return;\n"
+    "  ivec3 q = ivec3(normalize(f) * 4096.0);\n"
+    "  for (int k = 0; k < 3; ++k) {\n"
+    "    uint slot = rt_slot(v[k], true);\n"
+    "    if (slot > n.mask) continue;\n"
+    "    atomicAdd(table[slot * 4u + 1u], uint(q.x));\n"
+    "    atomicAdd(table[slot * 4u + 2u], uint(q.y));\n"
+    "    atomicAdd(table[slot * 4u + 3u], uint(q.z));\n"
+    "  }\n"
+    "#else\n"
+    "  if (id >= n.verts) return;\n"
+    "  uint t0 = id - id % 3u;\n"
+    "  vec3 a = tri[t0 * 2u].xyz, b = tri[(t0 + 1u) * 2u].xyz, c = tri[(t0 + 2u) * 2u].xyz;\n"
+    "  vec3 f = cross(b - a, c - a);\n"
+    "  if (!(dot(f, f) > 1e-14)) { nrm[id] = vec4(0.0); return; }\n"
+    "  f = normalize(f);\n"
+    "  vec3 nn = f;\n"
+    "  uint slot = rt_slot(tri[id * 2u].xyz, false);\n"
+    "  if (slot <= n.mask) {\n"
+    "    vec3 sum = vec3(ivec3(int(table[slot * 4u + 1u]), int(table[slot * 4u + 2u]), int(table[slot * 4u + 3u])));\n"
+    "    if (dot(sum, sum) > 1.0) { sum = normalize(sum); nn = dot(sum, f) > 0.5 ? sum : f; }\n"
+    "  }\n"
+    "  nrm[id] = vec4(nn, 0.0);\n"
+    "#endif\n"
+    "}\n";
+
+
+typedef struct RtBuf
+{
+    VkBuffer b;
+    VmaAllocation m;
+    VkDeviceSize size;
+    VkDeviceAddress addr;
+    void* p; /* host-visible ones' */
+} RtBuf;
+
+static struct
+{
+    int tried, ok;
+    VkPipeline gi, ao, giblur, clay;
+    VkFormat clay_fmt;
+    VkPipeline nclear, nsum, nresolve;
+    VkDescriptorSetLayout dsl, tex_dsl, cdsl;
+    VkPipelineLayout layout, clayout;
+    VkDescriptorPool pool[FRAMES]; /* the alpha tests' textures' sets, a frame's */
+    uint64_t pool_serial[FRAMES];
+    VkDescriptorSet texset; /* this frame's */
+    RtBuf tri, nrm, table, scratch, tlas_buf, blas_buf[2], inst[FRAMES], tab[FRAMES];
+    VkAccelerationStructureKHR tlas, blas[2]; /* (blas[1]: the alpha-tested) */
+    uint32_t rtp[4];                         /* RT_GLSL pc.rtp: the solid triangles, the alpha tests */
+    uint32_t verts;
+    VkDeviceSize scratch_align;
+    /* the profile: casters captured, from the cache, skipped (no pipeline yet), triangles */
+    uint32_t st_live, st_cached, st_skipped, st_frames;
+    uint64_t st_tris;
+} g_ray;
+
+/* one of RT_GLSL's passes (FX_RT_<name>) into fmt */
+static VkPipeline rt_fx_pipeline(const char* name, VkFormat fmt)
+{
+    size_t fl = strlen(FX_GLSL), rl = strlen(RT_GLSL), n = fl + rl + 256;
+    char* src = (char*)malloc(n);
+    /* RT_GLSL goes inside FX_GLSL's fragment part: before its last #endif */
+    int at = (int)(fl - strlen("#endif\n"));
+    snprintf(src, n, "#extension GL_EXT_ray_query : require\n#extension GL_EXT_nonuniform_qualifier : require\n"
+                     "#define FX_RT\n#define FX_RT_%s\n%.*s%s#endif\n", name, at, FX_GLSL, RT_GLSL);
+    VkShaderModule fs = compile_glsl(src, 1);
+    free(src);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (fs && g_fx.vs)
+    {
+        VkPipelineColorBlendAttachmentState b = { 0 };
+        b.colorWriteMask = 0xF;
+        static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        p = make_pipeline(g_fx.vs, fs, g_ray.layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            VK_POLYGON_MODE_FILL, dyn, 2, 0);
+    }
+    if (fs)
+        vkDestroyShaderModule(g_dev, fs, NULL);
+    if (!p)
+        fprintf(stderr, "[recomp] gfx: ray tracing pass %s failed\n", name);
+    return p;
+}
+
+static VkPipeline rt_compute(const char* pass)
+{
+    size_t n = sizeof RT_NORMALS_GLSL + 64;
+    char* src = (char*)malloc(n);
+    snprintf(src, n, "#define %s\n%s", pass, RT_NORMALS_GLSL);
+    VkShaderModule cs = compile_glsl(src, 2);
+    free(src);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (cs)
+    {
+        VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        ci.stage = (VkPipelineShaderStageCreateInfo){ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT, ci.stage.module = cs, ci.stage.pName = "main";
+        ci.layout = g_ray.clayout;
+        if (vkCreateComputePipelines(g_dev, g_vkcache, 1, &ci, NULL, &p) != VK_SUCCESS)
+            p = VK_NULL_HANDLE;
+        vkDestroyShaderModule(g_dev, cs, NULL);
+    }
+    return p;
+}
+
+/* whether rays can be traced here (asking once; after fx_init) */
+static int rt_init(void)
+{
+    if (g_ray.tried)
+        return g_ray.ok;
+    g_ray.tried = 1;
+    if (!g_has_rt || !fx_init())
+    {
+        fprintf(stderr, "[recomp] gfx: ray tracing: not on this device\n");
+        return 0;
+    }
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR asp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR };
+    VkPhysicalDeviceProperties2 p2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+    p2.pNext = &asp;
+    vkGetPhysicalDeviceProperties2(g_phys, &p2);
+    g_ray.scratch_align = asp.minAccelerationStructureScratchOffsetAlignment ? asp.minAccelerationStructureScratchOffsetAlignment : 256;
+    /* the passes': FX_GLSL's ten (fx_init), and the world (10-13), pushed; the textures (set 1) */
+    VkDescriptorSetLayoutBinding b[14];
+    b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    for (uint32_t i = 1; i < 10; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[10] = (VkDescriptorSetLayoutBinding){ 10, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    for (uint32_t i = 11; i < 14; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dl.bindingCount = 14;
+    dl.pBindings = b;
+    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_ray.dsl));
+    VkDescriptorSetLayoutBinding tb = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, RT_TEXS, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    VkDescriptorBindingFlags tf = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo tfi = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO };
+    tfi.bindingCount = 1, tfi.pBindingFlags = &tf;
+    VkDescriptorSetLayoutCreateInfo tl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    tl.pNext = &tfi;
+    tl.bindingCount = 1, tl.pBindings = &tb;
+    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &tl, NULL, &g_ray.tex_dsl));
+    VkDescriptorSetLayout sets[2] = { g_ray.dsl, g_ray.tex_dsl };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    pl.setLayoutCount = 2, pl.pSetLayouts = sets;
+    pl.pushConstantRangeCount = 1, pl.pPushConstantRanges = &pcr;
+    VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, &g_ray.layout));
+    for (int i = 0; i < FRAMES; ++i)
+    {
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, RT_TEXS * 4 };
+        VkDescriptorPoolCreateInfo pi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pi.maxSets = 4, pi.poolSizeCount = 1, pi.pPoolSizes = &ps;
+        VK_CHECK(vkCreateDescriptorPool(g_dev, &pi, NULL, &g_ray.pool[i]));
+    }
+    /* the normals' compute passes: three storage buffers, pushed; NC as push constants */
+    VkDescriptorSetLayoutBinding cb[3];
+    for (uint32_t i = 0; i < 3; ++i)
+        cb[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+    dl.bindingCount = 3, dl.pBindings = cb;
+    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_ray.cdsl));
+    VkPushConstantRange cpr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 16 };
+    pl.setLayoutCount = 1, pl.pSetLayouts = &g_ray.cdsl;
+    pl.pPushConstantRanges = &cpr;
+    VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, &g_ray.clayout));
+    const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+    g_ray.gi = rt_fx_pipeline("GI", F16);
+    g_ray.ao = rt_fx_pipeline("AO", F16);
+    g_ray.giblur = rt_fx_pipeline("GIBLUR", F16);
+    g_ray.nclear = rt_compute("RT_NCLEAR");
+    g_ray.nsum = rt_compute("RT_NSUM");
+    g_ray.nresolve = rt_compute("RT_NRESOLVE");
+    g_ray.ok = g_ray.gi && g_ray.ao && g_ray.giblur && g_ray.nclear && g_ray.nsum && g_ray.nresolve;
+    fprintf(stderr, g_ray.ok ? "[recomp] gfx: ray tracing ready\n" : "[recomp] gfx: ray tracing: its pipelines failed\n");
+    return g_ray.ok;
+}
+
+int gfx_rt_supported(void) { return rt_init(); }
+
+/* a buffer of at least need bytes in *b (made again, half as large again, when smaller; the old one let go
+ * once the GPU is past it): the GPU's own, or one the CPU writes (host) */
+static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host)
+{
+    if (b->b && b->size >= need)
+        return 0;
+    if (b->b)
+        trash(2, (uint64_t)(uintptr_t)b->b, b->m), b->b = VK_NULL_HANDLE;
+    need = (need + need / 2 + 65535) & ~(VkDeviceSize)65535;
+    VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bi.size = need;
+    bi.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    VmaAllocationCreateInfo ai = { 0 };
+    ai.usage = VMA_MEMORY_USAGE_AUTO;
+    if (host)
+        ai.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(g_vma, &bi, &ai, &b->b, &b->m, &info) != VK_SUCCESS)
+    {
+        fprintf(stderr, "[recomp] gfx: ray tracing: a buffer of %llu bytes failed\n", (unsigned long long)need);
+        b->b = VK_NULL_HANDLE, b->size = 0;
+        return -1;
+    }
+    b->size = need, b->p = info.pMappedData;
+    VkBufferDeviceAddressInfo ad = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+    ad.buffer = b->b;
+    b->addr = vkGetBufferDeviceAddress(g_dev, &ad);
+    return 1;
+}
+
+/* an acceleration structure of at least need bytes in *s, over its own buffer */
+static int rt_structure(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize need, VkAccelerationStructureTypeKHR type)
+{
+    int grown = rt_buffer(buf, need, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 0);
+    if (grown < 0)
+        return 0;
+    if (*s && !grown)
+        return 1;
+    if (*s)
+        trash(3, (uint64_t)(uintptr_t)*s, VK_NULL_HANDLE), *s = VK_NULL_HANDLE;
+    VkAccelerationStructureCreateInfoKHR ci = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+    ci.buffer = buf->b, ci.size = buf->size, ci.type = type;
+    return vkCreateAccelerationStructureKHR(g_dev, &ci, NULL, s) == VK_SUCCESS;
+}
+
+/* one caster to capture: what it draws, through which matrix (clip space to this frame's view space) */
+typedef struct RtItem
+{
+    const Caster* c;
+    float m[16];
+    uint32_t tris;
+    uint8_t alpha; /* traced through its alpha test (rt_alpha) */
+} RtItem;
+
+/* traced through its alpha test: the zone's and its placed objects' (leaves, grass) whose vertex function
+ * gives texture coordinates and whose first stage's texture is there (gfx_d3d12.c rt_alpha) */
+static int rt_alpha(const Caster* c)
+{
+    return (c->fixed || c->keep) && alpha_tested(&c->lib.fs) && c->lib.vs.ntex >= 1 && c->tex[0] && c->up && c->lib.fs.st[0].tex == 1 &&
+        !c->lib.fs.st[0].projected;
+}
+
+static uint32_t rt_tris(const Caster* c)
+{
+    if (c->prim == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        return c->n / 3;
+    if (c->prim == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
+        return c->n >= 3 ? c->n - 2 : 0;
+    return 0;
+}
+
+static VkPipeline rt_pipeline(const Caster* c, int alpha)
+{
+    PipeKey pk;
+    memset(&pk, 0, sizeof pk);
+    pk.lib = c->lib;
+    GfxVsKey* vk = &pk.lib.vs;
+    vk->shadow = 2, vk->pixel = 0, vk->water = 0;
+    /* the position alone - and an alpha test's texture coordinates and diffuse alpha (gfx_metal.m rt_pipeline) */
+    vk->normalize = vk->localviewer = vk->specular = 0;
+    vk->nlights = 0, memset(vk->light_type, 0, sizeof vk->light_type);
+    vk->fog_vertex = vk->range_fog = 0, vk->flat = 0;
+    if (!alpha)
+    {
+        vk->lighting = 0, vk->src_diffuse = vk->src_specular = vk->src_ambient = vk->src_emissive = 0;
+        vk->ntex = 0, memset(vk->tci, 0, sizeof vk->tci), memset(vk->ttf, 0, sizeof vk->ttf);
+    }
+    memset(&pk.lib.fs, 0, sizeof pk.lib.fs);
+    pk.color = VK_FORMAT_UNDEFINED, pk.depth = VK_FORMAT_UNDEFINED, pk.topo = 0; /* (points: one a corner) */
+    return pipeline_for(&pk, c->vs, c->ps);
+}
+
+static VkWriteDescriptorSet rt_write(uint32_t binding, VkDescriptorType type, const VkDescriptorBufferInfo* bi)
+{
+    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    w.dstBinding = binding, w.descriptorCount = 1, w.descriptorType = type, w.pBufferInfo = bi;
+    return w;
+}
+
+/* The world for this frame's rays (invP the projection's inverse, view the camera, cam where it is): 1
+ * when it was made */
+static int rt_capture(const float* invP, const float* view, const float* cam)
+{
+    static RtItem* items;
+    static uint32_t cap;
+    uint32_t n = 0, total = g_ncasters + g_ncache;
+    if (!rt_init() || !total)
+        return 0;
+    if (cap < total)
+        cap = total + total / 2, items = (RtItem*)realloc(items, cap * sizeof *items);
+    uint64_t verts = 0;
+    uint32_t ntex = 0;
+    for (uint32_t i = 0; i < total; ++i)
+    {
+        RtItem* it = &items[n];
+        if (i < g_ncasters)
+        {
+            it->c = &g_casters[i];
+            memcpy(it->m, invP, 64);
+        }
+        else
+        {
+            Cached* ce = &g_cache[i - g_ncasters];
+            if (ce->dead || cached_expired(ce) || !ce->c.n || !ce->c.ub || ce->seen == g_serial)
+                continue;
+            if (ce->c.has_pos)
+            {
+                float dx = ce->pos[0] - cam[0], dy = ce->pos[1] - cam[1], dz = ce->pos[2] - cam[2];
+                if (dx * dx + dy * dy + dz * dz > RT_REACH * RT_REACH)
+                    continue;
+            }
+            it->c = &ce->c;
+            gfx_mat_mul(it->m, ce->clip_world, view);
+        }
+        if (!it->c->n || !(it->tris = rt_tris(it->c)))
+            continue;
+        it->alpha = (uint8_t)(rt_alpha(it->c) && ntex < RT_TEXS);
+        ntex += it->alpha;
+        if (!rt_pipeline(it->c, it->alpha))
+        {
+            g_ray.st_skipped++;
+            continue;
+        }
+        verts += (uint64_t)it->tris * 3;
+        n++;
+    }
+    if (!n || verts > (1u << 26))
+        return 0;
+    /* the solid first, then the alpha-tested: the two structures */
+    {
+        static RtItem* tmp;
+        static uint32_t tcap;
+        if (tcap < n)
+            tcap = cap, tmp = (RtItem*)realloc(tmp, tcap * sizeof *tmp);
+        uint32_t k = 0;
+        for (int pass = 0; pass < 2; ++pass)
+            for (uint32_t i = 0; i < n; ++i)
+                if (items[i].alpha == pass)
+                    tmp[k++] = items[i];
+        memcpy(items, tmp, n * sizeof *items);
+    }
+    const VkBufferUsageFlags SB = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (rt_buffer(&g_ray.tri, verts * 32, SB | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 0) < 0)
+        return 0;
+    /* the capture: a pass with nothing to draw into, each caster's corners written by its function */
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ 1, 1 };
+    ri.layerCount = 1;
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport v = { 0, 0, 1, 1, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { 1, 1 } };
+    vkCmdSetViewport(cb, 0, 1, &v);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    VkBuffer mb = VK_NULL_HANDLE, live_mb = VK_NULL_HANDLE;
+    VkDeviceSize moff = 0, live_moff = 0;
+    VkPipeline bound = VK_NULL_HANDLE;
+    uint64_t vsolid = 0, valpha = 0;
+    uint32_t first = 0;
+    VkDeviceSize ialign = g_props.limits.minStorageBufferOffsetAlignment;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const RtItem* it = &items[i];
+        const Caster* cs = it->c;
+        int live = cs >= g_casters && cs < g_casters + g_ncasters;
+        if (live && !live_mb)
+            memcpy(ring(64, RING_ALIGN, &live_mb, &live_moff), it->m, 64);
+        if (live)
+            mb = live_mb, moff = live_moff;
+        else
+            memcpy(ring(64, RING_ALIGN, &mb, &moff), it->m, 64);
+        VkPipeline ps = rt_pipeline(cs, it->alpha);
+        if (ps != bound)
+        {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ps), bound = ps;
+            /* (rasterization off: the depth and stencil states are none of the pipeline's) */
+            vkCmdSetCullMode(cb, VK_CULL_MODE_NONE);
+            vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+            vkCmdSetDepthBiasEnable(cb, VK_FALSE);
+            vkCmdSetDepthBias(cb, 0.0f, 0.0f, 0.0f);
+            vkCmdSetPrimitiveTopology(cb, VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+        }
+        /* where and how (emit_rt_index): the first corner written, the indices' size, a strip, the first
+         * vertex or index (the indices bound from an aligned offset: the rest counted here) */
+        VkDeviceSize iat = 0;
+        uint32_t skip = 0;
+        if (cs->itype)
+            iat = cs->ioff / ialign * ialign, skip = (uint32_t)((cs->ioff - iat) / cs->itype);
+        uint32_t rtc[4] = { first, cs->itype, cs->prim == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, cs->itype ? skip : cs->vstart };
+        VkBuffer cbuf;
+        VkDeviceSize coff;
+        memcpy(ring(16, RING_ALIGN, &cbuf, &coff), rtc, 16);
+        VkWriteDescriptorSet w[GFX_NSTREAMS + 5];
+        VkDescriptorBufferInfo bi[GFX_NSTREAMS + 5];
+        uint32_t nw = 0;
+        bi[0] = (VkDescriptorBufferInfo){ cs->ub, cs->uoff, sizeof(GfxU) };
+        bi[1] = (VkDescriptorBufferInfo){ mb, moff, 64 };
+        bi[2] = (VkDescriptorBufferInfo){ g_ray.tri.b, 0, VK_WHOLE_SIZE };
+        bi[3] = (VkDescriptorBufferInfo){ cbuf, coff, 16 };
+        bi[4] = cs->itype ? (VkDescriptorBufferInfo){ cs->ib, iat, VK_WHOLE_SIZE } : (VkDescriptorBufferInfo){ g_dummy, 0, VK_WHOLE_SIZE };
+        w[nw++] = rt_write(B_U, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0]);
+        w[nw++] = rt_write(B_SHADOW, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[1]);
+        w[nw++] = rt_write(B_RT_OUT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2]);
+        w[nw++] = rt_write(B_RT_C, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[3]);
+        w[nw++] = rt_write(B_RT_IDX, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[4]);
+        for (int st = 0; st < GFX_NSTREAMS; ++st)
+        {
+            bi[5 + st] = cs->vb[st] ? (VkDescriptorBufferInfo){ cs->vb[st], cs->voff[st], VK_WHOLE_SIZE }
+                                    : (VkDescriptorBufferInfo){ g_dummy, 0, VK_WHOLE_SIZE };
+            w[nw++] = rt_write(B_STREAM0 + (uint32_t)st, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[5 + st]);
+        }
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, nw, w);
+        vkCmdDraw(cb, it->tris * 3, 1, 0, 0);
+        first += it->tris * 3;
+        *(it->alpha ? &valpha : &vsolid) += (uint64_t)it->tris * 3;
+        if (live)
+            g_ray.st_live++;
+        else
+            g_ray.st_cached++;
+    }
+    vkCmdEndRendering(cb);
+    g_bound = VK_NULL_HANDLE;
+    full_barrier(cb); /* the corners written, before the structures' builds read them */
+    if (!vsolid) /* (the bounce light's and occlusion's rays trace the solid ones) */
+        return 0;
+    /* the alpha tests' table and textures: each one's first triangle, its texture (its index in set 1), stage
+     * 0's alpha op and arguments, its test with the texture factor's alpha */
+    uint32_t nalpha = 0, at = (uint32_t)(vsolid / 3);
+    for (uint32_t i = 0; i < n; ++i)
+        nalpha += items[i].alpha;
+    RtBuf* tab = &g_ray.tab[g_frame];
+    if (rt_buffer(tab, (VkDeviceSize)(nalpha ? nalpha : 1) * 16, SB, 1) < 0)
+        return 0;
+    if (g_ray.pool_serial[g_frame] != g_serial)
+        vkResetDescriptorPool(g_dev, g_ray.pool[g_frame], 0), g_ray.pool_serial[g_frame] = g_serial;
+    VkDescriptorSetAllocateInfo dai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dai.descriptorPool = g_ray.pool[g_frame], dai.descriptorSetCount = 1, dai.pSetLayouts = &g_ray.tex_dsl;
+    if (vkAllocateDescriptorSets(g_dev, &dai, &g_ray.texset) != VK_SUCCESS)
+        return 0;
+    if (nalpha)
+    {
+        static VkDescriptorImageInfo* ii;
+        static uint32_t icap;
+        if (icap < nalpha)
+            icap = nalpha, ii = (VkDescriptorImageInfo*)realloc(ii, icap * sizeof *ii);
+        uint32_t* t = (uint32_t*)tab->p, k = 0;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            const RtItem* it = &items[i];
+            if (!it->alpha)
+                continue;
+            const Caster* c = it->c;
+            const GfxStage* st = &c->lib.fs.st[0];
+            uint32_t ops = c->lib.fs.prog ? 0 : (uint32_t)(st->aop & 63) << 2 | (uint32_t)st->aa1 << 8 | (uint32_t)st->aa2 << 16;
+            GfxSampler sk = c->samp[0];
+            ii[k] = (VkDescriptorImageInfo){ sampler(&sk), c->tex[0], VK_IMAGE_LAYOUT_GENERAL };
+            t[0] = at, t[1] = k, t[2] = ops;
+            t[3] = (uint32_t)c->lib.fs.alpha_func << 8 | (uint32_t)fminf(fmaxf(c->up->params[1], 0.0f), 255.0f) |
+                (uint32_t)(fminf(fmaxf(c->up->tfactor[3], 0.0f), 1.0f) * 255.0f + 0.5f) << 16;
+            t += 4, at += it->tris, k++;
+        }
+        VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w.dstSet = g_ray.texset, w.dstBinding = 0, w.descriptorCount = nalpha;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, w.pImageInfo = ii;
+        vkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+    }
+    /* a structure over the solid triangles and one over the alpha-tested, and the one over both: two
+     * instances, masks 1 and 2 (the bounce light's and occlusion's rays, mask 1, skip the leaves whole) */
+    VkAccelerationStructureGeometryKHR g[2];
+    VkAccelerationStructureBuildGeometryInfoKHR bl[2], tl;
+    VkAccelerationStructureBuildRangeInfoKHR br[2], tr;
+    VkDeviceSize scratch = 0, soff[2] = { 0, 0 };
+    memset(g, 0, sizeof g), memset(bl, 0, sizeof bl), memset(&tl, 0, sizeof tl), memset(br, 0, sizeof br);
+    uint32_t ninst = 0, nbl = 0;
+    VkAccelerationStructureBuildGeometryInfoKHR bl_go[2];
+    const VkAccelerationStructureBuildRangeInfoKHR* br_go[2];
+    for (int k = 0; k < 2; ++k)
+    {
+        uint64_t from = k ? vsolid : 0, count = k ? valpha : vsolid;
+        if (!count)
+            continue;
+        g[k].sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        g[k].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        g[k].flags = k ? 0 : VK_GEOMETRY_OPAQUE_BIT_KHR;
+        VkAccelerationStructureGeometryTrianglesDataKHR* td = &g[k].geometry.triangles;
+        td->sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        td->vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        td->vertexData.deviceAddress = g_ray.tri.addr + from * 32;
+        td->vertexStride = 32;
+        td->maxVertex = (uint32_t)count - 1;
+        td->indexType = VK_INDEX_TYPE_NONE_KHR;
+        bl[k].sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+        bl[k].type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        bl[k].flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+        bl[k].mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        bl[k].geometryCount = 1, bl[k].pGeometries = &g[k];
+        uint32_t prims = (uint32_t)(count / 3);
+        VkAccelerationStructureBuildSizesInfoKHR sz = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+        vkGetAccelerationStructureBuildSizesKHR(g_dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bl[k], &prims, &sz);
+        if (!rt_structure(&g_ray.blas[k], &g_ray.blas_buf[k], sz.accelerationStructureSize, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR))
+            return 0;
+        bl[k].dstAccelerationStructure = g_ray.blas[k];
+        soff[k] = scratch, scratch += (sz.buildScratchSize + g_ray.scratch_align - 1) / g_ray.scratch_align * g_ray.scratch_align;
+        br[k].primitiveCount = prims;
+        bl_go[nbl] = bl[k], br_go[nbl] = &br[k], nbl++;
+    }
+    /* the instances: the solid (custom index 0, mask 1), the alpha-tested (1, mask 2) */
+    RtBuf* ib = &g_ray.inst[g_frame];
+    if (rt_buffer(ib, 2 * sizeof(VkAccelerationStructureInstanceKHR), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 1) < 0)
+        return 0;
+    VkAccelerationStructureInstanceKHR* inst = (VkAccelerationStructureInstanceKHR*)ib->p;
+    memset(inst, 0, 2 * sizeof *inst);
+    for (int k = 0; k < 2; ++k)
+        if (bl[k].geometryCount)
+        {
+            VkAccelerationStructureInstanceKHR* d = &inst[ninst++];
+            d->transform.matrix[0][0] = d->transform.matrix[1][1] = d->transform.matrix[2][2] = 1.0f;
+            d->instanceCustomIndex = (uint32_t)k, d->mask = k ? 2 : 1;
+            d->flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+            VkAccelerationStructureDeviceAddressInfoKHR ai = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+            ai.accelerationStructure = g_ray.blas[k];
+            d->accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(g_dev, &ai);
+        }
+    VkAccelerationStructureGeometryKHR tg = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    tg.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    tg.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    tg.geometry.instances.data.deviceAddress = ib->addr;
+    tl.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    tl.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    tl.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    tl.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    tl.geometryCount = 1, tl.pGeometries = &tg;
+    VkAccelerationStructureBuildSizesInfoKHR tsz = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    vkGetAccelerationStructureBuildSizesKHR(g_dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tl, &ninst, &tsz);
+    if (!rt_structure(&g_ray.tlas, &g_ray.tlas_buf, tsz.accelerationStructureSize, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR))
+        return 0;
+    tl.dstAccelerationStructure = g_ray.tlas;
+    VkDeviceSize tscratch = scratch;
+    scratch += tsz.buildScratchSize + g_ray.scratch_align;
+    if (rt_buffer(&g_ray.scratch, scratch, SB, 0) < 0)
+        return 0;
+    VkDeviceAddress sbase = (g_ray.scratch.addr + g_ray.scratch_align - 1) / g_ray.scratch_align * g_ray.scratch_align;
+    for (uint32_t k = 0, j = 0; k < 2; ++k)
+        if (bl[k].geometryCount)
+            bl_go[j++].scratchData.deviceAddress = sbase + soff[k];
+    vkCmdBuildAccelerationStructuresKHR(cb, nbl, bl_go, br_go);
+    full_barrier(cb); /* (the top one stands on them) */
+    tl.scratchData.deviceAddress = sbase + tscratch;
+    tr = (VkAccelerationStructureBuildRangeInfoKHR){ ninst, 0, 0, 0 };
+    const VkAccelerationStructureBuildRangeInfoKHR* trp = &tr;
+    vkCmdBuildAccelerationStructuresKHR(cb, 1, &tl, &trp);
+    /* the corners' smooth normals (RT_NORMALS_GLSL) */
+    uint32_t slots = 1024;
+    while (slots < verts * 2u && slots < (1u << 26))
+        slots *= 2;
+    if (rt_buffer(&g_ray.nrm, verts * 16, SB, 0) < 0 || rt_buffer(&g_ray.table, (VkDeviceSize)slots * 16, SB, 0) < 0)
+        return 0;
+    full_barrier(cb);
+    VkDescriptorBufferInfo cbi[3] = { { g_ray.table.b, 0, VK_WHOLE_SIZE }, { g_ray.tri.b, 0, VK_WHOLE_SIZE }, { g_ray.nrm.b, 0, VK_WHOLE_SIZE } };
+    VkWriteDescriptorSet cw[3];
+    for (uint32_t i = 0; i < 3; ++i)
+        cw[i] = rt_write(i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &cbi[i]);
+    uint32_t nc[4] = { (uint32_t)(verts / 3), slots - 1, (uint32_t)verts, 0 };
+    VkPipeline passes[3] = { g_ray.nclear, g_ray.nsum, g_ray.nresolve };
+    uint32_t counts[3] = { slots, (uint32_t)(verts / 3), (uint32_t)verts };
+    for (int i = 0; i < 3; ++i)
+    {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, passes[i]);
+        p_push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_ray.clayout, 0, 3, cw);
+        vkCmdPushConstants(cb, g_ray.clayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, nc);
+        vkCmdDispatch(cb, (counts[i] + 255) / 256, 1, 1);
+        full_barrier(cb);
+    }
+    g_dirty = 1;
+    g_ray.rtp[0] = (uint32_t)(vsolid / 3), g_ray.rtp[1] = nalpha, g_ray.rtp[2] = g_ray.rtp[3] = 0;
+    g_ray.verts = (uint32_t)verts;
+    g_ray.st_tris += verts / 3, g_ray.st_frames++;
+    return 1;
+}
+
+/* one of ray tracing's passes (fx_pass's, with the world bound: RT_GLSL's 10-13 and set 1) */
+static void rt_pass(GfxTex* target, int load, VkPipeline p, const float* vp, const VkImageView* in, int n, const int32_t* dir)
+{
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    uint32_t tw, th;
+    level_size(target, 0, &tw, &th);
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    ca.imageView = attachment_view(target, 0, 0);
+    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    ca.loadOp = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ tw, th };
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport v = vp ? (VkViewport){ vp[0], vp[1], vp[2], vp[3], 0, 1 } : (VkViewport){ 0, 0, (float)tw, (float)th, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { tw, th } };
+    vkCmdSetViewport(cb, 0, 1, &v);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    VkWriteDescriptorSet w[14];
+    VkDescriptorBufferInfo bi[4] = { { g_fx.ub, g_fx.uoff, sizeof(FxU) }, { g_ray.tri.b, 0, VK_WHOLE_SIZE }, { g_ray.nrm.b, 0, VK_WHOLE_SIZE },
+        { g_ray.tab[g_frame].b, 0, VK_WHOLE_SIZE } };
+    VkDescriptorImageInfo ii[9];
+    w[0] = rt_write(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0]);
+    for (int i = 0; i < 9; ++i)
+    {
+        int t = i < 6 ? i : i == 8 ? 6 : -1;
+        ii[i] = t >= 0 ? (VkDescriptorImageInfo){ g_fx.samp, t < n && in[t] ? in[t] : g_dummy2d->view, VK_IMAGE_LAYOUT_GENERAL }
+                       : (VkDescriptorImageInfo){ g_fx.cmp, g_fx.sdummy->view, VK_IMAGE_LAYOUT_GENERAL };
+        w[1 + i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w[1 + i].dstBinding = 1 + (uint32_t)i, w[1 + i].descriptorCount = 1;
+        w[1 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, w[1 + i].pImageInfo = &ii[i];
+    }
+    VkWriteDescriptorSetAccelerationStructureKHR wa = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+    wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &g_ray.tlas;
+    w[10] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    w[10].pNext = &wa, w[10].dstBinding = 10, w[10].descriptorCount = 1;
+    w[10].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    for (uint32_t i = 0; i < 3; ++i)
+        w[11 + i] = rt_write(11 + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1 + i]);
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ray.layout, 0, 14, w);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ray.layout, 1, 1, &g_ray.texset, 0, NULL);
+    uint32_t pc[8] = { dir ? (uint32_t)dir[0] : 0, dir ? (uint32_t)dir[1] : 0, 0, 0, g_ray.rtp[0], g_ray.rtp[1], g_ray.rtp[2], g_ray.rtp[3] };
+    vkCmdPushConstants(cb, g_ray.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+    g_dirty = 1;
+    g_bound = VK_NULL_HANDLE;
+    target->used = g_serial, target->rec = g_cb_index;
 }
 
 void gfx_trace_dump(const char* path)
@@ -3914,10 +5072,21 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             for (int j = 0; j < 3; ++j)
                 w[j] = s->sun_dir[0] * vinv[j] + s->sun_dir[1] * vinv[4 + j] + s->sun_dir[2] * vinv[8 + j];
             gfx_normalize3(w);
-            /* the sun moves on in steps of a quarter degree: the shadows' edges hold still between them */
-            float dot = w[0] * g_fx.sunw[0] + w[1] * g_fx.sunw[1] + w[2] * g_fx.sunw[2];
-            if (!g_fx.sunw_seen || dot < 0.99999f)
-                memcpy(g_fx.sunw, w, 12);
+            /* the sun moves on in the game's steps (a quarter degree each game minute, every 2.4 s): the shadows
+             * glide from each to the next over the 150 frames to it rather than jump - long at dawn and dusk, a
+             * jump of their whole edge (a step past a few degrees, a new hour or place, is taken at once) */
+            float dot = w[0] * g_fx.sunt[0] + w[1] * g_fx.sunt[1] + w[2] * g_fx.sunt[2];
+            if (!g_fx.sunw_seen || dot < 0.995f)
+                memcpy(g_fx.sunw, w, 12), memcpy(g_fx.sun0, w, 12), memcpy(g_fx.sunt, w, 12), g_fx.sunp = 1.0f;
+            else if (dot < 0.999995f) /* (past the noise of the game's own, short of its quarter-degree step) */
+                memcpy(g_fx.sun0, g_fx.sunw, 12), memcpy(g_fx.sunt, w, 12), g_fx.sunp = 0.0f;
+            if (g_fx.sunp < 1.0f)
+            {
+                g_fx.sunp = fminf(g_fx.sunp + 1.0f / 150.0f, 1.0f);
+                for (int j = 0; j < 3; ++j)
+                    g_fx.sunw[j] = g_fx.sun0[j] + (g_fx.sunt[j] - g_fx.sun0[j]) * g_fx.sunp;
+                gfx_normalize3(g_fx.sunw);
+            }
             g_fx.sunw_seen = g_serial;
             fx_ease(g_fx.suncol, s->sun_color, 3, 0.1f);
         }
@@ -3951,9 +5120,12 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
             {
                 u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
+                u.gi[0] *= g_fxs.gi * day;
                 if (day >= 0.25f)
                     g_sun_shown = g_serial;
             }
+            else
+                u.gi[0] = 0.0f;
             g_fx.tr_strength = u.smap[0], g_fx.tr_day = day;
             u.smap2[1] = fminf(fmaxf(g_fxs.sun_face, 0.0f), 1.0f), u.smap2[2] = fmaxf(g_fxs.sun_min, 0.0f);
             /* the sun's place on screen: far along its direction, through the projection */
@@ -3972,19 +5144,23 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
          * size, and not a jump away */
         {
             float vinv2[16], m[16];
-            int ok = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0] && g_fx.hist[0]->w == aw &&
-                g_fx.hist[0]->h == ah && gfx_mat_inverse(vinv2, s->view);
-            if (ok)
+            int cam = g_fx.prev_serial && g_fx.prev_serial + 1 == g_serial && gfx_mat_inverse(vinv2, s->view);
+            if (cam)
             {
                 float dx = vinv2[12] - g_fx.prev_cam[0], dy = vinv2[13] - g_fx.prev_cam[1], dz = vinv2[14] - g_fx.prev_cam[2];
-                ok = dx * dx + dy * dy + dz * dz < 25.0f;
+                cam = dx * dx + dy * dy + dz * dz < 25.0f;
             }
-            if (ok)
+            if (cam)
             {
                 gfx_mat_mul(m, vinv2, g_fx.prev_view);
                 gfx_mat_mul(u.reproj, m, g_fx.prev_proj);
-                u.hist[0] = 1.0f;
+                u.hist[0] = g_fx.hist_serial && g_fx.hist_serial + 1 == g_serial && g_fx.hist[0] && g_fx.hist[0]->w == aw &&
+                    g_fx.hist[0]->h == ah ? 1.0f : 0.0f;
+                /* the bounce light's too, at its own size */
+                u.gip[0] = g_fx.gih_serial && g_fx.gih_serial + 1 == g_serial && g_fx.gih[0] && g_fx.gih[0]->w == (aw + 1) / 2 &&
+                    g_fx.gih[0]->h == (ah + 1) / 2 ? 1.0f : 0.0f;
             }
+            g_fx.prev_serial = g_serial;
             /* the pattern's turn: a golden-ratio step each frame */
             u.hist[1] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
             u.hist[2] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f);
@@ -3997,6 +5173,21 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         if (g_fxs.water > 0.0f && have_v)
             water_scene(s, vinv, &u, ct);
         const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+        /* the world for rays, before the passes that trace them */
+        int rt = 0;
+        if ((g_fxs.rt > 0.0f || (int)g_fxs.debug == 8) && have_v)
+        {
+            float invP[16];
+            rt = gfx_mat_inverse(invP, s->proj) && rt_capture(invP, s->view, vinv + 12);
+        }
+        uint32_t gw = (aw + 1) / 2, gh = (ah + 1) / 2;
+        int gi = u.gi[0] > 0.0f && fx_tex(&g_fx.gi0, F16, gw, gh, GFX_USE_RT, 1) && fx_tex(&g_fx.gih[0], F16, gw, gh, GFX_USE_RT, 1) &&
+            fx_tex(&g_fx.gih[1], F16, gw, gh, GFX_USE_RT, 1) && (!rt || fx_tex(&g_fx.gi1, F16, gw, gh, GFX_USE_RT, 1));
+        if (!gi)
+            u.gi[0] = 0.0f;
+        u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
+        if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
+            u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
         if (fx_tex(&g_fx.src, ct->vf, ct->w, ct->h, GFX_USE_RT, 1) && fx_tex(&g_fx.ao0, F16, aw, ah, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.ao1, F16, aw, ah, GFX_USE_RT, 1) && fx_tex(&g_fx.b1a, F16, bw, bh, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.b1b, F16, bw, bh, GFX_USE_RT, 1) && fx_tex(&g_fx.b2a, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) &&
@@ -4035,13 +5226,22 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         near_on ? g_fx.smapn->view : g_fx.sdummy->view, lz ? lz->view : VK_NULL_HANDLE };
                     VkImageView sh[2] = { ao_in[1], ao_in[2] };
                     fx_pass(g_fx.ao0, 0, 0, g_fx.ao_pipe, NULL, ao_in, 4, sh, NULL);
-                    fx_pass(g_fx.ao1, 0, 0, g_fx.blur_pipe, NULL, &g_fx.ao0->view, 1, NULL, across);
-                    fx_pass(g_fx.ao0, 0, 0, g_fx.blur_pipe, NULL, &g_fx.ao1->view, 1, NULL, down);
+                    /* traced (rt): the occlusion from rays in the world, the sun's as fx_ao found it; ao1 then holds it */
+                    GfxTex *a = g_fx.ao0, *bt = g_fx.ao1;
+                    if (rt && u.ao[1] > 0.0f)
+                    {
+                        VkImageView r_in[2] = { g_fx.ao0->view, depth->view };
+                        rt_pass(g_fx.ao1, 0, g_ray.ao, NULL, r_in, 2, NULL);
+                        a = g_fx.ao1, bt = g_fx.ao0;
+                    }
+                    fx_pass(bt, 0, 0, g_fx.blur_pipe, NULL, &a->view, 1, NULL, across);
+                    fx_pass(a, 0, 0, g_fx.blur_pipe, NULL, &bt->view, 1, NULL, down);
+                    ao_out = a;
                     if (g_fxs.temporal > 0.0f && fx_tex(&g_fx.hist[0], F16, aw, ah, GFX_USE_RT, 1) &&
                         fx_tex(&g_fx.hist[1], F16, aw, ah, GFX_USE_RT, 1))
                     {
                         int to = g_fx.hist_at ^ 1;
-                        VkImageView t_in[2] = { g_fx.ao0->view, g_fx.hist[g_fx.hist_at]->view };
+                        VkImageView t_in[2] = { a->view, g_fx.hist[g_fx.hist_at]->view };
                         fx_pass(g_fx.hist[to], 0, 0, g_fx.temporal_pipe, NULL, t_in, 2, NULL, NULL);
                         ao_out = g_fx.hist[to];
                         g_fx.hist_at = to, g_fx.hist_serial = g_serial;
@@ -4049,6 +5249,39 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 }
                 else
                     fx_uniforms(&u);
+                /* the bounce light: gathered from its map at half the occlusion's size, then over frames */
+                GfxTex* gi_out = NULL;
+                if (gi)
+                {
+                    if (rt)
+                    {
+                        /* traced (rt): rays from each texel into the world, the light they meet as the frame or the
+                         * sun saw it; smoothed four times (one texel apart, two, four, one) before the temporal pass */
+                        static const int32_t s1[2] = { 1, 1 }, s2[2] = { 2, 2 }, s4[2] = { 4, 4 };
+                        VkImageView r_in[5] = { depth->view, g_fx.src->view, ao_out->view, g_fx.gimap->view, g_fx.gicol->view };
+                        rt_pass(g_fx.gi0, 0, g_ray.gi, NULL, r_in, 5, NULL);
+                        rt_pass(g_fx.gi1, 0, g_ray.giblur, NULL, &g_fx.gi0->view, 1, s1);
+                        rt_pass(g_fx.gi0, 0, g_ray.giblur, NULL, &g_fx.gi1->view, 1, s2);
+                        rt_pass(g_fx.gi1, 0, g_ray.giblur, NULL, &g_fx.gi0->view, 1, s4);
+                        rt_pass(g_fx.gi0, 0, g_ray.giblur, NULL, &g_fx.gi1->view, 1, s1);
+                    }
+                    else
+                    {
+                        VkImageView gi_in[3] = { depth->view, g_fx.gimap->view, g_fx.gicol->view };
+                        g_fx.mip_in = 1u << 2;
+                        fx_pass(g_fx.gi0, 0, 0, g_fx.gi_pipe, NULL, gi_in, 3, NULL, NULL);
+                        g_fx.mip_in = 0;
+                    }
+                    gi_out = g_fx.gi0;
+                    if (u.gip[1] > 0.0f)
+                    {
+                        int to = g_fx.gih_at ^ 1;
+                        VkImageView t_in[2] = { g_fx.gi0->view, g_fx.gih[g_fx.gih_at]->view };
+                        fx_pass(g_fx.gih[to], 0, 0, g_fx.gitemp_pipe, NULL, t_in, 2, NULL, NULL);
+                        gi_out = g_fx.gih[to];
+                        g_fx.gih_at = to, g_fx.gih_serial = g_serial;
+                    }
+                }
                 if (u.bloom[1] > 0.0f)
                 {
                     VkImageView b_in[2] = { g_fx.src->view, ao_out->view }; /* shaded as the composite shades */
@@ -4067,9 +5300,17 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     fx_pass(g_fx.ra, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.rb->view, 1, NULL, across);
                     fx_pass(g_fx.rb, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.ra->view, 1, NULL, down);
                 }
-                VkImageView comp_in[6] = { g_fx.src->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view };
+                VkImageView comp_in[7] = { g_fx.src->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view,
+                    gi_out ? gi_out->view : VK_NULL_HANDLE };
                 float vp[4] = { vx, vy, vw, vh };
-                fx_pass(ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 6, NULL, NULL);
+                fx_pass(ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 7, NULL, NULL);
+                if (rt && (int)g_fxs.debug == 8)
+                {
+                    if (!g_ray.clay || g_ray.clay_fmt != ct->vf)
+                        g_ray.clay = rt_fx_pipeline("CLAY", ct->vf), g_ray.clay_fmt = ct->vf;
+                    if (g_ray.clay)
+                        rt_pass(ct, 1, g_ray.clay, vp, &depth->view, 1, NULL);
+                }
                 depth->used = g_serial, depth->rec = g_cb_index;
             }
         }
@@ -4090,6 +5331,11 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 "%u cached; map %.0f units across; sun %.2f %.2f %.2f\n", g_fx.st_frames, g_fx.st_own, g_fx.st_map, g_fx.st_cmin,
                 g_fx.st_cmax, g_fx.st_cached, g_fx.st_across, g_fx.sunw[0], g_fx.sunw[1], g_fx.sunw[2]);
             g_fx.st_last = now, g_fx.st_frames = g_fx.st_own = g_fx.st_map = g_fx.st_cmax = 0;
+            if (g_ray.st_frames)
+                fprintf(stderr, "[recomp] gfx: ray tracing: %u frames; casters %u live, %u from the cache, %u waiting for pipelines; "
+                    "%llu triangles a frame\n", g_ray.st_frames, g_ray.st_live, g_ray.st_cached, g_ray.st_skipped,
+                    (unsigned long long)(g_ray.st_tris / g_ray.st_frames));
+            g_ray.st_frames = g_ray.st_live = g_ray.st_cached = g_ray.st_skipped = 0, g_ray.st_tris = 0;
         }
     }
     {
@@ -4193,7 +5439,7 @@ static VkPipeline util_pipeline(const char* define, VkFormat fmt, int blend)
         }
         static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
         p = make_pipeline(vs, fs, g_util_layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED,
-            blend ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, dyn, 2);
+            blend ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, dyn, 2, 0);
     }
     if (vs)
         vkDestroyShaderModule(g_dev, vs, NULL);
@@ -4610,9 +5856,36 @@ int gfx_init(void* window, int vsync)
     VkPhysicalDeviceFeatures have;
     vkGetPhysicalDeviceFeatures(g_phys, &have);
     VkPhysicalDeviceVulkan12Features have12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR have_as = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+    VkPhysicalDeviceRayQueryFeaturesKHR have_rq = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
     VkPhysicalDeviceFeatures2 have2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     have2.pNext = &have12;
+    have12.pNext = &have_as, have_as.pNext = &have_rq;
     vkGetPhysicalDeviceFeatures2(g_phys, &have2);
+    /* ray tracing (rt_capture): ray queries over acceleration structures, buffers by their addresses, the
+     * capture's vertex functions writing, and the alpha tests' textures indexed per ray */
+    {
+        uint32_t ne = 0;
+        vkEnumerateDeviceExtensionProperties(g_phys, NULL, &ne, NULL);
+        VkExtensionProperties* es = (VkExtensionProperties*)calloc(ne ? ne : 1, sizeof *es);
+        vkEnumerateDeviceExtensionProperties(g_phys, NULL, &ne, es);
+        int found = 0;
+        for (uint32_t j = 0; j < ne; ++j)
+            found += !strcmp(es[j].extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) ||
+                !strcmp(es[j].extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME) ||
+                !strcmp(es[j].extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        free(es);
+        /* FFXI_RT_OFF=1: none, for a driver whose builds misbehave. lavapipe on aarch64 (Mesa 25.2) faults in
+         * its own structure builder - the Linux test box on an ARM Mac - so the CPU's device there has none */
+        const char* no = getenv("FFXI_RT_OFF");
+        int cpu_arm = 0;
+#if defined(__aarch64__)
+        cpu_arm = g_props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+#endif
+        g_has_rt = found == 3 && have_as.accelerationStructure && have_rq.rayQuery && have12.bufferDeviceAddress &&
+            have.vertexPipelineStoresAndAtomics && have12.shaderSampledImageArrayNonUniformIndexing &&
+            have12.descriptorBindingPartiallyBound && !(no && no[0] == '1') && !cpu_arm;
+    }
     g_has_bc = have.textureCompressionBC, g_has_aniso = have.samplerAnisotropy, g_has_lines = have.fillModeNonSolid;
     g_has_large_points = have.largePoints, g_has_mirror_once = have12.samplerMirrorClampToEdge;
     g_max_aniso = g_props.limits.maxSamplerAnisotropy;
@@ -4621,12 +5894,21 @@ int gfx_init(void* window, int vsync)
     en.samplerAnisotropy = have.samplerAnisotropy;
     en.fillModeNonSolid = have.fillModeNonSolid;
     en.largePoints = have.largePoints;
+    en.vertexPipelineStoresAndAtomics = g_has_rt ? VK_TRUE : VK_FALSE;
+    VkPhysicalDeviceRayQueryFeaturesKHR en_rq = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+    en_rq.rayQuery = VK_TRUE;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR en_as = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+    en_as.accelerationStructure = VK_TRUE;
+    en_as.pNext = &en_rq;
     VkPhysicalDeviceVulkan13Features en13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     en13.dynamicRendering = VK_TRUE;
+    en13.pNext = g_has_rt ? &en_as : NULL;
     VkPhysicalDeviceVulkan12Features en12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     en12.pNext = &en13;
     en12.timelineSemaphore = VK_TRUE;
     en12.samplerMirrorClampToEdge = have12.samplerMirrorClampToEdge;
+    if (g_has_rt)
+        en12.bufferDeviceAddress = en12.shaderSampledImageArrayNonUniformIndexing = en12.descriptorBindingPartiallyBound = VK_TRUE;
     VkPhysicalDeviceFeatures2 en2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     en2.pNext = &en12;
     en2.features = en;
@@ -4635,12 +5917,18 @@ int gfx_init(void* window, int vsync)
     qi.queueFamilyIndex = g_qfam;
     qi.queueCount = 1;
     qi.pQueuePriorities = &prio;
-    const char* dext[2] = { VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char* dext[5] = { VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME };
+    uint32_t ndext = 1;
+    if (g_surface)
+        dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (g_has_rt)
+        dext[ndext++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, dext[ndext++] = VK_KHR_RAY_QUERY_EXTENSION_NAME,
+        dext[ndext++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
     VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     dci.pNext = &en2;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qi;
-    dci.enabledExtensionCount = g_surface ? 2 : 1;
+    dci.enabledExtensionCount = ndext;
     dci.ppEnabledExtensionNames = dext;
     r = vkCreateDevice(g_phys, &dci, NULL, &g_dev);
     if (r != VK_SUCCESS)
@@ -4657,6 +5945,7 @@ int gfx_init(void* window, int vsync)
     vf.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     vf.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
     VmaAllocatorCreateInfo ai = { 0 };
+    ai.flags = g_has_rt ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0;
     ai.pVulkanFunctions = &vf;
     ai.vulkanApiVersion = VK_API_VERSION_1_3;
     ai.physicalDevice = g_phys;
@@ -4693,6 +5982,9 @@ int gfx_init(void* window, int vsync)
     for (uint32_t s = 0; s < GFX_NSTREAMS; ++s)
         b[nb++] = (VkDescriptorSetLayoutBinding){ B_STREAM0 + s, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
     b[nb++] = (VkDescriptorSetLayoutBinding){ B_SHADOW, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    b[nb++] = (VkDescriptorSetLayoutBinding){ B_RT_OUT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    b[nb++] = (VkDescriptorSetLayoutBinding){ B_RT_C, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    b[nb++] = (VkDescriptorSetLayoutBinding){ B_RT_IDX, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
     for (uint32_t i = 0; i < 8; ++i)
         b[nb++] = (VkDescriptorSetLayoutBinding){ B_TEX0 + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
             NULL };
@@ -4754,7 +6046,8 @@ int gfx_init(void* window, int vsync)
     }
     if (g_surface)
         swap_create();
-    fprintf(stderr, "[recomp] gfx: Vulkan %u.%u on %s%s\n", VK_API_VERSION_MAJOR(g_props.apiVersion),
-        VK_API_VERSION_MINOR(g_props.apiVersion), g_props.deviceName, g_has_bc ? "" : " (no BC textures)");
+    fprintf(stderr, "[recomp] gfx: Vulkan %u.%u on %s%s%s\n", VK_API_VERSION_MAJOR(g_props.apiVersion),
+        VK_API_VERSION_MINOR(g_props.apiVersion), g_props.deviceName, g_has_bc ? "" : " (no BC textures)",
+        g_has_rt ? " (ray queries)" : "");
     return 1;
 }

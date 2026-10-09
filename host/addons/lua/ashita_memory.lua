@@ -498,10 +498,13 @@ function Target:GetTargetPosF(i)
 end
 
 function Target:GetLastTargetName() return cstr(game.target('LastTargetName')) end
+-- newer Ashita's: 1 while locked on (LockedOnFlags bit 0), else 0; XIUI and LibraPlates compare it with 1
+function Target:GetIsLockedOn() return bit.band(num(game.target(pid('target_t', 'LockedOnFlags'))), 1) end
 function Target:GetRawStructure() return proxy('target_t', game.base('target')) end
 function Target:GetRawStructureWindow() return proxy('targetwindow_t', game.base('target_window')) end
 
--- Ashita's force flag has no counterpart in the game's call (SetTarget(entity, 1, 0)).
+-- Ashita's force flag has no counterpart in the game's call (SetTarget(actor, 1, 0)). An entity with
+-- no actor (out of render range) is not targeted.
 function Target:SetTarget(index, force)
     return game.set_target_index(index)
 end

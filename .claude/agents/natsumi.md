@@ -110,8 +110,8 @@ To stand somewhere no scene goes (a zone, a spot) without recordings, `tools/sta
 ports (`--auth-port 55231 --data-port 55230 --view-port 55001 --zone-port 55232`) and sign in the
 same way.
 
-Recordings live in `generated/replay/` and are not part of the repository. If they are missing, stop
-and tell the user; recording needs their own server (`tools/replay.py record all ...`).
+The recordings are committed in `tools/replay/scenes/`, and `default.txt` plays them. Don't
+re-record them: a new set needs the user's server (`tools/replay/README.md`, "A new reference set").
 
 ## Per scene
 

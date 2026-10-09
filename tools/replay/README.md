@@ -13,14 +13,14 @@ addons folder and load it on a LandSandBoat server of your own:
     /addon load xireplay
 
 Every zone visit is then recorded to Ashita's `config/addons/xireplay/`, one JSON-lines file per
-visit (the packets the client got, with their times). Nothing recorded is part of this repository:
-recordings are yours, made on your server.
+visit (the packets the client got, with their times). Record only on a server you run. The scenes
+`default.txt` plays are already recorded, in `scenes/` (below).
 
 ## Scenes
 
 The addon also directs scenes: a fixed list of GM commands, with markers for the measured window,
 recorded as one file per zone visit. It has seven (`home`, `markets`, `mines`, `lighting`, `weather`,
-`crowd`, `effects`); `default.txt` makes these from their recordings, with scene flags:
+`crowd`, `effects`); `default.txt` makes these from the recordings in `scenes/`, with scene flags:
 
 | scene | group | what it shows |
 | --- | --- | --- |
@@ -41,12 +41,41 @@ zone's mobs to the character):
     python3 tools/replay.py record all --server <your server> --user <GM account> --password ...
 
 A client signs in (Enter through the lobby, by the control port), runs `/xireplay run all` and quits
-when it is done; the recordings land in `generated/replay/`, where `default.txt` finds them.
+when it is done; the recordings land in `generated/replay/`, not in `scenes/`.
 `--revive-container <database container>` first gives a character left K.O. its HP back, in a
 LandSandBoat Docker setup's database (a K.O. character can't run GM commands). Every scene but home
 pins the clock and clears the weather at its zone-in.
 
     python3 tools/replay.py run tools/replay/default.txt
+
+## The reference set
+
+`scenes/` holds the recordings `default.txt` plays, committed so that every machine and CI plays the
+same packets. They are LandSandBoat packet captures, which the repository allows (README, "Rules").
+
+They are trimmed to what the scenes measure: no one but the character acts, and every NPC and mob
+stays where it first appears, as `--my-actions` and `--hold` play a recording. A mob walking into
+view, or its shadow moving under a still camera, would change a scene that measures weather or light.
+`--players`, `--echo` and `--mob-spells` add their characters and spells on top.
+
+Each file's first line records what made it and what was trimmed:
+
+    {"meta":{"zone":210,"scene":"home","captured":"2026-10-04T01:36:32Z",
+     "server":"LandSandBoat ea0054e7f420","client":"2025-11-12 (30251101_2)","recorder":"xireplay 1.0",
+     "trimmed":["my-actions","hold"]}}
+
+### A new reference set
+
+Record the whole set again (above), so that every scene comes from one server, client and addon.
+Then:
+
+    python3 tools/replay.py keep generated/replay/*.jsonl --lsb <LandSandBoat commit> --build <game build>
+
+`keep` writes what playback reads into `scenes/`: the server's packets from the zone-in to the
+zone-out and the markers, with the character renamed `Replay`, trimmed, and the meta line above
+(`--build` as `meta/builds.json` names it). The client's own packets, including the GM commands it
+typed, are left out. Keep the raw recordings, since trimmed packets can't be restored from `scenes/`,
+and pass only the recordings `default.txt` names.
 
 ## Play
 

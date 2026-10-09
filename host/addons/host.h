@@ -107,8 +107,14 @@ void xi_hooks_frame(void);            /* chat lines and commands queued for the 
 int xi_chat_input(char* out, size_t n);
 int xi_chat_input_open(void);
 void xi_chat_set_input(const char* text);
-/* Packets queued by addons (whole packets: header included). */
+/* Packets queued for the next buffer (whole packets: header included), handled by the addons there. */
 void xi_packet_inject(int outgoing, const uint8_t* p, size_t n);
+/* An addon's packet (Ashita's AddOutgoingPacket/AddIncomingPacket, Windower's packets.inject): through
+ * the addons' handlers now, with injected set, as Ashita does (LuAshitacast re-injects under a flag it
+ * clears straight after), then queued as they left it. Injected from a handler of an injected packet (or
+ * of one the queue drains), it is still handled at once, one level deep (hooks.c, INJECT_DEPTH); deeper,
+ * it waits for the next buffer and is handled there. */
+void xi_packet_inject_handled(int outgoing, const uint8_t* p, size_t n);
 /* The last packet of an id seen in a direction (0x200 bytes max): size, or 0. */
 size_t xi_packet_last(int outgoing, uint16_t id, uint8_t* out, size_t cap, uint64_t* when_ms);
 /* A plain buffer (0x1C header, packets) through the pipeline, as the packet hooks do (the harness). */

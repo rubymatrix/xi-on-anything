@@ -26,8 +26,14 @@ Ashita event      xi event     what the callback gets
   xinput_button   frame        e: button (bit number in wButtons), state (1 down, 0 up), injected, blocked
                                (both polled from the pad the game reads; blocking doesn't hide
                                anything from the game here)
-  d3d_dp, d3d_dip, dinput_button, dinput_state: accepted, never raised (no per-draw-call or
-      DirectInput-pad hook here); the first registration logs "unsupported: event <name>".
+  dinput_button   dinput_*     e: button (DIJOYSTATE offset: 48 + the button, 32 the D-pad), state (128 down,
+                               0 up; the D-pad's hundredths of a degree, -1 centred), injected, blocked
+  dinput_state    dinput_*     e: data, data_raw (DIJOYSTATE), size, pov (as state above), injected, blocked
+                               (both from the first pad as its own driver numbers it on Windows -
+                               PlayStation, Switch Pro and Stadia orders, else Xbox's - read when the game
+                               reads it; a press blocked in dinput_button is kept from the game)
+  d3d_dp, d3d_dip: accepted, never raised (no per-draw-call hook here); the first registration
+      logs "unsupported: event <name>".
 
 Handlers of the input events run as coroutines, so a handler may coroutine.sleep (the rest runs
 from the task list). Errors in one handler are reported and the next still runs.
@@ -206,6 +212,7 @@ ffi.cdef[[ typedef struct { uint32_t dwPacketNumber; uint16_t wButtons; uint8_t 
 local pad_state = ffi.new('xi_xinput_state_t')
 local pad_ptr = ffi.cast('uint8_t*', pad_state)
 local pad_buttons, pad_packet = 0, 0
+local dinput_buf = u8arr(80) -- the DIJOYSTATE of the last dinput_state
 local function poll_pad()
     local buttons, lt, rt, lx, ly, rx, ry = xi.ashita_native.xpad(0)
     if not buttons then return nil end
@@ -316,15 +323,39 @@ local EVENTS = {
         xi = 'xinput_button',
         run = function(xe)
             if (xe.id or 0) ~= 0 then return end
-            local e = { button = xe.key, state = xe.down and 1 or 0, injected = false, blocked = xe.blocked or false }
+            -- button 0 (the D-pad up) comes without key when released
+            local e = { button = xe.key or 0, state = xe.down and 1 or 0, injected = false,
+                blocked = xe.blocked or false }
             each('xinput_button', true, nil, e)
             if e.blocked then xe.blocked = true end
         end,
     },
     d3d_dp = { never = true },
     d3d_dip = { never = true },
-    dinput_button = { never = true },
-    dinput_state = { never = true },
+    dinput_button = {
+        -- the first pad as its own DirectInput driver numbers it (keys.c): a press blocked here stays up
+        -- for the game
+        xi = 'dinput_button',
+        run = function(xe)
+            local v = xe.id or 0
+            if v == 0xFFFFFFFF then v = -1 end -- the POV, centred
+            local e = { button = xe.key, state = v, injected = false, blocked = xe.blocked or false }
+            each('dinput_button', true, nil, e)
+            if e.blocked then xe.blocked = true end
+        end,
+    },
+    dinput_state = {
+        xi = 'dinput_state',
+        run = function(xe)
+            local data = xe.data or ''
+            if #data < 80 then return end
+            -- one buffer for every read (as pad_state): this is raised each time the game reads the pad
+            ffi.copy(dinput_buf, data, 80)
+            local pov = ffi.cast('uint32_t*', dinput_buf + 32)[0]
+            each('dinput_state', false, nil, { data = data, data_raw = ffi.cast(u8p, dinput_buf), size = #data,
+                pov = pov == 0xFFFFFFFF and -1 or pov, injected = false, blocked = false })
+        end,
+    },
 }
 
 ------------------------------------------------------------------------------------------------

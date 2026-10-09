@@ -108,6 +108,15 @@ static const struct
     { "lod", offsetof(GfxFxSettings, lod), 0.0f },
     /* not an effect: anti-aliasing of the finished scene, 0 none, 1 FXAA (scene_aa); with or without the effects */
     { "aa", offsetof(GfxFxSettings, aa), 0.0f },
+    /* the sun's light thrown on by what it lights (bounce light): its strength (0 none), how far a lit
+     * surface throws it, and how far from the camera it is gathered (the map it is gathered from); off
+     * unless asked for (Config > Modern's Bounce Light) */
+    { "gi", offsetof(GfxFxSettings, gi), 0.0f },
+    { "gi_radius", offsetof(GfxFxSettings, gi_radius), 6.0f },
+    { "gi_distance", offsetof(GfxFxSettings, gi_distance), 48.0f },
+    /* ray tracing: the bounce light and the occlusion traced through the frame's casters (rt_capture), where
+     * the GPU can; off unless asked for */
+    { "rt", offsetof(GfxFxSettings, rt), 0.0f },
 };
 
 static float* fx_setting(const char* key)
@@ -129,6 +138,12 @@ float gfx_fx_get(const char* key)
 {
     float* p = fx_setting(key);
     return p ? *p : 0.0f;
+}
+
+/* the sun's shadows are on: the effects, a sun strength, and characters among the casters */
+int gfx_sun_shadows_on(void)
+{
+    return g_fxs.fx != 0.0f && g_fxs.sun > 0.0f && g_fxs.sun_casters != 2.0f;
 }
 
 static char g_fx_file[1024];
@@ -185,7 +200,8 @@ void fx_config(void)
     const char* dbg = getenv("FFXI_FX_DEBUG"); /* also by name */
     if (dbg)
         g_fxs.debug = !strcmp(dbg, "ao") ? 1.0f : !strcmp(dbg, "fog") ? 2.0f : !strcmp(dbg, "bloom") ? 3.0f
-            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f : (float)atof(dbg);
+            : !strcmp(dbg, "rays") ? 4.0f : !strcmp(dbg, "shadow") ? 5.0f
+            : !strcmp(dbg, "gi") ? 6.0f : !strcmp(dbg, "gi_split") ? 7.0f : !strcmp(dbg, "clay") ? 8.0f : (float)atof(dbg);
     for (size_t i = 0; i < FX_NSETTINGS; ++i)
         g_fx_start[i] = *(float*)((char*)&g_fxs + FX_SETTINGS[i].at);
     const char* file = getenv("FFXI_FX_FILE");

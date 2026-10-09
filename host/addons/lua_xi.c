@@ -101,7 +101,7 @@ static int m_find(lua_State* L)
     {
         const char* mod = lua_tostring(L, 1);
         if (!strcasecmp(mod, "FFXiMain.dll") || !strcasecmp(mod, "FFXiMain"))
-            xi_image(NULL, NULL, &start, &size);
+            xi_image(&start, &size, NULL, NULL); /* the whole image, as Ashita's module size is */
         else if (!strcasecmp(mod, "FFXi.dll"))
             start = 0x0F000000u, size = 0x100000u;
         else
@@ -113,7 +113,7 @@ static int m_find(lua_State* L)
             size = (uint32_t)lua_tonumber(L, 2);
     }
     else if (lua_isnumber(L, 1) && lua_tonumber(L, 1) == 0 && lua_tonumber(L, 2) == 0)
-        xi_image(NULL, NULL, &start, &size); /* Ashita's find(0, 0, ...): FFXiMain */
+        xi_image(&start, &size, NULL, NULL); /* Ashita's find(0, 0, ...): FFXiMain, the whole image */
     else
     {
         start = arg_addr(L, 1);
@@ -631,7 +631,7 @@ static int p_inject(lua_State* L)
     int out = lua_toboolean(L, 1);
     size_t n;
     const char* s = luaL_checklstring(L, 2, &n);
-    xi_packet_inject(out, (const uint8_t*)s, n);
+    xi_packet_inject_handled(out, (const uint8_t*)s, n);
     return 0;
 }
 

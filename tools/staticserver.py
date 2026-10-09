@@ -884,8 +884,17 @@ def tls_context():
     return ctx
 
 
+class ArgumentParser(argparse.ArgumentParser):
+    """argparse reading a word that starts with a negative number as a value on every Python, as 3.13
+    and later do (--pos -322.43,5.0,-362.77,219): before 3.13 only a plain number like -90 was one."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._negative_number_matcher = re.compile(r'-\.?\d')
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    ap = ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--huffman', default=os.environ.get('FFXI_HUFFMAN'), help='folder with compress.dat')
     ap.add_argument('--config', help='JSON with character fields (see DEFAULT_CHAR)')
     ap.add_argument('--sql', help='a LandSandBoat sql/ folder: zone lines and music')

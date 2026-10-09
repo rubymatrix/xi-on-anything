@@ -12,7 +12,8 @@
 typedef struct FxU
 {
     float proj[4], zp[4], vp[4], size[4], ao[4], grade[4], hand[4], up[4], sun[4], suncol[4], sunuv[4], fogc[4], fogp[4],
-        bloom[4], rays[4], shadow[4], lmat[16], smap[4], smap2[4], reproj[16], hist[4], lmatn[16], smapn[4], smapn2[4], aop[4];
+        bloom[4], rays[4], shadow[4], lmat[16], smap[4], smap2[4], reproj[16], hist[4], lmatn[16], smapn[4], smapn2[4], aop[4],
+        gimat[16], giinv[16], gi[4], gip[4];
 } FxU;
 
 enum { GFX_SUN_MAP = 4096 }; /* the far cascade's texels across */

@@ -97,7 +97,8 @@ typedef struct GfxVsKey
     uint8_t pixel;      /* the lighting per pixel rather than per vertex (the back end sets it: the
                          * scene effects' light setting); the vertex function passes the normal on */
     uint8_t shadow;     /* drawn again from the sun (the back end's shadow map): the position the
-                         * function makes goes through the matrix in buffer 5 */
+                         * function makes goes through the matrix in buffer 5; 2: captured for ray
+                         * tracing, that point streamed out in view space (the back ends' rt_capture) */
     uint8_t water;      /* the back end's water (GfxFsKey.water): the view-space position is passed on */
 } GfxVsKey;
 
@@ -186,6 +187,8 @@ typedef struct GfxDraw
     GfxDepthKey depth;
     const uint32_t* vs_tokens; /* the shader behind vs.prog / fs.prog */
     const uint32_t* ps_tokens;
+    uint32_t vs_token_count, ps_token_count; /* their lengths in words, END included; 0 unknown (the
+                                              * render worker then draws directly) */
     GfxU u;
     GfxTex* tex[8];
     GfxSampler samp[8];
@@ -242,6 +245,17 @@ void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t 
  * and a new copy queued behind this frame's work. Only the first read of a level waits. For
  * read-only locks the game polls every frame (FFXI's occlusion probe). */
 void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch);
+#if defined(FFXI_ANDROID_VULKAN)
+/* gfx_tex_read_async with a history per key (one object's lifetime, chosen by the caller): the newest
+ * finished copy from an earlier frame at most max_age frames old, or the current pixels when there is
+ * none, and a new copy queued. Key 0, max_age 0, a second read of a key in one frame, and a read with
+ * no room for its history read the current pixels, as gfx_tex_read. */
+void gfx_tex_read_async_keyed(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch, uint64_t key,
+                              uint32_t max_age);
+/* Counts one occlusion-probe read in the frame statistics: whether its key was known, and whether
+ * asynchronous reads were on. */
+void gfx_android_probe_read(int known_key, int async_enabled);
+#endif
 /* A rectangle between textures of one format. */
 void gfx_copy(GfxTex* src, uint32_t sface, uint32_t slevel, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h,
     GfxTex* dst, uint32_t dface, uint32_t dlevel, uint32_t dx, uint32_t dy);
@@ -289,11 +303,16 @@ void gfx_set_moghouse(int in);
 /* Whether the sun's shadows were drawn, at least a quarter as dark as by full day, within the last 30
  * frames: the game's own character shadows stand aside only then (d3d8.c game_shadow_hidden). */
 int gfx_sun_shadows_shown(void);
+int gfx_sun_shadows_on(void); /* the setting: effects, sun > 0, characters cast (gfx_fx.c) */
 /* Whether the sun's shadows want the zone round the camera drawn this frame, out of view as well (the
  * map renderer's culling set aside for it: host64's cull_test): the radius in world units, and in
  * center where round, or 0 for the game's own culling. A frame or two after the casters kept from
  * before were let go (a zone-in) and as the camera moves on, so what stands behind it casts. */
 float gfx_sun_prime(float* center);
+
+/* Whether the scene effects can trace rays here (the rt setting: the GPU's ray queries, and on
+ * Direct3D 12 the shaders built with dxc); the first call asks the device. */
+int gfx_rt_supported(void);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);

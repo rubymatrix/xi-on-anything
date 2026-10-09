@@ -115,7 +115,13 @@ uint32_t plat_thread_id(void)
 #elif defined(__EMSCRIPTEN__)
     return (uint32_t)(uintptr_t)pthread_self();
 #else
-    return (uint32_t)syscall(SYS_gettid);
+    /* once per thread: gettid is a system call, and the critical sections (kobj.c) and the profile's
+     * per-shim timing (thunk.c) ask on every call - with FFXI_PROFILE, about 1.3 million times a second
+     * in a crowd */
+    static RT_TLS uint32_t t_id;
+    if (!t_id)
+        t_id = (uint32_t)syscall(SYS_gettid);
+    return t_id;
 #endif
 }
 

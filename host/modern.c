@@ -102,10 +102,28 @@ enum
                                             * x and y first, in the coordinates SPRITE_DRAW takes */
     WINDOW_CURSOR = FFXI_MODERN_WINDOW_CURSOR, /* 0x10118db0 thiscall window (item, hand): the cursor to the item; the
                                                 * window's +0x4c (16 bits) the item it is on */
+    WINDOW_HELP = FFXI_MODERN_WINDOW_HELP, /* 0x101186a0 thiscall window: the help line made the cursor's item's (its
+                                            * part's +0x4c, else its layout's text), if it is the window in front.
+                                            * The game runs it as the cursor moves */
+    WINDOW_SCROLL = FFXI_MODERN_WINDOW_SCROLL, /* 0x10118530 thiscall window (total, shown): its scroll bar (made if it
+                                                * has none) at its right edge, for a list of total entries showing
+                                                * shown at a time; the window's +0x88 the bar, +0x14 in it the first
+                                                * entry shown. The game draws it with the window (the Effects page's) */
     VTBL_SLOTS = 17,
     CONFIG_ITEMS = 13,          /* the Config list's own */
     EV_DOWN = 1, EV_UP = 2, EV_RIGHT = 3, EV_LEFT = 4, EV_SELECT = 5, /* a menu's input events (OnInput); the game's own sliders go up on 3 */
+    EV_WHEEL_UP = 22, EV_WHEEL_DOWN = 23, /* a step of the mouse wheel over the window (the game's Effects page
+                                           * scrolls on them) */
 };
+
+/* WINDOW_HELP's and WINDOW_SCROLL's first bytes, as 2025-11-12 has them (WINDOW_HELP's then MGR, mov
+ * ecx, MGR). 2025-12-26's and 2026-09-03's addresses are 2025-11-12's moved as every window function
+ * round them is (+0x10, +0x410), not read from those builds: setup() checks the bytes there, and
+ * without them the help line waits for the cursor to move and the Addons page draws its own bar. */
+static const uint8_t WINDOW_HELP_KNOWN[] = { 0x53, 0x55, 0x56, 0x8b, 0xe9, 0x57, 0xb9 };
+static const uint8_t WINDOW_SCROLL_KNOWN[] = { 0x56, 0x8b, 0xf1, 0x8b, 0x86, 0x88, 0x00, 0x00, 0x00, 0x85, 0xc0, 0x75,
+    0x14, 0x6a, 0x2c };
+static int g_help_ok, g_scroll_ok; /* their bytes are as known (setup) */
 
 static const char CONFIG_NAME[] = "menu    configwi", SHEET_NAME[] = "menu    modernps",
                   RENAMED[] = "menu    configw_";
@@ -158,12 +176,12 @@ static int g_nfx_keys;
 
 /* Config > Addons: a row an installed addon (host/addons/manage.c), ADDON_VIS of them at a time
  * over the list from g_addon_top, scrolled as the inventory is: up from the top row or down from the
- * bottom one moves the list under the cursor, past the end back round to the start. The rows are
- * the same each time; their names, kinds and the list's place are drawn each frame (addons_draw)
- * with a sprite a glyph, so an addon installed while the game runs shows the next time the page
- * opens. The page's height follows the list's length up to ADDON_VIS rows: a layout for each,
- * "menu    addonw01" to "menu    addonw10", the page's menu table entry renamed to the one that
- * fits as it opens. */
+ * bottom one moves the list under the cursor, past the end back round to the start; the mouse wheel
+ * moves it a row a step, as the game's Effects page does. The rows are the same each time; their
+ * names, kinds and the list's place are drawn each frame (addons_draw) with a sprite a glyph, so an
+ * addon installed while the game runs shows the next time the page opens. The page's height follows
+ * the list's length up to ADDON_VIS rows: a layout for each, "menu    addonw01" to "menu    addonw10",
+ * the page's menu table entry renamed to the one that fits as it opens. */
 enum
 {
     ADDON_VIS = 10,
@@ -175,6 +193,7 @@ static const Row ADDON_ROWS[ADDON_VIS] = { ADDON_ROW, ADDON_ROW, ADDON_ROW, ADDO
     ADDON_ROW, ADDON_ROW, ADDON_ROW };
 static const ModernAddons* g_addons;
 static int g_addon_n, g_addon_top, g_addon_cursor;
+static uint32_t g_addon_bar; /* the window whose scroll bar is the game's (WINDOW_SCROLL), or 0 */
 
 void modern_set_addons(const ModernAddons* ops) { g_addons = ops; }
 
@@ -254,6 +273,8 @@ static float get(const Row* r)
         return g_setup.fps_divisor ? (float)*g_setup.fps_divisor : 1.0f;
     if (!strcmp(r->key, "@ui"))
         return g_ui_aspect;
+    if (!strcmp(r->key, "@occlusion"))
+        return (float)d3d8_occlusion();
     if (!strncmp(r->key, "@hide", 5))
         return g_hide >> atoi(r->key + 5) & 1 ? 0.0f : 1.0f;
     if (!strcmp(r->key, "@addon"))
@@ -289,6 +310,11 @@ static void set(const Row* r, float v)
     {
         g_ui_aspect = v;
         user32_set_ui_aspect(v);
+        g_host_touched = 1;
+    }
+    else if (!strcmp(r->key, "@occlusion"))
+    {
+        d3d8_set_occlusion((int)v);
         g_host_touched = 1;
     }
     else if (!strncmp(r->key, "@hide", 5))
@@ -345,7 +371,10 @@ static void slide(const Row* r, int dir)
     set(r, r->lo + (r->hi - r->lo) * t / SLIDER_STEPS);
 }
 
+/* Android's renderer has no scene effects (its gfx_fx_get is 0), so the rows set through them,
+ * effects and draw distances alike, are not shown there */
 static const Row MODERN_ROWS[] = {
+#if !defined(FFXI_ANDROID_VULKAN)
     { "Modern Effects", "fx", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
         "Ambient occlusion, fog, light, shadows and the rest below." },
     { "Ambient Occlusion", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
@@ -366,10 +395,22 @@ static const Row MODERN_ROWS[] = {
         "How much of the sun's shadows reach indoors: your Mog House, caves, towers. Off lights them as the game does." },
     { "Per-Pixel Lighting", "light", CHOICE, 3, { "Off", "Sun", "All" }, { 0, 1, 2 }, 0, 0,
         "Smooth light across surfaces: the sun's, or every light's." },
+    { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
+        "Sunlit ground and walls light what stands near them. Off at the left." },
+    { "Ray Tracing", "rt", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
+        "Bounce light and soft shade traced through the world. Needs a graphics card that traces rays; on a Mac, macOS 13." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
     { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
+#endif
+#if defined(FFXI_ANDROID_VULKAN)
+    { "Occlusion Check", "@occlusion", CHOICE, 3, { "Off", "Delayed", "Exact" }, { 0, 1, 2 }, 0, 0,
+        "What walls hide from the game's checks. Off treats all as seen; Delayed asks the last frames; Exact waits." },
+#else /* no Delayed: without Android's per-probe history it makes characters flicker (d3d8.c lock_rect) */
+    { "Occlusion Check", "@occlusion", CHOICE, 2, { "Off", "Exact" }, { 0, 2 }, 0, 0,
+        "What walls hide from the game's checks. Off treats all as seen; Exact waits for the GPU." },
+#endif
     { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
     { "Interface Shape", "@ui", CHOICE, 3, { "Full", "16:9", "4:3" }, { 0, 16.0f / 9.0f, 4.0f / 3.0f }, 0, 0,
         "Keeps the menus in a box of this shape on a wide screen." },
@@ -383,13 +424,15 @@ static const Row DISPLAY_ROWS[] = {
         "The window's size." },
     { "UI Scale", "@menu", LIST, 0, { 0 }, { 0 }, 0, 0,
         "How large the menus and text are drawn." },
-    { "Background Resolution", "@bg", CHOICE, 3, { "4096", "6144", "8192" }, { 4096, 6144, 8192 }, 0, 0,
+    { "Background Resolution", "@bg", CHOICE, 4, { "2048", "4096", "6144", "8192" }, { 2048, 4096, 6144, 8192 }, 0, 0,
         "The size the world is drawn at before it fits the window. From the next start." },
+#if !defined(FFXI_ANDROID_VULKAN) /* scene effects, as MODERN_ROWS */
     { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
     { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
         "Sharper ground and walls at an angle." },
     { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "The frame rate, in the screen's top left corner." },
+#endif
 };
 
 static const Row MENUS_ROWS[] = {
@@ -542,8 +585,8 @@ static void save(void)
         FILE* f = fopen(path, "w");
         if (f)
         {
-            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
-                (double)g_ui_aspect, g_hide);
+            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\nocclusion=%d\n",
+                g_setup.fps_divisor ? *g_setup.fps_divisor : 1u, (double)g_ui_aspect, g_hide, d3d8_occlusion());
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
             fclose(f);
@@ -909,6 +952,7 @@ enum
     PAGE_Y = 48,
     MIN_W = 424,
     TITLE_H = 30, /* the title strip, and room under it */
+    SCROLL_BAR_W = 8, /* the game's scroll bar, at a window's right edge (WINDOW_SCROLL) */
     ROW_H = 22,
     TRACK_W = 150, /* a slider's, from 32 right of its row's controls' column */
     LIST_VALUE_X = 32 + TRACK_W + 12 + 36, /* a list's value's words, from its row's controls' column: after Max */
@@ -937,7 +981,7 @@ typedef struct Page
     Item items[MAX_ITEMS];
     int nitems, row_item[MAX_ROWS + 1], w, h, cx; /* cx: the controls' column */
     int spr_panel, spr_caption, spr_config, spr_line[MAX_ROWS];
-    uint32_t layout, layout_size, handler, str_name, str_config_help, str_help[MAX_ROWS];
+    uint32_t layout, layout_size, handler, str_name, str_title, str_config_help, str_help[MAX_ROWS];
 } Page;
 
 /* How a page's menu table entry is free: the second of two of a name (the game only ever finds the
@@ -1035,7 +1079,11 @@ static int panel_sprite(const Page* p, int nrows)
     const uint32_t bg[4] = { WHITE, WHITE, 0x40404040u, 0x40404040u };
     part4(0, 0, p->w, h, p->w, h, 0, 0, bg, M_PANEL, NEWTEX);
     const uint32_t strip[4] = { 0x7f7f7f20u, 0x7f404010u, 0x7f7f7f20u, 0x7f404010u };
-    part4(0, 4, p->w, 20, 64, 8, 0, 0, strip, M_ITEM, GAUGE);
+    /* a full Addons page may have the game's scroll bar down its right edge, title strip and all (when
+     * the list is longer than it, known only as it opens): the strip stops short of it, or it shows
+     * through the bar's track */
+    int strip_w = p == &PAGES[PAGE_ADDONS] && nrows == ADDON_VIS ? p->w - SCROLL_BAR_W : p->w;
+    part4(0, 4, strip_w, 20, 64, 8, 0, 0, strip, M_ITEM, GAUGE);
     words(8, 6, p->title, 0);
     for (int r = 0; r < nrows; ++r)
     {
@@ -1282,7 +1330,8 @@ static uint32_t sprite(int i)
     return list && i >= 0 && i < g_nsprites ? rd32(list + 4u * (uint32_t)i) : 0;
 }
 
-/* item's help, in the game's help line while the cursor is on it */
+/* item's help, in the game's help line while the cursor is on it. The game reads it as the cursor
+ * moves; set while the cursor is already there (a page just opened), the line is made again now */
 static void help(uint32_t window, int item, uint32_t str)
 {
     uint32_t part = window ? guest_thiscall(WINDOW_PART, window, 1, (uint32_t[]){ (uint32_t)item }) : 0;
@@ -1290,6 +1339,8 @@ static void help(uint32_t window, int item, uint32_t str)
     {
         wr8(part + 0x4a, 1);
         wr32(part + 0x4c, str);
+        if (g_help_ok && (int16_t)rd16(window + 0x4c) == item)
+            guest_thiscall(WINDOW_HELP, window, 0, NULL);
     }
 }
 
@@ -1310,7 +1361,7 @@ static uint32_t addons_open(void)
     Page* p = &PAGES[PAGE_ADDONS];
     g_addon_n = g_addons->scan();
     int rows = g_addon_n < 1 ? 1 : g_addon_n > ADDON_VIS ? ADDON_VIS : g_addon_n;
-    g_addon_top = 0, g_addon_cursor = 0;
+    g_addon_top = 0, g_addon_cursor = 0, g_addon_bar = 0;
     p->nrows = rows, p->nitems = p->row_item[rows], p->h = TITLE_H + rows * ROW_H + 8;
     memcpy(GUEST_PTR(p->spare), GUEST_PTR(g_addon_str[rows]), 16);
     return g_addon_str[rows];
@@ -1346,14 +1397,15 @@ static int draw_text(uint32_t list, const char* s, int x, int y, int w)
     return at - x;
 }
 
-/* each frame: a row's addon's name, its kind (and New), the list's place in the title strip and
- * a scroll bar when it is longer than the page */
+/* each frame: a row's addon's name, its kind (and New), and when the list is longer than the page,
+ * its place in the title strip and on a scroll bar (the game's, else one drawn here) */
 static void addons_draw(const Page* p, uint32_t window)
 {
     uint32_t sheet = find_sheet(), list = sheet ? rd32(sheet) : 0;
     if (!list || !window)
         return;
-    guest_thiscall(WINDOW_RECT, window, 4, (uint32_t[]){ g_scratch + 48, 1, 1, 1 });
+    /* Item 1 follows the window; exclude its cursor and press offsets so the whole overlay stays put. */
+    guest_thiscall(WINDOW_RECT, window, 4, (uint32_t[]){ g_scratch + 48, 1, 0, 0 });
     int ox = (int16_t)rd16(g_scratch + 48) - p->items[0].x, oy = (int16_t)rd16(g_scratch + 50) - row_top(0);
     for (int r = 0; r < p->nrows; ++r)
     {
@@ -1377,12 +1429,24 @@ static void addons_draw(const Page* p, uint32_t window)
         char where[32];
         SDL_snprintf(where, sizeof where, "%d-%d of %d", g_addon_top + 1, g_addon_top + p->nrows, g_addon_n);
         draw_text(list, where, ox + p->w - 14 - text_width(where), oy + 6, 200);
-        int x = ox + p->w - 12, top = oy + TITLE_H, h = p->nrows * ROW_H - 6;
-        int th = h * p->nrows / g_addon_n, max = g_addon_n - p->nrows;
-        th = th < 8 ? 8 : th;
-        int ty = top + (h - th) * g_addon_top / max;
-        for (int y = top; y < top + h; y += 4)
-            draw_at(list, y >= ty && y < ty + th ? g_spr_bar_thumb : g_spr_bar_track, x, y);
+        /* the game's scroll bar, as its Effects page has, set up once a window and kept at the list's place */
+        if (g_scroll_ok && g_addon_bar != window)
+        {
+            guest_thiscall(WINDOW_SCROLL, window, 2, (uint32_t[]){ (uint32_t)g_addon_n, (uint32_t)p->nrows });
+            g_addon_bar = rd32(window + 0x88) ? window : 0;
+        }
+        uint32_t bar = g_addon_bar == window ? rd32(window + 0x88) : 0;
+        if (bar)
+            wr32(bar + 0x14, (uint32_t)g_addon_top);
+        else
+        {
+            int x = ox + p->w - 12, top = oy + TITLE_H, h = p->nrows * ROW_H - 6;
+            int th = h * p->nrows / g_addon_n, max = g_addon_n - p->nrows;
+            th = th < 8 ? 8 : th;
+            int ty = top + (h - th) * g_addon_top / max;
+            for (int y = top; y < top + h; y += 4)
+                draw_at(list, y >= ty && y < ty + th ? g_spr_bar_thumb : g_spr_bar_track, x, y);
+        }
     }
     g_addon_cursor = (int16_t)rd16(window + 0x4c);
 }
@@ -1414,6 +1478,24 @@ static void addons_scroll(const Page* p, uint32_t window, int id, int ev)
     }
     else
         return;
+    int item = p->row_item[to] + (id - 1 - p->row_item[r]) + 1;
+    if (item != id)
+        guest_thiscall(WINDOW_CURSOR, window, 2, (uint32_t[]){ (uint32_t)item, 1 });
+    g_addon_cursor = item;
+}
+
+/* a wheel step, as the game's Effects page takes one: the list moves a row (not past either end) and
+ * the cursor a row the other way, so it stays on its addon until that one leaves the page */
+static void addons_wheel(const Page* p, uint32_t window, int ev)
+{
+    int max = g_addon_n > p->nrows ? g_addon_n - p->nrows : 0, step = ev == EV_WHEEL_DOWN ? 1 : -1;
+    if (!window || g_addon_top + step < 0 || g_addon_top + step > max)
+        return;
+    g_addon_top += step;
+    int id = (int16_t)rd16(window + 0x4c);
+    if (id < 1 || id > p->nitems)
+        return;
+    int r = p->items[id - 1].row, to = r - step < 0 ? 0 : r - step >= p->nrows ? p->nrows - 1 : r - step;
     int item = p->row_item[to] + (id - 1 - p->row_item[r]) + 1;
     if (item != id)
         guest_thiscall(WINDOW_CURSOR, window, 2, (uint32_t[]){ (uint32_t)item, 1 });
@@ -1519,6 +1601,8 @@ static void page_input(Guest* g)
     Page* p = page_of(g->ecx);
     if (p == &PAGES[PAGE_ADDONS] && g_addons && id >= 1 && id <= p->nitems && (ev == EV_UP || ev == EV_DOWN))
         addons_scroll(p, window_of(g->ecx), id, ev);
+    else if (p == &PAGES[PAGE_ADDONS] && g_addons && (ev == EV_WHEEL_UP || ev == EV_WHEEL_DOWN))
+        addons_wheel(p, window_of(g->ecx), ev);
     else if (p && id >= 1 && id <= p->nitems)
     {
         const Item* it = &p->items[id - 1];
@@ -1961,6 +2045,17 @@ static void lobby_install(void)
     }
 }
 
+/* a page's name on its window's title tab, as a game page's ("Gameplay"). The game keeps a layout's
+ * title as text, looked up from the text id in its window block when the layout is parsed (the
+ * window's record, the layout's +8: +0xc that text, +8 the help line's); our pages' blocks have none
+ * (the game's tables have no "Display"), so ours is put there after */
+static void title(uint32_t layout, uint32_t str)
+{
+    uint32_t parsed = layout ? rd32(layout + 8) : 0;
+    if (parsed && rd32(parsed + 0xc) != str)
+        wr32(parsed + 0xc, str);
+}
+
 /* Ours in the game's lists: the sheet, the Config list in place of the game's (renamed), the pages.
  * The game could load its menu data again, so this is looked at now and then. */
 static void install(void)
@@ -1981,11 +2076,21 @@ static void install(void)
         if (k == PAGE_ADDONS)
         {
             for (int r = 1; r <= ADDON_VIS; ++r)
-                if (!find_layout((const char*)GUEST_PTR(g_addon_str[r])))
-                    add(LAYOUT_ADD, MGR, g_addon_layout[r]);
+            {
+                const char* name = (const char*)GUEST_PTR(g_addon_str[r]);
+                uint32_t layout = find_layout(name);
+                if (!layout)
+                    add(LAYOUT_ADD, MGR, g_addon_layout[r]), layout = find_layout(name);
+                title(layout, PAGES[k].str_title);
+            }
         }
-        else if (!find_layout(PAGES[k].name))
-            add(LAYOUT_ADD, MGR, PAGES[k].layout);
+        else
+        {
+            uint32_t layout = find_layout(PAGES[k].name);
+            if (!layout)
+                add(LAYOUT_ADD, MGR, PAGES[k].layout), layout = find_layout(PAGES[k].name);
+            title(layout, PAGES[k].str_title);
+        }
     hide_apply();
     lobby_install();
 }
@@ -2011,6 +2116,13 @@ static int setup(void)
                       find_layout(PAGES[k].spare_was))
             return 0;
     g_actions_ok = guest_is(ACTION_LISTS, ACTIONS_KNOWN, sizeof ACTIONS_KNOWN);
+    g_help_ok = guest_is(WINDOW_HELP, WINDOW_HELP_KNOWN, sizeof WINDOW_HELP_KNOWN) &&
+                rd32(WINDOW_HELP + sizeof WINDOW_HELP_KNOWN) == MGR;
+    g_scroll_ok = guest_is(WINDOW_SCROLL, WINDOW_SCROLL_KNOWN, sizeof WINDOW_SCROLL_KNOWN);
+    if (!g_help_ok)
+        fprintf(stderr, "[modern] window_help is not the function known: the help line waits for the cursor to move\n");
+    if (!g_scroll_ok)
+        fprintf(stderr, "[modern] window_scroll is not the function known: Config > Addons draws its own scroll bar\n");
     lists_fill();
     size_t csize;
     uint8_t* c = build_sheet() ? config_layout(&csize) : NULL;
@@ -2053,7 +2165,7 @@ static int setup(void)
             return 0;
         p->layout = gbytes(l, (uint32_t)n), p->layout_size = (uint32_t)n;
         free(l);
-        p->str_name = gstr(p->name), p->str_config_help = gstr(p->config_help);
+        p->str_name = gstr(p->name), p->str_title = gstr(p->title), p->str_config_help = gstr(p->config_help);
         for (int r = 0; r < p->nrows; ++r)
             p->str_help[r] = gstr(p->rows[r].help);
         uint32_t global = gheap_alloc(4, 1);
@@ -2251,7 +2363,7 @@ static void display_apply(void)
 }
 
 /* The game's own character shadows, Config > Shadows (option 58: 0 Normal, the blob under each
- * character; 1 Off; 2 High), Off while the sun's shadows are drawn and characters cast them - what
+ * character; 1 Off; 2 High), Off while the sun's shadows are on and characters cast them - what
  * gameshadows decides for the projected one draw by draw (d3d8.c game_shadow_hidden): 0 auto, 1 the
  * game's always, 2 never. Put back after two seconds without them (night, a Mog House, the effects
  * off), not to flip with each frame. The player's value is kept in modern.cfg while it is held: the
@@ -2262,7 +2374,7 @@ static void game_shadows_follow(void)
     static int idle;
     float mode = gfx_fx_get("gameshadows");
     int off = mode == 2.0f ||
-              (mode != 1.0f && gfx_fx_get("sun_casters") != 2.0f && gfx_sun_shadows_shown());
+              (mode != 1.0f && gfx_sun_shadows_on());
     idle = off ? 0 : idle + 1;
     if (!off && (g_own_shadows < 0 || idle < 4))
         return;
@@ -2368,6 +2480,8 @@ void modern_init(const ModernSetup* setup)
         if (g_hide >> HIDE_OLD_MAGIC_TRUST & 1)
             g_hide = (g_hide & ~(1u << HIDE_OLD_MAGIC_TRUST)) | 1u << HIDE_TRUST;
     }
+    if (cfg_value(path, "occlusion", buf, sizeof buf))
+        d3d8_set_occlusion((int)strtol(buf, NULL, 10));
     if (cfg_value(path, "game_shadows", buf, sizeof buf))
     {
         long v = strtol(buf, NULL, 10);
