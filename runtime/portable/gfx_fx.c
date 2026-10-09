@@ -140,6 +140,12 @@ float gfx_fx_get(const char* key)
     return p ? *p : 0.0f;
 }
 
+/* the sun's shadows are on: the effects, a sun strength, and characters among the casters */
+int gfx_sun_shadows_on(void)
+{
+    return g_fxs.fx != 0.0f && g_fxs.sun > 0.0f && g_fxs.sun_casters != 2.0f;
+}
+
 static char g_fx_file[1024];
 static struct timespec g_fx_mtime;
 #define FX_NSETTINGS (sizeof FX_SETTINGS / sizeof FX_SETTINGS[0])
