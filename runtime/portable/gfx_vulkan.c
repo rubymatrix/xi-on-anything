@@ -154,6 +154,12 @@ struct GfxBuf
     uint32_t size;
     uint64_t used;
     uint64_t up_last, up_prev; /* the frames of its last two uploads (buf_volatile) */
+    /* the bytes it was last filled from, which the caller keeps (gfx.h; d3d8.c: the buffer's own memory),
+     * as gfx_d3d12.c keeps them: draw_clip0 reads them instead of p, which is write-combined. The sun
+     * cache's copies (cache_copy) still read p: they are made when the scene is done, and by then the
+     * game may have written newer bytes here than the draw had */
+    const uint8_t* cpu;
+    uint32_t cpu_size;
 };
 
 typedef struct Chunk
@@ -777,6 +783,7 @@ void gfx_buf_upload(GfxBuf* b, const void* data, uint32_t size)
     if (size > b->size)
         size = b->size;
     sun_cache_forget(b->b); /* new contents: the cache's copy of what it drew is no longer it */
+    b->cpu = (const uint8_t*)data, b->cpu_size = size;
     if (b->up_last != g_serial)
         b->up_prev = b->up_last, b->up_last = g_serial;
     if (b->used > completed())
@@ -1958,8 +1965,8 @@ static void scene_mips(const GfxDraw* d)
         return;
     uint32_t tw, th;
     color_size(&tw, &th);
-    if (tw * th < 1024)
-        return; /* not the sun flare's 16x16 occlusion probe */
+    if (tw < 512 || th < 512)
+        return; /* onto a large target only: not the flare's probe, nor the game's 256x256 targets (gfx_metal.m) */
     for (int i = 0; i < 8; ++i)
     {
         GfxTex* t = d->tex[i];
@@ -2034,7 +2041,12 @@ static int draw_clip0(const GfxDraw* d, float out[4])
     {
         base[s] = NULL, have[s] = 0;
         if (d->buf[s])
-            base[s] = (const uint8_t*)d->buf[s]->p + d->buf_off[s], have[s] = d->buf[s]->size > d->buf_off[s] ? d->buf[s]->size - d->buf_off[s] : 0;
+        {
+            const GfxBuf* b = d->buf[s];
+            const uint8_t* p = b->cpu ? b->cpu : (const uint8_t*)b->p;
+            uint32_t n = b->cpu ? b->cpu_size : b->size;
+            base[s] = p + d->buf_off[s], have[s] = n > d->buf_off[s] ? n - d->buf_off[s] : 0;
+        }
         else if (d->data[s])
             base[s] = (const uint8_t*)d->data[s], have[s] = d->size[s];
     }

@@ -983,11 +983,17 @@ static void test_scene_sun_sharp(void)
     gfx_fx_set("temporal", 0.85f);
 }
 
-/* The scene filter: a 1024x1024 scene of 8-pixel stripes drawn at 32x32 is gray, where one
- * bilinear sample per pixel (every pixel lands on a white row) is white - the shimmer. */
+/* The scene filter: a 1024x1024 scene of 8-pixel stripes drawn at 32x32 onto a large target (512x512, as the
+ * world onto the back buffer) is gray, where one bilinear sample per pixel (every pixel lands on a white row)
+ * is white - the shimmer. Onto a small target (this test's 32x32, as the game's 256x256 ones) it is that one
+ * sample, filter or not: the game never filtered those, and rebuilding the scene's mips for each was a crowd's
+ * whole frame. */
 static void test_scene_filter(void)
 {
-    enum { B = 1024 };
+    enum { B = 1024, L = 512 };
+    static uint32_t big[L * L];
+    GfxTex* large = gfx_tex_create(GFX_TEX_2D, 21, L, L, 1, GFX_USE_RT);
+    const uint32_t lvp[6] = { 0, 0, L, L, 0, 0x3F800000u };
     GfxTex* rt = gfx_tex_create(GFX_TEX_2D, 21, B, B, 1, GFX_USE_RT);
     const uint32_t bvp[6] = { 0, 0, B, B, 0, 0x3F800000u };
     gfx_set_targets(rt, 0, 0, NULL);
@@ -999,24 +1005,39 @@ static void test_scene_filter(void)
         quad(q, 0, (float)(16 * i), B, (float)(16 * i + 8), 0xFFFFFFFFu, 0.5f);
         rows[i][0] = q[0], rows[i][1] = q[1], rows[i][2] = q[2], rows[i][3] = q[1], rows[i][4] = q[3], rows[i][5] = q[2];
     }
-    GfxDraw d;
-    defaults(&d);
-    layout_ui(&d);
-    d.u.vp[2] = d.u.vp[3] = B;
-    memcpy(d.vp, bvp, sizeof bvp);
-    d.fs.st[0] = (GfxStage){ 2, 0, 1, 1, 2, 0, 1, 1, 1, 0, 0, 2 };
-    d.data[0] = rows, d.size[0] = sizeof rows;
-    d.prim = GFX_TRIANGLELIST, d.count = 2 * (B / 16);
-    gfx_draw(&d);
+    GfxDraw stripes, d;
+    defaults(&stripes);
+    layout_ui(&stripes);
+    stripes.u.vp[2] = stripes.u.vp[3] = B;
+    memcpy(stripes.vp, bvp, sizeof bvp);
+    stripes.fs.st[0] = (GfxStage){ 2, 0, 1, 1, 2, 0, 1, 1, 1, 0, 0, 2 };
+    stripes.data[0] = rows, stripes.size[0] = sizeof rows;
+    stripes.prim = GFX_TRIANGLELIST, stripes.count = 2 * (B / 16);
+    gfx_draw(&stripes);
     GfxScene sc;
     memset(&sc, 0, sizeof sc); /* no camera: the filter alone */
-    for (int pass = 0; pass < 2; ++pass)
+    /* pass 0: filter on, onto the large target; 1: filter off, onto it; 2: filter on, onto the small target,
+     * the scene drawn to again first (its mips behind, as the world between the game's small targets) */
+    for (int pass = 0; pass < 3; ++pass)
     {
-        gfx_fx_set("filter", (float)!pass);
+        gfx_fx_set("filter", pass == 1 ? 0.0f : 1.0f);
+        if (pass == 2)
+            gfx_draw(&stripes);
         gfx_scene_done(rt, &sc);
-        gfx_set_targets(g_rt, 0, 0, g_ds);
+        if (pass < 2)
+        {
+            gfx_set_targets(large, 0, 0, NULL);
+            gfx_clear(0, NULL, 1, 0xFF000000u, 1.0f, 0, lvp);
+        }
+        else
+            gfx_set_targets(g_rt, 0, 0, g_ds);
         defaults(&d);
         layout_ui(&d);
+        if (pass < 2)
+        {
+            d.u.vp[2] = d.u.vp[3] = L;
+            memcpy(d.vp, lvp, sizeof lvp);
+        }
         d.tex[0] = rt;
         d.samp[0] = (GfxSampler){ 3, 3, 3, 2, 2, 0, 0, 0, 0 }; /* CLAMP, LINEAR, no mips: the game's */
         d.fs.st[0] = (GfxStage){ 2, 2, 1, 1, 2, 2, 1, 1, 1, 1, 0, 2 };
@@ -1025,17 +1046,29 @@ static void test_scene_filter(void)
         for (int i = 0; i < 4; ++i) /* each screen pixel's center on a texel's center (row 32y + 16) */
             v[i].u += 0.5f / B, v[i].v += 0.5f / B;
         draw_ui(&d, v);
-        readback();
-        uint32_t c = px(16, 16) & 255;
+        uint32_t c;
+        if (pass < 2)
+        {
+            gfx_tex_read(large, 0, 0, big, L * 4);
+            c = big[16 * L + 16] & 255;
+        }
+        else
+        {
+            readback();
+            c = px(16, 16) & 255;
+        }
         if (pass == 0)
             CHECK(c >= 100 && c <= 156, "scene filter: stripes at 1/32 size %u (want gray)", c);
-        else
+        else if (pass == 1)
             CHECK(c >= 250, "scene filter off: %u (want the white row one sample finds)", c);
+        else
+            CHECK(c >= 250, "scene filter onto a small target: %u (want the one sample, as the game's)", c);
         gfx_set_targets(rt, 0, 0, NULL);
     }
     gfx_fx_set("filter", 1.0f);
     gfx_set_targets(g_rt, 0, 0, g_ds);
     gfx_tex_destroy(rt);
+    gfx_tex_destroy(large);
 }
 
 /* A large render target the game samples itself (FFXI's character shadow, projected around the

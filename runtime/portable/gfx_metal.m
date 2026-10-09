@@ -1552,8 +1552,11 @@ static void scene_mips(const GfxDraw* d)
     if (g_fxs.fx == 0.0f || g_fxs.filter == 0.0f || !d->vs.rhw || !g_rt)
         return;
     NSUInteger tw = g_rt->tex.width, th = g_rt->tex.height;
-    if (tw * th < 1024)
-        return; /* not the sun flare's 16x16 occlusion probe */
+    /* onto a large target only: not the sun flare's 16x16 occlusion probe, nor the game's 256x256 targets. In a
+     * crowd the game draws its world into those some 40 times a frame, and rebuilding the world's mips for each
+     * (13 levels of 4096x4096) kept the GPU busy all frame; the game never filtered them */
+    if (tw < 512 || th < 512)
+        return;
     for (int i = 0; i < 8; ++i)
     {
         GfxTex* t = d->tex[i];
