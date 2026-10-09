@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XI on Anything</title>
+<style>
+  :root { --bg: #0b0d12; --fg: #d8dbe2; --dim: #8a8f9c; --accent: #c9a24a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; }
+  #status { position: fixed; top: 8px; left: 12px; color: var(--accent); text-shadow: 0 1px 2px #000; z-index: 2; }
+  #log { position: fixed; left: 0; right: 0; bottom: 0; max-height: 30vh; margin: 0; padding: 8px 12px; z-index: 2;
+         color: var(--dim); background: rgba(11, 13, 18, 0.75); font: 11px/1.35 ui-monospace, Menlo, monospace;
+         white-space: pre-wrap; word-break: break-all; overflow: auto; }
+  body.nolog #log { display: none; }
+  #signin { position: fixed; inset: 0; z-index: 4; display: none; align-items: center; justify-content: center;
+            background: radial-gradient(ellipse at center, #1a1f2b 0%, var(--bg) 70%); padding: 16px; }
+  #signin form { width: min(360px, 100%); display: grid; gap: 10px; padding: 24px; border-radius: 10px;
+                 background: rgba(20, 24, 33, 0.92); border: 1px solid #2c3242; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+  #signin h1 { margin: 0 0 6px; font-size: 18px; color: var(--accent); font-weight: 600; }
+  #signin .where { margin: -6px 0 6px; color: var(--dim); font-size: 12px; }
+  #signin label { display: grid; gap: 4px; font-size: 12px; color: var(--dim); }
+  #signin input { font: 15px system-ui, sans-serif; padding: 9px 10px; border-radius: 6px; border: 1px solid #343b4d;
+                  background: #0f121a; color: var(--fg); }
+  #signin input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #signin button { margin-top: 6px; padding: 10px; border: 0; border-radius: 6px; font: 600 15px system-ui, sans-serif;
+                   background: var(--accent); color: #1b1606; cursor: pointer; }
+  #signin .err { color: #e59b9b; font-size: 12px; min-height: 1em; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="signin">
+  <form autocomplete="on">
+    <h1>Sign in</h1>
+    <div class="where" id="where"></div>
+    <label>Username <input id="su" name="username" autocomplete="username" required></label>
+    <label>Password <input id="sp" name="password" type="password" autocomplete="current-password" required></label>
+    <label>One-time code (if your account has one) <input id="so" name="otp" inputmode="numeric" autocomplete="one-time-code"></label>
+    <button type="submit">Play</button>
+    <div class="err" id="serr"></div>
+  </form>
+</div>
+<div id="status">Starting…</div>
+<pre id="log"></pre>
+<script>
+// The page (docs/web-port-plan.md): the game drawn into #canvas by its render thread (WebGPU), its log below. The
+// hash carries the server's token (#t=...), and options: &profile=1 &nolog=1 &fps=0. The sign-in is a form: the
+// password goes to the game in its environment (the TLS to the server runs in the game), never in the address.
+// Development (the static test servers): &server=<ip>&user=..&pass=..&authport=..&dataport=..&viewport=..&enter=<s>
+const hash = new URLSearchParams(location.hash.slice(1));
+const logEl = document.getElementById('log'), statusEl = document.getElementById('status');
+new BroadcastChannel('xi-err').onmessage = (e) => log('thread crashed: ' + e.data);
+const lines = [];
+function log(text) {
+  lines.push(text);
+  if (lines.length > 2000) lines.splice(0, 500);
+  logEl.textContent = lines.join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+}
+if (hash.get('nolog')) document.body.classList.add('nolog');
+if (!crossOriginIsolated) statusEl.textContent = 'This page needs cross-origin isolation (open it from tools/webserve.py).';
+const args = ['--game', '/game', '--data-dir', '/xi-data', '--reg', '/app/ffxi.reg', '--reg-final', '/xi-data/settings.reg'];
+let password = '';
+for (const k of ['server', 'user', 'pass', 'authport', 'dataport', 'viewport'])
+  if (hash.get(k)) args.push('--' + k, hash.get(k));
+// every file of a build is asked for as name?v=<build> (tools/build_web.py fills it in), so a browser or a
+// proxy's cache can't pair a new page with an old script or wasm
+const XI_BUILD = '__XI_BUILD__';
+let xiCfg = {}; // webserve.py's /config
+var Module = {
+  locateFile: (p, dir) => dir + p + '?v=' + XI_BUILD,
+  arguments: args,
+  thisProgram: '/app/host64',
+  print: log,
+  printErr: log,
+  preRun: [() => {
+    const ENV = Module.ENV, FS = Module.FS;
+    ENV.XI_HTTP_URL = location.origin;
+    ENV.XI_TOKEN = hash.get('t') || '';
+    ENV.FFXI_DATA_DIR = '/xi-data';
+    // the file cache (dlcache.js): the game's data reads kept in Cache Storage; #cache=0 reads the network
+    // only, #cache=clear empties it first
+    if (hash.get('cache') !== '0' && self.caches) {
+      Module.fileCache = new Worker('dlcache.js?v=' + XI_BUILD);
+      ENV.XI_CACHE = '1';
+      navigator.storage?.persist?.();
+    }
+    ENV.FFXI_DISCORD = '0';
+    if (password) ENV.FFXI_PASSWORD = password;
+    password = '';
+    if (hash.get('profile')) ENV.FFXI_PROFILE = '1';
+    FS.mkdir('/xi-data');
+    // the game's window is the canvas, in device pixels: its resolution and the menus' (the data folder's
+    // settings.reg, loaded last), windowed, with the 4096 background the scene effects want
+    const { w, h, mw, mh } = xiHud.sizes();
+    const hex = (v) => 'dword:' + v.toString(16).padStart(8, '0');
+    FS.writeFile('/xi-data/settings.reg', 'REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI]\r\n' +
+      '"0001"=' + hex(w) + '\r\n"0002"=' + hex(h) + '\r\n"0003"=' + hex(4096) + '\r\n"0004"=' + hex(4096) + '\r\n' +
+      '"0034"=' + hex(1) + '\r\n"0037"=' + hex(mw) + '\r\n"0038"=' + hex(mh) + '\r\n');
+    Module.viewSize = [w, h];
+  }],
+  onRuntimeInitialized() {
+    statusEl.textContent = 'Running';
+    Module.fileCache?.postMessage({ mem: Module.wasmMemory, clear: hash.get('cache') === 'clear', bucket: !!xiCfg.bucket,
+      token: hash.get('t') || '' });
+    Module._web_view_size(Module.viewSize[0], Module.viewSize[1]);
+    Module._web_focus(1);
+    xiInput.start(Module, document.getElementById('canvas'));
+    xiHud.follow(Module);
+    if (hash.get('fps') !== '0') xiHud.gauge(Module);
+    if (hash.get('dl') !== '0') xiHud.downloads(Module.fileCache);
+    // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay.py does)
+    if (hash.get('enter')) {
+      const until = Date.now() + Number(hash.get('enter')) * 1000;
+      const t = setInterval(() => {
+        if (Date.now() > until) return clearInterval(t);
+        Module._web_key(40, 1, 0);
+        setTimeout(() => Module._web_key(40, 0, 0), 80);
+      }, 2000);
+    }
+  },
+  onExit(code) { statusEl.textContent = 'Exited (' + code + ')'; },
+};
+window.addEventListener('error', (e) => log('error: ' + e.message));
+
+function startGame() {
+  statusEl.textContent = 'Loading…';
+  const s = document.createElement('script');
+  s.src = 'host64.js?v=' + XI_BUILD;
+  document.body.appendChild(s);
+}
+
+// the server's address and the overlays from webserve.py, then the sign-in (none when the address has it)
+(async () => {
+  let cfg = {};
+  try {
+    const r = await fetch('config?t=' + encodeURIComponent(hash.get('t') || ''));
+    if (r.ok) cfg = await r.json();
+  } catch (e) {}
+  xiCfg = cfg;
+  if (!hash.get('server') && cfg.server) args.push('--server', cfg.server);
+  for (let i = 0; i < (cfg.dats || 0); i++) args.push('--dats', '/dats/' + i);
+  if (hash.get('user')) return startGame();
+  const box = document.getElementById('signin'), su = document.getElementById('su'), sp = document.getElementById('sp'),
+    so = document.getElementById('so');
+  document.getElementById('where').textContent = cfg.server_name ? 'on ' + cfg.server_name : '';
+  try { su.value = localStorage.getItem('xi.user') || ''; } catch (e) {}
+  box.style.display = 'flex';
+  statusEl.textContent = '';
+  (su.value ? sp : su).focus();
+  box.querySelector('form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    try { localStorage.setItem('xi.user', su.value); } catch (e) {}
+    args.push('--user', su.value);
+    if (so.value.trim()) args.push('--otp', so.value.trim());
+    password = sp.value;
+    sp.value = '';
+    box.style.display = 'none';
+    startGame();
+  });
+})();
+</script>
+<script src="input.js?v=__XI_BUILD__"></script>
+<script src="hud.js?v=__XI_BUILD__"></script>
+</body>
+</html>

@@ -4,6 +4,12 @@
 #include "gwin.h"
 #include "plat.h"
 
+#if !defined(RT_GUEST_WINDOW)
+/* the browser (flat guest memory, no window): the kernels need a Guest outside guest memory and the host
+ * SIMD of geometry_simd.c, so they stay off there and the game runs its own code */
+#define rt_guest_base ((uint8_t*)0)
+#endif
+
 /* the batch this thread is running, if any; the feature bytes in guest memory are never changed */
 static RT_TLS Guest* batch_guest;
 static RT_TLS GeometryLayout batch_layout;

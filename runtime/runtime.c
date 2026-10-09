@@ -118,8 +118,15 @@ GuestFn rt_lookup_any(uint32_t target)
     return fn;
 }
 
+#if defined(RT_WATERMARK)
+void watermark_probe(Guest* g, uint32_t target); /* runtime/portable/watermark.c */
+#endif
+
 void rt_call_indirect(Guest* g, uint32_t target)
 {
+#if defined(RT_WATERMARK)
+    watermark_probe(g, target);
+#endif
     GuestFn fn = rt_lookup_any(target);
     if (fn)
     {

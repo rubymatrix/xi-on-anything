@@ -19,6 +19,15 @@ void gwin_release(uint32_t addr); /* a whole reservation, by its start */
 uint32_t gwin_alloc(uint32_t size); /* reserve + commit anywhere */
 int gwin_is_committed(uint32_t addr);
 
+/* How much of the window the game uses: bytes committed now and at most, and the end of the highest
+ * reservation (what a wasm32 build, whose memory can only grow upward, would have to cover). */
+typedef struct GwinStats
+{
+    uint64_t committed, committed_peak;
+    uint32_t top;
+} GwinStats;
+void gwin_stats(GwinStats* s);
+
 /* Heap. Every heap handle shares one allocator; the handles only keep identities apart.
  * Callers hold the guest lock (the runtime's own startup code runs before any other thread). */
 uint32_t gheap_alloc(uint32_t size, int zero);

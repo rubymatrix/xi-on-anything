@@ -97,12 +97,14 @@
 #include "user32.h"
 #include "d3d8.h"
 #include "gfx.h"
+#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
 #include "dsound.h"
 #include "dinput.h"
 #include "ws2.h"
 #include "plat.h"
 #include "vfs.h"
 #include "geometry_guest.h"
+#include "watermark.h"
 #include "build.h" /* FFXI_VERSION */
 #if defined(FFXI_ANDROID_VULKAN)
 #include "benchmark.h"
@@ -728,6 +730,17 @@ static void present_hook(void)
     if (g_addons_on)
         addons_frame();
     discord_frame();
+    watermark_frame();
+#if defined(__EMSCRIPTEN__)
+    extern void web_frame(void); /* sdl_web.c */
+    extern int web_take_resize(int* w, int* h, int* menu_w, int* menu_h);
+    web_frame();
+    {
+        int w, h, mw, mh; /* the page was resized: the game's resolution follows */
+        if (web_take_resize(&w, &h, &mw, &mh))
+            modern_window_size(w, h, mw, mh);
+    }
+#endif
     if (!g_fps_global)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
