@@ -2350,7 +2350,7 @@ static void display_apply(void)
 }
 
 /* The game's own character shadows, Config > Shadows (option 58: 0 Normal, the blob under each
- * character; 1 Off; 2 High), Off while the sun's shadows are drawn and characters cast them - what
+ * character; 1 Off; 2 High), Off while the sun's shadows are on and characters cast them - what
  * gameshadows decides for the projected one draw by draw (d3d8.c game_shadow_hidden): 0 auto, 1 the
  * game's always, 2 never. Put back after two seconds without them (night, a Mog House, the effects
  * off), not to flip with each frame. The player's value is kept in modern.cfg while it is held: the
@@ -2361,7 +2361,7 @@ static void game_shadows_follow(void)
     static int idle;
     float mode = gfx_fx_get("gameshadows");
     int off = mode == 2.0f ||
-              (mode != 1.0f && gfx_fx_get("sun_casters") != 2.0f && gfx_sun_shadows_shown());
+              (mode != 1.0f && gfx_sun_shadows_on());
     idle = off ? 0 : idle + 1;
     if (!off && (g_own_shadows < 0 || idle < 4))
         return;
