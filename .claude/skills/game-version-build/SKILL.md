@@ -46,6 +46,10 @@ runtime or graphics code changed too.
      package at `C:\Dev\SDL3\SDL3-3.4.16`, or wherever `SDL3_DIR` points.
    - `boot64` also exports the game's registry keys (from a retail install on this machine) to
      `build/ffxi.reg`. On a machine without one that is expected to fail quietly.
+   - If the build's `builds.json` entry has a `geometry` section without a `layout`, run
+     `python3 tests/geometry_replay_test.py` (any host; needs `pefile` and `unicorn`). On a pass,
+     set `"layout": 1` in that section and rebuild `host64`. On a failure, leave the layout out
+     and report it: the build keeps the translated skinning.
 
 3. **macOS arm64.** If this session runs on macOS, build the two POSIX targets (`brew install
    sdl3 pkg-config mbedtls`, `pip3 install capstone pefile`). On Windows it can't be built here.

@@ -1,14 +1,18 @@
 """tools/replayserver.py and tools/replayscene.py: recordings read into scenes, what the scene flags
 do to them, and the server's events and requests; tools/replayreport.py's phases and tools/replay.py's
-frame-log reading and capture conversion. The recordings are made up here; no game data.
+frame-log reading and capture conversion. The recordings are made up here, except the committed ones
+in tools/replay/scenes/.
 
   python3 tests/replay_test.py [-v]
 """
 import json
 import os
+import socket
 import struct
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 
@@ -79,6 +83,16 @@ class Recordings(Folder):
         self.assertEqual(s.rename('Replay'), 2)
         self.assertEqual(s.name(), 'Replay')
         self.assertIn(b'Recorders', bytes(s.packets[1][1]))  # not a whole field: left alone
+
+    def test_a_saved_scene_loads_back_the_same(self):
+        s = replayscene.Scene.load(self.write('scene.jsonl', recording(
+            [(500, packet(0x017, b'before')), (1000, zone_in()), (1500, packet(0x037, b'x')), (3000, packet(0x00B, b''))],
+            [(2000, 'start')])))
+        s.meta['server'] = 'LandSandBoat 0123abc'
+        s.save(os.path.join(self.dir, 'saved.jsonl'))
+        t = replayscene.Scene.load(os.path.join(self.dir, 'saved.jsonl'))
+        self.assertEqual((t.meta, t.marks), (s.meta, s.marks))
+        self.assertEqual([(at, bytes(d)) for at, d in t.packets], [(at, bytes(d)) for at, d in s.packets])
 
     def test_quiet_drops_text(self):
         s = replayscene.Scene.load(self.write('scene.jsonl', recording(
@@ -289,6 +303,10 @@ class SceneFlags(Folder):
         self.assertEqual(struct.unpack_from('<H', d, 0x68)[0], replayscene.WEATHERS.index('hot spell'))
         self.assertEqual(s.marks[-1], [0.6, 'end'])
 
+    def test_a_negative_position_is_a_value_not_a_flag(self):
+        s = self.load('--zone 35 --at -322.5,5,-362.75,219 --turn -90')
+        self.assertEqual(struct.unpack_from('<fff', s.packets[0][1], 0x0C), (-322.5, 5, -362.75))
+
     def test_flags_that_need_another(self):
         for flags in ('--echo', '--looks a.jsonl', '--echo-spells haste', '--at 1,2,3', '--zone 104', '--zone 104 --at 1,2',
                       '--weather fog-bank', '--mob-spells no-such-spell'):
@@ -322,6 +340,45 @@ class Report(Folder):
 
 
 class Runner(Folder):
+    def server(self, code):
+        """A stand-in replay server: a Python process running code, its output in server.log."""
+        log = os.path.join(self.dir, 'server.log')
+        with open(log, 'w') as f:
+            p = subprocess.Popen([sys.executable, '-u', '-c', code], stdout=f, stderr=subprocess.STDOUT)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p, log
+
+    def test_the_server_is_waited_for_until_it_listens(self):
+        p, log = self.server("import time; time.sleep(0.3); print('12:00:00 [server] 2 scenes'); time.sleep(30)")
+        replay.wait_server(p, log, timeout=10)
+        self.assertIsNone(p.poll())
+
+    def test_a_server_that_stops_ends_the_wait(self):
+        p, log = self.server("raise SystemExit('bad suite')")
+        with self.assertRaises(SystemExit):
+            replay.wait_server(p, log, timeout=10)
+
+    def test_a_port_the_last_run_left_in_time_wait_is_free(self):
+        with socket.socket() as srv:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as the game's listener (control.lua)
+            srv.bind(('127.0.0.1', 0))
+            srv.listen(1)
+            port = srv.getsockname()[1]
+            cli = socket.create_connection(('127.0.0.1', port))
+            conn, _ = srv.accept()
+            conn.close()  # the listening side closes first, as the game's does: its port is left in TIME_WAIT
+            cli.close()
+        time.sleep(0.2)
+        replay.wait_port_free(port, wait=0)
+
+    def test_a_port_still_listened_on_is_taken(self):
+        with socket.socket() as srv:
+            srv.bind(('127.0.0.1', 0))
+            srv.listen(1)
+            with self.assertRaises(SystemExit):
+                replay.wait_port_free(srv.getsockname()[1], wait=0)
+
     def test_events_are_read_once_and_whole(self):
         path = self.write('frames.csv', 'f,1\nm,2,begin|1|rain|weather|109\nm,3,mark|1|ra')
         events = replay.Events(path)
@@ -343,6 +400,25 @@ class Runner(Folder):
         size = struct.unpack_from('>I', data, idat - 4)[0]
         self.assertEqual(zlib.decompress(data[idat + 4:idat + 4 + size]), bytes([0, 3, 2, 1, 6, 5, 4]))
         self.assertFalse(replay.png(self.write('other.raw', 'not a capture'), os.path.join(self.dir, 'x.png')))
+
+
+class ReferenceSet(unittest.TestCase):
+    """The committed recordings (tools/replay/scenes/), as tools/replay/default.txt plays them."""
+
+    def test_the_suite_plays_every_recording_and_only_those(self):
+        scenes = replayserver.load_suite(os.path.join(replay.TOOLS, 'replay', 'default.txt'), 'Replay')
+        for s in scenes:
+            self.assertEqual(os.path.dirname(s.path), replay.SCENES, s.label)
+        self.assertEqual({os.path.basename(s.path) for s in scenes}, set(os.listdir(replay.SCENES)))
+
+    def test_each_recording_is_kept_and_trimmed(self):
+        for name in os.listdir(replay.SCENES):
+            s = replayscene.Scene.load(os.path.join(replay.SCENES, name))
+            self.assertLessEqual({'server', 'client', 'recorder', 'trimmed'}, s.meta.keys(), name)
+            self.assertEqual((s.name(), s.marks[-1][1]), ('Replay', 'end'), name)
+            kept = [bytes(d) for _, d in s.packets]
+            replayscene.trim(s)
+            self.assertEqual([bytes(d) for _, d in s.packets], kept, name)  # nothing left to trim
 
 
 if __name__ == '__main__':

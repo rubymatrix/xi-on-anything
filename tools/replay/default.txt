@@ -1,49 +1,49 @@
 # Every scene. The session waits in GM Home; "!replay <#|name|group|all>" plays scenes.
-# The recordings are your own: python3 tools/replay.py record all --server <your LandSandBoat server> ...
-# writes them to generated/replay/ (the xireplay addon's scenes: tools/replay/xireplay).
-../../generated/replay/home-1.jsonl --home --label home
+# The recordings are in scenes/, committed so every machine plays the same scenes; each file's first
+# line says what made it. A new set: tools/replay/README.md, "A new reference set".
+scenes/home-1.jsonl --home --label home
 
 # city
-../../generated/replay/markets-1.jsonl --label markets --group city --length 20
-../../generated/replay/mines-1.jsonl --label mines --group city --length 20
+scenes/markets-1.jsonl --label markets --group city --length 20
+scenes/mines-1.jsonl --label mines --group city --length 20
 
 # lighting: one vantage at four times of day
-../../generated/replay/lighting-1.jsonl --label dawn --group lighting
-../../generated/replay/lighting-2.jsonl --label noon --group lighting
-../../generated/replay/lighting-3.jsonl --label dusk --group lighting
-../../generated/replay/lighting-4.jsonl --label midnight --group lighting
+scenes/lighting-1.jsonl --label dawn --group lighting
+scenes/lighting-2.jsonl --label noon --group lighting
+scenes/lighting-3.jsonl --label dusk --group lighting
+scenes/lighting-4.jsonl --label midnight --group lighting
 
 # indoors: a zone with no sky, at noon, where the sun's shadows would black it out (the lighting visit
 # moved there; the clock stays pinned to noon)
-../../generated/replay/lighting-2.jsonl --label garden --group indoors --zone 35 --at -322.43,5.0,-362.77,219
+scenes/lighting-2.jsonl --label garden --group indoors --zone 35 --at -322.43,5.0,-362.77,219
 
 # weather: each in a zone whose own weather includes it (the client draws effects only there),
 # set at the zone-in (the client starts a weather's effects only when it arrives)
-../../generated/replay/weather-1.jsonl --label hot-spell --group weather --weather hot-spell
-../../generated/replay/weather-1.jsonl --label heat-wave --group weather --weather heat-wave
-../../generated/replay/weather-1.jsonl --label sand-storm --group weather --weather sand-storm
-../../generated/replay/weather-2.jsonl --label sunshine --group weather --weather sunshine
-../../generated/replay/weather-3.jsonl --label dust-storm --group weather --weather dust-storm
-../../generated/replay/weather-4.jsonl --label wind --group weather --weather wind
-../../generated/replay/weather-5.jsonl --label gales --group weather --weather gales
-../../generated/replay/weather-6.jsonl --label rain --group weather --weather rain
-../../generated/replay/weather-7.jsonl --label squall --group weather --weather squall
-../../generated/replay/weather-8.jsonl --label snow --group weather --weather snow
-../../generated/replay/weather-9.jsonl --label blizzards --group weather --weather blizzards
-../../generated/replay/weather-10.jsonl --label thunder --group weather --weather thunder
-../../generated/replay/weather-10.jsonl --label thunderstorms --group weather --weather thunderstorms
+scenes/weather-1.jsonl --label hot-spell --group weather --weather hot-spell
+scenes/weather-1.jsonl --label heat-wave --group weather --weather heat-wave
+scenes/weather-1.jsonl --label sand-storm --group weather --weather sand-storm
+scenes/weather-2.jsonl --label sunshine --group weather --weather sunshine
+scenes/weather-3.jsonl --label dust-storm --group weather --weather dust-storm
+scenes/weather-4.jsonl --label wind --group weather --weather wind
+scenes/weather-5.jsonl --label gales --group weather --weather gales
+scenes/weather-6.jsonl --label rain --group weather --weather rain
+scenes/weather-7.jsonl --label squall --group weather --weather squall
+scenes/weather-8.jsonl --label snow --group weather --weather snow
+scenes/weather-9.jsonl --label blizzards --group weather --weather blizzards
+scenes/weather-10.jsonl --label thunder --group weather --weather thunder
+scenes/weather-10.jsonl --label thunderstorms --group weather --weather thunderstorms
 # the rest in an empty zone: a weather visit moved there (no recording of their own); auroras and
 # stellar glare at midnight, where they show (by day the sun washes them out)
-../../generated/replay/weather-2.jsonl --label clouds --group weather --zone 104 --at 49.375,0.267,3.777,0 --weather clouds
-../../generated/replay/weather-2.jsonl --label gloom --group weather --zone 24 --at 196.543,-23.051,347.649,0 --weather gloom
-../../generated/replay/weather-2.jsonl --label darkness --group weather --zone 161 --at 209.0,-24.532,19.0,128 --weather darkness
-../../generated/replay/lighting-4.jsonl --label auroras --group weather --zone 130 --at -121.144,-40.536,421.18,0 --weather auroras
-../../generated/replay/lighting-4.jsonl --label stellar-glare --group weather --zone 126 --at -226.75,-19.0,319.64,0 --weather stellar-glare
+scenes/weather-2.jsonl --label clouds --group weather --zone 104 --at 49.375,0.267,3.777,0 --weather clouds
+scenes/weather-2.jsonl --label gloom --group weather --zone 24 --at 196.543,-23.051,347.649,0 --weather gloom
+scenes/weather-2.jsonl --label darkness --group weather --zone 161 --at 209.0,-24.532,19.0,128 --weather darkness
+scenes/lighting-4.jsonl --label auroras --group weather --zone 130 --at -121.144,-40.536,421.18,0 --weather auroras
+scenes/lighting-4.jsonl --label stellar-glare --group weather --zone 126 --at -226.75,-19.0,319.64,0 --weather stellar-glare
 
 # crowds: about forty mobs held, each made four; 150 geared characters in a city
-../../generated/replay/crowd-1.jsonl --label mob-crowd --group crowd --hold --clone 4 --mob-name Monster
-../../generated/replay/markets-1.jsonl --label player-crowd --group crowd --length 20 --players 150 --looks ../../generated/replay/markets-1.jsonl,../../generated/replay/mines-1.jsonl
+scenes/crowd-1.jsonl --label mob-crowd --group crowd --clone 4 --mob-name Monster
+scenes/markets-1.jsonl --label player-crowd --group crowd --length 20 --players 150 --looks scenes/markets-1.jsonl,scenes/mines-1.jsonl
 
 # effects: thirty characters echoing a red mage's casts with spells of their own, staggered; the mob crowd casting spells at each other
-../../generated/replay/effects-1.jsonl --label effects --group effects --players 30 --looks ../../generated/replay/markets-1.jsonl,../../generated/replay/mines-1.jsonl --echo --echo-spread 2.5 --echo-spells all
-../../generated/replay/crowd-1.jsonl --label mob-spells --group effects --hold --clone 4 --mob-name Monster --mob-spells all --mob-spells-every 5
+scenes/effects-1.jsonl --label effects --group effects --players 30 --looks scenes/markets-1.jsonl,scenes/mines-1.jsonl --echo --echo-spread 2.5 --echo-spells all
+scenes/crowd-1.jsonl --label mob-spells --group effects --clone 4 --mob-name Monster --mob-spells all --mob-spells-every 5

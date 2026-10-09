@@ -434,15 +434,25 @@ events.raise = raise
 
 -------------------------------------------------------------------------------- tasks
 
+-- Unload handlers run as plain calls and the addon is gone before a sleep would end, so a sleep
+-- there returns at once (LuAshitacast sleeps in its unload) and the rest of the handler runs.
+local unloading = false
+
 function coroutine.sleep(s)
     local co, main = co_running()
-    if co == nil or main then error('coroutine.sleep: not inside a coroutine', 2) end
+    if co == nil or main then
+        if unloading then return end
+        error('coroutine.sleep: not inside a coroutine', 2)
+    end
     co_yield(SLEEP, tonumber(s) or 0)
 end
 
 function coroutine.sleepf(n)
     local co, main = co_running()
-    if co == nil or main then error('coroutine.sleepf: not inside a coroutine', 2) end
+    if co == nil or main then
+        if unloading then return end
+        error('coroutine.sleepf: not inside a coroutine', 2)
+    end
     co_yield(SLEEPF, tonumber(n) or 1)
 end
 
@@ -576,7 +586,9 @@ function hooks.load()
 end
 
 function hooks.unload()
+    unloading = true
     raise('unload')
+    unloading = false
 end
 
 xi.hooks = hooks

@@ -46,6 +46,10 @@ HAND = {
     'MemAlloc', 'MemFree', 'AddFontFromFileTTF', 'AddFontFromMemoryCompressedTTF',
     'AddFontFromMemoryCompressedBase85TTF', 'BeginMenuEx', 'MenuItemEx',
 }
+# Functions Ashita binds that its annotations leave out (addons call them unguarded), also hand_<Name>:
+# SetWindowFontScale is obsolete in ImGui 1.92 but still compiled (imgui.h, IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+# unset), and HXUI, XIUI, hgather and points call it every frame.
+UNANNOTATED = ['SetWindowFontScale']
 # Class methods implemented in gui_lua.cpp as hand_<Class>_<Method>.
 HAND_METHODS = {
     ('ImDrawList', 'AddPolyline'), ('ImDrawList', 'AddConvexPolyFilled'),
@@ -799,6 +803,10 @@ def main():
             report['bound'].append(name)
         else:
             report['unbound'].append((name, why))
+    for name in UNANNOTATED:
+        if name not in groups:
+            fn_table.append((name, 'hand_' + name))
+            report['hand'].append(name)
 
     # ---- Class methods.
     meth_groups, morder = {}, []

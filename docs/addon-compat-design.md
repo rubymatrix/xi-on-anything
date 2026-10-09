@@ -210,6 +210,10 @@ call:
 - **Faults**: an `ffi` access outside mapped memory is a host SIGSEGV/SIGBUS (macOS) or access
   violation (Windows). A guard around each Lua entry (`sigsetjmp` + signal handler on POSIX, SEH on
   Windows) unloads that addon and abandons its state (never `lua_close` a possibly corrupt state).
+  A fault inside a game call (`xi.memory.call`, a game function through `ffi`, the host's own game
+  calls) jumps past that call's restore, so the guard also puts back the thread's guest registers,
+  guest lock and no-yield count as they were at entry (`gt_save`/`gt_restore`): the game function the
+  hook interrupted resumes as it was. What the faulting function wrote stays written.
 - **Threading**: Lua is only entered from the thread that owns the addon host (the game's main
   thread) while holding the guest lock. Hooks that fire elsewhere (if the packet functions turn out
   to run on another guest thread) enter Lua only after taking a host recursive mutex that is always
@@ -331,8 +335,13 @@ As VanaCore, on the plain buffer (0x1C header, then packets: u16 id:9/size:7, u1
 2. Per packet, in order: Ashita addons' `packet_in`/`packet_out` (original + `modified`, `blocked`,
    `injected`, chunk), then Windower `incoming chunk`/`outgoing chunk` (id, data, modified,
    injected, blocked; return a string to replace, true to block).
-3. Drop blocked, append injected (padded, last sequence number, also passed through the handlers
-   with `injected = true`), carry over what doesn't fit.
+3. Drop blocked, append injected (padded, last sequence number), carry over what doesn't fit. An
+   addon's packet (`AddOutgoingPacket`, `packets.inject`) goes through the handlers with
+   `injected = true` when it is injected, as Ashita does: LuAshitacast re-injects a cast under a flag
+   it clears straight after. One injected from the handler of an injected packet (or of one the queue
+   drains) is still handled at once, one level deep; deeper, it waits for the next buffer and is
+   handled there, so an addon that injects for every packet it sees costs packets rather than a hang
+   (at most 256 wait per direction; more are dropped).
 4. Outgoing is rebuilt in a 0x2000-byte host buffer (`gheap`), handed to the original encrypt.
 
 ### 10.2 Windower's packet-derived events and state
@@ -414,7 +423,10 @@ We own DirectInput, user32 and the SDL pump, so capture is simpler than on Windo
   `!` alt, `@` win/cmd, `#` apps, `+` shift, `%` only while chat closed, `$` only while chat open;
   Windower's `bind` syntax maps to the same table). A bound key is consumed and runs its command
   through the router. On macOS, `@` maps to Cmd.
-- XInput / controller events for Ashita's `xinput_*` events come from `XI_GetState`.
+- XInput / controller events for Ashita's `xinput_*` events come from `XI_GetState`, and so do its
+  `dinput_*` events: the first pad as its own driver numbers it on Windows (`input_pad_dinput`:
+  PlayStation, Switch Pro and Stadia orders, else Xbox's), so addons written for those pads (XIUI's
+  crossbar) read the buttons they expect. A press blocked in either kind is kept from the game.
 
 ## 13. Compat layer rules
 

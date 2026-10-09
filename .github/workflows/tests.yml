@@ -1,0 +1,19 @@
+# The tests that need no game files: the replay tools and their recordings (tests/replay_test.py),
+# and the game's paths on a case-sensitive host (tests/vfs_test.c).
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay tools and reference set
+        run: python3 tests/replay_test.py -v
+      - name: Guest paths (vfs.c)
+        run: python3 tools/build_posix.py vfstest

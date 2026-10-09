@@ -2,8 +2,9 @@
  * generated resources (addon-deps/Resources/resources_data/<name>.lua).
  *
  * Build (from the repo root):
- *   cc -std=c11 -O2 -Ihost/addons -Ithird_party/luajit/src tests/res_test.c host/addons/res.c \
- *      host/addons/res_lua.c build/third_party/luajit.a -lm -o build/res_test
+ *   cc -std=c11 -O2 -Ihost/addons -Iruntime -Iruntime/portable -Ithird_party/luajit/src tests/res_test.c \
+ *      host/addons/res.c host/addons/res_lua.c runtime/portable/vfs.c runtime/portable/plat_posix.c \
+ *      build/third_party/luajit.a -lm -lpthread -o build/res_test
  * Run:
  *   build/res_test ["<FINAL FANTASY XI folder>" [<resources_data folder>]]
  * Defaults: ../FINAL FANTASY XI and ../addon-deps/Resources/resources_data (next to the repo).

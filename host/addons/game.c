@@ -119,7 +119,14 @@ typedef struct pattern_def
     int32_t offset;
     uint32_t count;
     int kind;
+    const char* alt; /* another build's form of the same code, tried when pattern is not found */
+    int32_t alt_offset;
 } pattern_def;
+
+/* The key item getters bound the table index with cmp eax, imm32 (3D) where the table count does not
+ * fit a signed byte (0x80 tables), and with cmp eax, imm8 (83 F8) where it does (0x70 on 2025-11-12) */
+#define KEYITEMS_IMM32 "8B44240485C07C??3D????????7D??8B4C24088B1485"
+#define KEYITEMS_IMM8 "8B44240485C07C??83F8??7D??8B4C24088B1485"
 
 static const pattern_def patterns[XI_P_COUNT] = {
     [XI_P_ENTITY_MAP] = {"entitymap", "8B560C8B042A8B0485", 9, 0, RD_U32},
@@ -133,8 +140,8 @@ static const pattern_def patterns[XI_P_COUNT] = {
     [XI_P_INVENTORY_OFS] = {"inventory.offset", "A1????????8D9488????????8990????????E9", 8, 0, RD_U32},
     [XI_P_AUTOFOLLOW] = {"autofollow", "8BCFE8????????8B0D????????E8????????8BE885ED750CB9", 25, 0, RD_U32},
     [XI_P_CASTBAR] = {"castbar", "85F674??A1????????85C074??8B4808", 5, 0, RD_U32},
-    [XI_P_KEYITEMS] = {"player.haskeyitem", "8B44240485C07C??3D????????7D??8B4C24088B1485", 22, 0, RD_U32},
-    [XI_P_KEYITEMS_SEEN] = {"player.seenkeyitem", "8B44240485C07C??3D????????7D??8B4C24088B1485", 22, 1, RD_U32},
+    [XI_P_KEYITEMS] = {"player.haskeyitem", KEYITEMS_IMM32, 22, 0, RD_U32, KEYITEMS_IMM8, 20},
+    [XI_P_KEYITEMS_SEEN] = {"player.seenkeyitem", KEYITEMS_IMM32, 22, 1, RD_U32, KEYITEMS_IMM8, 20},
     [XI_P_JOBLEVEL_FN] = {"player.joblevels", "8B0D????????85C974??8B4424043C1073??25FF000000", 0, 0, RD_MATCH},
     [XI_P_MASTERLEVEL_FN] = {"player.jobmasterlevels", "8B0D????????85C974??8B4424043C1873??25FF000000", 0, 0, RD_MATCH},
     [XI_P_MASTERFLAG_FN] = {"player.jobmasterflags", "8B15????????85D274??8A4C240480F91873??B801000000D3E02382????????F7D81BC0F7D8C3", 0, 0, RD_MATCH},
@@ -152,7 +159,9 @@ enum { ST_NEW, ST_OK, ST_MISSING };
 static struct
 {
     int state;
+    uint32_t hit;   /* where the pattern matched */
     uint32_t match; /* the pattern hit plus offset */
+    uint32_t bound; /* the key item getters' table count, once read (key_bit) */
     uint32_t value;
 } ptrs[XI_P_COUNT];
 
@@ -168,13 +177,20 @@ static void resolve(int which)
     if (text == 0 || text_size == 0)
         return; /* the image isn't loaded yet: try again next time */
     const pattern_def* p = &patterns[which];
-    uint32_t a = xi_find_pattern(text, text_size, p->pattern, p->offset, p->count);
+    int32_t offset = p->offset;
+    uint32_t a = xi_find_pattern(text, text_size, p->pattern, offset, p->count);
+    if (a == 0 && p->alt)
+    {
+        offset = p->alt_offset;
+        a = xi_find_pattern(text, text_size, p->alt, offset, p->count);
+    }
     if (a == 0)
     {
         ptrs[which].state = ST_MISSING;
         xi_log("game: pattern '%s' not found; its getters return nothing", p->name);
         return;
     }
+    ptrs[which].hit = a - (uint32_t)offset;
     ptrs[which].match = a;
     ptrs[which].value = p->kind == RD_U32 ? xi_game_rd32(a) : a;
     ptrs[which].state = ST_OK;
@@ -784,7 +800,21 @@ static int key_bit(int which, uint32_t id)
     uint32_t t = xi_game_ptr_value(which);
     if (t == 0)
         return -1;
-    if (id >= 128 * 32)
+    /* the table count is the getter's own bound (KEYITEMS_IMM32/IMM8): past it is the next table */
+    uint32_t tables = ptrs[which].bound;
+    if (tables == 0)
+    {
+        uint32_t hit = ptrs[which].hit;
+        uint8_t op = xi_game_rd8(hit + 8);
+        if (op == 0x3D)
+            tables = xi_game_rd32(hit + 9);
+        else if (op == 0x83)
+            tables = xi_game_rd8(hit + 10);
+        if (tables == 0 || tables > 1024)
+            return -1;
+        ptrs[which].bound = tables;
+    }
+    if (id >= tables * 32)
         return 0;
     uint32_t w;
     if (!xi_game_rd(t + (id / 32) * 4, &w, 4))
@@ -995,10 +1025,13 @@ int xi_game_set_target(uint32_t index)
     static const uint8_t op_ecx[] = {0x8B, 0x0D}, op_call[] = {0x50, 0xE8};
     if (!imm_after(site, 2, op_ecx, 2, &g) || !imm_after(site, 0x17, op_call, 2, &rel))
         return 0;
+    /* The game's SetTarget takes the entity's actor, not the entity: it reads the entity back from the
+     * actor's +0x70 (0x10158060 on 2025-11-12). An entity out of render range has no actor. */
     uint32_t fn = site + 0x1B + rel, target = xi_game_rd32(g), ent = xi_game_entity(index);
-    if (target == 0 || ent == 0)
+    uint32_t actor = ent ? xi_game_rd32(ent + XI_OFS_entity_ActorPointer) : 0;
+    if (target == 0 || actor == 0 || xi_game_rd32(actor + 0x70) != ent)
         return 0;
-    uint32_t args[3] = {ent, 1, 0};
+    uint32_t args[3] = {actor, 1, 0};
     guest_thiscall(fn, target, 3, args);
     return 1;
 #endif

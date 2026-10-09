@@ -8,6 +8,8 @@ frame log, and tools/replayreport.py's report.
   python3 tools/replay.py play suite.txt                        a session to watch: !replay in chat
   python3 tools/replay.py shots suite.txt                       a frame capture at each scene's READY
   python3 tools/replay.py record all --server <yours> --user <a GM>   the addon's scenes, recorded
+  python3 tools/replay.py keep generated/replay/*.jsonl --lsb <commit> --build <build>
+                                                                the recordings, as the reference set
 
 Results go to --out (default generated/runs/<date>-<suite>/): server.log, client.log, frames.csv,
 report.txt, report.json, and for shots the captures. The addon (tools/replay/xireplay) is copied into
@@ -20,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -30,8 +33,12 @@ import zlib
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TOOLS)
 sys.path.insert(0, TOOLS)
+import buildinfo  # noqa: E402
 import replayreport  # noqa: E402
+import replayscene  # noqa: E402
 import replayserver  # noqa: E402
+
+SCENES = os.path.join(TOOLS, 'replay', 'scenes')  # the committed recordings tools/replay/default.txt plays
 
 SETTLE = 3.0         # seconds after a scene's READY before its capture: effects take a moment to show
 LOBBY_TIMEOUT = 180  # seconds from the client's start to the character in a zone
@@ -53,6 +60,10 @@ def wait_port_free(port, wait=60):
     deadline = time.time() + wait
     while True:
         with socket.socket() as s:
+            # as the game's listener does (control.lua), so the last run's connections in TIME_WAIT don't
+            # count; not on Windows, where it would let this bind a port that is in use
+            if sys.platform != 'win32':
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(('127.0.0.1', port))
                 return
@@ -61,6 +72,19 @@ def wait_port_free(port, wait=60):
         if time.time() > deadline:
             raise SystemExit(f'the control port {port} is taken: is another game still running?')
         time.sleep(1)
+
+
+def wait_server(server, log_path, timeout=60):
+    """Wait until the replay server is listening: it logs "[server] ..." once its ports are open."""
+    deadline = time.time() + timeout
+    while server.poll() is None:
+        with open(log_path, encoding='utf-8', errors='replace') as f:
+            if '[server] ' in f.read():
+                return
+        if time.time() > deadline:
+            raise SystemExit(f'the server is not listening after {timeout} s; see {log_path}')
+        time.sleep(0.2)
+    raise SystemExit(f'the server stopped; see {log_path}')
 
 
 class Control:
@@ -187,9 +211,7 @@ def session(a, autoplay, on_event=None, wait_done=True):
                                    '--suite', a.suite, '--autoplay', autoplay], stdout=server_log, stderr=subprocess.STDOUT)
     client = ctl = None
     try:
-        time.sleep(1.5)
-        if server.poll() is not None:
-            raise SystemExit(f'the server stopped; see {out}/server.log')
+        wait_server(server, os.path.join(out, 'server.log'))
         client, ctl = launch(a, data, os.path.join(out, 'client.log'),
                              ['--server', '127.0.0.1', '--user', 'replay', '--pass', 'replay',
                               '--authport', str(replayserver.AUTH_PORT), '--dataport', str(replayserver.DATA_PORT),
@@ -205,6 +227,8 @@ def session(a, autoplay, on_event=None, wait_done=True):
         deadline = time.time() + RUN_TIMEOUT
         done = False
         while not done and client.poll() is None:
+            if server.poll() is not None:
+                raise SystemExit(f'the server stopped; see {out}/server.log')
             for e in events.new():
                 print('  ' + e, flush=True)
                 if on_event:
@@ -342,16 +366,55 @@ def record(a):
             print(f'recorded {os.path.basename(path)}')
 
 
+def recorder_version():
+    """The xireplay addon's version (its addon.version)."""
+    with open(os.path.join(TOOLS, 'replay', 'xireplay', 'xireplay.lua'), encoding='utf-8') as f:
+        return re.search(r"^addon\.version\s*=\s*'([^']+)'", f.read(), re.M).group(1)
+
+
+def client_build(label):
+    """A game build as meta/builds.json names it: '<label> (<client version>)'."""
+    builds = buildinfo.known()
+    if label not in builds:
+        raise SystemExit(f'--build: {label!r} is not a build in meta/builds.json ({", ".join(builds)})')
+    return f'{label} ({builds[label]["version"]})'
+
+
+def keep_file(src, dst, meta):
+    """A recording as the reference set keeps it: what playback reads (Scene.load), the character named
+    Replay, trimmed (replayscene.trim), and meta added to its meta line. Returns the counts."""
+    s = replayscene.Scene.load(src)
+    renamed = s.rename('Replay')
+    dropped, held = replayscene.trim(s)
+    s.meta.update(meta)
+    s.save(dst)
+    return renamed, dropped, held
+
+
+def keep(a):
+    """Recordings made the reference set, in tools/replay/scenes/ (or --out)."""
+    meta = {'server': f'LandSandBoat {a.lsb}', 'client': client_build(a.build),
+            'recorder': f'xireplay {recorder_version()}', 'trimmed': list(replayscene.TRIM)}
+    out = a.out or SCENES
+    os.makedirs(out, exist_ok=True)
+    for src in a.suite:
+        renamed, dropped, held = keep_file(src, os.path.join(out, os.path.basename(src)), meta)
+        print(f"kept {os.path.basename(src)}: {renamed} packets renamed Replay, {dropped} others' actions dropped, "
+              f'{held} updates held')
+
+
 def main():
+    # SIGTERM as an exit, through the finally blocks that stop the client and the server
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
     argv = sys.argv[1:]
     client_args = []
     if '--' in argv:
         i = argv.index('--')
         argv, client_args = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('what', choices=['run', 'play', 'shots', 'record'])
+    ap.add_argument('what', choices=['run', 'play', 'shots', 'record', 'keep'])
     ap.add_argument('suite', nargs='+', metavar='SUITE|SCENE',
-                    help='a suite file; for record, the addon scenes to record (or all)')
+                    help='a suite file; for record, the addon scenes to record (or all); for keep, recordings')
     ap.add_argument('--server', help='with record: your LandSandBoat server')
     ap.add_argument('--user', help='with record: a GM account on it')
     ap.add_argument('--password', default=os.environ.get('FFXI_PASSWORD'), help='with record: its password (or FFXI_PASSWORD)')
@@ -363,9 +426,15 @@ def main():
     ap.add_argument('--data-dir', default=default_data_dir(), help="the client's data folder")
     ap.add_argument('--huffman', default=os.environ.get('FFXI_HUFFMAN'), help='folder with compress.dat')
     ap.add_argument('--control-port', type=int, default=54300)
-    ap.add_argument('--out', help='where the results go')
+    ap.add_argument('--out', help='where the results go (keep: default tools/replay/scenes/)')
+    ap.add_argument('--lsb', help='with keep: the LandSandBoat commit the recordings were made on')
+    ap.add_argument('--build', help='with keep: the game build they were made with, as meta/builds.json names it')
     a = ap.parse_args(argv)
     a.client_args = client_args
+    if a.what == 'keep':
+        if not (a.lsb and a.build):
+            ap.error('keep: --lsb and --build (the LandSandBoat commit and game build they were recorded with)')
+        return keep(a)
     if not a.game:
         ap.error('--game (or FFXI_GAME): the FINAL FANTASY XI folder')
     if a.what == 'record':

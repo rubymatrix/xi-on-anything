@@ -137,6 +137,7 @@ void gfx_set_focus(const float* pos) { (void)pos; }
 void gfx_set_moghouse(int in) { (void)in; }
 int gfx_sun_shadows_shown(void) { return 0; }
 float gfx_sun_prime(float* center) { (void)center; return 0.0f; }
+int gfx_rt_supported(void) { return 0; }
 float gfx_fx_get(const char* key) { return (void)key, 0.0f; }
 void gfx_trace_dump(const char* path) { (void)path; }
 void gfx_finish(void) {}

@@ -7,6 +7,8 @@
   python3 tools/build_posix.py host64 --game <folder>    the game host, with SDL3
   python3 tools/build_posix.py gfxtest                   the graphics back end and the D3D8 front end,
         offscreen, without the game (tests/gfx_test.c, tests/d3d8_test.c)
+  python3 tools/build_posix.py vfstest                   the game's paths to host paths (runtime/portable/vfs.c),
+        without the game (tests/vfs_test.c)
   python3 tools/build_posix.py datuitest --game <folder>  the game's UI art read from its DATs (host/datui.c):
         parse checks, and renders in build/datui/ (tests/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
@@ -79,7 +81,8 @@ else:
         GFX_LIBS = ['-L' + os.path.join(os.environ['XI_DEPS'], 'lib')] + GFX_LIBS
 HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime/portable/dsound.c',
                 'runtime/portable/input.c', 'runtime/portable/dinput.c', 'runtime/portable/ws2.c', 'host/host64.c',
-                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/cexi.c', 'host/discord.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c'] + GFX_SOURCES
+                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/cexi.c', 'host/discord.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c',
+                'runtime/portable/geometry_hooks.c'] + GFX_SOURCES
 # the addon host (host/addons/, docs/addon-compat-design.md): C, C++ (ImGui) and its embedded Lua
 ADDON_SOURCES = sorted('host/addons/' + f for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'host', 'addons'))
                        if f.endswith('.c') or f.endswith('.cpp')) + ['generated/addons_lua.c']
@@ -302,8 +305,11 @@ def host64_kit(game, kitdir):
     addon_cflags, _ = addons(make=False)
     inc = ['-I', 'third_party/sdl3/include'] + thirdparty.flags('mbedtls') + addon_cflags
     objs += compile_stale(k['device_sources'], 'build/obj/host64-kit', inc)
-    libs = [os.path.join(kitdir, 'lib', l) for l in k['libs']]
-    run(CXX + ['-o', 'build/host64'] + objs + ['-Wl,--start-group'] + libs + ['-Wl,--end-group'] + k['system'] + ['-rdynamic'])
+    libs = [os.path.join(kitdir, 'lib', l) for l in k['libs'] if l != 'libxi.a']
+    # libxi.a whole, as the other builds link every object: addons find win32_ffi.c's and gdifont_ffi.c's
+    # functions by name (ffi.C), so nothing references them and an archive would leave them out
+    xi = ['-Wl,--whole-archive', os.path.join(kitdir, 'lib', 'libxi.a'), '-Wl,--no-whole-archive']
+    run(CXX + ['-o', 'build/host64'] + objs + xi + ['-Wl,--start-group'] + libs + ['-Wl,--end-group'] + k['system'] + ['-rdynamic'])
     buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build/host64 from the kit; run: build/host64 --game %s --server <name>' % shlex.quote(game))
 
@@ -337,6 +343,14 @@ def gfxtest():
                                                    'runtime/portable/d3d8.c', 'tests/d3d8_test.c'], 'build/d3d8test', sdl_cflags)
     run(CC + ['-o', 'build/d3d8_test'] + objs + sdl_libs + GFX_LIBS + ['-lm', '-lpthread'])
     run(['build/d3d8_test'])
+
+
+def vfstest():
+    """runtime/portable/vfs.c on this host, with plat_posix.c: tests/vfs_test.c."""
+    os.makedirs(os.path.join(ROOT, 'build'), exist_ok=True)
+    run(CC + CFLAGS + ['-o', 'build/vfs_test', 'tests/vfs_test.c', 'runtime/portable/vfs.c', 'runtime/portable/plat_posix.c',
+                       '-lpthread'])
+    run(['build/vfs_test'])
 
 
 def datuitest(game):
@@ -484,7 +498,7 @@ APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'datuitest', 'app', 'kit'])
+    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'datuitest', 'app', 'kit'])
     ap.add_argument('--out', default='build/kit')  # kit: where it goes
     ap.add_argument('--kit')  # host64: build from this kit
     ap.add_argument('--game', default=os.path.expanduser('~/SquareEnix/FINAL FANTASY XI'))
@@ -506,6 +520,8 @@ def main():
     args = ap.parse_args()
     if args.target == 'gfxtest':
         return gfxtest()
+    if args.target == 'vfstest':
+        return vfstest()
     if args.target == 'kit':
         return kit(args.out)
     game = os.path.abspath(args.game)
