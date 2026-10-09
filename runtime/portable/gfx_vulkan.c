@@ -1965,8 +1965,8 @@ static void scene_mips(const GfxDraw* d)
         return;
     uint32_t tw, th;
     color_size(&tw, &th);
-    if (tw * th < 1024)
-        return; /* not the sun flare's 16x16 occlusion probe */
+    if (tw < 512 || th < 512)
+        return; /* onto a large target only: not the flare's probe, nor the game's 256x256 targets (gfx_metal.m) */
     for (int i = 0; i < 8; ++i)
     {
         GfxTex* t = d->tex[i];
