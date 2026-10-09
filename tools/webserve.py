@@ -18,7 +18,7 @@ request and the WebSocket need it, so other pages the browser has open can't use
 
 A private S3-compatible bucket holding a copy of the install and overlays (DigitalOcean Spaces,
 Cloudflare R2, ...) takes the file reads off this machine's upload: --bucket is its address with the bucket
-in the host name (https://<bucket>.sfo3.digitaloceanspaces.com, or the CDN one), --bucket-game the folder
+in the host name (https://<bucket>.<region>.digitaloceanspaces.com, or the CDN one), --bucket-game the folder
 the install is in, --bucket-dats each overlay's folder (in --dats order), and XI_BUCKET_KEY /
 XI_BUCKET_SECRET an access key (in the environment, or in ~/.config/xi-web.env or --env <file> as KEY=VALUE
 lines). The page's file cache (tools/web/dlcache.js) then reads blocks straight from
