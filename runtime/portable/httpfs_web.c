@@ -57,6 +57,14 @@ EM_JS(int, httpfs_cached, (const char* url, const char* key, double start, doubl
     }
 });
 
+/* is the cache worker there? It answers on cell at once, however busy its reads are: 1, or 0 after 2 s */
+EM_JS(int, httpfs_ping, (int32_t* cell), {
+    (globalThis.xiCacheChan ||= new BroadcastChannel('xi-cache')).postMessage({ ping: 1, cell });
+    const c = new Int32Array(wasmMemory.buffer, cell, 2);
+    if (Atomics.load(c, 0) != 2) Atomics.wait(c, 0, 0, 2000);
+    return Atomics.compareExchange(c, 0, 0, 3) == 0 ? 0 : 1;
+});
+
 /* the game opened a file: the cache worker starts on its first blocks (nothing waits for it) */
 EM_JS(void, httpfs_hint, (const char* url, const char* key, double size), {
     (globalThis.xiCacheChan ||= new BroadcastChannel('xi-cache')).postMessage({ open: 1, u: UTF8ToString(url), k: UTF8ToString(key), size });
@@ -368,14 +376,25 @@ static Slot* block(Mount* m, int e, uint32_t b)
     int64_t size = m->ents[e].size, at = (int64_t)b * BLOCK;
     uint32_t want = (uint32_t)(size - at < BLOCK ? size - at : BLOCK);
     int got = -2;
-    if (s->data && g_cache)
+    /* the cells are on the heap, and one the worker didn't answer is left there (marked 3), so a late answer
+     * finds it and drops itself rather than landing on whatever reused the memory */
+    int32_t* cell = s->data && g_cache ? (int32_t*)calloc(2, sizeof *cell) : NULL;
+    if (cell)
     {
-        int32_t cell[2] = { 0, 0 };
         got = httpfs_cached(url, key, (double)at, (double)want, (double)size, s->data, BLOCK, cell);
-        if (got == -2)
+        if (got != -2)
+            free(cell);
+        else
         {
-            fprintf(stderr, "httpfs: the file cache didn't answer; reading the network directly\n");
-            g_cache = 0;
+            /* slow (a pack, a busy link) is this read's problem only; a worker that's gone is everyone's */
+            int32_t* ping = (int32_t*)calloc(2, sizeof *ping);
+            int alive = ping && httpfs_ping(ping);
+            if (alive)
+                free(ping);
+            fprintf(stderr, "httpfs: the file cache didn't answer in time; %s\n",
+                alive ? "reading this block from the network" : "it's gone, reading the network from now on");
+            if (!alive)
+                g_cache = 0;
         }
     }
     if (got == -2)

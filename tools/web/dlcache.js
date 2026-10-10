@@ -9,8 +9,11 @@
 //  - with a bucket (webserve.py --bucket), a miss reads the block from the bucket, by links webserve.py signs
 //    (one ask a file, used for 5 hours): the file's gzipped block when there are blocks (--bucket-blocks;
 //    unpacked here), else a range of its plain copy, and through webserve.py only if both fail.
-//  - a small file (under 256 KB) missing comes with the rest of its pack (webserve.py --bucket-blocks): about
-//    8 MB of its folder's small files in one request, all put in the cache.
+//  - a small file (under 256 KB) missing is read as its own block, and its pack (webserve.py --bucket-blocks:
+//    about 8 MB of its folder's small files in one request) follows in the background into the cache.
+//  - the game is answered before its block is put in the cache; until a put lands, the bytes are kept here
+//    (fresh). Puts other than the game's go one at a time: Chromium slows matches on a Cache while it puts.
+//  - read-ahead and the background download only check a block is there (have, then a match), never read it.
 //  - the background download ({prefetch: true} from the page) fills the cache with every file of the
 //    install: the packs, then the rest a file at a time, several at once, the game's own reads first; a file
 //    done is marked, so it resumes.
@@ -22,7 +25,11 @@ const CACHE = 'xi-files-v1';
 const dl = new BroadcastChannel('xi-dl');
 const inflight = new Map(); // key -> Promise<Uint8Array | null>
 const links = new Map(); // 'dat/<path>' -> Promise<{ url, blocks?, pack?, until } | null>
-const packs = new Map(); // pack id -> Promise<Map<key, Uint8Array> | null>
+const packs = new Map(); // pack id -> Promise<{ got: Map<key, Uint8Array>, written: Promise } | null>, until written
+const fresh = new Map(); // cache entry -> its bytes, until its put lands
+const have = new Set(); // cache entries known to be there
+const HAVE = new Uint8Array(0); // what a read ahead or background get answers for a block already there
+let puts = Promise.resolve(); // the non-game puts, one at a time
 let mem = null, cache = null, queue = [], seq = 0, bucket = false, token = '', game = 0;
 let bg = null; // the background download: { on, files, done, bytes, doneBytes, t0 }
 
@@ -43,53 +50,111 @@ new BroadcastChannel('xi-cache').onmessage = ({ data }) => (mem ? serve(data) : 
 const entry = (k, at) => new URL('/xi-cache/' + k + '&at=' + at, location.origin).href;
 
 // block at..at+n of the file (u its address at webserve.py, k its cache key); lane: 0 the game, 1 read ahead,
-// 2 the background download (not shown one by one)
+// 2 the background download (not shown one by one). Lanes 1 and 2 answer HAVE for a block already there.
 function get(u, k, at, n, lane) {
   const key = entry(k, at);
-  let p = inflight.get(key);
-  if (p) return p;
-  p = (async () => {
-    try {
-      const hit = cache && (await cache.match(key));
-      if (hit) {
-        const b = new Uint8Array(await hit.arrayBuffer());
-        if (b.length == n) return lane || dl.postMessage({ hit: 1, k: b.length }), b;
-      }
-    } catch (e) {}
-    const id = 'c' + ++seq, t0 = performance.now();
-    if (lane < 2) dl.postMessage({ s: 1, id, u, at, n, ahead: lane });
-    if (!lane) game++;
-    let b = null, from = 'server';
-    try {
-      const l = bucket ? await signed(u) : null;
-      if (l && l.pack && at == 0) {
-        const all = await packGet(l.pack);
-        b = all && all.get(k);
+  if (lane && have.has(key)) return Promise.resolve(HAVE);
+  const p = inflight.get(key);
+  if (p) return lane ? p : joined(p, key, n);
+  const q = fetchBlock(u, k, at, n, lane, key);
+  inflight.set(key, q);
+  q.finally(() => inflight.delete(key));
+  return q;
+}
+
+// the game waiting on a read already under way: counted as the game's, so the background download waits
+async function joined(p, key, n) {
+  game++;
+  try {
+    const b = await p;
+    return b === HAVE ? await hitOf(key, n, 0) : b;
+  } finally {
+    game--;
+  }
+}
+
+// the block from here or the cache: its bytes (HAVE, lane > 0), or null if it isn't there
+async function hitOf(key, n, lane) {
+  const f = fresh.get(key);
+  if (f && f.length == n) return lane ? HAVE : f;
+  try {
+    const hit = cache && (await cache.match(key));
+    if (!hit) return null;
+    have.add(key);
+    if (lane) return HAVE;
+    const b = new Uint8Array(await hit.arrayBuffer());
+    if (b.length == n) return b;
+    have.delete(key);
+  } catch (e) {}
+  return null;
+}
+
+async function fetchBlock(u, k, at, n, lane, key) {
+  const hit = await hitOf(key, n, lane);
+  if (hit) {
+    if (!lane) dl.postMessage({ hit: 1, k: hit.length });
+    return hit;
+  }
+  const id = 'c' + ++seq, t0 = performance.now();
+  if (lane < 2) dl.postMessage({ s: 1, id, u, at, n, ahead: lane });
+  if (!lane) game++;
+  let b = null, from = 'server';
+  try {
+    const l = bucket ? await signed(u) : null;
+    if (l && l.pack && at == 0) {
+      if (l.blocks && l.blocks[0]) packGet(l.pack); // its own block below, the rest of the pack behind it
+      else {
+        const r = await packGet(l.pack);
+        b = r && r.got.get(k);
         if (b && b.length != n) b = null;
         if (b) from = 'bucket, pack';
       }
-      if (!b && l && l.blocks && l.blocks[at / BLOCK]) {
-        b = await unzip(l.blocks[at / BLOCK], n);
-        from = 'bucket, gzip';
-      }
-      if (!b && l) {
-        b = await read(l.url, at, n, { mode: 'cors', credentials: 'omit' });
-        from = 'bucket';
-      }
-      if (!b) {
-        b = await read(u, at, n, {});
-        from = 'server';
-      }
-    } finally {
-      if (!lane) game--;
     }
-    if (lane < 2) dl.postMessage({ s: 0, id, u, k: b ? b.length : -1, ms: performance.now() - t0, ahead: lane, from });
-    if (b && cache) await cache.put(key, new Response(b)).catch(() => {});
-    return b;
-  })();
-  inflight.set(key, p);
-  p.finally(() => inflight.delete(key));
-  return p;
+    if (!b && l && l.blocks && l.blocks[at / BLOCK]) {
+      b = await unzip(l.blocks[at / BLOCK], n);
+      from = 'bucket, gzip';
+    }
+    if (!b && l) {
+      b = await read(l.url, at, n, { mode: 'cors', credentials: 'omit' });
+      from = 'bucket';
+    }
+    if (!b) {
+      b = await read(u, at, n, {});
+      from = 'server';
+    }
+  } finally {
+    if (!lane) game--;
+  }
+  if (lane < 2) dl.postMessage({ s: 0, id, u, k: b ? b.length : -1, ms: performance.now() - t0, ahead: lane, from });
+  if (b && from != 'bucket, pack') { // a pack puts its own
+    const put = store(key, b, !lane);
+    if (lane == 2) await put; // the background download goes no faster than its puts
+  }
+  return b;
+}
+
+// b into the cache as key, readable from here until the put lands; the game's put now, the rest in turn
+function store(key, b, now) {
+  if (!cache) return Promise.resolve();
+  fresh.set(key, b);
+  const put = () => cache.put(key, new Response(b.slice())).then(() => have.add(key), () => {})
+    .finally(() => fresh.get(key) === b && fresh.delete(key));
+  return now ? put() : (puts = puts.then(put));
+}
+
+// an empty entry marking something done (a file of the background download, a pack), in turn
+function mark(key) {
+  if (!cache) return Promise.resolve();
+  return (puts = puts.then(() => cache.put(key, new Response('')).then(() => have.add(key), () => {})));
+}
+
+// a mark (or block) there?
+async function marked(key) {
+  if (have.has(key)) return true;
+  try {
+    if (cache && (await cache.match(key))) return have.add(key), true;
+  } catch (e) {}
+  return false;
 }
 
 // a range of a file, or null
@@ -134,27 +199,27 @@ const keyOf = (d) => d[0] + '/' + enc(d[1]) + '?v=' + d[2] + '.' + d[3];
 const urlOf = (d) => location.origin + '/' + d[0] + '/' + enc(d[1]) + '?t=' + encodeURIComponent(token);
 
 // a pack ({id, url, members: [[route, path, mtime, size, offset]]}): fetched once, each member put in the cache
-// (and marked done for the background download); a map of its members' keys to their bytes
+// (and marked done for the background download), then the pack marked done and dropped from here; got maps its
+// members' keys to their bytes, written settles once they are all in the cache
 function packGet(pack) {
   let p = packs.get(pack.id);
   if (p) return p;
   p = (async () => {
     const raw = await unzip(pack.url, -1);
     if (!raw) return null;
-    const out = new Map();
-    await Promise.all(pack.members.map(async (m) => {
+    const got = new Map(), waits = [];
+    for (const m of pack.members) {
       const k = keyOf(m), b = raw.subarray(m[4], m[4] + m[3]);
-      if (b.length != m[3]) return;
-      out.set(k, b);
-      if (cache) {
-        await cache.put(entry(k, 0), new Response(b.slice())).catch(() => {});
-        await cache.put(entry('done/' + k, 0), new Response('')).catch(() => {});
-      }
-    }));
-    return out;
+      if (b.length != m[3]) continue;
+      got.set(k, b);
+      waits.push(store(entry(k, 0), b, false), mark(entry('done/' + k, 0)));
+    }
+    const written = Promise.all(waits).then(() => mark(entry('pack/' + pack.id, 0)))
+      .finally(() => packs.delete(pack.id));
+    return { got, written };
   })();
   packs.set(pack.id, p);
-  p.then((r) => r || packs.delete(pack.id));
+  p.then((r) => r || packs.delete(pack.id), () => packs.delete(pack.id));
   return p;
 }
 
@@ -165,6 +230,11 @@ function blocksOf(size, first, count) {
 }
 
 async function serve(r) {
+  if (r.ping) {
+    const c = new Int32Array(mem.buffer, r.cell, 2);
+    if (Atomics.compareExchange(c, 0, 0, 2) == 0) Atomics.notify(c, 0);
+    return;
+  }
   if (r.open) {
     // the game opened the file: its first blocks, all at once
     for (const [at, n] of blocksOf(r.size, 0, OPEN_BLOCKS)) get(r.u, r.k, at, n, 1);
@@ -215,7 +285,7 @@ async function follow(p) {
   await Promise.all(Array.from({ length: FOLLOWERS }, async () => {
     while (i < list.length) {
       const d = list[i++], k = keyOf(d);
-      if (cache && (await cache.match(entry('done/' + k, 0)))) continue;
+      if (await marked(entry('done/' + k, 0))) continue;
       await Promise.all(blocksOf(d[3], 0, OPEN_BLOCKS).map(([at, n]) => get(urlOf(d), k, at, n, 1)));
     }
   }));
@@ -283,18 +353,16 @@ async function prefetch(on) {
   const timer = setInterval(report, 1000);
   // a file: false if paused (it goes back in the queue) or failed (left for the game to ask for)
   const one = async (f) => {
-    const mark = entry('done/' + f.k, 0);
-    if (!(cache && (await cache.match(mark)))) {
+    const done = entry('done/' + f.k, 0);
+    if (!(await marked(done))) {
       for (const [at, n] of blocksOf(f.size, 0, Infinity)) {
         while (game > 0 && bg.on) await new Promise((r) => setTimeout(r, 50)); // the game's reads first
         if (!bg.on) return bg.again.push(f), false;
-        if (!(cache && (await cache.match(entry(f.k, at))))) {
-          const b = await get(f.u, f.k, at, n, 2);
-          if (!b) return (bg.failed = (bg.failed || 0) + 1), false;
-          bg.fetched += n;
-        }
+        const b = await get(f.u, f.k, at, n, 2);
+        if (!b) return (bg.failed = (bg.failed || 0) + 1), false;
+        if (b !== HAVE) bg.fetched += n;
       }
-      if (cache) await cache.put(mark, new Response('')).catch(() => {});
+      await mark(done);
     }
     bg.doneBytes += f.size;
     bg.done++;
@@ -305,12 +373,11 @@ async function prefetch(on) {
     while (bg.on && bg.packNext < bg.packs.length) {
       const pk = bg.packs[bg.packNext++];
       while (game > 0 && bg.on) await new Promise((r) => setTimeout(r, 50));
-      const mark = entry('pack/' + pk.id, 0);
-      if (!(cache && (await cache.match(mark)))) {
-        const got = await packGet(pk);
-        if (!got) continue;
-        for (const b of got.values()) bg.fetched += b.length;
-        if (cache) await cache.put(mark, new Response('')).catch(() => {});
+      if (!(await marked(entry('pack/' + pk.id, 0)))) {
+        const r = await packGet(pk);
+        if (!r) continue;
+        await r.written;
+        for (const b of r.got.values()) bg.fetched += b.length;
       }
       bg.packsDone++;
     }

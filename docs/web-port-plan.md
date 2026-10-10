@@ -283,6 +283,33 @@ cursors. The `AudioContext` is created and resumed in the "Play" click (autoplay
 - wasm: streaming compile (`WebAssembly.instantiateStreaming`); after first run V8 serves its
   compiled-code cache. Pipeline key file prewarms WebGPU pipelines behind the loading bar.
 
+### Asset delivery: next steps, in order (from the PR #57 review, 2026-10-10)
+
+1. **Cache-path fixes (done on this branch):** a small file's miss reads its own gzipped block and
+   leaves the pack to the background; one slow answer from the cache worker no longer turns the
+   cache off; a game read that joins a read-ahead counts as a game read; packs are dropped once
+   written; read-ahead and the background download check a block is there without reading it; a
+   miss answers the game before its `cache.put`, and non-game puts go one at a time.
+2. **Measure stalls:** the downloads overlay sums the ms the game waited, per zone and per minute,
+   and a scripted cold-cache run (replay scenes, cache cleared) gives a repeatable number. Every
+   step below is judged by how much waiting it removes.
+3. **Background download vs the game:** `priority: 'low'` on its fetches, an `AbortController` to
+   cancel them when the game misses (back in the queue), far fewer in flight while the game reads.
+4. **Cheap hints:** a hint at the game's stat / `FindFirstFileA` before a queued model load, so
+   the page fetches the loader's queue in parallel; a batch `/sign`; the spell, ability and weapon
+   skill effect set (about 29 MB) prefetched after sign-in; a page on 127.0.0.1 ignores the bucket.
+5. **Only if misses hitch the frame:** settle whether model DATs load on the loader thread or the
+   game thread (native run with injected file latency, logging the game thread's wait on the file
+   semaphore). Then a FIFO hand-off for semaphores in `kobj.c` (today every waiter races on a
+   global epoch, and the releasing loader tends to win), and a hook in the loader loop that waits
+   for the request's bytes to be cached before it takes the semaphore.
+6. **Size:** blocks stored as brotli 11 with `Content-Encoding: br` (about 1 GB less; check the
+   bucket serves the header unchanged), then content-hash keys instead of mtime (updates that
+   re-ship identical files stop re-downloading them).
+7. **Later or not at all:** zone-keyed learning through the C packet hook in the web build;
+   holding or rewriting 0x00D/0x00E appearance packets; decrypting on the proxy; sharing learned
+   maps between players (licence and privacy first); xz, Opus, chunk dedup, zone unscrambling.
+
 ## Player experience
 
 - **Start page**: preflight before downloading anything big. Checks `crossOriginIsolated`,
