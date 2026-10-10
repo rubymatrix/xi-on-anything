@@ -131,7 +131,7 @@ typedef struct ResItem
 {
     uint32_t id;
     uint8_t kind;          /* RES_ITEM_* */
-    uint8_t legacy;        /* from 0xC00-byte records (kind-specific fields left 0) */
+    uint8_t legacy;        /* from 0xC00-byte records: of the kind's fields, gear's and cast time read */
     uint16_t flags, stack, type, resource_id, targets;
 
     /* weapons, armor (level/slots/races/jobs also instincts) */

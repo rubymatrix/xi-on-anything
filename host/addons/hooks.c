@@ -3,9 +3,15 @@
  *   parse_input    int __cdecl (const char* line, int mode): every typed line, macro line and menu
  *                  command. The host's commands and addons' command events run first; handled
  *                  lines never reach the game.
- *   write_line     void __cdecl (int mode, const char* text): the chat log's add-line. Addons see
- *                  each line (text_in) and may change or block it. The host writes its own lines
- *                  through it (queued until the chat log exists).
+ *   write_line     void __cdecl (int mode, const char* text): a wrapper of the chat log's add-line
+ *                  that the game itself hardly uses. The host writes its own lines through it
+ *                  (queued until the chat log exists).
+ *   chat_add       the chat log's add-line method, which write_line calls (+0x26): bool
+ *                  __thiscall (const char* text, uint8_t* mode_block, int, int, int), ret 0x14;
+ *                  mode_block[0] is the mode (a byte: a mode an addon sets is cut to it). Every
+ *                  line goes through it: addons see each one (text_in) and may change or block it.
+ *                  It needs write_line's wrap too; a build without both raises text_in in
+ *                  write_line, for the host's lines alone.
  *   packet_decrypt int __cdecl (out, capacity, key, table, in, size): after it, the plain buffer
  *                  (a 0x1C-byte header, then packets) goes through the addons (packet_in).
  *   packet_encrypt int __cdecl (out, capacity, key, in, size, table): before it, the same for the
@@ -32,6 +38,10 @@ extern const GuestFn rt_orig_parse_input;
 #if defined(FFXI_WRAP_WRITE_LINE)
 extern GuestFn rt_wrap_write_line;
 extern const GuestFn rt_orig_write_line;
+#endif
+#if defined(FFXI_WRAP_CHAT_ADD)
+extern GuestFn rt_wrap_chat_add;
+extern const GuestFn rt_orig_chat_add;
 #endif
 #if defined(FFXI_WRAP_PACKET_DECRYPT)
 extern GuestFn rt_wrap_packet_decrypt;
@@ -62,7 +72,7 @@ static size_t guest_str(uint32_t a, char* out, size_t n)
     return i;
 }
 
-/* A scratch buffer in guest memory the host hands the game (replaced lines, packet buffers). */
+/* A scratch buffer in guest memory the host hands the game (packet buffers). */
 static uint32_t guest_scratch(int which, uint32_t size)
 {
     static uint32_t buf[4], cap[4];
@@ -253,24 +263,40 @@ static void game_run(int mode, const char* line, int raw)
 #endif
 }
 
-#if defined(FFXI_WRAP_WRITE_LINE)
-static void wrap_write_line(Guest* g)
+/* Whether text_in is raised for every line (chat_add, the method write_line calls at +0x26), not
+ * only for the host's own in write_line. */
+static int chat_add_hooked(void)
 {
-    int mode = (int)rt_arg(g, 0);
-    uint32_t text = rt_arg(g, 1);
-    if (!xi_addon_count())
+#if defined(FFXI_WRAP_CHAT_ADD) && defined(FFXI_WRAP_WRITE_LINE)
+    static int hooked = -1;
+    if (hooked < 0)
     {
-        rt_orig_write_line(g);
-        return;
+        uint32_t at = FFXI_WRAP_WRITE_LINE + 0x26;
+        hooked = xi_mapped(at, 5) && rd8(at) == 0xE8 && at + 5 + rd32(at + 1) == FFXI_WRAP_CHAT_ADD;
+        if (!hooked)
+            xi_log_once("chatadd", "write_line at %08x does not call chat_add at %08x: "
+                "addons see the host's lines only", FFXI_WRAP_WRITE_LINE, FFXI_WRAP_CHAT_ADD);
     }
+    return hooked;
+#else
+    return 0;
+#endif
+}
+
+int xi_chat_game_lines(void) { return !xi_headless && chat_add_hooked(); }
+
+#if defined(FFXI_WRAP_WRITE_LINE) || defined(FFXI_WRAP_CHAT_ADD)
+enum { LINE_AS_IS, LINE_BLOCKED, LINE_CHANGED };
+
+/* text_in for a line on its way to the chat log. LINE_CHANGED: the new line in *out, guest memory
+ * the caller frees after the game has it, and its mode in *mode_out. */
+static int text_in(int mode, uint32_t text, int* mode_out, uint32_t* out)
+{
     static char line[2][2048];
     static uint8_t mod[2][2048];
     static int depth;
-    if (depth >= 2)
-    {
-        rt_orig_write_line(g);
-        return;
-    }
+    if (!xi_addon_count() || depth >= 2)
+        return LINE_AS_IS;
     int d = depth++;
     size_t n = guest_str(text, line[d], sizeof line[d]);
     XiEvent e;
@@ -285,29 +311,74 @@ static void wrap_write_line(Guest* g)
     xi_raise(&e);
     depth--;
     if (e.blocked)
-    {
-        rt_return(g, 0, 0);
-        return;
-    }
+        return LINE_BLOCKED;
     if (e.mode_mod == mode && e.mod_size == n && !memcmp(e.mod, line[d], n))
-    {
-        rt_orig_write_line(g);
-        return;
-    }
-    uint32_t buf = guest_scratch(0, (uint32_t)e.mod_size + 1);
+        return LINE_AS_IS;
+    uint32_t buf = gheap_alloc((uint32_t)e.mod_size + 1, 1);
     if (!buf)
-    {
-        rt_orig_write_line(g);
-        return;
-    }
+        return LINE_AS_IS;
     memcpy(GUEST_PTR(buf), e.mod, e.mod_size);
     wr8(buf + (uint32_t)e.mod_size, 0);
-    wr32(g->esp + 4, (uint32_t)e.mode_mod);
+    *mode_out = e.mode_mod, *out = buf;
+    return LINE_CHANGED;
+}
+#endif
+
+#if defined(FFXI_WRAP_WRITE_LINE)
+static void wrap_write_line(Guest* g)
+{
+    if (chat_add_hooked())
+    {
+        rt_orig_write_line(g); /* chat_add raises text_in for the line */
+        return;
+    }
+    int mode = (int)rt_arg(g, 0), mode_mod = mode;
+    uint32_t text = rt_arg(g, 1), buf = 0;
+    switch (text_in(mode, text, &mode_mod, &buf))
+    {
+    case LINE_BLOCKED:
+        rt_return(g, 0, 0);
+        return;
+    case LINE_AS_IS:
+        rt_orig_write_line(g);
+        return;
+    }
+    wr32(g->esp + 4, (uint32_t)mode_mod);
     wr32(g->esp + 8, buf);
     rt_orig_write_line(g); /* cdecl: the caller's stack slots are the caller's; put them back */
     /* esp is past the return address now: the arguments sit at esp and esp + 4 */
     wr32(g->esp, (uint32_t)mode);
     wr32(g->esp + 4, text);
+    gheap_free(buf);
+}
+#endif
+
+#if defined(FFXI_WRAP_CHAT_ADD)
+static void wrap_chat_add(Guest* g)
+{
+    uint32_t text = rt_arg(g, 0), block = rt_arg(g, 1);
+    if (!chat_add_hooked() || !block || !xi_mapped(block, 1))
+    {
+        rt_orig_chat_add(g);
+        return;
+    }
+    int mode = rd8(block), mode_mod = mode;
+    uint32_t buf = 0;
+    switch (text_in(mode, text, &mode_mod, &buf))
+    {
+    case LINE_BLOCKED:
+        rt_return(g, 1, 0x14); /* as the method's own exits for a line it drops */
+        return;
+    case LINE_AS_IS:
+        rt_orig_chat_add(g);
+        return;
+    }
+    /* the mode block is the caller's (often a local it passes again): its mode is put back */
+    wr32(g->esp + 4, buf);
+    wr8(block, (uint8_t)mode_mod);
+    rt_orig_chat_add(g); /* thiscall: it pops its arguments */
+    wr8(block, (uint8_t)mode);
+    gheap_free(buf);
 }
 #endif
 
@@ -689,14 +760,17 @@ void xi_hooks_init(void)
 #if defined(FFXI_WRAP_WRITE_LINE)
     rt_wrap_write_line = wrap_write_line;
 #endif
+#if defined(FFXI_WRAP_CHAT_ADD)
+    rt_wrap_chat_add = wrap_chat_add;
+#endif
 #if defined(FFXI_WRAP_PACKET_DECRYPT)
     rt_wrap_packet_decrypt = wrap_packet_decrypt;
 #endif
 #if defined(FFXI_WRAP_PACKET_ENCRYPT)
     rt_wrap_packet_encrypt = wrap_packet_encrypt;
 #endif
-#if !defined(FFXI_WRAP_PARSE_INPUT) || !defined(FFXI_WRAP_WRITE_LINE) || !defined(FFXI_WRAP_PACKET_DECRYPT) || \
-    !defined(FFXI_WRAP_PACKET_ENCRYPT)
+#if !defined(FFXI_WRAP_PARSE_INPUT) || !defined(FFXI_WRAP_WRITE_LINE) || !defined(FFXI_WRAP_CHAT_ADD) || \
+    !defined(FFXI_WRAP_PACKET_DECRYPT) || !defined(FFXI_WRAP_PACKET_ENCRYPT)
     xi_log("build %s lacks some addon hooks (meta/builds.json wraps): commands, chat or packets are not seen", FFXI_BUILD);
 #endif
     (void)g_write_line_fn;

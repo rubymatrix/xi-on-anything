@@ -2,7 +2,8 @@
  *
  *   xi.memory  find, read_* / write_*, alloc / free, module: addresses in and out are the host
  *              addresses Lua can ffi.cast (a number below 2^32 is taken as a guest address)
- *   xi.chat    write (to the chat log), run (a line as if typed, next frame), input line
+ *   xi.chat    write (to the chat log), run (a line as if typed, next frame), input line, game_lines
+ *              (whether text_in sees the game's own lines)
  *   xi.ui      text objects, primitives, textures, screen size; the ImGui manager (Ashita's)
  *   xi.packets inject, last
  *   xi.input   binds, key state
@@ -472,9 +473,15 @@ static int c_alias(lua_State* L)
     return 0;
 }
 
+static int c_game_lines(lua_State* L)
+{
+    lua_pushboolean(L, xi_chat_game_lines());
+    return 1;
+}
+
 static const luaL_Reg CHAT[] = {
     { "write", c_write }, { "run", c_run }, { "input", c_input }, { "set_input", c_set_input }, { "exec", c_exec },
-    { "alias", c_alias }, { NULL, NULL },
+    { "alias", c_alias }, { "game_lines", c_game_lines }, { NULL, NULL },
 };
 
 /* --- xi.ui ------------------------------------------------------------------------------------ */

@@ -276,9 +276,10 @@ TOOLS = [
      {'line': {'type': 'string'},
       'since': {'type': 'integer', 'description': 'if given, return chat log lines after this sequence number'},
       'wait_ms': {'type': 'integer', 'description': 'wait before reading the log (default 500)'}}, ['line']),
-    ('game_chat_log', t_chat_log, 'Chat lines (UTF-8) after a sequence number: what the server sends as chat '
-     '(say, tells, system messages; mode = chat kind, sender) and the addon host\'s lines. NPC dialog and battle '
-     'messages are not in it: use game_screenshot. "last" is the newest sequence number.',
+    ('game_chat_log', t_chat_log, 'Chat lines (UTF-8) after a sequence number: what the chat log shows (chat, '
+     'battle and system messages, the addon host\'s lines; mode = chat mode; a speaker\'s name is in the '
+     'text). On a build without the chat_add hook, only the server\'s chat (with sender) and the host\'s '
+     'lines. "last" is the newest sequence number.',
      {'since': {'type': 'integer'}, 'limit': {'type': 'integer'}}),
     ('game_chat_input', t_chat_input, 'Read the chat input line, or replace its text.', {'text': {'type': 'string'}}),
     ('game_entities', t_entities, 'Entities (players, NPCs, monsters) near the player, nearest first.',
