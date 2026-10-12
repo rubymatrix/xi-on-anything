@@ -1,4 +1,4 @@
-/* Config > Modern. See modern.h.
+/* Config > Advanced and its pages. See modern.h.
  *
  * FFXiMain's menus (2026-09-03) are layouts from the menu DAT (English: ROM/119/51.DAT, chunk type
  * 0x30) that its menu manager (0x10621838) opens by name, each run by a handler object named in a
@@ -13,15 +13,18 @@
  *   - A sprite sheet of our own, "menu    modernps", from the game's textures: the page's panel,
  *     captions and buttons, the Config list's label, underlines and a slider's fill. Registered
  *     with the game's sheets.
- *   - The Config list's layout, rebuilt from the DAT with our item after its last and registered
- *     in place of the original, which is renamed out of the way.
+ *   - The Config list's layout, rebuilt from the DAT with our item, Advanced, after its last and
+ *     registered in place of the original, which is renamed out of the way. Advanced opens a list
+ *     of the pages, drawn as the game's lists in Config are (Window's).
  *   - The page's layout: buttons and sliders over its panel.
  *   - The menu table has no free entry, but has one the game never finds - the second of two
  *     "conf1win" entries - and room for one more in its end marker. Each becomes a page's,
  *     pointing at a global of our own.
  *   - The page's handler is a Config page (the game's base class, ctor 0x10196980) whose vtable
  *     points at shims here; the Config list's handler gets a copy of its vtable whose select slot
- *     comes here first. (The pages are a table: another is a row in PAGES and a spare entry.)
+ *     comes here first. (The pages are a table: another is a row in PAGES.)
+ * The pages share one of those entries, renamed for each as it opens (open_page); the Advanced list
+ * takes another.
  * Config > Menus hides items of the game's own menus the same way: the combat menu's lists of
  * actions without Trust, and Magic's, Status's and Abilities' layouts, rebuilt with the items
  * hidden empty.
@@ -109,6 +112,7 @@ enum
                                                 * entry shown. The game draws it with the window (the Effects page's) */
     VTBL_SLOTS = 17,
     CONFIG_ITEMS = 13,          /* the Config list's own */
+    CONFIG_OURS = 1,            /* ours after them: Advanced */
     EV_DOWN = 1, EV_UP = 2, EV_RIGHT = 3, EV_LEFT = 4, EV_SELECT = 5, /* a menu's input events (OnInput); the game's own sliders go up on 3 */
     EV_WHEEL_UP = 22, EV_WHEEL_DOWN = 23, /* a step of the mouse wheel over the window (the game's Effects page
                                            * scrolls on them) */
@@ -134,6 +138,7 @@ enum
     CHOICE, /* a button an option */
     SLIDER, /* Min to Max */
     LIST,   /* one of a list (List): a slider along it, its value's words after Max */
+    HEADER, /* no setting: the name of the group of rows under it */
 };
 
 typedef struct Row
@@ -273,6 +278,10 @@ static float get(const Row* r)
         return g_ui_aspect;
     if (!strcmp(r->key, "@occlusion"))
         return (float)d3d8_occlusion();
+    if (!strcmp(r->key, "@nameplates"))
+        return g_setup.nameplate_fix ? (float)*g_setup.nameplate_fix : 1.0f;
+    if (!strcmp(r->key, "@nameplate_size"))
+        return g_setup.nameplate_sy ? *g_setup.nameplate_sy : 1.0f;
     if (!strncmp(r->key, "@hide", 5))
         return g_hide >> atoi(r->key + 5) & 1 ? 0.0f : 1.0f;
     if (!strcmp(r->key, "@addon"))
@@ -313,6 +322,14 @@ static void set(const Row* r, float v)
     else if (!strcmp(r->key, "@occlusion"))
     {
         d3d8_set_occlusion((int)v);
+        g_host_touched = 1;
+    }
+    else if (!strcmp(r->key, "@nameplates") || !strcmp(r->key, "@nameplate_size"))
+    {
+        if (r->key[10] == 's' && g_setup.nameplate_fix)
+            *g_setup.nameplate_fix = v != 0.0f;
+        else if (g_setup.nameplate_sx && g_setup.nameplate_sy)
+            *g_setup.nameplate_sx = *g_setup.nameplate_sy = v;
         g_host_touched = 1;
     }
     else if (!strncmp(r->key, "@hide", 5))
@@ -369,19 +386,71 @@ static void slide(const Row* r, int dir)
     set(r, r->lo + (r->hi - r->lo) * t / SLIDER_STEPS);
 }
 
-/* Android's renderer has no scene effects (its gfx_fx_get is 0), so the rows set through them,
- * effects and draw distances alike, are not shown there */
-static const Row MODERN_ROWS[] = {
+/* The pages' rows, as the tree in docs/options.md has them: a HEADER row names the group under it.
+ * Android's renderer has no scene effects (its gfx_fx_get is 0), so the rows set through them,
+ * effects and draw distances alike, are not shown there, nor the pages of nothing else. */
+#define HEADER_ROW(s) { s, "", HEADER, 0, { 0 }, { 0 }, 0, 0, "" }
+
+static const Row DISPLAY_ROWS[] = {
+    HEADER_ROW("Window"),
+    /* 0034: 1 a window, 3 borderless over the whole screen, 0 full screen (2, a borderless window, reads as none) */
+    { "Window Mode", "@mode", CHOICE, 3, { "Windowed", "Borderless", "Full" }, { 1, 3, 0 }, 0, 0,
+        "A window, borderless over the whole screen, or full screen." },
+    { "Resolution", "@res", LIST, 0, { 0 }, { 0 }, 0, 0, "The window's size." },
+    HEADER_ROW("Scaling"),
+    { "UI Scale", "@menu", LIST, 0, { 0 }, { 0 }, 0, 0, "How large the menus and text are drawn." },
+    { "Interface Shape", "@ui", CHOICE, 3, { "Full", "16:9", "4:3" }, { 0, 16.0f / 9.0f, 4.0f / 3.0f }, 0, 0,
+        "Keeps the menus in a box of this shape on a wide screen." },
+    { "Background Resolution", "@bg", CHOICE, 4, { "2048", "4096", "6144", "8192" }, { 2048, 4096, 6144, 8192 }, 0, 0,
+        "The size the world is drawn at before it fits the window. From the next start." },
+    HEADER_ROW("Performance"),
+    { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
 #if !defined(FFXI_ANDROID_VULKAN)
+    { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
+        "The frame rate, in the screen's top left corner." },
+#endif
+};
+
+static const Row GRAPHICS_ROWS[] = {
+#if !defined(FFXI_ANDROID_VULKAN)
+    HEADER_ROW("Quality"),
+    { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
+    { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
+        "Sharper ground and walls at an angle." },
+    { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
+    { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
+    HEADER_ROW("Color"),
+    { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast. Needs Modern Effects." },
+    { "Saturation", "sat", SLIDER, 0, { 0 }, { 0 }, 0.5f, 1.5f, "How strong the colors are, with Color Grading." },
+    { "Contrast", "contrast", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Darker darks and brighter lights, with Color Grading." },
+#endif
+    HEADER_ROW("World Detail"),
+#if !defined(FFXI_ANDROID_VULKAN)
+    { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
+    { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
+    { "Level of Detail", "lod", CHOICE, 2, { "Game", "Near" }, { 2, 1 }, 0, 0,
+        "Near draws the world's most detailed models at every distance." },
+#endif
+#if defined(FFXI_ANDROID_VULKAN)
+    { "Occlusion Check", "@occlusion", CHOICE, 3, { "Off", "Delayed", "Exact" }, { 0, 1, 2 }, 0, 0,
+        "What walls hide from the game's checks. Off treats all as seen; Delayed asks the last frames; Exact waits." },
+#else /* no Delayed: without Android's per-probe history it makes characters flicker (d3d8.c lock_rect) */
+    { "Occlusion Check", "@occlusion", CHOICE, 2, { "Off", "Exact" }, { 0, 2 }, 0, 0,
+        "What walls hide from the game's checks. Off treats all as seen; Exact waits for the GPU." },
+#endif
+};
+
+#if !defined(FFXI_ANDROID_VULKAN)
+static const Row LIGHTING_ROWS[] = {
     { "Modern Effects", "fx", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Ambient occlusion, fog, light, shadows and the rest below." },
-    { "Ambient Occlusion", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
-    { "AO Quality", "ao_quality", CHOICE, 3, { "Low", "Medium", "High" }, { 0, 1, 2 }, 0, 0,
-        "How many samples the shade takes a frame. Low is lightest on the GPU." },
-    { "Fog", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun." },
-    { "God Rays", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun." },
-    { "Bloom", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights." },
-    { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast." },
+        "Shadows, occlusion, lighting, fog, rays and bloom: these pages' effects." },
+    { "Per-Pixel Lighting", "light", CHOICE, 3, { "Off", "Sun", "All" }, { 0, 1, 2 }, 0, 0,
+        "Smooth light across surfaces: the sun's, or every light's." },
+    { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
+        "Sunlit ground and walls light what stands near them. Off at the left." },
+    { "Ray Tracing", "rt", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
+        "Bounce light and soft shade traced through the world. Needs a graphics card that traces rays; on a Mac, macOS 13." },
+    HEADER_ROW("Shadows"),
     { "Sun Shadows", "sun", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How dark the sun's shadows are." },
     { "Shadow Casters", "sun_casters", CHOICE, 3, { "Characters", "World", "All" }, { 1, 2, 0 }, 0, 0,
         "Who casts sun shadows: characters, the world, or both." },
@@ -391,55 +460,44 @@ static const Row MODERN_ROWS[] = {
         "Sharper shadows close up. High uses more video memory." },
     { "Indoor Shadows", "moghouse", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f,
         "How much of the sun's shadows reach indoors: your Mog House, caves, towers. Off lights them as the game does." },
-    { "Per-Pixel Lighting", "light", CHOICE, 3, { "Off", "Sun", "All" }, { 0, 1, 2 }, 0, 0,
-        "Smooth light across surfaces: the sun's, or every light's." },
-    { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
-        "Sunlit ground and walls light what stands near them. Off at the left." },
-    { "Ray Tracing", "rt", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Bounce light and soft shade traced through the world. Needs a graphics card that traces rays; on a Mac, macOS 13." },
-    { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
-    { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
-    { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
-    { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
-#endif
-#if defined(FFXI_ANDROID_VULKAN)
-    { "Occlusion Check", "@occlusion", CHOICE, 3, { "Off", "Delayed", "Exact" }, { 0, 1, 2 }, 0, 0,
-        "What walls hide from the game's checks. Off treats all as seen; Delayed asks the last frames; Exact waits." },
-#else /* no Delayed: without Android's per-probe history it makes characters flicker (d3d8.c lock_rect) */
-    { "Occlusion Check", "@occlusion", CHOICE, 2, { "Off", "Exact" }, { 0, 2 }, 0, 0,
-        "What walls hide from the game's checks. Off treats all as seen; Exact waits for the GPU." },
-#endif
-    { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
-    { "Interface Shape", "@ui", CHOICE, 3, { "Full", "16:9", "4:3" }, { 0, 16.0f / 9.0f, 4.0f / 3.0f }, 0, 0,
-        "Keeps the menus in a box of this shape on a wide screen." },
+    { "Character Shadows", "gameshadows", CHOICE, 3, { "Auto", "On", "Off" }, { 0, 1, 2 }, 0, 0,
+        "The game's own round shadows under characters: Auto hides them while the sun's are on." },
+    HEADER_ROW("Ambient Occlusion"),
+    { "Strength", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
+    { "Quality", "ao_quality", CHOICE, 3, { "Low", "Medium", "High" }, { 0, 1, 2 }, 0, 0,
+        "How many samples the shade takes a frame. Low is lightest on the GPU." },
+    { "Radius", "radius", SLIDER, 0, { 0 }, { 0 }, 0.25f, 3.0f, "How far from a corner the shade reaches." },
 };
 
-static const Row DISPLAY_ROWS[] = {
-    /* 0034: 1 a window, 3 borderless over the whole screen, 0 full screen (2, a borderless window, reads as none) */
-    { "Window Mode", "@mode", CHOICE, 3, { "Windowed", "Borderless", "Full" }, { 1, 3, 0 }, 0, 0,
-        "A window, borderless over the whole screen, or full screen." },
-    { "Resolution", "@res", LIST, 0, { 0 }, { 0 }, 0, 0,
-        "The window's size." },
-    { "UI Scale", "@menu", LIST, 0, { 0 }, { 0 }, 0, 0,
-        "How large the menus and text are drawn." },
-    { "Background Resolution", "@bg", CHOICE, 4, { "2048", "4096", "6144", "8192" }, { 2048, 4096, 6144, 8192 }, 0, 0,
-        "The size the world is drawn at before it fits the window. From the next start." },
-#if !defined(FFXI_ANDROID_VULKAN) /* scene effects, as MODERN_ROWS */
-    { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
-    { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
-        "Sharper ground and walls at an angle." },
-    { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
-        "The frame rate, in the screen's top left corner." },
-#endif
+static const Row ATMOSPHERE_ROWS[] = {
+    HEADER_ROW("Fog"),
+    { "Density", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun. Needs Modern Effects." },
+    HEADER_ROW("God Rays"),
+    { "Strength", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun. Needs Modern Effects." },
+    HEADER_ROW("Bloom"),
+    { "Strength", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights. Needs Modern Effects." },
+    { "Threshold", "threshold", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f, "How bright a light must be to glow. Lower: more glows." },
+    HEADER_ROW("Water"),
+    { "Modern Water", "water", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
+        "Water that bends and reflects the world, with foam at its edges. OFF: as the game draws it." },
+    { "Reflection", "water_reflect", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How much of the sky the water mirrors." },
+    { "Sun Highlight", "water_spec", SLIDER, 0, { 0 }, { 0 }, 0, 4.0f, "The sun's glint on the water." },
+    { "Foam", "water_foam", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Foam where the water meets the shore." },
 };
+#endif
 
-static const Row MENUS_ROWS[] = {
+static const Row INTERFACE_ROWS[] = {
+    HEADER_ROW("Nameplates"),
+    { "Shape", "@nameplates", CHOICE, 2, { "Fixed", "Stretched" }, { 1, 0 }, 0, 0,
+        "Fixed keeps names over heads their 4:3 shape in a wide window; Stretched widens them as the game does." },
+    { "Size", "@nameplate_size", SLIDER, 0, { 0 }, { 0 }, 0.5f, 2.0f, "How large the names over heads are." },
+    HEADER_ROW("Menus: Content"),
     { "Trust", "@hide0", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "Trust in the combat menu and in the main menu's Magic." },
     { "Mounts", "@hide7", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "Mount in Abilities, the combat menu's and the main menu's." },
-    { "Geomancy (Magic)", "@hide1", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
-        "Geomancy in the main menu's Magic." },
+    { "Geomancy", "@hide1", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0, "Geomancy in the main menu's Magic." },
+    HEADER_ROW("Menus: Status Pages"),
     { "Master Levels", "@hide3", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "Master Levels in the main menu's Status." },
     { "Unity", "@hide4", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0, "Unity in the main menu's Status." },
@@ -587,6 +645,9 @@ static void save(void)
                 g_setup.fps_divisor ? *g_setup.fps_divisor : 1u, (double)g_ui_aspect, g_hide, d3d8_occlusion());
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
+            if (g_setup.nameplate_fix && g_setup.nameplate_sx && g_setup.nameplate_sy)
+                fprintf(f, "nameplates=%d\nnameplate_scale=%gx%g\n", *g_setup.nameplate_fix,
+                    (double)*g_setup.nameplate_sx, (double)*g_setup.nameplate_sy);
             fclose(f);
         }
         else
@@ -806,7 +867,7 @@ static const Glyph* glyph(char c) { return ui_menu_glyph(c); }
 static int text_width(const char* s) { return ui_menu_text_width(s); }
 
 static const char NEWTEX[] = "menu    newtex  ", GAUGE[] = "menu    gauge   ", BUTTONTO[] = "menu    buttonto",
-                  FONT[] = "font    font    ";
+                  FONT[] = "font    font    ", HFR1[] = "menu    hfr1    ", MENU2FON[] = "menu    menu2fon";
 
 /* Colours are RGBA a vertex (TL, TR, BL, BR), 0x7f the texel as it is; modes as the game's sheets
  * have them (their bytes in order). */
@@ -816,6 +877,7 @@ enum
     SHADOW = 0x7f7f7f20u,  /* a button's words' drop shadow */
     PILL_COL = 0x60607f70u, /* a button */
     PILL_SHADOW = 0x00000070u,
+    HEADER_COL = 0x7f6c207fu, /* a group's name: the gold of the game's own headings */
     M_PANEL = 0x01000101u, /* a panel's own parts */
     M_ITEM = 0x01000201u,  /* a button's */
     M_SHADOW = 0x01020001u,
@@ -946,6 +1008,45 @@ static int underline_sprite(int w)
     return i;
 }
 
+/* A list window's title tab (as "comwin" sprite 21, Config's): a bar of the theme's frame under the
+ * words, centred over a window w wide, its ends fading out, the words in the menus' title font
+ * ("menu2fon", ROM/0/1.DAT): its glyphs' places, as the game's own tabs have them, for the letters
+ * our titles need. Where the bar starts and how wide it is, for the tab's layout block. */
+static const struct
+{
+    char c;
+    short u, v, w, h;
+} TITLE_GLYPHS[] = {
+    { 'A', 3, 161, 8, 9 }, { 'a', 23, 175, 6, 7 }, { 'c', 41, 175, 6, 7 }, { 'd', 50, 173, 6, 9 },
+    { 'e', 59, 175, 6, 7 }, { 'n', 136, 175, 7, 7 }, { 'v', 207, 175, 8, 7 },
+};
+
+static int title_sprite(const char* s, int w, int* bar_x, int* bar_w)
+{
+    int i = sprite_begin(), tw = 0;
+    for (const char* c = s; *c; ++c)
+        for (size_t k = 0; k < sizeof TITLE_GLYPHS / sizeof TITLE_GLYPHS[0]; ++k)
+            if (TITLE_GLYPHS[k].c == *c)
+                tw += TITLE_GLYPHS[k].w;
+    int x0 = (w - tw) / 2, x1 = x0 + tw;
+    const uint32_t mid[4] = { 0x7f7f7f40u, 0x7f7f7f40u, 0x7f7f7f40u, 0x7f7f7f40u },
+                   left[4] = { 0x7f7f7f00u, 0x7f7f7f40u, 0x7f7f7f00u, 0x7f7f7f40u },
+                   right[4] = { 0x7f7f7f40u, 0x7f7f7f00u, 0x7f7f7f40u, 0x7f7f7f00u };
+    part4(x0, 0, x1, 4, tw, 4, 0, 1, mid, M_SHADOW, HFR1);
+    part4(x0 - 8, 0, x0, 4, 8, 4, 24, 1, left, M_SHADOW, HFR1);
+    part4(x1, 0, x1 + 8, 4, 8, 4, 0, 1, right, M_SHADOW, HFR1);
+    for (int at = x0; *s; ++s)
+        for (size_t k = 0; k < sizeof TITLE_GLYPHS / sizeof TITLE_GLYPHS[0]; ++k)
+            if (TITLE_GLYPHS[k].c == *s)
+            {
+                const int gw = TITLE_GLYPHS[k].w, gh = TITLE_GLYPHS[k].h, top = TITLE_GLYPHS[k].v == 175 ? -1 : -3;
+                part(at, top, at + gw, top + gh, gw, gh, TITLE_GLYPHS[k].u, TITLE_GLYPHS[k].v, WHITE, M_PANEL, MENU2FON);
+                at += gw;
+            }
+    *bar_x = x0 - 8, *bar_w = tw + 16;
+    return i;
+}
+
 
 /* ---- the pages ---- */
 
@@ -971,12 +1072,9 @@ typedef struct Item
 
 typedef struct Page
 {
-    const char* name;  /* its layout's and its menu table entry's */
-    const char* title; /* on its title strip, and its item in the Config list */
+    const char* name;  /* its layout's, and its menu table entry's while it is open */
+    const char* title; /* on its title strip, and its item in the Advanced list */
     const char* config_help;
-    uint32_t spare; /* the menu table entry it takes, */
-    const char* spare_was; /* named this (and, for the duplicate conf1win, after one of the same) */
-    int spare_how;         /* SPARE_* */
     uint32_t modes;        /* its entry's +0x28: the game modes it opens in (0x08 the lobby's, 0x01 the field's) and more */
     const Row* rows;
     int nrows;
@@ -984,43 +1082,53 @@ typedef struct Page
     Item items[MAX_ITEMS];
     int nitems, row_item[MAX_ROWS + 1], w, h, cx; /* cx: the controls' column */
     int spr_panel, spr_caption, spr_config, spr_line[MAX_ROWS];
-    uint32_t layout, layout_size, handler, str_name, str_title, str_config_help, str_help[MAX_ROWS];
+    uint32_t layout, layout_size, handler, global, str_name, str_title, str_config_help, str_help[MAX_ROWS];
 } Page;
 
-/* How a page's menu table entry is free: the second of two of a name (the game only ever finds the
- * first), or the table's end - the empty entry its loops stop at, unread otherwise, whose place the
- * next thing in memory (first byte 0) then takes */
-enum
-{
-    SPARE_UNUSED = 0, /* an entry whose menu is in no DAT and that nothing opens */
-    SPARE_DUP = 1,
-    SPARE_END = 2,
-    TABLE_END = FFXI_MODERN_MENUS_END, /* 0x10376270 */
-};
-
-static const char NO_NAME[16] = { 0 };
-
 static Page PAGES[] = {
-    { "menu    displayw", "Display", "Window mode, resolution, UI scale, background, anti-aliasing and the frame rate.",
-        FFXI_MODERN_MENUS_DISPLAY, "tkdebug dbdelsel", SPARE_UNUSED, 0x1c0209u, DISPLAY_ROWS,
-        sizeof DISPLAY_ROWS / sizeof DISPLAY_ROWS[0] },
-    { "menu    menushid", "Menus", "Show or hide items of the game's own menus.", TABLE_END, NO_NAME, SPARE_END, 0x1c0201u,
-        MENUS_ROWS, sizeof MENUS_ROWS / sizeof MENUS_ROWS[0] },
-    { "menu    modernwi", "Modern", "Graphics beyond the original's: effects, lighting and draw distance.",
-        FFXI_MODERN_MENUS_CONF1WIN, "menu    conf1win", SPARE_DUP, 0x1c0201u, MODERN_ROWS,
-        sizeof MODERN_ROWS / sizeof MODERN_ROWS[0] },
+    { "menu    displayw", "Display", "Window mode, resolution, the interface's size and shape, and the frame rate.",
+        0x1c0209u, DISPLAY_ROWS, sizeof DISPLAY_ROWS / sizeof DISPLAY_ROWS[0] },
+    { "menu    graphicw", "Graphics", "Anti-aliasing, texture filtering, sharpening, color and draw distance.", 0x1c0201u,
+        GRAPHICS_ROWS, sizeof GRAPHICS_ROWS / sizeof GRAPHICS_ROWS[0] },
+#if !defined(FFXI_ANDROID_VULKAN)
+    { "menu    lightinw", "Lighting", "Modern effects, lighting, sun shadows and ambient occlusion.", 0x1c0201u,
+        LIGHTING_ROWS, sizeof LIGHTING_ROWS / sizeof LIGHTING_ROWS[0] },
+    { "menu    atmosphw", "Atmosphere", "Fog, god rays, bloom and water.", 0x1c0201u, ATMOSPHERE_ROWS,
+        sizeof ATMOSPHERE_ROWS / sizeof ATMOSPHERE_ROWS[0] },
+#endif
+    { "menu    interfaw", "Interface", "Nameplates, and items of the game's own menus shown or hidden.", 0x1c0201u,
+        INTERFACE_ROWS, sizeof INTERFACE_ROWS / sizeof INTERFACE_ROWS[0] },
     /* last: there only with the addon host (g_npages) */
-    { "menu    addonw10", "Addons", "Turn the installed addons (Ashita, Windower and xi) on and off.",
-        FFXI_MODERN_MENUS_ADDONS, "menu    oplev   ", SPARE_UNUSED, 0x1c0201u, ADDON_ROWS, ADDON_VIS },
-};
-enum
-{
-    PAGE_DISPLAY = 0, /* the one the lobby's Config window opens */
-    PAGE_ADDONS = 3,
+    { "menu    addonw10", "Addons", "Turn the installed addons (Ashita, Windower and xi) on and off.", 0x1c0201u,
+        ADDON_ROWS, ADDON_VIS },
 };
 enum
 {
     NPAGES = sizeof PAGES / sizeof PAGES[0],
+    PAGE_DISPLAY = 0, /* the one the lobby's Config window opens */
+    PAGE_ADDONS = NPAGES - 1,
+};
+
+/* The menu table has no free entry, but has ones the game never finds: the second of two of a name
+ * (the game only ever finds the first), or one whose menu is in no DAT and that nothing opens. The
+ * pages share one, named for a page and pointing at its handler as it opens (open_page): only one
+ * is open at a time. The Advanced list takes another. */
+typedef struct Spare
+{
+    uint32_t at;
+    const char* was; /* its name (a duplicate's: after one of the same) */
+    int dup;
+} Spare;
+
+enum
+{
+    PAGES_ENTRY = FFXI_MODERN_MENUS_DISPLAY,     /* tkdebug dbdelsel */
+    ADVANCED_ENTRY = FFXI_MODERN_MENUS_CONF1WIN, /* the second conf1win */
+};
+
+static const Spare SPARES[] = {
+    { PAGES_ENTRY, "tkdebug dbdelsel", 0 },
+    { ADVANCED_ENTRY, "menu    conf1win", 1 },
 };
 
 static int g_npages; /* the pages there are: all but Addons without the addon host */
@@ -1030,6 +1138,14 @@ static int g_spr_track, g_spr_fill; /* a slider's hit area (nothing to see) and 
 static int g_spr_glyph[95], g_spr_kind[3], g_spr_new, g_spr_bar_track, g_spr_bar_thumb, g_addon_panel[ADDON_VIS + 1];
 static uint32_t g_addon_layout[ADDON_VIS + 1], g_addon_size[ADDON_VIS + 1], g_addon_str[ADDON_VIS + 1];
 static int g_spr_blank;             /* nothing to see: what a hidden item of the game's draws */
+/* Config > Advanced: its item in the Config list, and its list's title tab (where its bar is) */
+static int g_spr_main, g_spr_adv_title, g_adv_tab_x, g_adv_tab_w;
+enum
+{
+    ADV_X = 384, /* the list's window, where and as wide as the Config list's */
+    ADV_Y = 48,
+    ADV_W = 112,
+};
 
 static int row_top(int r) { return TITLE_H + r * ROW_H; }
 
@@ -1038,12 +1154,14 @@ static void layout_items(Page* p)
 {
     p->nitems = 0, p->w = MIN_W, p->cx = 150;
     for (int r = 0; r < p->nrows; ++r)
-        if (32 + text_width(p->rows[r].label) + 24 > p->cx)
+        if (p->rows[r].kind != HEADER && 32 + text_width(p->rows[r].label) + 24 > p->cx)
             p->cx = 32 + text_width(p->rows[r].label) + 24;
     for (int r = 0; r < p->nrows; ++r)
     {
         const Row* row = &p->rows[r];
         p->row_item[r] = p->nitems;
+        if (row->kind == HEADER)
+            continue;
         if (row->kind == SLIDER)
             p->items[p->nitems++] = (Item){ r, -1, p->cx + 32, TRACK_W, 0 };
         else if (row->kind == LIST)
@@ -1088,9 +1206,16 @@ static int panel_sprite(const Page* p, int nrows)
     int strip_w = p == &PAGES[PAGE_ADDONS] && nrows == ADDON_VIS ? p->w - SCROLL_BAR_W : p->w;
     part4(0, 4, strip_w, 20, 64, 8, 0, 0, strip, M_ITEM, GAUGE);
     words(8, 6, p->title, 0);
+    const uint32_t rule[4] = { 0x7f7f7f10u, 0x7f404000u, 0x7f7f7f10u, 0x7f404000u };
     for (int r = 0; r < nrows; ++r)
     {
         int y = row_top(r);
+        if (p->rows[r].kind == HEADER)
+        {
+            /* a group's name over a strip fading out as the title's does */
+            part4(8, y + 2, p->w - 8, y + 16, 64, 8, 0, 0, rule, M_ITEM, GAUGE);
+            continue;
+        }
         part(20, y + 4, 28, y + 12, 8, 8, 0, 8, WHITE, M_GAUGE, GAUGE);
         int tx = p->cx + 32;
         if (p->rows[r].kind == SLIDER || p->rows[r].kind == LIST)
@@ -1113,6 +1238,11 @@ static void page_sprites(Page* p)
     for (int r = 0; r < p->nrows; ++r)
     {
         sprite_begin();
+        if (p->rows[r].kind == HEADER)
+        {
+            words_in(12, 2, p->rows[r].label, HEADER_COL);
+            continue;
+        }
         words(32, 2, p->rows[r].label, 0);
         if (p->rows[r].kind == SLIDER || p->rows[r].kind == LIST)
             words(p->cx, 2, "Min", 0), words(p->cx + 32 + TRACK_W + 12, 2, "Max", 0);
@@ -1120,7 +1250,7 @@ static void page_sprites(Page* p)
     for (int r = 0; r < p->nrows; ++r)
     {
         p->spr_line[r] = -1;
-        if (p->rows[r].kind != SLIDER && p->rows[r].kind != LIST)
+        if (p->rows[r].kind != SLIDER && p->rows[r].kind != LIST && p->rows[r].kind != HEADER)
             p->spr_line[r] = underline_sprite(p->items[p->row_item[r]].w);
     }
     for (int i = 0; i < p->nitems; ++i)
@@ -1146,8 +1276,8 @@ static int build_sheet(void)
 {
     S.n = 0, S.sprites = 0, S.overflow = 0;
     put(SHEET_NAME, 16);
-    put("\x04", 1);
-    put(NEWTEX, 16), put(GAUGE, 16), put(BUTTONTO, 16), put(FONT, 16);
+    put("\x06", 1);
+    put(NEWTEX, 16), put(GAUGE, 16), put(BUTTONTO, 16), put(FONT, 16), put(HFR1, 16), put(MENU2FON, 16);
     size_t count = S.n;
     put("\0\0", 2);
     g_spr_track = sprite_begin();
@@ -1185,8 +1315,23 @@ static int build_sheet(void)
     part(0, 0, 6, 4, 64, 6, 0, 1, 0x60607f7fu, M_GAUGE, GAUGE);
     list_sprites(&g_res);
     list_sprites(&g_scale);
+    g_spr_main = button_sprite("Advanced", 88);
+    g_spr_adv_title = title_sprite("Advanced", ADV_W, &g_adv_tab_x, &g_adv_tab_w);
     S.p[count] = (uint8_t)S.sprites, S.p[count + 1] = (uint8_t)(S.sprites >> 8);
     return !S.overflow;
+}
+
+/* the row of items dir (1 down, -1 up) from row r among the first rows, round past the ends,
+ * over the groups' names */
+static int item_row(const Page* p, int r, int dir, int rows)
+{
+    for (int k = 0; k < rows; ++k)
+    {
+        r = (r + dir + rows) % rows;
+        if (p->row_item[r + 1] > p->row_item[r])
+            break;
+    }
+    return r;
 }
 
 /* the item of row r nearest x across */
@@ -1221,8 +1366,8 @@ static uint8_t* page_layout_rows(const Page* p, int rows, int panel, const char*
         const Item* it = &p->items[i];
         int r = it->row, first = p->row_item[r], across = p->row_item[r + 1] - first, k = i - first;
         uint8_t links[6] = { (uint8_t)((i + nitems - 1) % nitems + 1), (uint8_t)((i + 1) % nitems + 1),
-            (uint8_t)(scroll && r == 0 ? i + 1 : nearest(p, (r + rows - 1) % rows, it->x) + 1),
-            (uint8_t)(scroll && r == rows - 1 ? i + 1 : nearest(p, (r + 1) % rows, it->x) + 1),
+            (uint8_t)(scroll && r == 0 ? i + 1 : nearest(p, item_row(p, r, -1, rows), it->x) + 1),
+            (uint8_t)(scroll && r == rows - 1 ? i + 1 : nearest(p, item_row(p, r, 1, rows), it->x) + 1),
             (uint8_t)(first + (k + 1) % across + 1), (uint8_t)(first + (k + across - 1) % across + 1) };
         Ref ref = { 0, it->sprite, SHEET_NAME };
         to += block(dst + to, it->x, row_top(r), it->w, 16, i + 1, links, &ref, 1, "-1", "-1", 0);
@@ -1241,8 +1386,8 @@ static uint8_t* page_layout(const Page* p, size_t* out_size)
     return page_layout_rows(p, p->nrows, p->spr_panel, p->name, 0, out_size);
 }
 
-/* The Config list with our pages after its last item: every block as it is, the window taller, ours
- * linked in between the last item and the first, the title tab renumbered after them. */
+/* The Config list with Advanced after its last item: every block as it is, the window taller, ours
+ * linked in between the last item and the first, the title tab renumbered after it. */
 static uint8_t* config_layout(size_t* out_size)
 {
     size_t size;
@@ -1250,7 +1395,7 @@ static uint8_t* config_layout(size_t* out_size)
     if (!src)
         return NULL;
     int count = src[0x11];
-    uint8_t* dst = calloc(1, size + 128 * g_npages);
+    uint8_t* dst = calloc(1, size + 128 * CONFIG_OURS);
     size_t at = 0x20, to = 0x20;
     memcpy(dst, src, 0x20);
     int last = 0, lastx = 0, lasty = -1, lastw = 0, lasth = 0, ok = 1;
@@ -1265,21 +1410,26 @@ static uint8_t* config_layout(size_t* out_size)
         if (b >= 0 && src[at + 0x15] == 0xFF)
         {
             /* the title tab: ours go in before it */
-            for (int k = 0; k < g_npages; ++k)
+            for (int k = 0; k < CONFIG_OURS; ++k)
             {
-                int id = last + 1 + k, up = id - 1, down = k + 1 < g_npages ? id + 1 : 1;
+                int id = last + 1 + k, up = id - 1, down = k + 1 < CONFIG_OURS ? id + 1 : 1;
                 uint8_t links[6] = { (uint8_t)up, (uint8_t)down, (uint8_t)up, (uint8_t)down, (uint8_t)id, (uint8_t)id };
-                Ref ref = { 0, PAGES[k].spr_config, SHEET_NAME };
+                Ref ref = { 0, g_spr_main, SHEET_NAME };
                 to += block(dst + to, lastx, lasty + lasth * (k + 1), lastw, lasth, id, links, &ref, 1, "-1", "-1", 0);
             }
             memcpy(dst + to, src + at, n);
-            w16(dst + to + 0x12, last + g_npages + 1);
+            w16(dst + to + 0x12, last + CONFIG_OURS + 1);
         }
         else
         {
             memcpy(dst + to, src + at, n);
             if (b < 0)
-                w16(dst + to + 0xc, r16(dst + to + 0xc) + 16 * g_npages); /* the window: taller */
+            {
+                /* the window: taller, its frame a well a button more ("comwin" sprite k has k + 1) */
+                w16(dst + to + 0xc, r16(dst + to + 0xc) + 16 * CONFIG_OURS);
+                if (dst[to + 0x14] >= 1 && !memcmp(dst + to + 0x24, "menu    comwin  ", 16))
+                    w16(dst + to + 0x22, r16(dst + to + 0x22) + CONFIG_OURS);
+            }
             else if (r16(src + at + 4) > lasty)
                 last = r16(src + at + 0x12), lastx = r16(src + at + 2), lasty = r16(src + at + 4),
                 lastw = r16(src + at + 0xa), lasth = r16(src + at + 0xc);
@@ -1293,17 +1443,48 @@ static uint8_t* config_layout(size_t* out_size)
         free(dst);
         return NULL;
     }
-    dst[0x11] = (uint8_t)(count + g_npages);
+    dst[0x11] = (uint8_t)(count + CONFIG_OURS);
     /* the last item leads down to ours, the first up to them */
     at = 0x20 + (size_t)r16(dst + 0x20);
-    for (int b = 0; b < count + g_npages; ++b, at += (size_t)r16(dst + at))
+    for (int b = 0; b < count + CONFIG_OURS; ++b, at += (size_t)r16(dst + at))
     {
         int id = r16(dst + at + 0x12);
         if (id == last)
             dst[at + 0x16] = dst[at + 0x18] = (uint8_t)(last + 1);
         if (id == 1)
-            dst[at + 0x15] = dst[at + 0x17] = (uint8_t)(last + g_npages);
+            dst[at + 0x15] = dst[at + 0x17] = (uint8_t)(last + CONFIG_OURS);
     }
+    *out_size = to;
+    return dst;
+}
+
+static const char ADV_NAME[] = "menu    advancew";
+
+/* Advanced's list: as the Config list is drawn - its frame with a well a button, a button a page,
+ * its title tab - over the same place */
+static uint8_t* adv_layout(size_t* out_size)
+{
+    static const uint8_t NONE[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    int n = g_npages;
+    const Ref window[2] = { { 0, n - 1, "menu    comwin  " }, { 6, 0, "anc     anc_s   " } };
+    uint8_t* dst = calloc(1, 0x20 + 96 + (size_t)(n + 1) * 64);
+    if (!dst)
+        return NULL;
+    memcpy(dst, ADV_NAME, 16);
+    dst[0x10] = 1, dst[0x11] = (uint8_t)(n + 1);
+    size_t to = 0x20;
+    to += block(dst + to, ADV_X, ADV_Y, ADV_W, 6 + 16 * n + 4, -1, NULL, window, 2, "-1", "-1", 1);
+    for (int k = 0; k < n; ++k)
+    {
+        uint8_t up = (uint8_t)((k + n - 1) % n + 1), down = (uint8_t)((k + 1) % n + 1), id = (uint8_t)(k + 1);
+        const uint8_t links[6] = { up, down, up, down, id, id };
+        Ref ref = { 0, PAGES[k].spr_config, SHEET_NAME };
+        to += block(dst + to, 16, 6 + 16 * k, 88, 16, k + 1, links, &ref, 1, "-1", "-1", 0);
+    }
+    Ref tab = { 0, g_spr_adv_title, SHEET_NAME };
+    size_t at = to;
+    to += block(dst + to, 0, 0, g_adv_tab_w, 11, n + 1, NONE, &tab, 1, "-1", "-1", 0);
+    w16(dst + at + 0xe, g_adv_tab_x), w16(dst + at + 0x10, -3);
     *out_size = to;
     return dst;
 }
@@ -1311,6 +1492,7 @@ static uint8_t* config_layout(size_t* out_size)
 /* ---- the handlers ---- */
 
 static uint32_t g_config_slots[VTBL_SLOTS]; /* the Config list's own */
+static uint32_t g_adv_guest, g_adv_str, g_adv_help, g_adv_title; /* Config > Advanced's list: its layout, name, item's help, title */
 static void lobby_input(Guest* g);
 static void lobby_setup(void);
 static uint32_t g_scratch;                  /* guest room: a name, a cursor */
@@ -1357,8 +1539,8 @@ static Page* page_of(uint32_t handler)
 
 /* ---- Config > Addons ---- */
 
-/* the folders read again, the list from its start, the page as tall as it needs: its entry in the
- * menu table named for the layout with that many rows. The name to open it by. */
+/* the folders read again, the list from its start, the page as tall as it needs: the name of the
+ * layout with that many rows, to open it by. */
 static uint32_t addons_open(void)
 {
     Page* p = &PAGES[PAGE_ADDONS];
@@ -1366,8 +1548,22 @@ static uint32_t addons_open(void)
     int rows = g_addon_n < 1 ? 1 : g_addon_n > ADDON_VIS ? ADDON_VIS : g_addon_n;
     g_addon_top = 0, g_addon_cursor = 0, g_addon_bar = 0;
     p->nrows = rows, p->nitems = p->row_item[rows], p->h = TITLE_H + rows * ROW_H + 8;
-    memcpy(GUEST_PTR(p->spare), GUEST_PTR(g_addon_str[rows]), 16);
     return g_addon_str[rows];
+}
+
+/* page k opened over what is open: the pages' menu table entry named for it (Addons': for the
+ * layout that fits) and pointing at its handler, then opened by that name */
+static void open_page(int k)
+{
+    Page* p = &PAGES[k];
+    uint32_t name = k == PAGE_ADDONS ? addons_open() : p->str_name;
+    uint8_t* e = GUEST_PTR(PAGES_ENTRY);
+    memcpy(e, GUEST_PTR(name), 16);
+    memset(e + 16, 0, 16);
+    wr32(PAGES_ENTRY + 0x20, p->global);
+    wr32(PAGES_ENTRY + 0x24, 0x20000u);
+    wr32(PAGES_ENTRY + 0x28, p->modes);
+    guest_thiscall(MENU_OPEN, MGR, 3, (uint32_t[]){ name, 1, 0 });
 }
 
 static void draw_at(uint32_t list, int spr, int x, int y)
@@ -1505,27 +1701,23 @@ static void addons_wheel(const Page* p, uint32_t window, int ev)
     g_addon_cursor = item;
 }
 
-/* the Config list's select: ours open their pages, the rest as the game does */
+/* the Config list's select: ours opens the Advanced list, the rest as the game does */
 static void config_input(Guest* g)
 {
     uint32_t self = g->ecx, ev = ARG(0), item = ARG(1);
-    int k = (int16_t)item - CONFIG_ITEMS - 1;
-    if ((int16_t)ev == EV_SELECT && k == PAGE_ADDONS && k < g_npages)
-        guest_thiscall(MENU_OPEN, MGR, 3, (uint32_t[]){ addons_open(), 1, 0 });
-    else if ((int16_t)ev == EV_SELECT && k >= 0 && k < g_npages)
-        guest_thiscall(MENU_OPEN, MGR, 3, (uint32_t[]){ PAGES[k].str_name, 1, 0 });
+    if ((int16_t)ev == EV_SELECT && (int16_t)item == CONFIG_ITEMS + 1)
+        guest_thiscall(MENU_OPEN, MGR, 3, (uint32_t[]){ g_adv_str, 1, 0 });
     else
         guest_thiscall(g_config_slots[6], self, 2, (uint32_t[]){ ev, item });
     RET(0, 2);
 }
 
-/* ... and its drawing: our items' help */
+/* ... and its drawing: our item's help */
 static void config_draw(Guest* g)
 {
     uint32_t self = g->ecx;
     guest_thiscall(g_config_slots[4], self, 0, NULL);
-    for (int k = 0; k < g_npages; ++k)
-        help(window_of(self), CONFIG_ITEMS + 1 + k, PAGES[k].str_config_help);
+    help(window_of(self), CONFIG_ITEMS + 1, g_adv_help);
     RET(0, 0);
 }
 
@@ -1552,6 +1744,8 @@ static void page_draw(Guest* g)
         const Row* row = &p->rows[r];
         uint32_t id = (uint32_t)p->row_item[r] + 1;
         const List* l = list_of(row->key);
+        if (row->kind == HEADER)
+            continue;
         if (row->kind == LIST && l && l->n)
         {
             int at = list_at(l);
@@ -1625,7 +1819,32 @@ static void page_input(Guest* g)
     RET(0, 2);
 }
 
+/* ---- Config > Advanced ---- */
+
+
+/* the Advanced list: a page's help each, and select opens it */
+static void adv_draw(Guest* g)
+{
+    uint32_t window = window_of(g->ecx);
+    for (int k = 0; k < g_npages; ++k)
+        help(window, k + 1, PAGES[k].str_config_help);
+    RET(0, 0);
+}
+
+static void adv_input(Guest* g)
+{
+    int ev = (int16_t)ARG(0), id = (int16_t)ARG(1);
+    if (ev == EV_SELECT && id >= 1 && id <= g_npages)
+        open_page(id - 1);
+    RET(0, 2);
+}
+
+static void adv_close(Guest* g) { RET(0, 0); }
+
 static const ShimDef SHIMS[] = {
+    { "modern", "adv_draw", adv_draw },
+    { "modern", "adv_input", adv_input },
+    { "modern", "adv_close", adv_close },
     { "modern", "config_input", config_input },
     { "modern", "config_draw", config_draw },
     { "modern", "page_open", page_open },
@@ -1995,9 +2214,7 @@ static void lobby_input(Guest* g)
 {
     uint32_t self = g->ecx, ev = ARG(0), item = ARG(1);
     if ((int16_t)ev == EV_SELECT && (int16_t)item == LOBBY_OURS && !rd8(self + 0x24) && !rd8(self + 0x2c))
-    {
-        guest_thiscall(MENU_OPEN, MGR, 3, (uint32_t[]){ PAGES[PAGE_DISPLAY].str_name, 1, 0 });
-    }
+        open_page(PAGE_DISPLAY);
     else
         guest_thiscall(g_lobby_slots[6], self, 2, (uint32_t[]){ ev, item });
     /* on ours, no help (the game's help for an id past its own is the volume's) */
@@ -2073,7 +2290,7 @@ static void install(void)
         memcpy(GUEST_PTR(cur + 0x46), RENAMED, 16);
         if (!find_layout(CONFIG_NAME))
             add(LAYOUT_ADD, MGR, g_config_guest);
-        fprintf(stderr, "[modern] Config list: Modern added\n");
+        fprintf(stderr, "[modern] Config list: Advanced added\n");
     }
     for (int k = 0; k < g_npages; ++k)
         if (k == PAGE_ADDONS)
@@ -2094,8 +2311,44 @@ static void install(void)
                 add(LAYOUT_ADD, MGR, PAGES[k].layout), layout = find_layout(PAGES[k].name);
             title(layout, PAGES[k].str_title);
         }
+    uint32_t adv = find_layout(ADV_NAME);
+    if (!adv)
+        add(LAYOUT_ADD, MGR, g_adv_guest), adv = find_layout(ADV_NAME);
+    title(adv, g_adv_title);
     hide_apply();
     lobby_install();
+}
+
+/* Config > Advanced: the list's layout, its handler (a Config page's, with slots of its own) in its
+ * menu table entry, flagged as the game's lists in Config are (Window's "conf5m") */
+static int adv_setup(uint32_t page_vt)
+{
+    size_t n;
+    uint8_t* l = adv_layout(&n);
+    if (!l)
+        return 0;
+    g_adv_guest = gbytes(l, (uint32_t)n);
+    free(l);
+    g_adv_str = gstr(ADV_NAME);
+    g_adv_help = gstr("Display, graphics, lighting, the interface and addons, beyond the original's.");
+    g_adv_title = gstr("Advanced");
+    uint32_t vt = gheap_alloc(4 * (VTBL_SLOTS + 1), 1);
+    for (int i = 0; i < VTBL_SLOTS; ++i)
+        wr32(vt + 4u * i, rd32(page_vt + 4u * i));
+    wr32(vt + 4 * 3, thunk_for("modern", "adv_close"));
+    wr32(vt + 4 * 4, thunk_for("modern", "adv_draw"));
+    wr32(vt + 4 * 6, thunk_for("modern", "adv_input"));
+    uint32_t global = gheap_alloc(4, 1), handler = gheap_alloc(0x60, 1);
+    guest_thiscall(PAGE_CTOR, handler, 0, NULL);
+    wr32(handler, vt);
+    wr32(global, handler);
+    uint8_t* e = GUEST_PTR(ADVANCED_ENTRY);
+    memcpy(e, ADV_NAME, 16);
+    memset(e + 16, 0, 16);
+    wr32(ADVANCED_ENTRY + 0x20, global);
+    wr32(ADVANCED_ENTRY + 0x24, 0x220000u);
+    wr32(ADVANCED_ENTRY + 0x28, 0x810201u);
+    return 1;
 }
 
 /* 0 when this is not the build the addresses are for */
@@ -2110,13 +2363,9 @@ static int setup(void)
         if (CONFIG_KNOWN[i] && rd32(CONFIG_VTBL + 4u * i) != CONFIG_KNOWN[i])
             return 0;
     g_npages = g_addons ? NPAGES : NPAGES - 1;
-    for (int k = 0; k < g_npages; ++k)
-        if (PAGES[k].spare_how == SPARE_END
-                ? !guest_is(PAGES[k].spare, NO_NAME, 16) || rd32(PAGES[k].spare + 0x20) ||
-                      *GUEST_PTR(PAGES[k].spare + 0x2c)
-                : !guest_is(PAGES[k].spare, PAGES[k].spare_was, 16) ||
-                      (PAGES[k].spare_how == SPARE_DUP && !guest_is(PAGES[k].spare - 0x2c, PAGES[k].spare_was, 16)) ||
-                      find_layout(PAGES[k].spare_was))
+    for (size_t k = 0; k < sizeof SPARES / sizeof SPARES[0]; ++k)
+        if (!guest_is(SPARES[k].at, SPARES[k].was, 16) || (SPARES[k].dup && !guest_is(SPARES[k].at - 0x2c, SPARES[k].was, 16)) ||
+            find_layout(SPARES[k].was))
             return 0;
     g_actions_ok = guest_is(ACTION_LISTS, ACTIONS_KNOWN, sizeof ACTIONS_KNOWN);
     g_help_ok = guest_is(WINDOW_HELP, WINDOW_HELP_KNOWN, sizeof WINDOW_HELP_KNOWN) &&
@@ -2171,20 +2420,22 @@ static int setup(void)
         p->str_name = gstr(p->name), p->str_title = gstr(p->title), p->str_config_help = gstr(p->config_help);
         for (int r = 0; r < p->nrows; ++r)
             p->str_help[r] = gstr(p->rows[r].help);
-        uint32_t global = gheap_alloc(4, 1);
+        p->global = gheap_alloc(4, 1);
         p->handler = gheap_alloc(0x60, 1);
         guest_thiscall(PAGE_CTOR, p->handler, 0, NULL);
         wr32(p->handler, vt);
-        wr32(global, p->handler);
-        /* its menu table entry: flagged as the Config pages are but for cancel, which the game
-         * handles (closing it) */
-        uint8_t* e = GUEST_PTR(p->spare);
-        memcpy(e, p->name, 16);
-        memset(e + 16, 0, 16);
-        wr32(p->spare + 0x20, global);
-        wr32(p->spare + 0x24, 0x20000u);
-        wr32(p->spare + 0x28, p->modes);
+        wr32(p->global, p->handler);
     }
+    /* the pages' menu table entry (open_page names it for each as it opens): flagged as the Config
+     * pages are but for cancel, which the game handles (closing it) */
+    uint8_t* e = GUEST_PTR(PAGES_ENTRY);
+    memcpy(e, PAGES[PAGE_DISPLAY].name, 16);
+    memset(e + 16, 0, 16);
+    wr32(PAGES_ENTRY + 0x20, PAGES[PAGE_DISPLAY].global);
+    wr32(PAGES_ENTRY + 0x24, 0x20000u);
+    wr32(PAGES_ENTRY + 0x28, PAGES[PAGE_DISPLAY].modes);
+    if (!adv_setup(vt))
+        return 0;
 
     /* the Config list's handler: a copy of its vtable, select and draw ours */
     uint32_t cvt = gheap_alloc(4 * (VTBL_SLOTS + 1), 1);
@@ -2469,6 +2720,12 @@ void modern_init(const ModernSetup* setup)
     }
     if (cfg_value(path, "occlusion", buf, sizeof buf))
         d3d8_set_occlusion((int)strtol(buf, NULL, 10));
+    if (!setup->nameplates_given && setup->nameplate_fix && cfg_value(path, "nameplates", buf, sizeof buf))
+        *setup->nameplate_fix = atoi(buf) != 0;
+    float sx, sy;
+    if (!setup->nameplates_given && setup->nameplate_sx && cfg_value(path, "nameplate_scale", buf, sizeof buf) &&
+        sscanf(buf, "%fx%f", &sx, &sy) == 2 && sx >= 0.25f && sx <= 4.0f && sy >= 0.25f && sy <= 4.0f)
+        *setup->nameplate_sx = sx, *setup->nameplate_sy = sy;
     if (cfg_value(path, "game_shadows", buf, sizeof buf))
     {
         long v = strtol(buf, NULL, 10);
