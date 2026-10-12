@@ -13,8 +13,8 @@ key holds, frame captures, waits). Commands:
 
   state                      sign-in state, the player, zone, position, target, menu, chat input
   chat_send {line}           a line as if typed: /commands, //commands; other text is said (/say)
-  chat_log {since, limit}    chat lines after sequence number `since`: the server's chat (0x017) and
-                             the host's lines (UTF-8, codes removed)
+  chat_log {since, limit}    chat lines after sequence number `since`: what the chat log shows
+                             (UTF-8, codes removed)
   chat_input {text, open}    the chat input line: read it, or set its text
   keys {keys, hold_ms, gap_ms}  key presses in order: "enter", "down", "numpad5", "ctrl+t",
                              "wait:500" (ms); down for hold_ms, then up, gap_ms between
@@ -189,15 +189,15 @@ local function add_line(mode, text, sender)
     if #log > LOG_MAX then table.remove(log, 1) end
 end
 
--- What the chat log shows comes two ways: lines the host writes (text_in), and the chat the server
--- sends (0x017: kind, attributes, zone, sender[15], message). The game's own lines (/echo, its
--- system messages) don't pass the host's write_line hook in every build.
+-- What the chat log shows: every line, through text_in. A build where text_in sees only the host's
+-- lines (xi.chat.game_lines) adds the chat the server sends (0x017: kind, attributes, zone,
+-- sender[15], message); the game's other lines (/echo, its system messages) are missing there.
 xi.events.on('text_in', function(e)
     if not e.blocked then add_line(e.mode_modified or e.mode, plain(e.modified or e.data or '')) end
 end)
 
 xi.events.on('packet_in', function(e)
-    if e.id ~= 0x017 or e.blocked or e.injected then return end
+    if e.id ~= 0x017 or e.blocked or e.injected or xi.chat.game_lines() then return end
     local d = e.data or ''
     if #d < 24 then return end
     local sender = plain((d:sub(9, 23):gsub('%z.*', '')))

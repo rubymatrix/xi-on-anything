@@ -1134,19 +1134,53 @@ static size_t find_block(const uint8_t* r, size_t n, size_t want)
     return 0;
 }
 
-/* The older 0xC00-byte records (an era install's item files, HorizonXI's): a weapon's and armour's
- * level, slots, races and jobs two bytes before parse_item_fields reads them, then a weapon's damage
- * and delay at 0x1C (as LandSandBoat's item tables have them) */
+/* A weapon's and armour's fields from the superior level on (q): the same in both record sizes */
+static void parse_gear_fields(ResItem* it, const uint8_t* q, int kind)
+{
+    it->superior_level = rd16(q);
+    it->shield_size = rd16(q + 2);
+    const uint8_t* p = q + 4;
+    if (kind == RES_ITEM_WEAPON)
+    {
+        it->damage = rd16(q + 4);
+        it->delay = (int16_t)rd16(q + 6);
+        it->dps = rd16(q + 8);
+        it->skill = q[0x0A];
+        it->jug_size = q[0x0B];
+        it->weapon_unknown = rd32(q + 0x0C);
+        p = q + 0x10;
+    }
+    it->max_charges = p[0];
+    it->cast_time = p[1];
+    it->cast_delay = rd16(p + 2);
+    it->recast_delay = rd32(p + 4);
+    it->base_item_id = rd16(p + 8);
+    it->item_level = p[10];
+    it->item_level_unknown = p[11];
+    it->range = p[12];
+    it->area_range = p[13];
+    it->area_shape = p[14];
+    it->area_cursor = p[15];
+}
+
+/* The older 0xC00-byte records (an era install's item files, HorizonXI's): the header is two bytes
+ * shorter, so a usable item's cast time and a weapon's and armour's level, slots and races sit two
+ * bytes before parse_item_fields reads them; the jobs word and everything after it sit four bytes
+ * before (a weapon's damage and delay at 0x1C, as LandSandBoat's item tables have them) */
 static void parse_legacy_fields(ResItem* it, const uint8_t* r, int kind)
 {
+    if (kind == RES_ITEM_USABLE)
+    {
+        it->cast_time = rd16(r + 0x0E);
+        return;
+    }
     if (kind != RES_ITEM_WEAPON && kind != RES_ITEM_ARMOR)
         return;
     it->level = rd16(r + 0x0E);
     it->slots = rd16(r + 0x10);
     it->races = rd16(r + 0x12);
     it->jobs = rd32(r + 0x14);
-    if (kind == RES_ITEM_WEAPON)
-        it->damage = rd16(r + 0x1C), it->delay = (int16_t)rd16(r + 0x1E);
+    parse_gear_fields(it, r + 0x18, kind);
 }
 
 static void parse_item_fields(ResItem* it, const uint8_t* r, int kind)
@@ -1175,32 +1209,7 @@ static void parse_item_fields(ResItem* it, const uint8_t* r, int kind)
             it->instinct_cost = rd16(r + 0x1C);
             break;
         }
-        it->superior_level = rd16(r + 0x1C);
-        it->shield_size = rd16(r + 0x1E);
-        {
-            const uint8_t* p = r + 0x20;
-            if (kind == RES_ITEM_WEAPON)
-            {
-                it->damage = rd16(r + 0x20);
-                it->delay = (int16_t)rd16(r + 0x22);
-                it->dps = rd16(r + 0x24);
-                it->skill = r[0x26];
-                it->jug_size = r[0x27];
-                it->weapon_unknown = rd32(r + 0x28);
-                p = r + 0x2C;
-            }
-            it->max_charges = p[0];
-            it->cast_time = p[1];
-            it->cast_delay = rd16(p + 2);
-            it->recast_delay = rd32(p + 4);
-            it->base_item_id = rd16(p + 8);
-            it->item_level = p[10];
-            it->item_level_unknown = p[11];
-            it->range = p[12];
-            it->area_range = p[13];
-            it->area_shape = p[14];
-            it->area_cursor = p[15];
-        }
+        parse_gear_fields(it, r + 0x1C, kind);
         break;
     case RES_ITEM_PUPPET:
         it->puppet_slot = rd16(r + 0x10);

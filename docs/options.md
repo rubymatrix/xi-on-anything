@@ -1,0 +1,227 @@
+# Options catalog
+
+Every setting the client has, grouped by what it changes rather than where it lives. In game, the
+player-facing ones are under **Config › Advanced** (`host/modern.c`), in six pages: Display,
+Graphics, Lighting, Atmosphere, Interface and Addons. The tree is at the end.
+
+Sources, as the tables abbreviate them:
+
+- **Menu**: its row under Config › Advanced, as *page › row* (a group heading in brackets)
+- **fx**: its key in `fx.txt` (`runtime/portable/gfx_fx.c`), also `FFXI_FX_<KEY>` in the environment; read again while the game runs
+- **CLI**: a `host64` flag (`host/host64.c`)
+- **App**: an app-bundle default (`app_default`, read when the flag is absent)
+- **Env**: an `FFXI_*` environment variable
+
+Defaults are the code's. `fx = 0` (the default) turns every scene effect off; the keys below it keep
+their values for when it is on. On Android the rows set through scene effects are not shown, nor
+the Lighting and Atmosphere pages.
+
+---
+
+## 1. Display
+
+| Setting | Menu | fx | CLI | App | Default / range |
+|---|---|---|---|---|---|
+| Window mode | Display › [Window] Window Mode | | | `FFXIWindowMode` | Windowed / Borderless / Full |
+| Fullscreen space | | | | `FFXIFullscreenSpace` | |
+| Resolution | Display › [Window] Resolution | | | `FFXIResolution` | list |
+| UI scale | Display › [Scaling] UI Scale | | | `FFXIMenuResolution` | list |
+| Interface shape | Display › [Scaling] Interface Shape | | `--ui-aspect` | `FFXIUIAspect` | off; Full / 16:9 / 4:3 |
+| Background (render) resolution | Display › [Scaling] Background Resolution | | | `FFXIBackground` | 2048 / 4096 / 6144 / 8192, next start |
+| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor` | | 1 = 60 fps (default), 2 = 30 as shipped |
+| FPS counter | Display › [Performance] FPS Counter | `fps` | | | 1 shown |
+| GPU pick (Vulkan) | | | | | `FFXI_GPU` env |
+
+## 2. Image quality and color
+
+| Setting | Menu | fx | Default / range |
+|---|---|---|---|
+| Anti-aliasing | Graphics › [Quality] Anti-Aliasing | `aa` | 0 off, 1 FXAA |
+| Texture filtering | Graphics › [Quality] Texture Filtering | `aniso` | 16 (1/4/8/16) |
+| Anti-shimmer (temporal) | Graphics › [Quality] Anti-Shimmer | `filter` | 1 on |
+| Temporal blend | | `temporal` | 0.85 |
+| Sharpening | Graphics › [Quality] Sharpening | `sharpen` | 0.3 (0–1) |
+| Color grading | Graphics › [Color] Color Grading | `grade` | 1.0 (0–1) |
+| Saturation | Graphics › [Color] Saturation | `sat` | 1.12 (0.5–1.5) |
+| Contrast | Graphics › [Color] Contrast | `contrast` | 0.2 (0–0.5) |
+
+## 3. Lighting and shadows
+
+| Setting | Menu | fx | Default / range |
+|---|---|---|---|
+| **Master: Modern Effects** | Lighting › Modern Effects | `fx` | 0 off; switches Lighting and Atmosphere |
+| Per-pixel lighting | Lighting › Per-Pixel Lighting | `light` | 0 off, 1 sun, 2 all lights |
+| Bounce light | Lighting › Bounce Light | `gi` | 0 off (0–3) |
+| Ray tracing | Lighting › Ray Tracing | `rt` | 0 off |
+| Sun shadow darkness | Lighting › [Shadows] Sun Shadows | `sun` | 0.45 (0–1) |
+| Shadow casters | Lighting › [Shadows] Shadow Casters | `sun_casters` | 0 all, 1 characters, 2 world |
+| Shadow edges | Lighting › [Shadows] Shadow Edges | `sun_soft` | 0 hard, 0.03 soft |
+| Shadow detail (near map) | Lighting › [Shadows] Shadow Detail | `sun_detail` | 4096 (2048/4096/8192; 512–8192 in the file) |
+| Indoor shadows | Lighting › [Shadows] Indoor Shadows | `moghouse` | 0 (0–1) |
+| The game's own character shadows | Lighting › [Shadows] Character Shadows | `gameshadows` | 0 auto, 1 always, 2 never |
+| Dawn/dusk long shadows | | `sun_dusk` | 1 |
+| Sun shadow reach | | `sun_distance` | 100 |
+| Near map reach | | `sun_near` | 10 |
+| Off-screen caster prime | | `sun_prime` | 300 (0 never) |
+| Sun direct strength | | `sun_direct` | 0.5 |
+| Sun face / min | | `sun_face`, `sun_min` | 0 / 0 |
+| Contact shadow | | `shadow`, `shadow_length` | 0.3 / 0.6 |
+
+## 4. Ambient occlusion
+
+| Setting | Menu | fx | Default / range |
+|---|---|---|---|
+| Strength | Lighting › [Ambient Occlusion] Strength | `ao` | 0.8 (0–1.5) |
+| Quality | Lighting › [Ambient Occlusion] Quality | `ao_quality` | 0 low (6 taps), 1 medium (10), 2 high (16) |
+| Radius | Lighting › [Ambient Occlusion] Radius | `radius` | 1.0 (0.25–3) |
+
+## 5. Atmosphere
+
+| Setting | Menu | fx | Default / range |
+|---|---|---|---|
+| Fog density | Atmosphere › [Fog] Density | `fog` | 0.004 (0–0.02) |
+| Fog falloff / height / max | | `fog_falloff`, `fog_height`, `fog_max` | 0.08 / 2.0 / 0.5 |
+| Fog sun glow / phase | | `fog_sun`, `fog_g` | 0.5 / 0.6 |
+| God rays | Atmosphere › [God Rays] Strength | `rays` | 0.6 (0–1.5) |
+| Ray decay / length | | `rays_decay`, `rays_length` | 0.965 / 0.85 |
+| Bloom | Atmosphere › [Bloom] Strength | `bloom` | 0.3 (0–2) |
+| Bloom threshold | Atmosphere › [Bloom] Threshold | `threshold` | 0.75 (0.3–1) |
+
+## 6. Water
+
+| Setting | Menu | fx | Default / range |
+|---|---|---|---|
+| Modern water on/off | Atmosphere › [Water] Modern Water | `water` | 1 |
+| Sky reflection | Atmosphere › [Water] Reflection | `water_reflect` | 0.6 (0–1) |
+| Sun highlight | Atmosphere › [Water] Sun Highlight | `water_spec` | 2.0 (0–4) |
+| Foam amount | Atmosphere › [Water] Foam | `water_foam` | 0.6 (0–1) |
+| Foam depth | | `water_foam_width` | 0.8 |
+| Refraction | | `water_refract` | 0.015 |
+| Clarity depth | | `water_clarity` | 3.0 |
+| Soft edge | | `water_soft` | 0.15 |
+| Ripple tilt / density | | `water_ripple`, `water_scale` | 0.25 / 0.6 |
+
+## 7. World detail and distance
+
+| Setting | Menu | fx | CLI | App | Default / range |
+|---|---|---|---|---|---|
+| World draw distance | Graphics › [World Detail] Draw Distance | `draw` | `--draw-distance k` or `WxC` | `FFXIDrawDistance` | 1 as the game; 0.5–20 CLI, 1–6 menu |
+| Character draw distance | Graphics › [World Detail] Character Distance | `draw_entities` | (second half of `WxC`) | | 1–4 menu |
+| Level of detail | Graphics › [World Detail] Level of Detail | `lod` | `--lod near\|game` | `FFXILod` | fx 0 = the command line's, 1 near, 2 game |
+| Occlusion check | Graphics › [World Detail] Occlusion Check | | | | modern.cfg `occlusion`: 0 off, 2 exact (1 delayed, Android only) |
+
+## 8. Interface
+
+| Setting | Menu | CLI | App | Default / range |
+|---|---|---|---|---|
+| Nameplate shape | Interface › [Nameplates] Shape | `--nameplates fix\|off` | `FFXINameplates` | Fixed (4:3) / Stretched; modern.cfg `nameplates` |
+| Nameplate size | Interface › [Nameplates] Size | `--nameplate-scale s\|sxXsy` | `FFXINameplateScale` | 1 (0.5–2 menu, 0.25–4 CLI); modern.cfg `nameplate_scale` |
+| Hide Trust | Interface › [Menus: Content] Trust | | | Show |
+| Hide Mounts | Interface › [Menus: Content] Mounts | | | Show |
+| Hide Geomancy | Interface › [Menus: Content] Geomancy | | | Show |
+| Hide Master Levels | Interface › [Menus: Status Pages] Master Levels | | | Show |
+| Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
+| Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
+| Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+
+## 9. Textures & game data
+
+| Setting | CLI | App / Env | Notes |
+|---|---|---|---|
+| Texture packs | `--textures <dir>` (×8) | `FFXI_BUNDLED_TEXTURES` | default `<data dir>/textures`, then bundled `assets/textures` (font, slot bar) |
+| DAT overlays (XIPivot-style) | `--dats <dir>` (×8) | `FFXIDats` | first folder wins |
+| Custom server items | `--cexi off\|items\|full` | `FFXICexi` | CatsEyeXI-style ids |
+
+## 10. Addons
+
+| Setting | Where | Notes |
+|---|---|---|
+| Per-addon on/off | Advanced › Addons, `addons.cfg` | Ashita, Windower, xi |
+| Addons master switch | `FFXI_ADDONS` env | |
+| Addon test harness | `--addon-harness` | dev |
+
+## 11. Server & sign-in
+
+| Setting | CLI | App / Env |
+|---|---|---|
+| Server / lobby host | `--server` (`--lobby` old name) | `FFXIServer` |
+| Launcher session | `--session`, `--auth` | |
+| LandSandBoat sign-in | `--user`, `--pass`, `--otp`, `--login-token` | `FFXI_PASSWORD`, `FFXI_LSB_SESSION` |
+| Ports | `--authport` 54231, `--dataport` 54230, `--viewport` 54001 | |
+| Trust server cert | `--trust on\|off` | |
+| Loader version | `--loader-version a.b.c` | |
+
+## 12. Integrations
+
+| Setting | Where |
+|---|---|
+| Discord presence | `FFXI_DISCORD`, `FFXI_DISCORD_APP_ID`, `FFXI_DISCORD_NAME` |
+| In-process control (MCP) | `FFXI_CONTROL=1` |
+
+## 13. Install & paths
+
+| Setting | CLI | App / Env |
+|---|---|---|
+| Game folder | `--game` | `FFXIGameFolder` |
+| Host data folder | `--data-dir` | |
+| USER folder (settings, macros) | `--user-dir` | |
+| Cache folder | | `FFXI_CACHE_DIR` |
+| fx settings file | | `FFXI_FX_FILE` (default `fx.txt` in cache) |
+| Registry files | `--reg`, `--reg-overlay`, `--reg-final` | |
+
+## 14. Developer & diagnostics
+
+Not for players.
+
+| Area | Switches |
+|---|---|
+| Effects | `debug` (fx), `FFXI_FX_DEBUG` |
+| Rendering | `FFXI_DRAWLOG`, `FFXI_TEXLOG`, `FFXI_TEXDUMP`, `FFXI_PROBE`, `FFXI_ASYNC_READBACK`, `FFXI_UI_NATIVE`, `FFXI_FPS` |
+| GPU validation | `FFXI_VK_VALIDATION`, `FFXI_D3D12_DEBUG` |
+| World | `FFXI_LODLOG`, `FFXI_WATERLOG`, `FFXI_PRIMELOG` |
+| Files / net | `FFXI_DATS_TRACE`, `FFXI_NET_TRACE` |
+| Recompiler | `FFXI_RECOMP_TRACE`, `FFXI_RECOMP_MISSING` |
+| Profiling | `FFXI_PROFILE`, `FFXI_SAMPLE` |
+
+---
+
+## Not in a menu yet
+
+- The tuning keys above with no Menu entry (fog, rays, sun shadows, water): only `fx.txt` reaches
+  them. The plan is a tuning page linked from each group.
+- **Three draw-distance ranges**: CLI 0.5–20, menu 1–6 (world) / 1–4 (characters).
+- **`--aspect`** is described in the `host/host64.c` header comment but not parsed; it looks stale.
+
+## Menu tree
+
+```
+Config
+└── Advanced
+    ├── Display
+    │   ├── [Window] ........ Window Mode, Resolution
+    │   ├── [Scaling] ....... UI Scale, Interface Shape, Background Resolution
+    │   └── [Performance] ... Frame Rate, FPS Counter
+    ├── Graphics
+    │   ├── [Quality] ....... Anti-Aliasing, Texture Filtering, Anti-Shimmer, Sharpening
+    │   ├── [Color] ......... Color Grading, Saturation, Contrast
+    │   └── [World Detail] .. Draw Distance, Character Distance, Level of Detail, Occlusion Check
+    ├── Lighting
+    │   ├── Modern Effects, Per-Pixel Lighting, Bounce Light, Ray Tracing
+    │   ├── [Shadows] ....... Sun Shadows, Shadow Casters, Shadow Edges, Shadow Detail,
+    │   │                     Indoor Shadows, Character Shadows
+    │   └── [Ambient Occlusion] Strength, Quality, Radius
+    ├── Atmosphere
+    │   ├── [Fog] ........... Density
+    │   ├── [God Rays] ...... Strength
+    │   ├── [Bloom] ......... Strength, Threshold
+    │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam
+    ├── Interface
+    │   ├── [Nameplates] .... Shape, Size
+    │   ├── [Menus: Content]  Trust, Mounts, Geomancy
+    │   └── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    └── Addons .............. one row an installed addon (xi, Ashita, Windower)
+```
+
+Set before the game starts, so not in the game's menus: server and sign-in, game data (texture
+packs, DAT overlays, `--cexi`), integrations (Discord) and paths (sections 9, 11, 12 and 13), and
+the developer switches (section 14).

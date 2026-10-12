@@ -95,7 +95,7 @@ Every pattern in Vekien's doc matches our unpacked images, uniquely where it sho
             │ dinput reads ─▶ overlay blanking ─▶ game                                      │
             │                                                                               │
             │ f_ParseInput  ──wrap──▶ cmd router: host cmds → binds/aliases → addons → game │
-            │ f_WriteLine   ──wrap──▶ text_in / incoming text  (modify / block)             │
+            │ f_ChatAdd     ──wrap──▶ text_in / incoming text  (modify / block)             │
             │ f_decrypt/enc ──wrap──▶ packet pipeline: packet_in/out, chunk events, state   │
             │ Present       ──hook──▶ addon frame: tasks, d3d_present / prerender, ImGui,   │
             │                         overlay draw (text, prims, ImGui) via gfx.h           │
@@ -143,7 +143,8 @@ All run on the game thread with the guest lock held. Per-build addresses come fr
 | Hook | Kind | Use |
 |---|---|---|
 | `parse_input` (`int __cdecl (const char*, int mode)`) | wrap | Command routing (section 9), Ashita `command` and `text_out`, Windower `outgoing text`, `/shutdown` notice |
-| `write_line` (`void __cdecl (int mode, const char*)`) | wrap + called | Ashita `text_in`, Windower `incoming text` (both may rewrite text/mode or block); `add_to_chat` / `AddChatMessage` call it via `guest_call`, queued until the chat log global is non-null |
+| `write_line` (`void __cdecl (int mode, const char*)`) | wrap + called | `add_to_chat` / `AddChatMessage` call it via `guest_call`, queued until the chat log global is non-null; the game itself hardly calls it. Raises `text_in` only in a build without `chat_add` |
+| `chat_add` (the chat log's add-line, `bool __thiscall (const char*, uint8_t* mode_block, int, int, int)`, `ret 0x14`; the call at `write_line + 0x26`) | wrap | Ashita `text_in`, Windower `incoming text` for every line the chat log gets: chat, `/echo`, battle and system messages, the host's lines (both may rewrite text/mode or block; mode is `mode_block[0]`) |
 | `packet_decrypt` | wrap | After the original returns: incoming pipeline (section 10) |
 | `packet_encrypt` | wrap | Before the original runs: outgoing pipeline |
 | Present | existing `d3d8_set_present_hook` | Addon frame (section 11) |
@@ -300,7 +301,8 @@ written against the upstream APIs' documentation and source, not derived from Va
   widths, float, double, string, array), `alloc`/`free` (guest heap), `module(name)` base/size.
 - `xi.game` — entity, entity_count, party, player, target, inventory, key items, spells, cast bar,
   auto-follow, recasts; per-frame read cache.
-- `xi.chat` — `write(text, mode)`, `run(line, mode)`, input line get/set/open state.
+- `xi.chat` — `write(text, mode)`, `run(line, mode)`, input line get/set/open state, `game_lines()`
+  (whether `text_in` sees the game's own lines: a build with the `chat_add` wrap).
 - `xi.packets` — `inject_in(bytes)`, `inject_out(bytes)`, `last(dir, id)`.
 - `xi.res` — items, abilities, spells, statuses, key items, zones, jobs, strings, straight from the
   DATs (section 10.3).
