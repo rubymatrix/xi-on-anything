@@ -27,6 +27,9 @@ sign-in screen's Settings.
 Experimental: an [Android build](docs/android.md), tested on a Pixel Fold. Desktop defaults are
 unchanged.
 
+Experimental: a [browser build](docs/web.md) (WebAssembly and WebGPU) that you host for yourself from
+your own install; there is no public instance.
+
 ## What's better than the original
 
 - **A Modern page in the game's own Config menu**, next to Gameplay, Windows and the rest:
