@@ -2821,6 +2821,8 @@ void gfx_set_moghouse(int in) { g_moghouse = in; }
 /* the last frame the sun's shadows were drawn a quarter or more of a day's strength (scene_fx) */
 static uint64_t g_sun_shown;
 int gfx_sun_shadows_shown(void) { return g_sun_shown && g_serial - g_sun_shown <= 30; }
+/* the sun's shadows are on: the effects, a sun strength, and characters among the casters (as gfx_fx.c) */
+int gfx_sun_shadows_on(void) { return g_fxs.fx != 0.0f && g_fxs.sun > 0.0f && g_fxs.sun_casters != 2.0f; }
 float gfx_sun_prime(float* center) { (void)center; return 0.0f; } /* the zone out of view: Metal's only */
 
 float gfx_fx_get(const char* key)
