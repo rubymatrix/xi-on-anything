@@ -68,9 +68,11 @@
     window.addEventListener('focus', () => M._web_focus(1));
     document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
 
+    // the pointer in the game's pixels: its resolution can be under the window's (hud.js caps it)
     const pos = (e) => {
       const r = canvas.getBoundingClientRect();
-      return [(e.clientX - r.left) * dpr(), (e.clientY - r.top) * dpr()];
+      const [w, h] = M.viewSize || [r.width * dpr(), r.height * dpr()];
+      return [(e.clientX - r.left) * w / r.width, (e.clientY - r.top) * h / r.height];
     };
     canvas.addEventListener('mousemove', (e) => { const [x, y] = pos(e); M._web_mouse_move(x, y); });
     canvas.addEventListener('mousedown', (e) => {

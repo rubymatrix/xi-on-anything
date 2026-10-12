@@ -1,15 +1,31 @@
 // The page's view of the game: its size following the window's, and the fps gauge.
-//  - size: the canvas fills the window; the game's resolution is the canvas in device pixels, and the menus'
-//    is that over a UI scale picked from the window (at least the pixel ratio, so the interface keeps its
-//    size on a high-density screen; more on a very tall window, so it never shrinks below ~1200 lines).
-//    A resize reaches the game when the window has stopped moving for a moment (web_resize).
+//  - resolution: the window in device pixels, at most MAX_PIXELS of them (about 4K; #maxpx=<millions>
+//    changes it), so a large high-density window doesn't render 15 million pixels a frame.
+//  - the interface (the game's menu size, which its windows are laid out in): one interface pixel a CSS
+//    pixel, times the player's interface size (#ui=1.25 is a quarter bigger), as the native game is at
+//    100%. Never under MIN_UI (the game's layouts need 512 x 448; a smaller window gets a smaller interface,
+//    not a cut-off one) and never over MAX_UI_H lines (a very tall window doesn't make it tiny). A wide
+//    window's interface keeps the shape Config > Modern > Interface Shape gives it (host/modern.c).
+//  - a resize reaches the game once the window has stopped moving for a moment (web_resize); meanwhile the
+//    last frame is letterboxed in the window (the canvas's object-fit), not stretched.
 //  - the gauge: frames the render thread presented, the worst gap between two, twice a second.
 (function () {
+  const MIN_UI_W = 640, MIN_UI_H = 480, MAX_UI_H = 1200;
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const uiSize = Math.min(3, Math.max(0.5, Number(hash.get('ui')) || 1));
+  const MAX_PIXELS = Math.max(0.5, Number(hash.get('maxpx')) || 8.3) * 1e6;
+
   function sizes() {
     const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(320, Math.round(innerWidth * dpr)) & ~1, h = Math.max(240, Math.round(innerHeight * dpr)) & ~1;
-    const scale = Math.max(dpr, h / 1200);
-    return { w, h, mw: Math.round(w / scale) & ~1, mh: Math.round(h / scale) & ~1 };
+    let cw = innerWidth, ch = innerHeight;
+    if (!cw || !ch) cw = screen.availWidth || 1280, ch = screen.availHeight || 720; // a page opened hidden
+    let px = dpr;
+    if (cw * ch * dpr * dpr > MAX_PIXELS) px = Math.sqrt(MAX_PIXELS / (cw * ch));
+    const w = Math.max(320, Math.round(cw * px)) & ~1, h = Math.max(240, Math.round(ch * px)) & ~1;
+    let u = uiSize; // CSS pixels an interface pixel
+    if (ch / u > MAX_UI_H) u = ch / MAX_UI_H;
+    if (cw / u < MIN_UI_W || ch / u < MIN_UI_H) u = Math.min(cw / MIN_UI_W, ch / MIN_UI_H);
+    return { w, h, mw: Math.round(cw / u) & ~1, mh: Math.round(ch / u) & ~1 };
   }
 
   function follow(M) {
@@ -18,10 +34,16 @@
       const s = sizes();
       if (s.w === last.w && s.h === last.h && s.mw === last.mw && s.mh === last.mh) return;
       last = s;
+      M.viewSize = [s.w, s.h];
       M._web_resize(s.w, s.h, s.mw, s.mh);
     };
     window.addEventListener('resize', () => { clearTimeout(timer); timer = setTimeout(apply, 150); });
-    matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener?.('change', apply);
+    // the window moved to a screen of another density (or the page was zoomed): asked again each time,
+    // for the density it has now
+    const density = () => {
+      matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener('change', () => { apply(); density(); }, { once: true });
+    };
+    density();
   }
 
   function gauge(M) {

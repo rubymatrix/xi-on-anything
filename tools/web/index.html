@@ -7,7 +7,7 @@
 <style>
   :root { --bg: #0b0d12; --fg: #d8dbe2; --dim: #8a8f9c; --accent: #c9a24a; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
-  #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; }
+  #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; background: #000; object-fit: contain; }
   #status { position: fixed; top: 8px; left: 12px; color: var(--accent); text-shadow: 0 1px 2px #000; z-index: 2; }
   #log { position: fixed; left: 0; right: 0; bottom: 0; max-height: 30vh; margin: 0; padding: 8px 12px; z-index: 2;
          color: var(--dim); background: rgba(11, 13, 18, 0.75); font: 11px/1.35 ui-monospace, Menlo, monospace;
@@ -64,6 +64,9 @@ const args = ['--game', '/game', '--data-dir', '/xi-data', '--reg', '/app/ffxi.r
 let password = '';
 for (const k of ['server', 'user', 'pass', 'authport', 'dataport', 'viewport'])
   if (hash.get(k)) args.push('--' + k, hash.get(k));
+// the interface's shape on a wide window (#shape=16:9, 4:3 or off; Config > Modern > Interface Shape, which the
+// browser doesn't keep between visits yet)
+if (hash.get('shape')) args.push('--ui-aspect', hash.get('shape'));
 // every file of a build is asked for as name?v=<build> (tools/build_web.py fills it in), so a browser or a
 // proxy's cache can't pair a new page with an old script or wasm
 const XI_BUILD = '__XI_BUILD__';
