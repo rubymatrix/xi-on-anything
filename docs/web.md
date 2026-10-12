@@ -134,7 +134,7 @@ private: a request without a signature gets 403.
    `python3 tools/bucket.py check --bucket … --object <some object> --origin …` shows a signed read
    working and an unsigned one refused.
 
-In the page, **Download all game data** (top left) fills the browser's own storage with every file,
+In the page, **Download all game data** (under the gear at the top right) fills the browser's own storage with every file,
 small files first: minutes rather than hours from a bucket (the 55,000 small files took about a minute
 in testing). After that, zoning reads nothing over the network. The page also learns which files the game opens together, and fetches the rest of a set when
 its first file opens.
@@ -149,7 +149,7 @@ Add these after the token in the address, e.g. `#t=<token>&ui=1.25`.
 | `ui=1.25` | Interface size: 1.25 is a quarter bigger, 0.8 smaller (0.5 to 3). |
 | `shape=16:9` | The interface's shape on a wide window: `16:9`, `4:3`, or `off` (the whole window). As Config > Modern > Interface Shape. |
 | `maxpx=8.3` | The most pixels the game renders, in millions (default 8.3, about 4K). |
-| `fps=0`, `dl=0`, `nolog=1` | Hide the fps gauge, the downloads overlay, the log. |
+| `fps`, `dl`, `log`, `status` `=0` or `=1` | Hide or show the fps counter, the file downloads list, the log, the status line. By default the fps counter and status line are on and the log and downloads list off; the gear at the top right switches each, and the browser remembers it. The log turns itself on when an error is logged. |
 
 ## Window size and the interface
 
@@ -186,7 +186,7 @@ Checked in Chromium at 1280 x 720, 1920 x 1080, 800 x 600, 2560 x 720 (with and 
   address in the browser's address bar.
 - **`net: refused <address> (not the game server)`** in `webserve.py`'s output: the game server sent you to a host not in
   `--server`; add it.
-- **Black screen at 0 fps**: read the log under the game. A crash prints `thread crashed:` and its
+- **Black screen at 0 fps**: read the log under the game (it opens by itself on an error; or turn it on under the gear, or add `&log=1`). A crash prints `thread crashed:` and its
   stack there; WebGPU errors show up there too.
 - **Slow zoning**: the overlay at the top left lists each file read, how long it took and where from
   (`bucket`, `bucket, gzip`, `bucket, pack` or `server`). Use a bucket, or **Download all game data**.

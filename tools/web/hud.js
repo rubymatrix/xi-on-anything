@@ -28,8 +28,10 @@
     return { w, h, mw: Math.round(cw / u) & ~1, mh: Math.round(ch / u) & ~1 };
   }
 
+  // from the size the game started with (M.startSizes, index.html), not the window's now: it may have changed
+  // while the game loaded
   function follow(M) {
-    let timer = 0, last = sizes();
+    let timer = 0, last = M.startSizes || sizes();
     const apply = () => {
       const s = sizes();
       if (s.w === last.w && s.h === last.h && s.mw === last.mw && s.mh === last.mh) return;
@@ -44,13 +46,14 @@
       matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener('change', () => { apply(); density(); }, { once: true });
     };
     density();
+    apply();
   }
 
   function gauge(M) {
     const el = document.createElement('div');
     el.id = 'fps';
     el.title = 'Frames a second (the worst frame of the last half second). Click to hide.';
-    el.style.cssText = 'position:fixed;top:8px;right:10px;z-index:3;padding:3px 8px;border-radius:4px;' +
+    el.style.cssText = 'position:fixed;top:8px;right:40px;z-index:3;padding:3px 8px;border-radius:4px;' +
       'font:600 12px/1.3 ui-monospace,Menlo,monospace;background:rgba(0,0,0,.55);color:#9be59b;cursor:pointer;' +
       'user-select:none;pointer-events:auto';
     el.addEventListener('click', () => (el.style.opacity = el.style.opacity === '0.15' ? '1' : '0.15'));
@@ -82,13 +85,13 @@
     text.addEventListener('click', () => (el.style.opacity = el.style.opacity === '0.15' ? '1' : '0.15'));
     // the background download of every game file (dlcache.js), remembered for the next visit
     const bar = document.createElement('div');
-    bar.style.cssText = 'display:flex;gap:8px;align-items:center;white-space:nowrap';
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center';
     const btn = document.createElement('button');
     btn.style.cssText = 'font:600 11px ui-monospace,Menlo,monospace;padding:2px 8px;border-radius:4px;border:0;' +
       'background:#c9a54a;color:#111;cursor:pointer';
     const prog = document.createElement('span');
     bar.append(btn, prog);
-    el.append(text, bar);
+    el.append(text);
     document.body.appendChild(el);
     let pf = null, want = false;
     try { want = localStorage.getItem('xi.prefetch') === '1'; } catch (e) {}
@@ -136,7 +139,7 @@
             lines.push(`  ${r.k < 0 ? '✗' : '✓'} ${name(r.u)}  ${r.k > 0 ? mb(r.k) + ' MB ' : ''}${r.ms.toFixed(0)} ms${r.from ? ' · ' + r.from : ''}`);
       }
       text.textContent = lines.join('\n');
-      text.style.display = lines.length ? '' : 'none';
+      el.style.display = lines.length ? '' : 'none';
       if (pf && pf.finished) {
         btn.style.display = 'none';
         prog.textContent = `all game data in this browser (${gb(pf.bytes)} GB)` + (pf.failed ? `, ${pf.failed} files failed` : '');
@@ -152,7 +155,81 @@
     }
     setInterval(draw, 250);
     draw();
+    return bar;
   }
 
-  window.xiHud = { sizes, follow, gauge, downloads };
+  // --- what the page shows over the game ----------------------------------------------------------------------
+  // The fps gauge, the file downloads, the log and the status line, each on or off: a gear at the top right
+  // opens the switches (and the game data download), remembered in this browser. By default the fps gauge and
+  // the status line are on, the log and the file downloads off (the log comes back on its own for an error:
+  // index.html). The address's options win: #fps, #dl, #log, #status =0 or =1 (#nolog=1 too).
+  const OVERLAYS = [['fps', 'FPS counter'], ['dl', 'File downloads'], ['log', 'Log'], ['status', 'Status line']];
+  const DEFAULTS = { fps: true, dl: false, log: false, status: true };
+  const shown = (() => {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('xi.overlays') || '{}'); } catch (e) {}
+    const out = {};
+    for (const [k] of OVERLAYS) {
+      const q = hash.get(k), no = k === 'log' ? hash.get('nolog') : null;
+      out[k] = q != null ? q !== '0' : no != null ? no === '0' : typeof saved[k] === 'boolean' ? saved[k] : DEFAULTS[k];
+    }
+    return out;
+  })();
+  const applyShown = () => { for (const [k] of OVERLAYS) document.body.classList.toggle('hide-' + k, !shown[k]); };
+  if (document.body) applyShown();
+  else document.addEventListener('DOMContentLoaded', applyShown);
+
+  function overlays(bar) {
+    const gear = document.createElement('button');
+    gear.id = 'xi-gear';
+    gear.title = 'Overlays and game data';
+    gear.textContent = '\u2699';
+    gear.style.cssText = 'position:fixed;top:6px;right:8px;z-index:5;width:24px;height:24px;padding:0;border:0;border-radius:4px;' +
+      'font:16px/24px system-ui,sans-serif;background:rgba(0,0,0,.55);color:#cfd8e3;cursor:pointer;opacity:.45';
+    gear.addEventListener('mouseenter', () => (gear.style.opacity = '1'));
+    gear.addEventListener('mouseleave', () => (gear.style.opacity = isOpen() ? '1' : '.45'));
+    const panel = document.createElement('div');
+    panel.style.cssText = 'position:fixed;top:36px;right:8px;z-index:5;width:250px;padding:10px 12px;border-radius:6px;' +
+      'font:12px/1.4 system-ui,sans-serif;background:rgba(14,17,24,.94);color:#d8dbe2;border:1px solid #2c3242;' +
+      'box-shadow:0 6px 24px rgba(0,0,0,.5);display:none;gap:6px';
+    const isOpen = () => panel.style.display !== 'none';
+    const head = (t) => {
+      const h = document.createElement('div');
+      h.textContent = t;
+      h.style.cssText = 'font-weight:600;color:#c9a24a';
+      return h;
+    };
+    panel.append(head('Show over the game'));
+    for (const [k, label] of OVERLAYS) {
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;cursor:pointer';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = shown[k];
+      box.addEventListener('change', () => {
+        shown[k] = box.checked;
+        applyShown();
+        try { localStorage.setItem('xi.overlays', JSON.stringify(shown)); } catch (e) {}
+      });
+      row.append(box, label);
+      panel.append(row);
+    }
+    if (bar) {
+      panel.append(head('Game data'));
+      bar.style.font = '11px/1.4 ui-monospace,Menlo,monospace';
+      panel.append(bar);
+    }
+    const toggle = (open) => {
+      panel.style.display = open ? 'grid' : 'none';
+      gear.style.opacity = open ? '1' : '.45';
+    };
+    gear.addEventListener('click', (e) => { e.stopPropagation(); toggle(!isOpen()); });
+    document.addEventListener('mousedown', (e) => { if (isOpen() && !panel.contains(e.target) && e.target !== gear) toggle(false); });
+    // keys typed here are the panel's, not the game's
+    panel.addEventListener('keydown', (e) => e.stopPropagation());
+    panel.addEventListener('keyup', (e) => e.stopPropagation());
+    document.body.append(gear, panel);
+  }
+
+  window.xiHud = { sizes, follow, gauge, downloads, overlays };
 })();

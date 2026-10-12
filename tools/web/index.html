@@ -12,7 +12,7 @@
   #log { position: fixed; left: 0; right: 0; bottom: 0; max-height: 30vh; margin: 0; padding: 8px 12px; z-index: 2;
          color: var(--dim); background: rgba(11, 13, 18, 0.75); font: 11px/1.35 ui-monospace, Menlo, monospace;
          white-space: pre-wrap; word-break: break-all; overflow: auto; }
-  body.nolog #log { display: none; }
+  body.hide-log #log, body.hide-status #status, body.hide-fps #fps, body.hide-dl #dl { display: none !important; }
   #signin { position: fixed; inset: 0; z-index: 4; display: none; align-items: center; justify-content: center;
             background: radial-gradient(ellipse at center, #1a1f2b 0%, var(--bg) 70%); padding: 16px; }
   #signin form { width: min(360px, 100%); display: grid; gap: 10px; padding: 24px; border-radius: 10px;
@@ -45,7 +45,7 @@
 <pre id="log"></pre>
 <script>
 // The page (docs/web-port-plan.md): the game drawn into #canvas by its render thread (WebGPU), its log below. The
-// hash carries the server's token (#t=...), and options: &profile=1 &nolog=1 &fps=0. The sign-in is a form: the
+// hash carries the server's token (#t=...), and options: &profile=1, and the overlays' (hud.js: &fps &dl &log &status =0 or =1). The sign-in is a form: the
 // password goes to the game in its environment (the TLS to the server runs in the game), never in the address.
 // Development (the static test servers): &server=<ip>&user=..&pass=..&authport=..&dataport=..&viewport=..&enter=<s>
 const hash = new URLSearchParams(location.hash.slice(1));
@@ -54,11 +54,12 @@ new BroadcastChannel('xi-err').onmessage = (e) => log('thread crashed: ' + e.dat
 const lines = [];
 function log(text) {
   lines.push(text);
+  // an error shows the log, though it is off (hud.js)
+  if (/thread crashed|^error|Aborted|RuntimeError|FATAL/i.test(text)) document.body.classList.remove('hide-log');
   if (lines.length > 2000) lines.splice(0, 500);
   logEl.textContent = lines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
 }
-if (hash.get('nolog')) document.body.classList.add('nolog');
 if (!crossOriginIsolated) statusEl.textContent = 'This page needs cross-origin isolation (open it from tools/webserve.py).';
 const args = ['--game', '/game', '--data-dir', '/xi-data', '--reg', '/app/ffxi.reg', '--reg-final', '/xi-data/settings.reg'];
 let password = '';
@@ -102,6 +103,7 @@ var Module = {
       '"0001"=' + hex(w) + '\r\n"0002"=' + hex(h) + '\r\n"0003"=' + hex(4096) + '\r\n"0004"=' + hex(4096) + '\r\n' +
       '"0034"=' + hex(1) + '\r\n"0037"=' + hex(mw) + '\r\n"0038"=' + hex(mh) + '\r\n');
     Module.viewSize = [w, h];
+    Module.startSizes = { w, h, mw, mh };
   }],
   onRuntimeInitialized() {
     statusEl.textContent = 'Running';
@@ -111,8 +113,9 @@ var Module = {
     Module._web_focus(1);
     xiInput.start(Module, document.getElementById('canvas'));
     xiHud.follow(Module);
-    if (hash.get('fps') !== '0') xiHud.gauge(Module);
-    if (hash.get('dl') !== '0') xiHud.downloads(Module.fileCache);
+    // the overlays (hud.js): each made, and shown or not as the gear's switches say
+    xiHud.gauge(Module);
+    xiHud.overlays(xiHud.downloads(Module.fileCache));
     // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay.py does)
     if (hash.get('enter')) {
       const until = Date.now() + Number(hash.get('enter')) * 1000;
