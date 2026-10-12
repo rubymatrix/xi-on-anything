@@ -377,12 +377,13 @@ static void nameplate_scale(Guest* g)
     wrf32(g->esp + 0x50, rdf32(g->esp + 0x50) * ky);
 }
 
+/* The hook is in whatever the settings: Config > Advanced > Interface changes them as the game runs */
 static void setup_nameplates(void)
 {
     int wanted = g_nameplate_fix || g_nameplate_sx != 1.0f || g_nameplate_sy != 1.0f;
 #ifdef FFXI_HOOK_NAMEPLATE_SCALE
-    if (wanted)
-        rt_hook_nameplate_scale = nameplate_scale;
+    (void)wanted;
+    rt_hook_nameplate_scale = nameplate_scale;
     rt_log("[recomp] nameplates: %s, scale %gx%g\n", g_nameplate_fix ? "4:3 shape" : "as the game draws them",
         g_nameplate_sx, g_nameplate_sy);
 #else
@@ -1263,7 +1264,8 @@ int main(int argc, char** argv)
     geometry_hooks_init();
     d3d8_setup();
     d3d8_set_present_hook(present_hook);
-    ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL };
+    ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
+        &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given };
     modern_init(&ms);
     setup_nameplates();
     setup_water();
