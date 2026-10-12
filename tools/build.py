@@ -362,6 +362,7 @@ def host64_headless(env):
     sdl_inc, sdl_lib = sdl3()
     objs += compile_stale(env, PORTABLE + HOST_BASE + ['runtime\\portable\\gfx_null.c'], 'build\\headless', sdl_inc + HOST_INCLUDES,
                           CFLAGS64)
+    objs += addon_objects(env, CFLAGS64, 'build\\headless')
     libs = [lib for lib in HOST_LIBS if lib not in GFX_LIBS]
     objs.append(host_resources(env, 'build\\headless'))
     run(['link', '/nologo', '/OUT:build\\host64-headless.exe', '/MACHINE:X64', sdl_lib] + libs + objs, env)
