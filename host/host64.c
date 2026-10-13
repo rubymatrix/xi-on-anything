@@ -112,6 +112,7 @@ extern const RtModule rt_module_ffxi; /* recomp.py --module ffxi */
 
 #define FFXI_BASE 0x0F000000u /* where FFXi.dll goes: free, below FFXiMain */
 #define DEFAULT_GAME_SERVER 0x7F000001u /* 127.0.0.1: a server on this machine */
+#define XI_APP_ID "xi-on-anything"      /* Linux: the windows' app id, its .desktop file's name */
 
 /* FFXiEntry {989D790D-6236-11D4-80E9-00105A81E890}, IFFXiEntry {989D790C-...} */
 static const uint8_t CLSID_FFXiEntry[16] = { 0x0D, 0x79, 0x9D, 0x98, 0x36, 0x62, 0xD4, 0x11,
@@ -797,6 +798,12 @@ int main(int argc, char** argv)
 #ifndef _WIN32
     /* a write to a closed socket (the game's, the sign-in's TLS, Discord's) is an error, not a signal */
     signal(SIGPIPE, SIG_IGN);
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    /* the Wayland app id (X11 class) of the sign-in's and the game's windows, before SDL starts:
+     * xi-on-anything.desktop (install.sh, build_posix.py desktop) names its icon; without it docks
+     * and switchers see SDL's default, the executable's name, and guess */
+    SDL_SetAppMetadata("FINAL FANTASY XI", NULL, XI_APP_ID);
 #endif
 #ifdef __APPLE__
     /* started from Finder or the Dock (an app bundle, no terminal): the log goes to host64.log
