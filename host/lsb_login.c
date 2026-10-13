@@ -19,9 +19,10 @@
  *      builds its character records from FFXiMain's own table.
  *   3. The lobby (TCP 54001 and 54230): every lobby command FFXiMain sends carries the session
  *      hash at +12, where the server looks for it (ws2_set_lobby_session).
- *   4. gamecore: there is no account-service session, so the session value is zero, and LSB's
- *      zone key is derived from exactly that (the 0xA2 key is MD5 input the client also computes),
- *      so our gamecore reports 16 zero bytes. Its command line carries the view port.
+ *   4. gamecore: the session value is what the profile service would have answered the game's
+ *      status change with, md5(session hash); the game starts its zone key with it, and since LSB
+ *      #11736 (2026-10-10) the map server does too. Servers before that key the zone with the
+ *      loader's 0xA2 key, so that sends the same 16 bytes. Its command line carries the view port.
  *   5. The game's lobby host name resolves to the server (host64's --server). */
 #include <stdio.h>
 #include <ctype.h>
@@ -536,12 +537,68 @@ static int json_str(const char* j, const char* key, char* out, size_t n)
     return 1;
 }
 
+/* --- the session key value ------------------------------------------------------------------------ */
+/* MD5 (RFC 1321), for the key value: LSB's profile service hands the game md5(session hash) as its
+ * status answer's random value, and the zone key starts with those 16 bytes (src/profile/data/accounts.cpp
+ * keyValue). Here, not mbedtls: the Windows build signs in over SChannel. */
+static void md5(const uint8_t* msg, size_t len, uint8_t out[16])
+{
+    static const uint32_t K[64] = {
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    };
+    static const uint8_t R[16] = { 7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21 };
+    uint32_t h[4] = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 };
+    size_t total = (len + 8) / 64 * 64 + 64;
+    for (size_t off = 0; off < total; off += 64)
+    {
+        uint8_t block[64];
+        for (size_t i = 0; i < 64; ++i)
+        {
+            size_t at = off + i;
+            block[i] = at < len ? msg[at] : at == len ? 0x80 : 0;
+        }
+        if (off + 64 == total)
+            for (int i = 0; i < 8; ++i)
+                block[56 + i] = (uint8_t)((uint64_t)len * 8 >> (8 * i));
+        uint32_t w[16], a = h[0], b = h[1], c = h[2], d = h[3];
+        for (int i = 0; i < 16; ++i)
+            w[i] = (uint32_t)block[4 * i] | (uint32_t)block[4 * i + 1] << 8 | (uint32_t)block[4 * i + 2] << 16 | (uint32_t)block[4 * i + 3] << 24;
+        for (int i = 0; i < 64; ++i)
+        {
+            uint32_t f;
+            int g;
+            if (i < 16)
+                f = (b & c) | (~b & d), g = i;
+            else if (i < 32)
+                f = (d & b) | (~d & c), g = (5 * i + 1) & 15;
+            else if (i < 48)
+                f = b ^ c ^ d, g = (3 * i + 5) & 15;
+            else
+                f = c ^ (b | ~d), g = (7 * i) & 15;
+            uint32_t t = d, x = a + f + K[i] + w[g];
+            int r = R[(i >> 4) * 4 + (i & 3)];
+            d = c, c = b, b = b + (x << r | x >> (32 - r)), a = t;
+        }
+        h[0] += a, h[1] += b, h[2] += c, h[3] += d;
+    }
+    for (int i = 0; i < 16; ++i)
+        out[i] = (uint8_t)(h[i / 4] >> (8 * (i % 4)));
+}
+
 /* --- the login data connection --------------------------------------------------------------------- */
 typedef struct DataConn
 {
     sock_t s;
     uint32_t account, server;
     uint8_t hash[16];
+    uint8_t key_value[16]; /* md5(hash): gamecore's session value */
 } DataConn;
 
 static DataConn g_data;
@@ -570,8 +627,10 @@ static void data_thread(void* arg)
             memcpy(out + 12, d->hash, 16);
             break;
         case 0x02:
-        case 0x15: /* the key: the constant a zero session value gives */
+        case 0x15: /* the key: the session value (servers before LSB #11736 key the zone with it), and the
+                    * counter's constant; newer servers take both from the profile hash and the lobby */
             out[0] = 0xA2;
+            memcpy(out + 1, d->key_value, 16);
             out[17] = 0x58, out[18] = 0xE0, out[19] = 0x5D, out[20] = 0xAD;
             break;
         default: /* 0x03 the character list, and anything else: no answer */
@@ -938,6 +997,7 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
         return 0;
     g_data.account = (uint32_t)account, g_data.server = l->server;
     memcpy(g_data.hash, hash, 16);
+    md5(hash, 16, g_data.key_value);
     uint8_t first[28] = { 0xFE };
     memcpy(first + 12, hash, 16);
     if (send(g_data.s, (const char*)first, sizeof first, 0) <= 0 || !plat_thread_start(data_thread, &g_data))
@@ -948,8 +1008,7 @@ int lsb_login(const LsbLogin* l, char* err, size_t errn)
     }
 
     ws2_set_lobby_session(hash, l->data_port, l->view_port);
-    static const uint8_t zero[16] = { 0 };
-    gamecore_set_session(zero);
+    gamecore_set_session(g_data.key_value);
     char cmd[64];
     snprintf(cmd, sizeof cmd, " /game eAZcFcB -net 3 -port %u", l->view_port);
     gamecore_set_cmdline(cmd);
