@@ -1895,6 +1895,56 @@ static void IDirect3DDevice8_ValidateDevice(Guest* g)
     RET(D3D_OK, 2);
 }
 
+/* Palettes: 256 PALETTEENTRYs (red, green, blue, flags bytes) each, kept by number and given back. Nothing
+ * draws with them: CheckDeviceFormat offers no P8 textures, so the game converts its paletted images itself;
+ * it still sets palettes (the character creation screen does). */
+#define MAX_PALETTES 4096u
+static uint8_t (*g_palettes)[256 * 4];
+static uint32_t g_npalettes, g_cur_palette = 0xffffu;
+
+static void IDirect3DDevice8_SetPaletteEntries(Guest* g)
+{
+    uint32_t n = ARG(1);
+    if (n >= MAX_PALETTES || !ARG(2))
+        RET(D3DERR_INVALIDCALL, 3);
+    if (n >= g_npalettes)
+    {
+        uint32_t want = n + 1 > 16 ? n + 1 : 16;
+        uint8_t(*p)[256 * 4] = realloc(g_palettes, (size_t)want * sizeof *g_palettes);
+        if (!p)
+            RET(D3DERR_INVALIDCALL, 3);
+        memset(p + g_npalettes, 0, (size_t)(want - g_npalettes) * sizeof *p);
+        g_palettes = p, g_npalettes = want;
+    }
+    memcpy(g_palettes[n], GUEST_PTR(ARG(2)), sizeof g_palettes[n]);
+    RET(D3D_OK, 3);
+}
+
+static void IDirect3DDevice8_GetPaletteEntries(Guest* g)
+{
+    uint32_t n = ARG(1);
+    if (n >= g_npalettes || !ARG(2))
+        RET(D3DERR_INVALIDCALL, 3);
+    memcpy(GUEST_PTR(ARG(2)), g_palettes[n], sizeof g_palettes[n]);
+    RET(D3D_OK, 3);
+}
+
+static void IDirect3DDevice8_SetCurrentTexturePalette(Guest* g)
+{
+    if (ARG(1) >= g_npalettes)
+        RET(D3DERR_INVALIDCALL, 2);
+    g_cur_palette = ARG(1);
+    RET(D3D_OK, 2);
+}
+
+static void IDirect3DDevice8_GetCurrentTexturePalette(Guest* g)
+{
+    if (!ARG(1))
+        RET(D3DERR_INVALIDCALL, 2);
+    wr32(ARG(1), g_cur_palette);
+    RET(D3D_OK, 2);
+}
+
 /* --- IDirect3DDevice8: drawing ----------------------------------------------------------------------------- */
 static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size, uint32_t up_data,
     uint32_t up_stride);
@@ -4220,6 +4270,10 @@ static const ShimDef D3D8[] = {
     D(IDirect3DDevice8, GetTextureStageState),
     D(IDirect3DDevice8, SetTextureStageState),
     D(IDirect3DDevice8, ValidateDevice),
+    D(IDirect3DDevice8, SetPaletteEntries),
+    D(IDirect3DDevice8, GetPaletteEntries),
+    D(IDirect3DDevice8, SetCurrentTexturePalette),
+    D(IDirect3DDevice8, GetCurrentTexturePalette),
     D(IDirect3DDevice8, DrawPrimitive),
     D(IDirect3DDevice8, DrawIndexedPrimitive),
     D(IDirect3DDevice8, DrawPrimitiveUP),
