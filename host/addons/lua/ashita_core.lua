@@ -342,8 +342,9 @@ CHAT.AddChatMessage = CHAT.Write
 function CHAT:ParseAutoTranslate(msg, use_brackets)
     msg = tostring(msg or '')
     return (msg:gsub('\xFD(.)(.)(.)(.)\xFD', function(k, l, b2, b3)
-        local s = xi.res.auto_translate(k:byte(), l:byte(), b2:byte(), b3:byte())
-        if not s then return nil end
+        -- one we cannot read as a ?, not its raw bytes: addons that split lines on control bytes
+        -- (timestamp, on 07 and 0A) would cut the code in two
+        local s = xi.res.auto_translate(k:byte(), l:byte(), b2:byte(), b3:byte()) or '?'
         if use_brackets then return '\xEF\x27' .. s .. '\xEF\x28' end
         return s
     end))
