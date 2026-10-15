@@ -67,7 +67,8 @@ char* res_utf8_dup(const char* in, int flags);
 /* One Shift-JIS double-byte character to its Unicode code point (0 if unmapped). */
 uint32_t res_sjis_char(uint8_t lead, uint8_t trail);
 /* An auto-translate phrase by its code bytes (FD <kind> <lang> <b2> <b3> FD, give the middle four),
- * raw game text with its @-references resolved; NULL if unknown. */
+ * raw game text with its @-references resolved: the phrase list's (kind 02), an item's name (07, 09,
+ * 0A) or a key item's (13, 15, 16). NULL if unknown. */
 const char* res_auto_translate(uint8_t kind, uint8_t lang, uint8_t b2, uint8_t b3);
 
 /* --- string tables (Ashita's names: "zones.names", "buffs.names", "keyitems.names", ...) ------ */
