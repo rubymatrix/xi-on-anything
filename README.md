@@ -234,6 +234,10 @@ docker run --rm -v "$PWD":/src -v "<FINAL FANTASY XI>":/game:ro -w /src xi-linux
     # FFXI_VK_VALIDATION=1: the Khronos validation layer
 ```
 
+`python3 tools/build_posix.py desktop --game <FINAL FANTASY XI>` then puts `build/host64` in the
+applications menu (`~/.local/share/applications/xi-on-anything.desktop`, named for host64's app id),
+so docks and window switchers show the game's icon for its windows.
+
 The kit the launcher builds the Steam Deck's client from is `tools/linux/kit.sh` (zig, static SDL3
 and glslang; CI publishes it as the `kit-linux` pre-release): everything that is not the game,
 prebuilt, so the player's machine needs only zig and python3 to make `host64` from their files

@@ -355,7 +355,7 @@ static int l_spell_ids(lua_State* L)
     int k = 0;
     lua_newtable(L);
     for (uint32_t i = 0; i < n; ++i)
-        if (res_spell(i))
+        if (res_spell(i) && !res_unnamed(res_spell(i)->name)) /* the table's real entries */
         {
             lua_pushnumber(L, i);
             lua_rawseti(L, -2, ++k);
@@ -387,7 +387,7 @@ static int l_ability_ids(lua_State* L)
     int k = 0;
     lua_newtable(L);
     for (uint32_t i = 0; i < n; ++i)
-        if (res_ability(i))
+        if (res_ability(i) && !res_unnamed(res_ability(i)->name)) /* the table's real entries */
         {
             lua_pushnumber(L, i);
             lua_rawseti(L, -2, ++k);
