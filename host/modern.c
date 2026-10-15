@@ -223,6 +223,9 @@ static List g_res = { "@res" }, g_scale = { "@menu" };
 static char g_settings_reg[1100];
 static int g_win_w, g_win_h, g_bg, g_menu_w, g_menu_h, g_mode; /* as the settings file has them; g_mode 0034 */
 static int g_display_live; /* the window's mode or size changed: display_apply, between frames */
+/* the window's size as the compositor keeps it when that is not the one chosen (a tiling one, or one
+ * that refused it: user32_resize_hook), for this run only; 0 when it is the one chosen */
+static int g_now_w, g_now_h;
 
 static List* list_of(const char* key) { return !strcmp(key, "@res") ? &g_res : !strcmp(key, "@menu") ? &g_scale : NULL; }
 
@@ -250,12 +253,14 @@ static int list_at(const List* l)
     return best;
 }
 
+/* the menus' scale as it is: a step of its list */
+static float scale_now(void) { return g_scale.n ? g_scale.v[list_at(&g_scale)] : 1.0f; }
+
 static void list_set(List* l, int i)
 {
     if (i < 0 || i >= l->n)
         return;
-    /* the scale as it is (a step of its list), before the window changes it */
-    float scale = g_scale.n ? g_scale.v[list_at(&g_scale)] : 1.0f;
+    float scale = scale_now(); /* before the window changes it */
     if (l == &g_res)
         g_win_w = l->w[i], g_win_h = l->h[i];
     else
@@ -303,7 +308,8 @@ static void set(const Row* r, float v)
             g_bg = (int)v;
         else
             g_mode = (int)v;
-        g_display_live |= l || !strcmp(r->key, "@mode"); /* at once (display_apply) */
+        if (l || !strcmp(r->key, "@mode"))
+            g_display_live = 1, g_now_w = 0; /* at once (display_apply), the size chosen asked again */
         /* written at once: a window closed other than by its close (the lobby's) still keeps it */
         save_display();
     }
@@ -2572,14 +2578,20 @@ static void menu_apply(int mw, int mh)
  * follows. What its size decides at its start - the menu target's - stays until it starts again. */
 static void display_apply(void)
 {
-    if (!g_display_live)
+    uint32_t hwnd = g_display_live ? d3d8_window() : 0;
+    if (!hwnd) /* nothing changed, or no device yet: kept for when there is one */
         return;
     g_display_live = 0;
-    uint32_t hwnd = d3d8_window();
-    if (!hwnd || !FFXI_MODERN)
+    if (!FFXI_MODERN)
         return;
-    int w = g_win_w, h = g_win_h;
-    user32_set_window(hwnd, g_mode, w, h);
+    int w = g_win_w, h = g_win_h, mw = g_menu_w, mh = g_menu_h;
+    if (g_now_w) /* the size the window has already: the game drawn at it, the menus at the scale chosen */
+    {
+        w = g_now_w, h = g_now_h;
+        menu_size(w, h, scale_now(), &mw, &mh);
+    }
+    else
+        user32_set_window(hwnd, g_mode, w, h);
     if (!d3d8_resize((uint32_t)w, (uint32_t)h))
         return;
     wr32(DISP_WIN_W, (uint32_t)w), wr32(DISP_WIN_H, (uint32_t)h), wr32(DISP_MODE, (uint32_t)g_mode);
@@ -2596,8 +2608,18 @@ static void display_apply(void)
         wr16(scene + 0x10, (uint16_t)w), wr16(scene + 0x12, (uint16_t)h);
     if (dev)
         wr32(dev + 0xc, (uint32_t)w), wr32(dev + 0x10, (uint32_t)h), wr32(dev + 0x28, g_mode != 0);
-    menu_apply(g_menu_w, g_menu_h);
-    fprintf(stderr, "[modern] display now: mode %d, %dx%d, menus %dx%d\n", g_mode, w, h, g_menu_w, g_menu_h);
+    menu_apply(mw, mh);
+    fprintf(stderr, "[modern] display now: mode %d, %dx%d, menus %dx%d%s\n", g_mode, w, h, mw, mh,
+        g_now_w ? " (the window's size as the compositor keeps it)" : "");
+}
+
+/* user32_resize_hook: the window at a size the compositor chose, not the one chosen here - the game
+ * drawn at it from the next frame, rather than its picture stretched onto it */
+static void window_resized(uint32_t hwnd, int w, int h)
+{
+    uint32_t dev = d3d8_window();
+    if (!dev || hwnd == dev) /* before the device: its window, made at the size the compositor keeps */
+        g_now_w = w, g_now_h = h, g_display_live = 1;
 }
 
 /* The game's own character shadows, Config > Shadows (option 58: 0 Normal, the blob under each
@@ -2681,6 +2703,7 @@ void modern_init(const ModernSetup* setup)
 {
     g_setup = *setup;
     d3d8_set_after_present(display_apply);
+    user32_resize_hook = window_resized;
     SDL_strlcpy(g_game, setup->game ? setup->game : "", sizeof g_game);
     if (setup->data_dir)
         SDL_strlcpy(g_data_dir, setup->data_dir, sizeof g_data_dir);

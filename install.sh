@@ -121,16 +121,38 @@ linux() {
         launch="APPIMAGE_EXTRACT_AND_RUN=1 %command%"
     fi
 
-    mkdir -p "$HOME/.local/share/applications"
-    cat > "$HOME/.local/share/applications/xi-on-anything.desktop" <<DESKTOP
+    # the icon, for the menu and for the game's windows: their app id is xi-on-anything (host64.c),
+    # this entry's name, so docks and switchers find it here. Icon= is its path, not a theme name:
+    # a shell that indexed the icon themes at login would not find a theme icon installed since
+    # (fetched beside it and moved over it, so a cut download leaves the one before)
+    local data="${XDG_DATA_HOME:-$HOME/.local/share}"
+    local icon="$data/icons/xi-on-anything.png" icon_line=""
+    mkdir -p "$data/icons"
+    if curl -fsSL -o "$icon.tmp" "https://raw.githubusercontent.com/$repo/main/assets/icon.png"; then
+        mv -f "$icon.tmp" "$icon"
+    else
+        rm -f "$icon.tmp"
+    fi
+    if [ -s "$icon" ]; then
+        icon_line="Icon=$icon"
+    fi
+
+    # written beside it and moved over it: shells watch the folder, which an edit in place does not
+    # change, and would keep showing an update's entry as they first read it
+    local entry="$data/applications/xi-on-anything.desktop"
+    mkdir -p "$data/applications"
+    cat > "$entry.tmp" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=XI on Anything
 Comment=FINAL FANTASY XI, recompiled for this machine
 Exec=env ${launch:+APPIMAGE_EXTRACT_AND_RUN=1 }"$image"
+${icon_line}
+StartupWMClass=xi-on-anything
 Categories=Game;
 Terminal=false
 DESKTOP
+    mv -f "$entry.tmp" "$entry"
 
     local steam=""
     for d in "$HOME/.steam/steam" "$HOME/.local/share/Steam"; do

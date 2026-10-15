@@ -19,6 +19,10 @@
         its Info.plist (host/appdefaults.h), so it starts from Finder with no command line. The values
         go into the built app only: nothing names a server in the source.
 
+  python3 tools/build_posix.py desktop --game <folder> [--server name]
+        (Linux) build/host64 in the applications menu: xi-on-anything.desktop and its icon in
+        ~/.local/share, named for host64's app id, so docks and window switchers show its icon.
+
   python3 tools/build_posix.py kit --out <dir>     (Linux) the kit: every library and every source that
         does not name a game build's addresses (build.h), built into static archives, and kit.json.
         tools/linux/kit.sh makes it with zig for the Steam Deck and other x86_64 Linux.
@@ -352,6 +356,50 @@ def vfstest():
     run(['build/vfs_test'])
 
 
+DESKTOP_ID = 'xi-on-anything'  # host64's app id on Linux (host64.c XI_APP_ID)
+DESKTOP_MARK = 'X-XI-Source-Build=true'  # an entry this wrote, not the launcher's (install.sh)
+
+
+def desktop_quote(arg):
+    """One Exec= argument, quoted as the Desktop Entry spec asks: escaped inside its quotes, then
+    every backslash doubled, as the value is unescaped as a string before it is split."""
+    arg = arg.replace('%', '%%')
+    if not any(c in arg for c in ' \t\n"\'\\><~|&;$*?#()`'):
+        return arg
+    return '"%s"' % ''.join('\\' + c if c in '"`$\\' else c for c in arg).replace('\\', '\\\\')
+
+
+def desktop(game, server):
+    """(Linux) build/host64 in the applications menu, as xi-on-anything.desktop with the game's
+    icon: the name of host64's app id, so docks and window switchers show the icon for its windows.
+    Icon= is the file's path, not a theme name: shells that index icon themes once at login
+    (Omarchy's switcher) would show nothing for a theme icon installed since."""
+    if sys.platform == 'darwin':
+        raise SystemExit('the desktop entry is for Linux (macOS: the app target)')
+    exe = os.path.join(ROOT, 'build', 'host64')
+    if not os.path.exists(exe):
+        raise SystemExit('no build/host64: build it first (host64 --game <folder>)')
+    data = os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share')
+    entry = os.path.join(data, 'applications', DESKTOP_ID + '.desktop')
+    if os.path.exists(entry):
+        with open(entry, errors='replace') as f:
+            if DESKTOP_MARK not in f.read():
+                raise SystemExit('%s is the launcher\'s (install.sh): left as it is' % entry)
+    icon = os.path.join(data, 'icons', DESKTOP_ID + '.png')
+    os.makedirs(os.path.dirname(icon), exist_ok=True)
+    shutil.copyfile(os.path.join(ROOT, 'assets', 'icon.png'), icon)
+    cmd = [exe, '--game', game] + (['--server', server] if server else [])
+    os.makedirs(os.path.dirname(entry), exist_ok=True)
+    # written beside it and renamed over it: shells watch the folder, which an edit in place does not
+    # change, and would keep showing the entry as they first read it
+    with open(entry + '.tmp', 'w') as f:
+        f.write('[Desktop Entry]\nType=Application\nName=%s\nComment=FINAL FANTASY XI, built from %s\n'
+                'Exec=%s\nIcon=%s\nStartupWMClass=%s\nCategories=Game;\nTerminal=false\n%s\n'
+                % (APP_NAME, ROOT, ' '.join(desktop_quote(a) for a in cmd), icon, DESKTOP_ID, DESKTOP_MARK))
+    os.replace(entry + '.tmp', entry)
+    print('installed %s and %s' % (entry, icon))
+
+
 def datuitest(game):
     """host/datui.c against the install's DATs; renders the windows and lobby into build/datui/."""
     os.makedirs(os.path.join(ROOT, 'build', 'datui'), exist_ok=True)
@@ -497,7 +545,7 @@ APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'datuitest', 'app', 'kit'])
+    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'datuitest', 'app', 'kit', 'desktop'])
     ap.add_argument('--out', default='build/kit')  # kit: where it goes
     ap.add_argument('--kit')  # host64: build from this kit
     ap.add_argument('--game', default=os.path.expanduser('~/SquareEnix/FINAL FANTASY XI'))
@@ -530,6 +578,8 @@ def main():
         return datuitest(game)
     if args.target == 'app':
         return app(game, args)
+    if args.target == 'desktop':
+        return desktop(game, args.server)
     if args.target == 'prepare':
         prepare(game)
     elif args.target == 'boot64':
