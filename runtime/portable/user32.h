@@ -37,6 +37,11 @@ extern int (*user32_event_hook)(const void* sdl_event, int window_w, int window_
 /* Set by the addon host: runs once when the player quits (the window closing), before the process
  * ends. */
 extern void (*user32_quit_hook)(void);
+/* Set by Config > Modern: hwnd's window (a window, not full screen; desktop Linux) has a size other
+ * than the game gave it - the compositor refused it, or resized or tiled the window since - and the
+ * game should draw at it. The game has been sent WM_SIZE; the window already has the size. Runs on
+ * the window's thread, from its message pump. */
+extern void (*user32_resize_hook)(uint32_t hwnd, int width, int height);
 /* where the game was given the cursor, 0..1 of its window across and down: i = 0 the latest, up to
  * USER32_MOUSE_GIVEN back. Returns 1 when it was given as it is (over the world), 0 unsqueezed (over
  * the interface), -1 when there is no such point. */
