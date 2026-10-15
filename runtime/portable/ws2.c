@@ -303,7 +303,7 @@ static void sh_listen(Guest* g)
 }
 
 /* FFXI_NET_TRACE=1: every TCP connect (with its result) and the size and first bytes of every send
- * and recv go to the log, for seeing what a server answered. Off by default: it logs what the
+ * and recv (and of every UDP datagram, the zone's) go to the log, for seeing what a server answered. Off by default: it logs what the
  * game sends, sign-in hashes included. */
 static int net_trace(void)
 {
@@ -316,20 +316,26 @@ static int net_trace(void)
     return on;
 }
 
-static void trace_bytes(const char* what, Sock* s, const uint8_t* p, int n)
+/* peer: the datagram's address (sendto/recvfrom), else the connected socket's */
+static void trace_bytes(const char* what, Sock* s, const struct sockaddr_in* to, const uint8_t* p, int n)
 {
     struct sockaddr_in peer;
     socklen_t len = sizeof peer;
     memset(&peer, 0, sizeof peer);
-    getpeername(s->h, (struct sockaddr*)&peer, &len);
+    if (to)
+        peer = *to;
+    else
+        getpeername(s->h, (struct sockaddr*)&peer, &len);
     uint32_t ip = ntohl(peer.sin_addr.s_addr);
-    char hex[3 * 64 + 1];
-    int k = n < 64 ? n : 64, o = 0;
+    /* FFXI_NET_TRACE=2: whole packets */
+    static char hex[3 * 0x1000 + 1];
+    int cap = getenv("FFXI_NET_TRACE")[0] == '2' ? 0x1000 : 64;
+    int k = n < cap ? n : cap, o = 0;
     for (int i = 0; i < k; ++i)
         o += snprintf(hex + o, sizeof hex - (size_t)o, "%02x ", p[i]);
     hex[o] = 0;
     rt_log("[net] %s %u.%u.%u.%u:%u %d bytes: %s%s\n", what, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255,
-        ntohs(peer.sin_port), n, hex, n > 64 ? "..." : "");
+        ntohs(peer.sin_port), n, hex, n > k ? "..." : "");
 }
 
 static void sh_connect(Guest* g)
@@ -468,7 +474,7 @@ static void sh_send(Guest* g)
     if (!nb)
         gt_lock();
     if (net_trace() && n > 0)
-        trace_bytes("send", s, (const uint8_t*)ARGP(1), n);
+        trace_bytes("send", s, NULL, (const uint8_t*)ARGP(1), n);
     if (n < 0)
     {
         gt_set_error(wsa_error(e));
@@ -491,6 +497,8 @@ static void sh_sendto(Guest* g)
         RET(GUEST_SOCKET_ERROR, 6);
     }
     int n = (int)sendto(s->h, (const char*)ARGP(1), (int)ARG(2), host_flags(ARG(3)), has ? (struct sockaddr*)&a : NULL, has ? sizeof a : 0);
+    if (net_trace() && n > 0)
+        trace_bytes("sendto", s, has ? &a : NULL, (const uint8_t*)ARGP(1), n);
     if (n < 0)
     {
         fail();
@@ -514,7 +522,7 @@ static void sh_recv(Guest* g)
         gt_lock();
     io_done(s, FD_READ, 0);
     if (net_trace() && n >= 0)
-        trace_bytes(n ? "recv" : "recv (closed)", s, (const uint8_t*)ARGP(1), n);
+        trace_bytes(n ? "recv" : "recv (closed)", s, NULL, (const uint8_t*)ARGP(1), n);
     if (n < 0)
     {
         gt_set_error(wsa_error(e));
@@ -538,6 +546,8 @@ static void sh_recvfrom(Guest* g)
     if (!nb)
         gt_lock();
     io_done(s, FD_READ, 0);
+    if (net_trace() && n > 0)
+        trace_bytes("recvfrom", s, &a, (const uint8_t*)ARGP(1), n);
     if (n < 0)
     {
         gt_set_error(wsa_error(e));

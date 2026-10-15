@@ -44,6 +44,8 @@ typedef struct DatImage
 /* The image called category/name (case-insensitive, without the space padding: "menu", "corner"),
  * decoded. 0 when there is none or its format is one not read here. */
 int dat_image(const DatFile* f, const char* category, const char* name, DatImage* out);
+/* Decode original texture alpha without UI-specific expansion or clipping. */
+int dat_image_native(const DatFile* f, const char* category, const char* name, DatImage* out);
 void dat_image_free(DatImage* img);
 
 typedef struct DatPart

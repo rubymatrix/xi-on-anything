@@ -1,8 +1,8 @@
-/* Config > Display, Menus, Modern and Addons (modern.c): pages of the game's own Config menu, drawn and
- * run by the game's menu code - its window, cursor, sounds and open/close effects. Menus shows or
- * hides items of the game's menus (each as it next opens); Modern switches this port's additions:
- * the scene effects (gfx_metal.m's settings file), draw distance, the frame rate and the
- * interface's shape, each showing at once. */
+/* Config > Advanced (modern.c): a list in the game's own Config menu of pages - Display, Graphics,
+ * Lighting, Atmosphere, Interface and Addons - drawn and run by the game's menu code: its window,
+ * cursor, sounds and open/close effects. They switch this port's additions (the scene effects of
+ * the graphics back ends' settings file, draw distance, the frame rate, the interface's shape,
+ * nameplates) and show or hide items of the game's own menus, each at once or as it next opens. */
 #pragma once
 
 #include <stdint.h>
@@ -14,6 +14,9 @@ typedef struct ModernSetup
     uint32_t* fps_divisor; /* host64's: 1 60 fps, 2 30 */
     int fps_given, ui_aspect_given; /* on the command line: modern.cfg does not override them */
     const char* settings_reg; /* the game's display settings (0001/0002, 0003/0004, 0037/0038): Config > Display writes them */
+    int* nameplate_fix;       /* host64's: 1 names over heads keep their 4:3 shape, 0 as the game draws them */
+    float *nameplate_sx, *nameplate_sy; /* ... and their size across and down */
+    int nameplates_given;     /* --nameplates or --nameplate-scale: modern.cfg does not override them */
 } ModernSetup;
 
 /* Reads modern.cfg, applying what the command line did not give. */

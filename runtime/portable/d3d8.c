@@ -103,6 +103,9 @@ static uint32_t g_cap_esp, g_cap_frame, g_cap_n;
 static uint32_t g_cap_at[32], g_cap_nat; /* <path>.at: draws after which the target is dumped */
 static void cap_present(void);
 static void scene_present(void);
+static void zonecap_present(void);
+static void zonecap_clear(uint32_t n, const void* rects, uint32_t flags, uint32_t color, uint32_t z, uint32_t stencil);
+static void zonecap_copy(uint32_t src, uint32_t dst, uint32_t n, uint32_t rects, uint32_t points);
 
 /* --- formats ----------------------------------------------------------------------------------------- */
 static uint32_t fmt_block(uint32_t f) /* bytes per 4x4 block, or 0 */
@@ -157,8 +160,32 @@ enum
     O_SURFACE,
 };
 
+/* Capture provenance is diagnostic identity, never a persistent DAT key. */
+typedef struct ModelOrigin
+{
+    uint32_t resource, fourcc, parents[4];
+    uint64_t load;
+} ModelOrigin;
+static RT_TLS ModelOrigin g_model_origin;
+static uint64_t g_model_serial, g_object_serial;
+
+void d3d8_model_loading(uint32_t resource, uint32_t fourcc, const uint32_t parents[4])
+{
+    memset(&g_model_origin, 0, sizeof g_model_origin);
+    if (resource)
+    {
+        g_model_origin.resource = resource;
+        g_model_origin.fourcc = fourcc;
+        memcpy(g_model_origin.parents, parents, sizeof g_model_origin.parents);
+        g_model_origin.load = ++g_model_serial;
+    }
+}
+
 typedef struct Obj
 {
+    uint64_t capture_id;
+    ModelOrigin origin;
+    uint64_t capture_texture_session, capture_texture_hash, capture_texture_offset;
     uint8_t kind, implicit; /* implicit: the swap chain's back buffer, the auto depth buffer */
     int32_t refs;
     uint32_t guest;     /* the COM pointer the game holds */
@@ -206,6 +233,8 @@ static uint32_t obj_new(int kind)
     g_free_hint = i + 1;
     Obj* o = &g_objs[i];
     memset(o, 0, sizeof *o);
+    o->capture_id = ++g_object_serial;
+    o->origin = g_model_origin;
     o->kind = (uint8_t)kind;
     o->refs = 1;
     o->guest = gheap_alloc(8, 1);
@@ -1143,6 +1172,7 @@ static void capture_frame(Obj* bb)
 
 static void IDirect3DDevice8_Present(Guest* g)
 {
+    zonecap_present();
     cap_present();
     scene_present();
     ui_present();
@@ -1473,6 +1503,7 @@ static void IDirect3DDevice8_CopyRects(Guest* g)
     Obj* d = obj(ARG(4));
     if (!s || !d || s->format != d->format)
         RET(D3DERR_INVALIDCALL, 6);
+    zonecap_copy(ARG(1), ARG(4), ARG(2) ? ARG(3) : 0, ARG(2), ARG(5));
     if (surface_scaled(s) || surface_scaled(d))
     {
         static int said;
@@ -1566,6 +1597,7 @@ static void apply_targets(void);
 /* Clear(Count, pRects, Flags, Color, Z, Stencil): D3DRECTs are x1, y1, x2, y2 */
 static void IDirect3DDevice8_Clear(Guest* g)
 {
+    zonecap_clear(ARG(2) ? ARG(1) : 0, ARG(2) ? ARGP(2) : NULL, ARG(3), ARG(4), ARG(5), ARG(6));
     apply_targets();
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
@@ -3036,6 +3068,9 @@ static void cap_draw(GfxDraw* d, uint32_t prim, uint32_t count, uint32_t first, 
     fprintf(f, "  box %.2f..%.2f  %.2f..%.2f  %.4f..%.4f\n", lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
 }
 
+/* Diagnostic capture has access to the adapter's owned state and guest buffer copies. */
+#include "zone_capture.h"
+
 /* --- the scene's end, for the back end's scene effects (gfx_scene_done) ------------------------------
  * The frame's 3D scene is the target that takes depth-tested draws of untransformed vertices and is
  * at least half the back buffer (not the 16x16 probes or smaller effect targets). It is finished
@@ -3541,9 +3576,9 @@ static int menu_target(const Obj* o)
 /* FFXI's own character shadow: the character drawn into a render target of the game's, then that
  * texture projected onto the ground around it - a blended 3D draw sampling, through projected
  * coordinates, a texture the game renders into. gameshadows (a scene-effect setting): 0 auto, off
- * while the sun's own shadows are drawn and characters cast them (the two would double) - drawn, not
- * merely on: by night, in a Mog House, while the effects' pipelines build, the game's stay; 1 always
- * the game's; 2 never. */
+ * whenever the sun's own shadows are on and characters cast them (the two would double) - on, not
+ * drawn: by night, in a Mog House or while the effects' pipelines build, the blob must not come
+ * back for a frame; 1 always the game's; 2 never. */
 static int game_shadow_hidden(const GfxDraw* d)
 {
     if (d->vs.rhw || !d->pipe.blend || d->fs.prog)
@@ -3551,7 +3586,7 @@ static int game_shadow_hidden(const GfxDraw* d)
     float mode = gfx_fx_get("gameshadows");
     if (mode == 1.0f)
         return 0;
-    if (mode != 2.0f && !(gfx_fx_get("sun_casters") != 2.0f && gfx_sun_shadows_shown()))
+    if (mode != 2.0f && !gfx_sun_shadows_on())
         return 0;
     for (int i = 0; i < d->fs.nstages && i < 8; ++i)
     {
@@ -3568,7 +3603,8 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
     GfxDraw* d = &g_draw;
     if (!build_draw(d))
         return;
-    if (game_shadow_hidden(d))
+    int hidden_shadow = game_shadow_hidden(d);
+    if (hidden_shadow && !g_zonecap.json)
     {
         g_scene.st_game_shadows++;
         return;
@@ -3590,6 +3626,12 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
     }
     if (!set_streams(d, first, nverts, up_data, up_stride))
         return;
+    zonecap_draw(d, prim, count, first, nverts, indices, index_size, n, up_data, up_stride, hidden_shadow);
+    if (hidden_shadow)
+    {
+        g_scene.st_game_shadows++;
+        return;
+    }
     scene_note(d);
     if (g_cap)
         cap_draw(d, prim, count, first, nverts, up_data, up_stride);
