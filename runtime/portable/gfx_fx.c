@@ -26,7 +26,7 @@ static const struct
     size_t at;
     float def;
 } FX_SETTINGS[] = {
-    { "fx", offsetof(GfxFxSettings, fx), 0.0f },
+    { "fx", offsetof(GfxFxSettings, fx), 1.0f },
     { "ao", offsetof(GfxFxSettings, ao), 0.8f },
     { "radius", offsetof(GfxFxSettings, radius), 1.0f },
     { "grade", offsetof(GfxFxSettings, grade), 1.0f },
@@ -46,7 +46,7 @@ static const struct
     { "rays", offsetof(GfxFxSettings, rays), 0.6f },
     { "rays_decay", offsetof(GfxFxSettings, rays_decay), 0.965f },
     { "rays_length", offsetof(GfxFxSettings, rays_length), 0.85f },
-    { "light", offsetof(GfxFxSettings, light), 0.0f },
+    { "light", offsetof(GfxFxSettings, light), 2.0f },
     { "shadow", offsetof(GfxFxSettings, shadow), 0.3f },
     { "shadow_length", offsetof(GfxFxSettings, shadow_length), 0.6f },
     { "sun", offsetof(GfxFxSettings, sun), 0.45f },
@@ -81,7 +81,7 @@ static const struct
     { "sun_detail", offsetof(GfxFxSettings, sun_detail), 4096.0f },
     /* the occlusion's taps a frame: 0 low (6), 1 medium (10), 2 high (16); the temporal pass gathers
      * them over frames */
-    { "ao_quality", offsetof(GfxFxSettings, ao_quality), 0.0f },
+    { "ao_quality", offsetof(GfxFxSettings, ao_quality), 1.0f },
     { "temporal", offsetof(GfxFxSettings, temporal), 0.85f },
     { "debug", offsetof(GfxFxSettings, debug), 0.0f },
     /* not effects: the host's draw distances (host64 --draw-distance), live while tuning; 0 leaves them */
@@ -118,6 +118,18 @@ static const struct
      * the GPU can; off unless asked for */
     { "rt", offsetof(GfxFxSettings, rt), 0.0f },
 };
+
+/* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
+ * the old menus wrote would hold them where nothing can change them back) */
+static const char* const FX_FIXED[] = { "fx", "gameshadows", "filter", "lod", "rt" };
+
+static int fx_fixed(const char* key)
+{
+    for (size_t i = 0; i < sizeof FX_FIXED / sizeof FX_FIXED[0]; ++i)
+        if (!strcmp(FX_FIXED[i], key))
+            return 1;
+    return 0;
+}
 
 static float* fx_setting(const char* key)
 {
@@ -172,7 +184,7 @@ void fx_reload(void)
     while (fgets(line, sizeof line, f))
         if (sscanf(line, " %63[a-z_] = %f", key, &v) == 2)
             for (size_t i = 0; i < FX_NSETTINGS; ++i)
-                if (!strcmp(FX_SETTINGS[i].key, key))
+                if (!strcmp(FX_SETTINGS[i].key, key) && !fx_fixed(key))
                     *(float*)((char*)&g_fxs + FX_SETTINGS[i].at) = v, seen[i] = 1;
     fclose(f);
     /* a line taken out of the file: its key back to what it was at start, not the file's last word */
