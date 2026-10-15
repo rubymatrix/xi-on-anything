@@ -1550,7 +1550,7 @@ static void load_spdata(void)
     free(d);
 }
 
-static int unnamed(const char* const name[2])
+int res_unnamed(const char* const name[2])
 {
     for (int l = 0; l < 2; ++l)
         if (name[l][0] && strcmp(name[l], "."))
@@ -1561,7 +1561,7 @@ static int unnamed(const char* const name[2])
 const ResSpell* res_spell(uint32_t index)
 {
     load_spdata();
-    if (index >= g_nspells || !g_spells || unnamed(g_spells[index].name))
+    if (index >= g_nspells || !g_spells)
         return NULL;
     return &g_spells[index];
 }
@@ -1569,7 +1569,7 @@ const ResSpell* res_spell(uint32_t index)
 const ResAbility* res_ability(uint32_t id)
 {
     load_spdata();
-    if (id >= g_nabilities || !g_abilities || unnamed(g_abilities[id].name))
+    if (id >= g_nabilities || !g_abilities)
         return NULL;
     return &g_abilities[id];
 }
@@ -1598,7 +1598,7 @@ const ResAbility* res_ability_by_recast(uint32_t id)
 {
     load_spdata();
     for (uint32_t i = 0x200; g_abilities && i < g_nabilities; ++i)
-        if (g_abilities[i].recast_id == id && !unnamed(g_abilities[i].name) && g_abilities[i].type != 3)
+        if (g_abilities[i].recast_id == id && !res_unnamed(g_abilities[i].name) && g_abilities[i].type != 3)
             return &g_abilities[i];
     return NULL;
 }

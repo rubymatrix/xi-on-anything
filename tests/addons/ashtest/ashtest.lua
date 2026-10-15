@@ -37,6 +37,10 @@ ashita.events.register('load', 'load_cb', function ()
     local spell = res:GetSpellById(1);
     say('spell 1=%s mp=%d whm level=%d', spell.Name[1], spell.ManaCost, spell.LevelRequired[3 + 1]);
     say('ability 1=%s', res:GetAbilityById(1).Name[1]);
+    -- an unnamed id inside the table is an empty record, as Ashita's; only past the end is nil
+    -- (addons count ids up to the first nil: SimpleLog)
+    local function upto(get) local n = 0; while get(res, n + 1) ~= nil do n = n + 1 end; return n end
+    say('spells up to the first nil=%d, abilities=%d', upto(res.GetSpellById), upto(res.GetAbilityById));
     say('string zones.names 230=%s', tostring(res:GetString('zones.names', 230)));
     say('string index of Cure=%d', res:GetString('spells.names', 'Cure'));
 

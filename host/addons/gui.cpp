@@ -359,7 +359,8 @@ extern "C" int xi_prim_get(uint32_t id, const char* f, double* n)
 
 /* --- fonts ------------------------------------------------------------------------------------ */
 
-/* A family (and style) to a font file: the system's font folders, then <data dir>/fonts/. */
+/* A family (and style) to a font file: <data dir>/fonts/, the system's font folders, then on Linux
+ * fontconfig (fontconfig_file). */
 static std::unordered_map<std::string, ImFont*> g_fonts;
 static ImFont* g_default_font;
 
@@ -368,6 +369,86 @@ static int file_exists(const char* p)
     PlatStat st;
     return plat_stat(p, &st);
 }
+
+/* Windows' own font files and the families they hold: what addons open from C:\Windows\Fonts\ and the
+ * families they ask for by name, expecting them to exist (xi_gui_windows_font, fontconfig_file) */
+static const struct WindowsFont
+{
+    const char* file;
+    const char* family;
+    int bold, italic;
+} WINDOWS_FONTS[] = {
+    { "arial.ttf", "Arial", 0, 0 }, { "arialbd.ttf", "Arial", 1, 0 }, { "ariali.ttf", "Arial", 0, 1 },
+    { "arialbi.ttf", "Arial", 1, 1 }, { "calibri.ttf", "Calibri", 0, 0 }, { "calibrib.ttf", "Calibri", 1, 0 },
+    { "consola.ttf", "Consolas", 0, 0 }, { "consolab.ttf", "Consolas", 1, 0 }, { "consolai.ttf", "Consolas", 0, 1 },
+    { "consolaz.ttf", "Consolas", 1, 1 }, { "cour.ttf", "Courier New", 0, 0 }, { "courbd.ttf", "Courier New", 1, 0 },
+    { "georgia.ttf", "Georgia", 0, 0 }, { "georgiab.ttf", "Georgia", 1, 0 }, { "lucon.ttf", "Lucida Console", 0, 0 },
+    { "micross.ttf", "Microsoft Sans Serif", 0, 0 }, { "segoeui.ttf", "Segoe UI", 0, 0 },
+    { "segoeuib.ttf", "Segoe UI", 1, 0 }, { "tahoma.ttf", "Tahoma", 0, 0 }, { "tahomabd.ttf", "Tahoma", 1, 0 },
+    { "times.ttf", "Times New Roman", 0, 0 }, { "timesbd.ttf", "Times New Roman", 1, 0 },
+    { "trebuc.ttf", "Trebuchet MS", 0, 0 }, { "trebucbd.ttf", "Trebuchet MS", 1, 0 }, { "verdana.ttf", "Verdana", 0, 0 },
+    { "verdanab.ttf", "Verdana", 1, 0 }, { "msgothic.ttc", "MS Gothic", 0, 0 }, { "meiryo.ttc", "Meiryo", 0, 0 },
+    { "impact.ttf", "Impact", 0, 0 }, { "comic.ttf", "Comic Sans MS", 0, 0 },
+};
+
+#if !defined(__APPLE__) && !defined(_WIN32)
+#include <dlfcn.h>
+#include <strings.h>
+
+/* Linux: fontconfig, the system's own resolver (every font folder, and stand-ins: Arial is Liberation
+ * Sans), dlopen'd so a system without it (Android) runs as before. Its nearest face counts only for a
+ * Windows family (WINDOWS_FONTS, or Helvetica, gdifont's last resort); any other family must match,
+ * so GetFontAvailable stays honest. */
+static std::string fontconfig_file(const std::string& family, int bold, int italic)
+{
+    typedef struct FcPattern FcPattern;
+    static void* lib = dlopen("libfontconfig.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!lib)
+        return std::string();
+    static auto parse = (FcPattern * (*)(const unsigned char*)) dlsym(lib, "FcNameParse");
+    static auto substitute = (int (*)(void*, FcPattern*, int))dlsym(lib, "FcConfigSubstitute");
+    static auto defaults = (void (*)(FcPattern*))dlsym(lib, "FcDefaultSubstitute");
+    static auto match = (FcPattern * (*)(void*, FcPattern*, int*)) dlsym(lib, "FcFontMatch");
+    static auto get = (int (*)(const FcPattern*, const char*, int, unsigned char**))dlsym(lib, "FcPatternGetString");
+    static auto destroy = (void (*)(FcPattern*))dlsym(lib, "FcPatternDestroy");
+    if (!parse || !substitute || !defaults || !match || !get || !destroy)
+        return std::string();
+    /* the name in fontconfig's syntax: its - : , \ escaped, then the style */
+    std::string name;
+    for (char c : family)
+    {
+        if (strchr("-:,\\", c))
+            name += '\\';
+        name += c;
+    }
+    name += bold ? ":bold" : "", name += italic ? ":italic" : "";
+    FcPattern* pat = parse((const unsigned char*)name.c_str());
+    if (!pat)
+        return std::string();
+    substitute(NULL, pat, 0 /* FcMatchPattern */);
+    defaults(pat);
+    int result = 0;
+    FcPattern* found = match(NULL, pat, &result);
+    destroy(pat);
+    if (!found)
+        return std::string();
+    std::string path;
+    unsigned char* file = NULL;
+    if (get(found, "file", 0, &file) == 0 /* FcResultMatch */ && file)
+    {
+        int ok = !strcasecmp(family.c_str(), "helvetica");
+        for (auto& w : WINDOWS_FONTS)
+            ok |= !strcasecmp(family.c_str(), w.family);
+        unsigned char* fam = NULL;
+        for (int i = 0; !ok && get(found, "family", i, &fam) == 0 && fam; ++i)
+            ok = !strcasecmp((const char*)fam, family.c_str());
+        if (ok)
+            path = (const char*)file;
+    }
+    destroy(found);
+    return path;
+}
+#endif
 
 static std::string font_file(const std::string& family, int bold, int italic)
 {
@@ -413,6 +494,11 @@ static std::string font_file(const std::string& family, int bold, int italic)
             }
         }
     }
+#if !defined(__APPLE__) && !defined(_WIN32)
+    /* fonts in folders of their own, by family rather than file name (the folders above hold few) */
+    if (!family.empty())
+        return fontconfig_file(family, bold, italic);
+#endif
     return std::string();
 }
 
@@ -421,24 +507,6 @@ static std::string font_file(const std::string& family, int bold, int italic)
  * system, else a stand-in (font_file's: Consolas -> Menlo, Segoe UI -> Helvetica, ...). */
 extern "C" int xi_gui_windows_font(const char* file, char* out, size_t n)
 {
-    static const struct
-    {
-        const char* file;
-        const char* family;
-        int bold, italic;
-    } FILES[] = {
-        { "arial.ttf", "Arial", 0, 0 }, { "arialbd.ttf", "Arial", 1, 0 }, { "ariali.ttf", "Arial", 0, 1 },
-        { "arialbi.ttf", "Arial", 1, 1 }, { "calibri.ttf", "Calibri", 0, 0 }, { "calibrib.ttf", "Calibri", 1, 0 },
-        { "consola.ttf", "Consolas", 0, 0 }, { "consolab.ttf", "Consolas", 1, 0 }, { "consolai.ttf", "Consolas", 0, 1 },
-        { "consolaz.ttf", "Consolas", 1, 1 }, { "cour.ttf", "Courier New", 0, 0 }, { "courbd.ttf", "Courier New", 1, 0 },
-        { "georgia.ttf", "Georgia", 0, 0 }, { "georgiab.ttf", "Georgia", 1, 0 }, { "lucon.ttf", "Lucida Console", 0, 0 },
-        { "micross.ttf", "Microsoft Sans Serif", 0, 0 }, { "segoeui.ttf", "Segoe UI", 0, 0 },
-        { "segoeuib.ttf", "Segoe UI", 1, 0 }, { "tahoma.ttf", "Tahoma", 0, 0 }, { "tahomabd.ttf", "Tahoma", 1, 0 },
-        { "times.ttf", "Times New Roman", 0, 0 }, { "timesbd.ttf", "Times New Roman", 1, 0 },
-        { "trebuc.ttf", "Trebuchet MS", 0, 0 }, { "trebucbd.ttf", "Trebuchet MS", 1, 0 }, { "verdana.ttf", "Verdana", 0, 0 },
-        { "verdanab.ttf", "Verdana", 1, 0 }, { "msgothic.ttc", "MS Gothic", 0, 0 }, { "meiryo.ttc", "Meiryo", 0, 0 },
-        { "impact.ttf", "Impact", 0, 0 }, { "comic.ttf", "Comic Sans MS", 0, 0 },
-    };
     std::string low = file;
     for (char& c : low)
         c = (char)tolower((unsigned char)c);
@@ -448,7 +516,7 @@ extern "C" int xi_gui_windows_font(const char* file, char* out, size_t n)
         return snprintf(out, n, "%s", mine.c_str()), 1;
     std::string family = low.substr(0, low.find_last_of('.'));
     int bold = 0, italic = 0;
-    for (auto& f : FILES)
+    for (auto& f : WINDOWS_FONTS)
         if (low == f.file)
             family = f.family, bold = f.bold, italic = f.italic;
     std::string path = font_file(family, bold, italic);

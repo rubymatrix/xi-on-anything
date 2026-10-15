@@ -9,6 +9,7 @@ command //wlayer Args
 command //WL
 command //lua c wlayer args via lua
 command //wlunknown x y
+# a command a listener ignores (returns nothing, as Windower handlers do) is still theirs: no error
 command //wlunknown2
 command //wl state
 command //wl sleep
