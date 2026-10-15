@@ -268,6 +268,37 @@ static void list_set(List* l, int i)
     menu_size(g_win_w, g_win_h, scale, &g_menu_w, &g_menu_h);
 }
 
+/* Graphics' Overall Quality: the Lighting page's settings at each level. Low has no modern lighting,
+ * sun shadows or occlusion; Medium is the defaults (gfx_fx.c); Max has every quality setting at its
+ * highest, sun shadows and bounce light at full strength. Settings that are none of
+ * these are Custom. */
+static const char* const QUALITY_KEYS[] = { "light", "sun", "sun_casters", "sun_soft", "sun_detail", "ao", "ao_quality",
+    "gi" };
+enum
+{
+    NQUALITY_KEYS = sizeof QUALITY_KEYS / sizeof QUALITY_KEYS[0],
+    NQUALITY = 3,
+};
+static const float QUALITY[NQUALITY][NQUALITY_KEYS] = {
+    { 0, 0, 0, 0, 2048, 0, 0, 0 },          /* Low */
+    { 2, 0.45f, 0, 0, 4096, 0.8f, 1, 0 },   /* Medium */
+    { 2, 1.0f, 0, 0.03f, 8192, 0.8f, 2, 3.0f }, /* Max */
+};
+
+/* the level the settings are at; NQUALITY (Custom) when none */
+static int quality_now(void)
+{
+    for (int q = 0; q < NQUALITY; ++q)
+    {
+        int i = 0;
+        while (i < NQUALITY_KEYS && fabsf(gfx_fx_get(QUALITY_KEYS[i]) - QUALITY[q][i]) <= 1e-3f * (QUALITY[q][i] > 1 ? QUALITY[q][i] : 1))
+            ++i;
+        if (i == NQUALITY_KEYS)
+            return q;
+    }
+    return NQUALITY;
+}
+
 static float get(const Row* r)
 {
     const List* l = list_of(r->key);
@@ -281,8 +312,8 @@ static float get(const Row* r)
         return g_setup.fps_divisor ? (float)*g_setup.fps_divisor : 1.0f;
     if (!strcmp(r->key, "@ui"))
         return g_ui_aspect;
-    if (!strcmp(r->key, "@occlusion"))
-        return (float)d3d8_occlusion();
+    if (!strcmp(r->key, "@quality"))
+        return (float)quality_now();
     if (!strcmp(r->key, "@nameplates"))
         return g_setup.nameplate_fix ? (float)*g_setup.nameplate_fix : 1.0f;
     if (!strcmp(r->key, "@nameplate_size"))
@@ -296,6 +327,18 @@ static float get(const Row* r)
 }
 
 static void save_display(void);
+
+/* a scene setting set, and kept to write to the settings file (save_fx) */
+static void fx_put(const char* key, float v)
+{
+    gfx_fx_set(key, v);
+    int known = 0;
+    for (int i = 0; i < g_nfx_keys; ++i)
+        known |= !strcmp(g_fx_keys[i], key);
+    if (!known && g_nfx_keys < 32)
+        SDL_strlcpy(g_fx_keys[g_nfx_keys++], key, sizeof g_fx_keys[0]);
+    g_fx_touched = 1;
+}
 
 static void set(const Row* r, float v)
 {
@@ -325,10 +368,11 @@ static void set(const Row* r, float v)
         user32_set_ui_aspect(v);
         g_host_touched = 1;
     }
-    else if (!strcmp(r->key, "@occlusion"))
+    else if (!strcmp(r->key, "@quality"))
     {
-        d3d8_set_occlusion((int)v);
-        g_host_touched = 1;
+        if ((int)v < NQUALITY) /* Custom: the settings as they are */
+            for (int i = 0; i < NQUALITY_KEYS; ++i)
+                fx_put(QUALITY_KEYS[i], QUALITY[(int)v][i]);
     }
     else if (!strcmp(r->key, "@nameplates") || !strcmp(r->key, "@nameplate_size"))
     {
@@ -352,15 +396,7 @@ static void set(const Row* r, float v)
             g_addons->set(i, v != 0.0f);
     }
     else
-    {
-        gfx_fx_set(r->key, v);
-        int known = 0;
-        for (int i = 0; i < g_nfx_keys; ++i)
-            known |= !strcmp(g_fx_keys[i], r->key);
-        if (!known && g_nfx_keys < 32)
-            SDL_strlcpy(g_fx_keys[g_nfx_keys++], r->key, sizeof g_fx_keys[0]);
-        g_fx_touched = 1;
-    }
+        fx_put(r->key, v);
 }
 
 /* the option the setting is at; -1 when it is none of them */
@@ -417,45 +453,27 @@ static const Row DISPLAY_ROWS[] = {
 #endif
 };
 
-static const Row GRAPHICS_ROWS[] = {
 #if !defined(FFXI_ANDROID_VULKAN)
+static const Row GRAPHICS_ROWS[] = {
     HEADER_ROW("Quality"),
+    { "Overall Quality", "@quality", CHOICE, 4, { "Low", "Medium", "Max", "Custom" }, { 0, 1, 2, 3 }, 0, 0,
+        "Sets the Lighting page: Low has no modern lighting, shadows or occlusion. Custom: as you set them." },
     { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
     { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
         "Sharper ground and walls at an angle." },
-    { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
     HEADER_ROW("Color"),
-    { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast. Needs Modern Effects." },
+    { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast." },
     { "Saturation", "sat", SLIDER, 0, { 0 }, { 0 }, 0.5f, 1.5f, "How strong the colors are, with Color Grading." },
     { "Contrast", "contrast", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Darker darks and brighter lights, with Color Grading." },
-#endif
     HEADER_ROW("World Detail"),
-#if !defined(FFXI_ANDROID_VULKAN)
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
-    { "Level of Detail", "lod", CHOICE, 2, { "Game", "Near" }, { 2, 1 }, 0, 0,
-        "Near draws the world's most detailed models at every distance." },
-#endif
-#if defined(FFXI_ANDROID_VULKAN)
-    { "Occlusion Check", "@occlusion", CHOICE, 3, { "Off", "Delayed", "Exact" }, { 0, 1, 2 }, 0, 0,
-        "What walls hide from the game's checks. Off treats all as seen; Delayed asks the last frames; Exact waits." },
-#else /* no Delayed: without Android's per-probe history it makes characters flicker (d3d8.c lock_rect) */
-    { "Occlusion Check", "@occlusion", CHOICE, 2, { "Off", "Exact" }, { 0, 2 }, 0, 0,
-        "What walls hide from the game's checks. Off treats all as seen; Exact waits for the GPU." },
-#endif
 };
 
-#if !defined(FFXI_ANDROID_VULKAN)
 static const Row LIGHTING_ROWS[] = {
-    { "Modern Effects", "fx", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Shadows, occlusion, lighting, fog, rays and bloom: these pages' effects." },
-    { "Per-Pixel Lighting", "light", CHOICE, 3, { "Off", "Sun", "All" }, { 0, 1, 2 }, 0, 0,
-        "Smooth light across surfaces: the sun's, or every light's." },
     { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
         "Sunlit ground and walls light what stands near them. Off at the left." },
-    { "Ray Tracing", "rt", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Bounce light and soft shade traced through the world. Needs a graphics card that traces rays; on a Mac, macOS 13." },
     HEADER_ROW("Shadows"),
     { "Sun Shadows", "sun", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How dark the sun's shadows are." },
     { "Shadow Casters", "sun_casters", CHOICE, 3, { "Characters", "World", "All" }, { 1, 2, 0 }, 0, 0,
@@ -466,8 +484,6 @@ static const Row LIGHTING_ROWS[] = {
         "Sharper shadows close up. High uses more video memory." },
     { "Indoor Shadows", "moghouse", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f,
         "How much of the sun's shadows reach indoors: your Mog House, caves, towers. Off lights them as the game does." },
-    { "Character Shadows", "gameshadows", CHOICE, 3, { "Auto", "On", "Off" }, { 0, 1, 2 }, 0, 0,
-        "The game's own round shadows under characters: Auto hides them while the sun's are on." },
     HEADER_ROW("Ambient Occlusion"),
     { "Strength", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
     { "Quality", "ao_quality", CHOICE, 3, { "Low", "Medium", "High" }, { 0, 1, 2 }, 0, 0,
@@ -477,11 +493,11 @@ static const Row LIGHTING_ROWS[] = {
 
 static const Row ATMOSPHERE_ROWS[] = {
     HEADER_ROW("Fog"),
-    { "Density", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun. Needs Modern Effects." },
+    { "Density", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun." },
     HEADER_ROW("God Rays"),
-    { "Strength", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun. Needs Modern Effects." },
+    { "Strength", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun." },
     HEADER_ROW("Bloom"),
-    { "Strength", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights. Needs Modern Effects." },
+    { "Strength", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights." },
     { "Threshold", "threshold", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f, "How bright a light must be to glow. Lower: more glows." },
     HEADER_ROW("Water"),
     { "Modern Water", "water", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
@@ -647,8 +663,8 @@ static void save(void)
         FILE* f = fopen(path, "w");
         if (f)
         {
-            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\nocclusion=%d\n",
-                g_setup.fps_divisor ? *g_setup.fps_divisor : 1u, (double)g_ui_aspect, g_hide, d3d8_occlusion());
+            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
+                (double)g_ui_aspect, g_hide);
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
             if (g_setup.nameplate_fix && g_setup.nameplate_sx && g_setup.nameplate_sy)
@@ -1094,10 +1110,10 @@ typedef struct Page
 static Page PAGES[] = {
     { "menu    displayw", "Display", "Window mode, resolution, the interface's size and shape, and the frame rate.",
         0x1c0209u, DISPLAY_ROWS, sizeof DISPLAY_ROWS / sizeof DISPLAY_ROWS[0] },
-    { "menu    graphicw", "Graphics", "Anti-aliasing, texture filtering, sharpening, color and draw distance.", 0x1c0201u,
-        GRAPHICS_ROWS, sizeof GRAPHICS_ROWS / sizeof GRAPHICS_ROWS[0] },
 #if !defined(FFXI_ANDROID_VULKAN)
-    { "menu    lightinw", "Lighting", "Modern effects, lighting, sun shadows and ambient occlusion.", 0x1c0201u,
+    { "menu    graphicw", "Graphics", "Overall quality, anti-aliasing, texture filtering, sharpening, color and draw distance.",
+        0x1c0201u, GRAPHICS_ROWS, sizeof GRAPHICS_ROWS / sizeof GRAPHICS_ROWS[0] },
+    { "menu    lightinw", "Lighting", "Bounce light, sun shadows and ambient occlusion.", 0x1c0201u,
         LIGHTING_ROWS, sizeof LIGHTING_ROWS / sizeof LIGHTING_ROWS[0] },
     { "menu    atmosphw", "Atmosphere", "Fog, god rays, bloom and water.", 0x1c0201u, ATMOSPHERE_ROWS,
         sizeof ATMOSPHERE_ROWS / sizeof ATMOSPHERE_ROWS[0] },
@@ -2741,8 +2757,6 @@ void modern_init(const ModernSetup* setup)
         if (g_hide >> HIDE_OLD_MAGIC_TRUST & 1)
             g_hide = (g_hide & ~(1u << HIDE_OLD_MAGIC_TRUST)) | 1u << HIDE_TRUST;
     }
-    if (cfg_value(path, "occlusion", buf, sizeof buf))
-        d3d8_set_occlusion((int)strtol(buf, NULL, 10));
     if (!setup->nameplates_given && setup->nameplate_fix && cfg_value(path, "nameplates", buf, sizeof buf))
         *setup->nameplate_fix = atoi(buf) != 0;
     float sx, sy;

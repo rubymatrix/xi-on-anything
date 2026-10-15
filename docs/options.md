@@ -38,7 +38,8 @@ the Lighting and Atmosphere pages.
 |---|---|---|---|
 | Anti-aliasing | Graphics › [Quality] Anti-Aliasing | `aa` | 0 off, 1 FXAA |
 | Texture filtering | Graphics › [Quality] Texture Filtering | `aniso` | 16 (1/4/8/16) |
-| Anti-shimmer (temporal) | Graphics › [Quality] Anti-Shimmer | `filter` | 1 on |
+| Overall quality | Graphics › [Quality] Overall Quality | | Low / Medium / Max set the Lighting page (`light`, `sun`, `sun_casters`, `sun_soft`, `sun_detail`, `ao`, `ao_quality`, `gi`); Custom when they are none of these. Medium is the defaults |
+| Anti-shimmer (temporal) | | `filter` | 1 on; fixed (fx.txt's line ignored) |
 | Temporal blend | | `temporal` | 0.85 |
 | Sharpening | Graphics › [Quality] Sharpening | `sharpen` | 0.3 (0–1) |
 | Color grading | Graphics › [Color] Color Grading | `grade` | 1.0 (0–1) |
@@ -49,16 +50,16 @@ the Lighting and Atmosphere pages.
 
 | Setting | Menu | fx | Default / range |
 |---|---|---|---|
-| **Master: Modern Effects** | Lighting › Modern Effects | `fx` | 0 off; switches Lighting and Atmosphere |
-| Per-pixel lighting | Lighting › Per-Pixel Lighting | `light` | 0 off, 1 sun, 2 all lights |
+| Modern effects (master) | | `fx` | 1 on; fixed (fx.txt's line ignored; `FFXI_FX=0` still turns them off) |
+| Per-pixel lighting | (Overall Quality) | `light` | 2 all lights (0 off, 1 sun) |
 | Bounce light | Lighting › Bounce Light | `gi` | 0 off (0–3) |
-| Ray tracing | Lighting › Ray Tracing | `rt` | 0 off |
+| Ray tracing | | `rt` | 0 off; fixed (fx.txt's line ignored; `FFXI_FX_RT=1` turns it on) |
 | Sun shadow darkness | Lighting › [Shadows] Sun Shadows | `sun` | 0.45 (0–1) |
 | Shadow casters | Lighting › [Shadows] Shadow Casters | `sun_casters` | 0 all, 1 characters, 2 world |
 | Shadow edges | Lighting › [Shadows] Shadow Edges | `sun_soft` | 0 hard, 0.03 soft |
 | Shadow detail (near map) | Lighting › [Shadows] Shadow Detail | `sun_detail` | 4096 (2048/4096/8192; 512–8192 in the file) |
 | Indoor shadows | Lighting › [Shadows] Indoor Shadows | `moghouse` | 0 (0–1) |
-| The game's own character shadows | Lighting › [Shadows] Character Shadows | `gameshadows` | 0 auto, 1 always, 2 never |
+| The game's own character shadows | | `gameshadows` | 0 auto; fixed (fx.txt's line ignored) |
 | Dawn/dusk long shadows | | `sun_dusk` | 1 |
 | Sun shadow reach | | `sun_distance` | 100 |
 | Near map reach | | `sun_near` | 10 |
@@ -72,7 +73,7 @@ the Lighting and Atmosphere pages.
 | Setting | Menu | fx | Default / range |
 |---|---|---|---|
 | Strength | Lighting › [Ambient Occlusion] Strength | `ao` | 0.8 (0–1.5) |
-| Quality | Lighting › [Ambient Occlusion] Quality | `ao_quality` | 0 low (6 taps), 1 medium (10), 2 high (16) |
+| Quality | Lighting › [Ambient Occlusion] Quality | `ao_quality` | 1 medium (10 taps); 0 low (6), 2 high (16) |
 | Radius | Lighting › [Ambient Occlusion] Radius | `radius` | 1.0 (0.25–3) |
 
 ## 5. Atmosphere
@@ -107,8 +108,8 @@ the Lighting and Atmosphere pages.
 |---|---|---|---|---|---|
 | World draw distance | Graphics › [World Detail] Draw Distance | `draw` | `--draw-distance k` or `WxC` | `FFXIDrawDistance` | 1 as the game; 0.5–20 CLI, 1–6 menu |
 | Character draw distance | Graphics › [World Detail] Character Distance | `draw_entities` | (second half of `WxC`) | | 1–4 menu |
-| Level of detail | Graphics › [World Detail] Level of Detail | `lod` | `--lod near\|game` | `FFXILod` | fx 0 = the command line's, 1 near, 2 game |
-| Occlusion check | Graphics › [World Detail] Occlusion Check | | | | modern.cfg `occlusion`: 0 off, 2 exact (1 delayed, Android only) |
+| Level of detail | | `lod` | `--lod near\|game` | `FFXILod` | the command line's (fx.txt's line ignored) |
+| Occlusion check | | | | | off (`FFXI_PROBE=gpu`: exact) |
 
 ## 8. Interface
 
@@ -202,13 +203,13 @@ Config
     │   ├── [Scaling] ....... UI Scale, Interface Shape, Background Resolution
     │   └── [Performance] ... Frame Rate, FPS Counter
     ├── Graphics
-    │   ├── [Quality] ....... Anti-Aliasing, Texture Filtering, Anti-Shimmer, Sharpening
+    │   ├── [Quality] ....... Overall Quality, Anti-Aliasing, Texture Filtering, Sharpening
     │   ├── [Color] ......... Color Grading, Saturation, Contrast
-    │   └── [World Detail] .. Draw Distance, Character Distance, Level of Detail, Occlusion Check
+    │   └── [World Detail] .. Draw Distance, Character Distance
     ├── Lighting
-    │   ├── Modern Effects, Per-Pixel Lighting, Bounce Light, Ray Tracing
+    │   ├── Bounce Light
     │   ├── [Shadows] ....... Sun Shadows, Shadow Casters, Shadow Edges, Shadow Detail,
-    │   │                     Indoor Shadows, Character Shadows
+    │   │                     Indoor Shadows
     │   └── [Ambient Occlusion] Strength, Quality, Radius
     ├── Atmosphere
     │   ├── [Fog] ........... Density

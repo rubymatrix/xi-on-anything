@@ -2749,13 +2749,13 @@ static const struct
     size_t at;
     float def;
 } FX_SETTINGS[] = {
-    FXS(fx, 0.0f), FXS(ao, 0.8f), FXS(radius, 1.0f), FXS(grade, 1.0f), FXS(sat, 1.12f), FXS(contrast, 0.2f),
+    FXS(fx, 1.0f), FXS(ao, 0.8f), FXS(radius, 1.0f), FXS(grade, 1.0f), FXS(sat, 1.12f), FXS(contrast, 0.2f),
     FXS(sharpen, 0.3f), FXS(filter, 1.0f), FXS(aniso, 16.0f), FXS(fog, 0.004f), FXS(fog_falloff, 0.08f),
     FXS(fog_height, 2.0f), FXS(fog_max, 0.5f), FXS(fog_sun, 0.5f), FXS(fog_g, 0.6f), FXS(bloom, 0.3f),
-    FXS(threshold, 0.75f), FXS(rays, 0.6f), FXS(rays_decay, 0.965f), FXS(rays_length, 0.85f), FXS(light, 0.0f),
+    FXS(threshold, 0.75f), FXS(rays, 0.6f), FXS(rays_decay, 0.965f), FXS(rays_length, 0.85f), FXS(light, 2.0f),
     FXS(shadow, 0.3f), FXS(shadow_length, 0.6f), FXS(sun, 0.45f), FXS(sun_distance, 100.0f), FXS(sun_soft, 0.0f),
     FXS(sun_face, 0.0f), FXS(sun_min, 0.15f), FXS(sun_direct, 0.5f), FXS(sun_casters, 0.0f), FXS(sun_near, 10.0f),
-    FXS(sun_detail, 4096.0f), FXS(ao_quality, 0.0f), FXS(temporal, 0.85f), FXS(debug, 0.0f), FXS(draw, 0.0f),
+    FXS(sun_detail, 4096.0f), FXS(ao_quality, 1.0f), FXS(temporal, 0.85f), FXS(debug, 0.0f), FXS(draw, 0.0f),
     FXS(draw_entities, 0.0f), FXS(fps, 1.0f), FXS(aa, 0.0f), FXS(sun_dusk, 1.0f),
     /* gfx_metal.m's water pass (GfxDraw.water): kept, read back and saved here, not drawn yet */
     FXS(water, 1.0f), FXS(water_refract, 0.015f), FXS(water_clarity, 3.0f), FXS(water_soft, 0.15f), FXS(water_foam, 0.6f),
@@ -2855,14 +2855,21 @@ static void fx_reload(void)
     FILE* f = fopen(g_fx_file, "r");
     if (!f)
         return;
+    /* the settings no menu sets any more (gfx_fx.c FX_FIXED): from the environment and the defaults only */
+    static const char* const FIXED[] = { "fx", "gameshadows", "filter", "lod", "rt" };
     char line[256], key[64];
     float v;
     uint8_t seen[FX_NSETTINGS] = { 0 };
     while (fgets(line, sizeof line, f))
         if (sscanf(line, " %63[a-z_] = %f", key, &v) == 2)
-            for (size_t i = 0; i < FX_NSETTINGS; ++i)
+        {
+            int fixed = 0;
+            for (size_t i = 0; i < sizeof FIXED / sizeof FIXED[0]; ++i)
+                fixed |= !strcmp(FIXED[i], key);
+            for (size_t i = 0; i < FX_NSETTINGS && !fixed; ++i)
                 if (!strcmp(FX_SETTINGS[i].key, key))
                     *(float*)((char*)&g_fxs + FX_SETTINGS[i].at) = v, seen[i] = 1;
+        }
     fclose(f);
     /* a line taken out of the file: its key back to what it was at start, not the file's last word */
     for (size_t i = 0; i < FX_NSETTINGS; ++i)

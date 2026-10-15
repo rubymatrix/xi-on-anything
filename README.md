@@ -389,7 +389,7 @@ the log reports each one: `[recomp] dats: era-dats, 163 files`.
 | `FFXI_DISCORD=0` | No Discord Rich Presence. |
 | `FFXI_DISCORD_NAME=0` | Rich Presence without the character's name (jobs and zone only). |
 | `FFXI_DISCORD_APP_ID` | The Discord application the presence is shown as, in place of the built-in one. |
-| `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU, whatever Config > Modern's Occlusion Check says. By default it answers "visible" at once, which saves 7–8 ms a frame. |
+| `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU. By default it answers "visible" at once, which saves 7–8 ms a frame. |
 | `FFXI_DRAWLOG=<file>` | While `<file>.go` exists, write the next frame's draws to `<file>` (return addresses on the guest stack, texture, vertex box), then remove `.go`. For finding which game code draws what. |
 | `FFXI_ASYNC_READBACK=1` | Small read-only surface locks take the newest finished copy instead of waiting for the GPU. |
 | `FFXI_VSYNC=0` | Never wait for the display, for measuring frame rates past its refresh rate. |
