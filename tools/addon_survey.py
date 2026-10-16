@@ -222,8 +222,10 @@ def main():
         f.write(SEED)
 
     base = os.path.join(args.data_dir, args.kind, 'addons')
+    # the main file in any letter case, as the host finds it (tTimers/ttimers.lua, balloon/Balloon.lua)
     names = sorted(n for n in os.listdir(base)
-                   if n != 'libs' and os.path.isfile(os.path.join(base, n, n + '.lua')))
+                   if n != 'libs' and os.path.isdir(os.path.join(base, n))
+                   and any(f.lower() == n.lower() + '.lua' for f in os.listdir(os.path.join(base, n))))
     if args.only:
         want = set(args.only.split(','))
         names = [n for n in names if n in want]
