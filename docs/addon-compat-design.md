@@ -172,6 +172,8 @@ wrap still holds the guest lock, but Lua must only be entered by one OS thread; 
 - `os.clock` is wall time in every state, as Windows' C runtime counts it (elsewhere `clock()` is
   CPU time, which runs several times slower than real time in the client); addons time actions
   with it.
+- Ashita states also get the libraries Ashita builds into its Lua: `struct` and Lua 5.3's `utf8`
+  (`ashita_struct.lua`, `ashita_utf8.lua`), global and by `require`.
 - State setup order: stdlibs → `xi` (native) → `xi.lua` (events, tasks, print, error policy) →
   `ashita.lua` or `windower.lua` → the addon file with chunk name `@<full path>`.
 

@@ -15,6 +15,7 @@ Globals it sets:
   the enums: ChatInputOpenStatus, CommandMode, FontBorderFlags, FontCreateFlags, FontDrawFlags,
              FrameAnchor, LogLevel, KeyboardEvent, MouseEvent, PluginFlags, PrimitiveDrawFlags
   coroutine.kill, table.make_literal (coroutine.sleep / sleepf come from xi.lua)
+  struct, utf8           Ashita's built-in libraries               (ashita_struct.lua, ashita_utf8.lua)
 
 Anything Ashita has that isn't here fails loudly: "<Class>.<Member> is not supported yet", and the
 host log gets one "unsupported: <Class>.<Member>" line per member (tools/addon_survey.py counts them).
@@ -75,6 +76,9 @@ ashita = util.partial({
 -- Ashita's built-in struct library (global, and require('struct'))
 struct = require('xi.ashita_struct')
 package.loaded['struct'] = struct
+-- and its utf8 library, Lua 5.3's (global, and require('utf8'))
+utf8 = require('xi.ashita_utf8')
+package.loaded['utf8'] = utf8
 
 local core = require('xi.ashita_core')
 AshitaCore = core.AshitaCore

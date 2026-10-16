@@ -9,6 +9,7 @@ run 0.2
 command /ashtest clock
 run 1
 command /ashtest clock
+command /ashtest utf8
 text_in 1 the secret word
 text_in 1 please block me
 packet_in 0a 00 01 00 11 22 33 44
