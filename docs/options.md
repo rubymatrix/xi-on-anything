@@ -38,7 +38,7 @@ the Lighting and Atmosphere pages.
 |---|---|---|---|
 | Anti-aliasing | Graphics › [Quality] Anti-Aliasing | `aa` | 0 off, 1 FXAA |
 | Texture filtering | Graphics › [Quality] Texture Filtering | `aniso` | 16 (1/4/8/16) |
-| Overall quality | Graphics › [Quality] Overall Quality | | Low / Medium / Max set the Lighting page (`light`, `sun`, `sun_casters`, `sun_soft`, `sun_detail`, `ao`, `ao_quality`, `gi`); Custom when they are none of these. Medium is the defaults |
+| Overall quality | Graphics › [Quality] Overall Quality | | Low / Medium / Max set the Lighting page (`light`, `sun`, `sun_casters`, `sun_soft`, `sun_detail`, `ao`, `ao_quality`, `gi`) and the contact shadows (`shadow`: 0 at Low); Custom when they are none of these. Medium is the defaults |
 | Anti-shimmer (temporal) | | `filter` | 1 on; fixed (fx.txt's line ignored) |
 | Temporal blend | | `temporal` | 0.85 |
 | Sharpening | Graphics › [Quality] Sharpening | `sharpen` | 0.3 (0–1) |
@@ -66,14 +66,14 @@ the Lighting and Atmosphere pages.
 | Off-screen caster prime | | `sun_prime` | 300 (0 never) |
 | Sun direct strength | | `sun_direct` | 0.5 |
 | Sun face / min | | `sun_face`, `sun_min` | 0 / 0 |
-| Contact shadow | | `shadow`, `shadow_length` | 0.3 / 0.6 |
+| Contact shadow | | `shadow`, `shadow_length`, `contact_steps` | 0.3 / 0.6 / 0 (the steps a frame, 1–16; 0 follows `ao_quality`: 8, 12, 16) |
 
 ## 4. Ambient occlusion
 
 | Setting | Menu | fx | Default / range |
 |---|---|---|---|
 | Strength | Lighting › [Ambient Occlusion] Strength | `ao` | 0.8 (0–1.5) |
-| Quality | Lighting › [Ambient Occlusion] Quality | `ao_quality` | 1 medium (10 taps); 0 low (6), 2 high (16) |
+| Quality | Lighting › [Ambient Occlusion] Quality | `ao_quality` | 1 medium (10 taps); 0 low (6), 2 high (16); the contact shadows' steps follow it (12; 8, 16) |
 | Radius | Lighting › [Ambient Occlusion] Radius | `radius` | 1.0 (0.25–3) |
 
 ## 5. Atmosphere

@@ -117,6 +117,10 @@ static const struct
     /* ray tracing: the bounce light and the occlusion traced through the frame's casters (rt_capture), where
      * the GPU can; off unless asked for */
     { "rt", offsetof(GfxFxSettings, rt), 0.0f },
+    /* the contact shadows' steps along the sun a frame, 1 to 16, offset each frame as the occlusion's taps
+     * are and gathered by the same temporal pass; 0 follows ao_quality: 8 low, 12 medium, 16 high (16
+     * every frame was nearly a quarter of the effects' cost on a ROG Ally) */
+    { "contact_steps", offsetof(GfxFxSettings, contact_steps), 0.0f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line

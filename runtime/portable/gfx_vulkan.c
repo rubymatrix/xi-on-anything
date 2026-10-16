@@ -2526,7 +2526,7 @@ static const char FX_GLSL[] =
     "  float nl = dot(N, u.sun.xyz);\n"
     "  float fade = smoothstep(0.0, 0.15, nl) * (1.0 - smoothstep(0.6 * u.shadow.w, u.shadow.w, dist));\n"
     "  if (fade <= 0.0) return 1.0;\n"
-    "  const int NS = 16;\n"
+    "  int NS = max(int(u.aop.y), 1);\n" /* contact_steps, jittered by k and gathered over frames */
     "  vec3 O = P + N * (0.01 * dist);\n"
     "  for (int i = 0; i < NS; ++i) {\n"
     "    float a = (float(i) + k) / float(NS);\n"
@@ -5025,6 +5025,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             { hand, 0, 0, 0 },
         };
         u.aop[0] = g_fxs.ao_quality >= 1.5f ? 16.0f : g_fxs.ao_quality >= 0.5f ? 10.0f : 6.0f;
+        u.aop[1] = gfx_contact_steps();
         u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
         /* world up in view space: the world's y axis through the inverse view matrix, pointing the way
          * the camera's own up does (FFXI's world y points down) */
@@ -5090,8 +5091,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.sunw_seen = g_serial;
             fx_ease(g_fx.suncol, s->sun_color, 3, 0.1f);
         }
-        int shadows = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f;
-        if (have_v && (own || (shadows && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
+        /* the sun kept for whatever wants it: its shadows, the god rays and the fog's glow toward it (Low has no
+         * shadows, and its rays would go out with no lit draw in view - the sky, where they show) */
+        int wanted = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f || g_fxs.rays > 0.0f || (g_fxs.fog > 0.0f && g_fxs.fog_sun > 0.0f);
+        if (have_v && (own || (wanted && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
         {
             for (int j = 0; j < 3; ++j)
                 g_fx.sun[j] = g_fx.sunw[0] * s->view[j] + g_fx.sunw[1] * s->view[4 + j] + g_fx.sunw[2] * s->view[8 + j];

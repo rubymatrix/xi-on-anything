@@ -682,14 +682,17 @@ static void test_scene_rays(void)
 
 /* Sun shadows: a post standing on the floor, the sun beyond it and high: the floor before the post
  * (toward the camera) is in its shadow, the floor beside it is not; with the sun behind the camera,
- * or no sun, no shadow. */
+ * or no sun, no shadow. The shaded case again at 16 and 8 steps, and at ao_quality 1's (12). */
 static void test_scene_shadow(void)
 {
     const float beyond[3] = { 0, 0.5f, 1 }, behind[3] = { 0, 0.5f, -1 };
-    const float* suns[3] = { beyond, behind, NULL };
-    for (int k = 0; k < 3; ++k)
+    const float* suns[5] = { beyond, behind, NULL, beyond, beyond };
+    const float steps[5] = { 16, 16, 16, 8, 0 };
+    for (int k = 0; k < 5; ++k)
     {
         fx_only("shadow", 1.0f);
+        gfx_fx_set("contact_steps", steps[k]);
+        gfx_fx_set("ao_quality", 1.0f);
         gfx_fx_set("shadow_length", 3.0f);
         scene_begin(1, 0xFF000000u);
         float floor[4][3] = { { -8, -3, 20 }, { 8, -3, 20 }, { -8, -3, 0.6f }, { 8, -3, 0.6f } };
@@ -700,13 +703,15 @@ static void test_scene_shadow(void)
         /* the floor 5 ahead: row 102; before the post (x 0) and beside it (x 3) */
         uint32_t before = spx(64, 102, 0), beside = spx(102, 102, 0);
         CHECK(beside >= 245, "sun shadows (%d): open floor %u (want lit)", k, beside);
-        if (k == 0)
-            CHECK(before <= 160, "sun shadows: floor before the post %u (want shaded)", before);
+        if (suns[k] == beyond)
+            CHECK(before <= 160, "sun shadows (%d steps): floor before the post %u (want shaded)", (int)steps[k], before);
         else
             CHECK(before >= 245, "sun shadows (%d): floor before the post %u (want lit: the sun is %s)", k, before,
                 k == 1 ? "behind the camera" : "absent");
     }
     gfx_fx_set("shadow_length", 0.6f);
+    gfx_fx_set("contact_steps", 0.0f);
+    gfx_fx_set("ao_quality", 0.0f);
 }
 
 /* The sun's shadow map: a post 10 ahead, 3 high, the sun beyond it and up at about 27 degrees - its
