@@ -315,8 +315,16 @@ do
     local windows = { kernel32 = true, user32 = true, gdi32 = true, winmm = true, shell32 = true, advapi32 = true,
                       d3d8 = true, d3dx8 = true, d3dx9 = true, msvcrt = true, ntdll = true, psapi = true, ole32 = true,
                       gdifonttexture = true }  -- gdifonts' renderer (tHotBar, tCrossBar): the host's own
+    -- fancychat's gdifonts hands its renderer the fonts beside it (SetFontFolder) in a call LuaJIT
+    -- turns down, gsub's count making a second argument; its DLL then guesses addons/fancychat/
+    -- gdifonts, and the host takes the folder the DLL was loaded from
+    local function gdifont_folder(path)
+        local dir = tostring(path):match('^(.*)[/\\]')
+        if dir and pcall(ffi.cdef, 'void SetFontFolder(const char* folder);') then pcall(C.SetFontFolder, dir) end
+    end
     ffi.load = function(name, global)
         local short = tostring(name):lower():gsub('%.dll$', ''):gsub('^.*[/\\]', '')
+        if short == 'gdifonttexture' then gdifont_folder(name) end
         if windows[short] then return proxyC end
         return load(host_path(name), global)
     end

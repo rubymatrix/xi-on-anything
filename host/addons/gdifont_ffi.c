@@ -119,7 +119,7 @@ typedef struct Face
 static Face* g_faces;
 
 /* SetFontFolder's fonts, a face for each file in every addon's folder that asked; g_folders_seen
- * changes the cache's keys, so a family looked up before a folder came is looked up again */
+ * (a folder's fonts came) changes the cache's keys, so a family looked up before is looked up again */
 static Face* g_folder_faces[64];
 static int g_nfolder_faces;
 static unsigned g_folders_seen;
@@ -409,11 +409,13 @@ XI_FFI void SetFontFolder(const char* folder)
     while (n > 1 && (dir[n - 1] == '/' || dir[n - 1] == '\\'))
         dir[--n] = 0;
     snprintf(prefix, sizeof prefix, "file|%s/", dir);
+    size_t np = strlen(prefix);
     for (int i = 0; i < g_nfolder_faces; ++i)
-        if (!strncmp(g_folder_faces[i]->key, prefix, strlen(prefix)))
+        if (!strncmp(g_folder_faces[i]->key, prefix, np) && !strchr(g_folder_faces[i]->key + np, '/'))
             return; /* this folder's fonts are in */
     PlatDir* d = plat_dir_open(dir);
     const char* e;
+    int added = 0;
     while (d && (e = plat_dir_next(d)) && g_nfolder_faces < (int)(sizeof g_folder_faces / sizeof *g_folder_faces))
     {
         size_t len = strlen(e);
@@ -431,11 +433,12 @@ XI_FFI void SetFontFolder(const char* folder)
             free(f);
             continue;
         }
-        g_folder_faces[g_nfolder_faces++] = f;
+        g_folder_faces[g_nfolder_faces++] = f, ++added;
     }
     if (d)
         plat_dir_close(d);
-    ++g_folders_seen;
+    if (added)
+        ++g_folders_seen;
 }
 
 /* --- text ----------------------------------------------------------------------------------- */
@@ -752,8 +755,9 @@ static GdiFontReturn render_text(Manager* mgr, const GdiFontHead* d, const char*
     return r;
 }
 
-/* the regions fork's layout: zero padding after GradientColor, then a family pointer, where the
- * inline layout has the family's first characters */
+/* the regions fork's layout: zero padding after GradientColor, then a family or text pointer (balloon
+ * passes no family when it found no default font), where the inline layout has the family's first
+ * characters - all zero for an empty family */
 static int pointer_layout(const void* data)
 {
     const uint8_t* b = (const uint8_t*)data;
@@ -763,10 +767,14 @@ static int pointer_layout(const void* data)
     for (size_t i = a; i < p; ++i)
         if (b[i])
             return 0;
-    const char* family;
+    const char *family, *text;
     memcpy(&family, b + p, sizeof family);
-    return family != NULL;
+    memcpy(&text, b + offsetof(GdiFontDataP, FontText), sizeof text);
+    return family != NULL || text != NULL;
 }
+
+/* a range of UTF-16 units: an addon's, so its end is summed without overflow */
+static int in_range(int at, const GdiCharRange* r) { return at >= r->First && (int64_t)at < (int64_t)r->First + r->Length; }
 
 static GdiFontReturn create_texture(uint32_t* mgr, const void* data, int marks)
 {
@@ -784,15 +792,15 @@ static GdiFontReturn create_texture(uint32_t* mgr, const void* data, int marks)
                 const GdiRegion* rg = &d->Regions[k];
                 for (int j = 0; rg->Ranges && j < rg->RangesLength; ++j)
                     for (int i = 0; i < t.n; ++i)
-                        if (t.g[i].at >= rg->Ranges[j].First && t.g[i].at < rg->Ranges[j].First + rg->Ranges[j].Length)
+                        if (in_range(t.g[i].at, &rg->Ranges[j]))
                             t.g[i].color = rg->FontColor, t.g[i].own = 1;
             }
             /* GDI+'s clip: a range of no characters clips nothing */
             const GdiCharRange* clip = d->ClipRange;
             if (clip && clip->Length > 0)
                 for (int i = 0; i < t.n; ++i)
-                    t.g[i].shown = t.g[i].at >= clip->First && t.g[i].at < clip->First + clip->Length;
-            r = render_text(manager(mgr), (const GdiFontHead*)data, d->FontFamily, &t);
+                    t.g[i].shown = in_range(t.g[i].at, clip);
+            r = render_text(manager(mgr), (const GdiFontHead*)data, d->FontFamily ? d->FontFamily : "", &t);
         }
     }
     else

@@ -1,8 +1,8 @@
 --[[
 ThornyFFXI's gdifonts library (tHotBar, tCrossBar...) on the host's renderer (host/addons/gdifont_ffi.c)
 and Direct3D (d3d_ffi.c). tests/addons/d3d8_ffi.py copies the library (not in this repository)
-into gdifonts/ next to this file; with fancychat's or balloon's version of it, their colours and
-clipping are checked too. Prints PASS/FAIL lines and "DONE <passed>/<total>".
+into gdifonts/ next to this file; with fancychat's or balloon's version of it, their colours,
+clipping and fonts are checked too. Prints PASS/FAIL lines and "DONE <passed>/<total>".
 --]]
 
 package.path = xi.paths.ashita .. 'addons/libs/?.lua;' .. package.path
@@ -117,6 +117,17 @@ if include:find('CreateTextureColor', 1, true) then
     end)
 end
 
+-- fancychat's ships its fonts beside include.lua: its game icons (U+EE1B, its gil) are drawn, not
+-- the missing glyph a character no font has gets (U+10FFFD)
+if include:find('SetFontFolder', 1, true) then
+    try('font folder', function()
+        local _, it, ir = plain('\238\184\155')
+        local _, mt, mr = plain('\244\143\191\189')
+        local icon, missing = opaque(it, ir), opaque(mt, mr)
+        check('SetFontFolder icons', icon > 20 and icon ~= missing, icon .. ' for ' .. missing .. ' missing')
+    end)
+end
+
 if include:find('GdiRegion_t', 1, true) then
     try('regions', function()
         local _, ft, fr = plain('ABCD')
@@ -132,6 +143,16 @@ if include:find('GdiRegion_t', 1, true) then
         local shown = opaque(ct, cr)
         check('clip keeps the size', cr.right == fr.right and cr.bottom == fr.bottom, cr.right .. ' for ' .. fr.right)
         check('clip shows the range', shown > 20 and shown < all * 0.75, shown .. ' of ' .. all)
+        -- balloon passes no family when it found no default font: still its layout, a font found
+        local d = ffi.new('GdiFontData_t')
+        local text = ffi.new('char[5]', 'ABCD')
+        d.FontHeight, d.FontColor, d.FontText = 24, 0xFFFFFFFF, text
+        local mgr = C.CreateFontManager(nil, 0)
+        local nr = C.CreateTexture(mgr, d)
+        check('no family', nr.Texture ~= nil and nr.Width > fr.right * 0.6 and nr.Width < fr.right * 1.6,
+            nr.Width .. ' for ' .. fr.right)
+        if nr.Texture ~= nil then nr.Texture:Release() end
+        C.DestroyFontManager(mgr)
     end)
 end
 
