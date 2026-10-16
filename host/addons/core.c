@@ -615,6 +615,30 @@ extern int luaopen_mime_core(lua_State* L);
 extern int luaopen_lfs(lua_State* L);
 extern int luaopen_lsqlite3(lua_State* L);
 
+#if !defined(_WIN32)
+/* os.clock as Windows' C runtime gives it, wall time, here counted from the first addon state.
+ * Elsewhere C's clock() is the process's CPU time, which runs several times slower than real
+ * time in a mostly idle game, so addons that time actions with os.clock (LuAshitacast's midcast
+ * delays, for one) wait far longer than they asked. */
+static uint64_t g_clock_origin;
+
+static int os_clock(lua_State* L)
+{
+    lua_pushnumber(L, (double)(rt_monotonic_ns() - g_clock_origin) / 1e9);
+    return 1;
+}
+
+static void wall_os_clock(lua_State* L)
+{
+    if (!g_clock_origin)
+        g_clock_origin = rt_monotonic_ns();
+    lua_getglobal(L, "os");
+    lua_pushcfunction(L, os_clock);
+    lua_setfield(L, -2, "clock");
+    lua_pop(L, 1);
+}
+#endif
+
 static void preload(lua_State* L, const char* name, lua_CFunction f)
 {
     lua_getglobal(L, "package");
@@ -725,6 +749,9 @@ int xi_addon_load(const char* name, int kind)
     }
     a->L = L;
     luaL_openlibs(L);
+#if !defined(_WIN32)
+    wall_os_clock(L);
+#endif
     preload(L, "socket.core", luaopen_socket_core);
     preload(L, "mime.core", luaopen_mime_core);
     preload(L, "lfs", luaopen_lfs);

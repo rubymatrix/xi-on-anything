@@ -169,6 +169,9 @@ wrap still holds the guest lock, but Lua must only be entered by one OS thread; 
   (`socket.core`, `mime.core`), **LuaFileSystem** (`lfs`), and a `zlib`/`struct`-style helper if
   the corpus needs it. No `package.loadlib` of foreign DLLs; a `require` of a known Windower native
   module maps to a built-in replacement or a clear error.
+- `os.clock` is wall time in every state, as Windows' C runtime counts it (elsewhere `clock()` is
+  CPU time, which runs several times slower than real time in the client); addons time actions
+  with it.
 - State setup order: stdlibs → `xi` (native) → `xi.lua` (events, tasks, print, error policy) →
   `ashita.lua` or `windower.lua` → the addon file with chunk name `@<full path>`.
 

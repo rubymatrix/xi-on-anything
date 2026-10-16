@@ -35,6 +35,9 @@
 [chat 1] ashtest: task ran
 [chat 1] ashtest: command slept
 [chat 1] ashtest: task slept
+[chat 1] ashtest: command /ashtest clock mode=1 injected=false
+[chat 1] ashtest: command /ashtest clock mode=1 injected=false
+[chat 1] ashtest: os.clock follows real time: true
 [chat 1] the xxxxxx word
 [harness] packet_in: 36 bytes in, 36 out : 0a04010011223344
 [harness] packet_in: 36 bytes in, 28 out

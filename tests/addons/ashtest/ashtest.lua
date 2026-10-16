@@ -100,6 +100,7 @@ ashita.events.register('load', 'load_cb', function ()
     ashita.tasks.once(0.05, function () say('task ran'); coroutine.sleep(0.05); say('task slept'); end);
 end);
 
+local clock_start;
 ashita.events.register('command', 'command_cb', function (e)
     if (e.command:sub(1, 8) ~= '/ashtest') then return; end
     e.blocked = true;
@@ -107,6 +108,15 @@ ashita.events.register('command', 'command_cb', function (e)
     if (e.command == '/ashtest sleep') then
         coroutine.sleep(0.05);
         say('command slept');
+    elseif (e.command == '/ashtest clock') then
+        -- os.clock is wall time, as on Windows: the harness script sleeps about a second (`run 1`)
+        -- between the two calls.
+        if (clock_start == nil) then
+            clock_start = os.clock();
+        else
+            local elapsed = os.clock() - clock_start;
+            say('os.clock follows real time: %s', tostring(elapsed > 0.8 and elapsed < 3));
+        end
     end
 end);
 
