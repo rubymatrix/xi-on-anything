@@ -262,6 +262,9 @@ because the recompiled C is what runs. Policy:
   0x...; ignored" once, and surface it in `//addon list`.
 - Keep a **patch table**: known addon patches (by addon name + pattern) mapped to a host option or
   a wrap hook that does the same thing. Existing precedents: draw distance, fps divisor, aspect.
+- Data the host itself keeps writing is the same problem: host64 puts the game's frame-rate divisor
+  back every frame, so an addon's write over it (Ashita's fps addon) is taken as that addon's frame
+  rate for the session (`xi_fps_write`), until the player picks one in Config > Display.
 
 ### 7.4 Win32 / D3D8 through `ffi.C`
 
@@ -319,7 +322,9 @@ written against the upstream APIs' documentation and source, not derived from Va
 The `parse_input` wrap calls the router with `(line, mode, injected)`:
 
 1. Host commands: `//addon`, `/addon`, `//lua` (Windower's `lua load|unload|reload|list|command`),
-   `//exec`, `//bind`, `/bind`, `//alias`, `/alias`, `//unbind`.
+   `//exec`, `//bind`, `/bind`, `//alias`, `/alias`, `//unbind`, and Windower's Config plugin for
+   `//config FrameRateDivisor`: 0 uncaps (FastCS, through a cutscene), any other value hands the
+   frame rate back to the player's own.
 2. Aliases (Ashita `/alias`, Windower `alias`) expand, then re-enter the router.
 3. Addons' `command` events (Ashita: every addon sees it with `blocked`; Windower: `addon command`
    for `//<name|_addon.command(s)>`).

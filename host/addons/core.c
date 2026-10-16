@@ -1052,8 +1052,29 @@ void xi_raise(XiEvent* e) { xi_raise_kind(e, -1); }
 static int g_started, g_shut;
 int xi_headless;
 
+static uint32_t (*g_fps_field)(void);
+static void (*g_fps_request)(int divisor);
+
+void xi_fps_write(uint32_t addr, const uint8_t* bytes, uint32_t n)
+{
+    uint32_t f = g_fps_field ? g_fps_field() : 0;
+    if (f && addr <= f && f + 4 <= addr + n)
+    {
+        uint32_t v;
+        memcpy(&v, bytes + (f - addr), 4);
+        g_fps_request(v > 60 ? 60 : (int)v);
+    }
+}
+
+void xi_fps_request(int divisor)
+{
+    if (g_fps_request)
+        g_fps_request(divisor);
+}
+
 void addons_init(const AddonsSetup* s)
 {
+    g_fps_field = s->fps_field, g_fps_request = s->fps_request;
     snprintf(g_data_dir, sizeof g_data_dir, "%s", s->data_dir ? s->data_dir : ".");
     with_slash(g_data_dir, sizeof g_data_dir);
     snprintf(g_game_dir, sizeof g_game_dir, "%s", s->game_dir ? s->game_dir : ".");

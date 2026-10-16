@@ -11,6 +11,11 @@ command //lua c wlayer args via lua
 command //wlunknown x y
 # a command a listener ignores (returns nothing, as Windower handlers do) is still theirs: no error
 command //wlunknown2
+# Windower's Config plugin: FrameRateDivisor (FastCS's, silent as Windower's is), and what isn't kept here
+command //config FrameRateDivisor 0
+command //config FrameRateDivisor 2
+command //config FrameRateDivisor x
+command //config AspectRatio 1
 command //wl state
 command //wl sleep
 run 0.2
