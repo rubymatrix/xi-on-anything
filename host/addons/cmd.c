@@ -470,7 +470,7 @@ static int host_command(const char* line)
             char* end;
             long d = strtol(w[2], &end, 10);
             if (*end || d < 0)
-                return chatf("config: FrameRateDivisor takes 0 (uncapped), 1 or 2"), 1;
+                return chatf("config: FrameRateDivisor takes 0 (uncapped) or 1 and up (your own frame rate)"), 1;
             xi_fps_request(d == 0 ? 0 : -1);
             return 1;
         }

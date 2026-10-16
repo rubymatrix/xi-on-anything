@@ -150,8 +150,7 @@ static uint32_t com_call(uint32_t obj, unsigned slot, unsigned nargs, const uint
  * it back: the player's (g_fps_divisor, Config > Display > Frame Rate), or an addon's for the
  * session (g_fps_addon: Ashita's fps addon, FastCS through a cutscene), until the player picks one. */
 static uint32_t g_fps_divisor = 1, g_fps_global;
-static int g_fps_addon = -1;     /* an addon's divisor (fps_request); -1 none */
-static uint32_t g_fps_chosen = 1; /* g_fps_divisor when the addon's was set: the player changing it ends it */
+static int g_fps_addon = -1; /* an addon's divisor (fps_request); -1 none */
 
 static void find_fps_global(void)
 {
@@ -182,12 +181,15 @@ static void fps_request(int divisor)
 {
     if (divisor == g_fps_addon)
         return;
-    g_fps_addon = divisor, g_fps_chosen = g_fps_divisor;
+    g_fps_addon = divisor;
     if (divisor < 0)
         rt_log("[recomp] frame-rate divisor: back to the player's %u\n", g_fps_divisor);
     else
-        rt_log("[recomp] frame-rate divisor: %d from an addon, until the menu's Frame Rate changes\n", divisor);
+        rt_log("[recomp] frame-rate divisor: %d from an addon, until the menu's Frame Rate is picked\n", divisor);
 }
+
+/* Config > Display > Frame Rate picked (modern.c), the one it showed too: an addon's ends */
+static void fps_chosen(void) { fps_request(-1); }
 
 /* --- the aspect ratio ---------------------------------------------------------------------------------
  * FFXiMain's projection takes its shape from a float at +0x2F0 of its camera object, which the game
@@ -757,8 +759,6 @@ static void present_hook(void)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
         return;
-    if (g_fps_addon >= 0 && g_fps_divisor != g_fps_chosen)
-        g_fps_addon = -1; /* the player picked a frame rate */
     uint32_t want = g_fps_addon >= 0 ? (uint32_t)g_fps_addon : g_fps_divisor;
     uint32_t object = rd32(g_fps_global);
     if (object && rd32(object + 0x30) != want)
@@ -1298,7 +1298,7 @@ int main(int argc, char** argv)
     d3d8_setup();
     d3d8_set_present_hook(present_hook);
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
-        &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given };
+        &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen };
     modern_init(&ms);
     setup_nameplates();
     setup_water();

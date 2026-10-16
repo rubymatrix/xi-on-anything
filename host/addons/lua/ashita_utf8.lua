@@ -14,7 +14,7 @@ local bit = require('bit')
 local band, bor, lshift, rshift = bit.band, bit.bor, bit.lshift, bit.rshift
 
 -- (%z: a pattern can't hold a zero byte in Lua 5.1, which 5.3's '[\0-\x7F...' does)
-local utf8 = { charpattern = '[%z\1-\x7F\xC2-\xFD][\x80-\xBF]*' }
+local utf8 = { charpattern = '[%z\1-\x7F\xC2-\xF4][\x80-\xBF]*' }
 
 local MAX = 0x10FFFF
 local LIMITS = { [1] = 0x80, [2] = 0x800, [3] = 0x10000 } -- the least code point of 2, 3, 4 bytes
