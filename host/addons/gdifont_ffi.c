@@ -8,15 +8,28 @@
  * FontHeight is the em size in pixels, as GDI+'s UnitPixel. Bold or italic without a font file
  * for the style is made (a pixel wider, a slant). The outline is a pen OutlineWidth wide around
  * the glyphs' edges (half outside), under the fill; gradients run the fill colour to
- * GradientColor in the eight GDI+ directions. */
+ * GradientColor in the eight GDI+ directions.
+ *
+ * Addons carry three versions of the DLL, one export set here serving all of them:
+ * - ThornyFFXI's own (tTimers, tHotBar): GdiFontData_t with the family and text inline.
+ * - fancychat's: the same, plus CreateTextureColor, whose text colours runs with inline markers
+ *   (\§AARRGGBBç\ until \§--------ç\), and SetFontFolder, the folder of fonts the addon carries
+ *   (Consolas, its game icons), found by family name and for glyphs the asked-for font lacks.
+ * - onimitch's "regions" fork (balloon): the family and text as pointers, then Regions (character
+ *   ranges filled in a colour of their own) and ClipRange (only those characters shown, the
+ *   texture sized for all of them: balloon's text typing out). Ranges count UTF-16 units, as GDI+.
+ *   CreateTexture tells it from the inline layout by the zero padding before its family pointer,
+ *   where the inline layout has the family's first characters. */
 #include <ctype.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "d3d_ffi.h"
 #include "host.h"
+#include "plat.h"
 
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -37,6 +50,31 @@ typedef struct
     char FontFamily[256];
     char FontText[4096];
 } GdiFontData;
+
+typedef struct
+{
+    int32_t First, Length;
+} GdiCharRange;
+
+typedef struct
+{
+    uint32_t FontColor, OutlineColor;
+    const GdiCharRange* Ranges;
+    int32_t RangesLength;
+} GdiRegion;
+
+/* the regions fork's GdiFontData_t */
+typedef struct
+{
+    int32_t BoxHeight, BoxWidth;
+    float FontHeight, OutlineWidth;
+    uint32_t FontFlags, FontColor, OutlineColor, GradientStyle, GradientColor;
+    const char* FontFamily;
+    const char* FontText;
+    const GdiRegion* Regions;
+    int32_t RegionsLength;
+    const GdiCharRange* ClipRange;
+} GdiFontDataP;
 
 typedef struct
 {
@@ -80,6 +118,68 @@ typedef struct Face
 
 static Face* g_faces;
 
+/* SetFontFolder's fonts, a face for each file in every addon's folder that asked; g_folders_seen
+ * changes the cache's keys, so a family looked up before a folder came is looked up again */
+static Face* g_folder_faces[64];
+static int g_nfolder_faces;
+static unsigned g_folders_seen;
+
+static int load_face(Face* f, const char* path)
+{
+    FILE* fp = fopen(path, "rb");
+    if (!fp)
+        return 0;
+    fseek(fp, 0, SEEK_END);
+    long n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    f->data = n > 0 ? (uint8_t*)malloc((size_t)n) : NULL;
+    if (!f->data || fread(f->data, 1, (size_t)n, fp) != (size_t)n)
+    {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    int off = stbtt_GetFontOffsetForIndex(f->data, 0);
+    if (off < 0 || !stbtt_InitFont(&f->info, f->data, off))
+    {
+        xi_log_once(path, "gdifonts: can't read %s", path);
+        return 0;
+    }
+    return f->ok = 1;
+}
+
+/* a folder font of this family, in the style asked for if there is one (else made) */
+static Face* folder_face(const char* key, const char* family, int bold, int italic)
+{
+    int want = (bold ? STBTT_MACSTYLE_BOLD : 0) | (italic ? STBTT_MACSTYLE_ITALIC : 0);
+    for (int pass = 0; pass < 2; ++pass)
+        for (int i = 0; i < g_nfolder_faces; ++i)
+        {
+            Face* ff = g_folder_faces[i];
+            int flags = pass ? STBTT_MACSTYLE_NONE : want ? want : STBTT_MACSTYLE_NONE;
+            if (stbtt_FindMatchingFont(ff->data, family, flags) < 0)
+                continue;
+            Face* f = (Face*)calloc(1, sizeof *f);
+            if (!f)
+                return NULL;
+            snprintf(f->key, sizeof f->key, "%s", key);
+            f->data = ff->data, f->info = ff->info, f->ok = 1;
+            f->fake_bold = pass && bold, f->fake_italic = pass && italic;
+            f->next = g_faces, g_faces = f;
+            return f;
+        }
+    return NULL;
+}
+
+/* a folder font with a glyph for c, for one the font asked for lacks (fancychat's game icons) */
+static Face* fallback_face(int c)
+{
+    for (int i = 0; i < g_nfolder_faces; ++i)
+        if (stbtt_FindGlyphIndex(&g_folder_faces[i]->info, c))
+            return g_folder_faces[i];
+    return NULL;
+}
+
 static int contains_ci(const char* s, const char* w)
 {
     size_t n = strlen(w);
@@ -97,11 +197,14 @@ static int contains_ci(const char* s, const char* w)
 static Face* face_for(const char* family, int bold, int italic)
 {
     char key[300];
-    snprintf(key, sizeof key, "%s|%d%d", family, bold, italic);
+    snprintf(key, sizeof key, "%s|%d%d|%u", family, bold, italic, g_folders_seen);
     for (Face* f = g_faces; f; f = f->next)
         if (!strcmp(f->key, key))
             return f->ok ? f : NULL;
-    Face* f = (Face*)calloc(1, sizeof *f);
+    Face* f = folder_face(key, family, bold, italic);
+    if (f)
+        return f;
+    f = (Face*)calloc(1, sizeof *f);
     if (!f)
         return NULL;
     snprintf(f->key, sizeof f->key, "%s", key);
@@ -113,30 +216,12 @@ static Face* face_for(const char* family, int bold, int italic)
         xi_log_once(key, "gdifonts: no font for %s", family);
         return NULL;
     }
-    FILE* fp = fopen(path, "rb");
-    if (!fp)
+    if (!load_face(f, path))
         return NULL;
-    fseek(fp, 0, SEEK_END);
-    long n = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    f->data = n > 0 ? (uint8_t*)malloc((size_t)n) : NULL;
-    if (!f->data || fread(f->data, 1, (size_t)n, fp) != (size_t)n)
-    {
-        fclose(fp);
-        return NULL;
-    }
-    fclose(fp);
-    int off = stbtt_GetFontOffsetForIndex(f->data, 0);
-    if (off < 0 || !stbtt_InitFont(&f->info, f->data, off))
-    {
-        xi_log_once(key, "gdifonts: can't read %s", path);
-        return NULL;
-    }
     const char* base = strrchr(path, '/');
     base = base ? base + 1 : path;
     f->fake_bold = bold && !contains_ci(base, "bold");
     f->fake_italic = italic && !contains_ci(base, "italic") && !contains_ci(base, "oblique");
-    f->ok = 1;
     return f;
 }
 
@@ -301,94 +386,263 @@ XI_FFI void DisableTextureDump(uint32_t* p)
 XI_FFI int GetFontAvailable(const char* family)
 {
     char path[1200];
-    return family && xi_gui_font_file(family, 0, 0, path, sizeof path);
+    if (!family)
+        return 0;
+    /* a style named matches the family alone (with none, stb wants "Family Subfamily") */
+    static const int STYLES[] = { STBTT_MACSTYLE_NONE, STBTT_MACSTYLE_BOLD, STBTT_MACSTYLE_ITALIC,
+                                  STBTT_MACSTYLE_BOLD | STBTT_MACSTYLE_ITALIC };
+    for (int i = 0; i < g_nfolder_faces; ++i)
+        for (int s = 0; s < 4; ++s)
+            if (stbtt_FindMatchingFont(g_folder_faces[i]->data, family, STYLES[s]) >= 0)
+                return 1;
+    return xi_gui_font_file(family, 0, 0, path, sizeof path);
+}
+
+/* SetFontFolder (fancychat's): the fonts in an addon's folder, by family name and for glyphs */
+XI_FFI void SetFontFolder(const char* folder)
+{
+    char dir[1200], prefix[1300];
+    if (!folder)
+        return;
+    xi_host_path(folder, dir, sizeof dir);
+    size_t n = strlen(dir);
+    while (n > 1 && (dir[n - 1] == '/' || dir[n - 1] == '\\'))
+        dir[--n] = 0;
+    snprintf(prefix, sizeof prefix, "file|%s/", dir);
+    for (int i = 0; i < g_nfolder_faces; ++i)
+        if (!strncmp(g_folder_faces[i]->key, prefix, strlen(prefix)))
+            return; /* this folder's fonts are in */
+    PlatDir* d = plat_dir_open(dir);
+    const char* e;
+    while (d && (e = plat_dir_next(d)) && g_nfolder_faces < (int)(sizeof g_folder_faces / sizeof *g_folder_faces))
+    {
+        size_t len = strlen(e);
+        if (len < 5 || (strcasecmp(e + len - 4, ".ttf") && strcasecmp(e + len - 4, ".otf")))
+            continue;
+        char path[1400];
+        snprintf(path, sizeof path, "%s/%s", dir, e);
+        Face* f = (Face*)calloc(1, sizeof *f);
+        if (!f)
+            break;
+        snprintf(f->key, sizeof f->key, "file|%s", path);
+        if (!load_face(f, path))
+        {
+            free(f->data);
+            free(f);
+            continue;
+        }
+        g_folder_faces[g_nfolder_faces++] = f;
+    }
+    if (d)
+        plat_dir_close(d);
+    ++g_folders_seen;
+}
+
+/* --- text ----------------------------------------------------------------------------------- */
+
+/* the fields every layout of GdiFontData_t starts with */
+typedef struct
+{
+    int32_t BoxHeight, BoxWidth;
+    float FontHeight, OutlineWidth;
+    uint32_t FontFlags, FontColor, OutlineColor, GradientStyle, GradientColor;
+} GdiFontHead;
+
+/* a character to draw: where it is in UTF-16 units (GDI+'s character ranges count those), its
+ * font, a colour of its own (a run's or a region's) and whether it shows */
+typedef struct Glyph
+{
+    int c, at;
+    uint32_t color;
+    uint8_t own, shown;
+    Face* face;
+} Glyph;
+
+typedef struct Text
+{
+    Glyph* g;
+    int n, cap, u16;
+} Text;
+
+static int text_add(Text* t, int c, uint32_t color, int own)
+{
+    if (t->n == t->cap)
+    {
+        int cap = t->cap ? t->cap * 2 : 256;
+        Glyph* g = (Glyph*)realloc(t->g, (size_t)cap * sizeof *g);
+        if (!g)
+            return 0;
+        t->g = g, t->cap = cap;
+    }
+    Glyph* g = &t->g[t->n++];
+    g->c = c, g->at = t->u16, g->color = color, g->own = (uint8_t)own, g->shown = 1, g->face = NULL;
+    t->u16 += c >= 0x10000 ? 2 : 1;
+    return 1;
+}
+
+/* the text's characters; with marks, fancychat's markers colour runs: \§AARRGGBBç\ (backslash,
+ * C2 A7, eight characters, C3 A7, backslash) starts one, \§--------ç\ goes back to the font's */
+static int text_utf8(Text* t, const char* s, int marks)
+{
+    const unsigned char* p = (const unsigned char*)s;
+    uint32_t color = 0;
+    int own = 0;
+    while (*p)
+    {
+        if (marks && p[0] == '\\' && p[1] == 0xC2 && p[2] == 0xA7 && memchr(p + 3, 0, 8) == NULL && p[11] == 0xC3 &&
+            p[12] == 0xA7 && p[13] == '\\')
+        {
+            char hex[9], *end;
+            memcpy(hex, p + 3, 8);
+            hex[8] = 0;
+            unsigned long v = strtoul(hex, &end, 16);
+            own = end == hex + 8;
+            color = own ? (uint32_t)v : 0;
+            p += 14;
+            continue;
+        }
+        if (!text_add(t, (int)utf8_next(&p), color, own))
+            return 0;
+    }
+    return 1;
+}
+
+static float glyph_scale(const Glyph* g, float height) { return stbtt_ScaleForMappingEmToPixels(&g->face->info, height); }
+
+static float glyph_advance(const Glyph* g, float height)
+{
+    if (g->c == '\r')
+        return 0;
+    int adv, lsb;
+    stbtt_GetCodepointHMetrics(&g->face->info, g->c, &adv, &lsb);
+    return (float)adv * glyph_scale(g, height);
+}
+
+/* kerning against the character before, in the same font */
+static float glyph_kern(const Glyph* g, const Glyph* prev, float height)
+{
+    if (!prev || prev->face != g->face || g->c == '\r')
+        return 0;
+    return (float)stbtt_GetCodepointKernAdvance(&g->face->info, prev->c, g->c) * glyph_scale(g, height);
 }
 
 #define MAX_LINES 128
 
-XI_FFI GdiFontReturn CreateTexture(uint32_t* mgr, const GdiFontData* d)
+static GdiFontReturn render_text(Manager* mgr, const GdiFontHead* d, const char* family, Text* t)
 {
     GdiFontReturn r = { 0, 0, NULL };
-    if (!d || !d->FontText[0] || d->FontHeight <= 0 || d->FontHeight > 512)
+    if (!t->n || d->FontHeight <= 0 || d->FontHeight > 512)
         return r;
     int bold = (d->FontFlags & F_BOLD) != 0, italic = (d->FontFlags & F_ITALIC) != 0;
-    char family[256];
-    memcpy(family, d->FontFamily, sizeof family);
-    family[255] = 0;
-    Face* f = face_for(family[0] ? family : "Arial", bold, italic);
+    Face* f = face_for(family && family[0] ? family : "Arial", bold, italic);
     if (!f)
         return r;
     float scale = stbtt_ScaleForMappingEmToPixels(&f->info, d->FontHeight);
     int asc, desc, gap;
     stbtt_GetFontVMetrics(&f->info, &asc, &desc, &gap);
     float line_h = (float)(asc - desc + gap) * scale, ascent = (float)asc * scale;
+    int coloured = 0;
+    for (int i = 0; i < t->n; ++i)
+    {
+        Glyph* g = &t->g[i];
+        g->face = f;
+        if (g->c >= ' ' && !stbtt_FindGlyphIndex(&f->info, g->c))
+        {
+            Face* o = fallback_face(g->c);
+            if (o)
+                g->face = o;
+        }
+        coloured |= g->own;
+    }
 
-    /* lines and their widths */
-    char text[4097];
-    memcpy(text, d->FontText, 4096);
-    text[4096] = 0;
-    const char* lines[MAX_LINES];
+    float ow = d->OutlineWidth > 0 ? d->OutlineWidth : 0;
+    float slant = f->fake_italic ? 0.2f : 0;
+    int pad = (int)ceilf(ow * 0.5f) + 1;
+
+    /* lines (their first and end characters) and their widths, every character's, shown or not; in
+     * a box BoxWidth wide, as GDI+ lays text out in one: a line breaks after the last space that
+     * fits, or inside a word wider than the box */
+    float room = d->BoxWidth > 0 ? (float)(d->BoxWidth - 2 * pad) - slant * line_h : 0;
+    int first[MAX_LINES], last[MAX_LINES];
     float widths[MAX_LINES];
     int nl = 0;
-    for (char *s = text, *e; s && nl < MAX_LINES; s = e ? e + 1 : NULL)
+    for (int i = 0; nl < MAX_LINES;)
     {
-        e = strchr(s, '\n');
-        if (e)
-            *e = 0;
-        size_t len = strlen(s);
-        if (len && s[len - 1] == '\r')
-            s[len - 1] = 0;
-        lines[nl] = s;
-        float w = 0;
-        int prev = 0;
-        for (const unsigned char* p = (const unsigned char*)s; *p;)
+        int start = i, brk = -1;
+        float w = 0, wbrk = 0;
+        const Glyph* prev = NULL;
+        for (; i < t->n && t->g[i].c != '\n'; ++i)
         {
-            int c = (int)utf8_next(&p);
-            int adv, lsb;
-            stbtt_GetCodepointHMetrics(&f->info, c, &adv, &lsb);
-            if (prev)
-                w += (float)stbtt_GetCodepointKernAdvance(&f->info, prev, c) * scale;
-            w += (float)adv * scale;
-            prev = c;
+            const Glyph* g = &t->g[i];
+            float step = glyph_kern(g, prev, d->FontHeight) + glyph_advance(g, d->FontHeight);
+            if (room > 0 && i > start && g->c != ' ' && w + step > room)
+            {
+                if (brk > start)
+                    i = brk, w = wbrk;
+                break;
+            }
+            w += step;
+            if (g->c != '\r')
+                prev = g;
+            if (g->c == ' ' && (i + 1 >= t->n || t->g[i + 1].c != ' '))
+                brk = i + 1, wbrk = w;
         }
-        widths[nl++] = w;
+        first[nl] = start, last[nl] = i, widths[nl++] = w;
+        if (i >= t->n)
+            break;
+        if (t->g[i].c == '\n')
+            ++i;
     }
     float maxw = 0;
     for (int i = 0; i < nl; ++i)
         if (widths[i] > maxw)
             maxw = widths[i];
-    float ow = d->OutlineWidth > 0 ? d->OutlineWidth : 0;
-    float slant = f->fake_italic ? 0.2f : 0;
-    int pad = (int)ceilf(ow * 0.5f) + 1;
     int W = d->BoxWidth > 0 ? d->BoxWidth : (int)ceilf(maxw + slant * line_h + (f->fake_bold ? 1 : 0)) + 2 * pad;
     int H = d->BoxHeight > 0 ? d->BoxHeight : (int)ceilf(line_h * (float)nl) + 2 * pad;
     if (W <= 0 || H <= 0 || W > 8192 || H > 8192)
         return r;
 
+    /* coverage: mask for the font's colour, cmask (with ccol) for characters with their own */
     float* mask = (float*)calloc((size_t)W * H, sizeof *mask);
-    if (!mask)
+    float* cmask = coloured ? (float*)calloc((size_t)W * H, sizeof *cmask) : NULL;
+    uint32_t* ccol = coloured ? (uint32_t*)calloc((size_t)W * H, sizeof *ccol) : NULL;
+    if (!mask || (coloured && (!cmask || !ccol)))
+    {
+        free(mask);
+        free(cmask);
+        free(ccol);
         return r;
+    }
+    float th = d->FontHeight / 14.0f < 1 ? 1 : d->FontHeight / 14.0f;
     for (int li = 0; li < nl; ++li)
     {
         float x = (float)pad, base = (float)pad + (float)li * line_h + ascent;
-        int prev = 0;
-        for (const unsigned char* p = (const unsigned char*)lines[li]; *p;)
+        const Glyph* prev = NULL;
+        for (int gi = first[li]; gi < last[li]; ++gi)
         {
-            int c = (int)utf8_next(&p);
-            if (prev)
-                x += (float)stbtt_GetCodepointKernAdvance(&f->info, prev, c) * scale;
-            int adv, lsb;
-            stbtt_GetCodepointHMetrics(&f->info, c, &adv, &lsb);
+            const Glyph* gl = &t->g[gi];
+            if (gl->c == '\r')
+                continue;
+            x += glyph_kern(gl, prev, d->FontHeight);
+            prev = gl;
+            float adv = glyph_advance(gl, d->FontHeight);
+            if (!gl->shown)
+            {
+                x += adv;
+                continue;
+            }
+            float* target = gl->own ? cmask : mask;
+            float gs = glyph_scale(gl, d->FontHeight);
             int gx0, gy0, gx1, gy1;
             float sx = x - floorf(x);
-            stbtt_GetCodepointBitmapBoxSubpixel(&f->info, c, scale, scale, sx, 0, &gx0, &gy0, &gx1, &gy1);
+            stbtt_GetCodepointBitmapBoxSubpixel(&gl->face->info, gl->c, gs, gs, sx, 0, &gx0, &gy0, &gx1, &gy1);
             int gw = gx1 - gx0, gh = gy1 - gy0;
             if (gw > 0 && gh > 0 && gw < 1024 && gh < 1024)
             {
                 unsigned char* g = (unsigned char*)malloc((size_t)gw * gh);
                 if (g)
                 {
-                    stbtt_MakeCodepointBitmapSubpixel(&f->info, g, gw, gh, gw, scale, scale, sx, 0, c);
+                    stbtt_MakeCodepointBitmapSubpixel(&gl->face->info, g, gw, gh, gw, gs, gs, sx, 0, gl->c);
                     int ox = (int)floorf(x) + gx0, oy = (int)floorf(base) + gy0;
                     for (int y = 0; y < gh; ++y)
                     {
@@ -410,8 +664,10 @@ XI_FFI GdiFontReturn CreateTexture(uint32_t* mgr, const GdiFontData* d)
                                 float part = v * (k ? fr : 1 - fr);
                                 if (xx >= 0 && xx < W && part > 0)
                                 {
-                                    float* m = &mask[(size_t)yy * W + xx];
-                                    *m = clampf(*m + part, 0, 1);
+                                    size_t i = (size_t)yy * W + xx;
+                                    target[i] = clampf(target[i] + part, 0, 1);
+                                    if (gl->own)
+                                        ccol[i] = gl->color;
                                 }
                             }
                         }
@@ -419,36 +675,52 @@ XI_FFI GdiFontReturn CreateTexture(uint32_t* mgr, const GdiFontData* d)
                     free(g);
                 }
             }
-            x += (float)adv * scale;
-            prev = c;
-        }
-        /* underline and strikeout */
-        float th = d->FontHeight / 14.0f < 1 ? 1 : d->FontHeight / 14.0f;
-        for (int which = 0; which < 2; ++which)
-        {
-            if (!(d->FontFlags & (which ? F_STRIKEOUT : F_UNDERLINE)))
-                continue;
-            float y0 = which ? base - d->FontHeight * 0.3f : base + d->FontHeight * 0.1f;
-            for (int yy = (int)floorf(y0); yy < (int)ceilf(y0 + th) && yy < H; ++yy)
-                for (int xx = pad; xx < pad + (int)ceilf(widths[li]) && xx < W; ++xx)
-                    if (yy >= 0)
-                        mask[(size_t)yy * W + xx] = 1;
+            /* underline and strikeout, under the characters shown */
+            for (int which = 0; which < 2; ++which)
+            {
+                if (!(d->FontFlags & (which ? F_STRIKEOUT : F_UNDERLINE)))
+                    continue;
+                float y0 = which ? base - d->FontHeight * 0.3f : base + d->FontHeight * 0.1f;
+                for (int yy = (int)floorf(y0); yy < (int)ceilf(y0 + th) && yy < H; ++yy)
+                    for (int xx = (int)floorf(x); xx < (int)ceilf(x + adv) && xx < W; ++xx)
+                        if (yy >= 0 && xx >= 0)
+                        {
+                            size_t i = (size_t)yy * W + xx;
+                            target[i] = 1;
+                            if (gl->own)
+                                ccol[i] = gl->color;
+                        }
+            }
+            x += adv;
         }
     }
     if (f->fake_bold) /* a pixel wider */
         for (int y = 0; y < H; ++y)
             for (int x = W - 1; x > 0; --x)
             {
-                float* m = &mask[(size_t)y * W + x];
-                float l = m[-1];
-                if (l > *m)
-                    *m = l;
+                size_t i = (size_t)y * W + x;
+                if (mask[i - 1] > mask[i])
+                    mask[i] = mask[i - 1];
+                if (cmask && cmask[i - 1] > cmask[i])
+                    cmask[i] = cmask[i - 1], ccol[i] = ccol[i - 1];
             }
-    float* outline = ow > 0 && (d->OutlineColor >> 24) ? dilate(mask, W, H, ow * 0.5f) : NULL;
+    /* the outline goes round every character shown, whatever its colour */
+    float* all = mask;
+    if (cmask)
+    {
+        all = (float*)malloc((size_t)W * H * sizeof *all);
+        for (size_t i = 0; all && i < (size_t)W * H; ++i)
+            all[i] = cmask[i] > mask[i] ? cmask[i] : mask[i];
+    }
+    float* outline = all && ow > 0 && (d->OutlineColor >> 24) ? dilate(all, W, H, ow * 0.5f) : NULL;
+    if (all != mask)
+        free(all);
     uint8_t* px = (uint8_t*)malloc((size_t)W * H * 4);
     if (!px)
     {
         free(mask);
+        free(cmask);
+        free(ccol);
         free(outline);
         return r;
     }
@@ -458,19 +730,90 @@ XI_FFI GdiFontReturn CreateTexture(uint32_t* mgr, const GdiFontData* d)
         for (int x = 0; x < W; ++x)
         {
             float fc[4];
-            fill_color(d->FontColor, d->GradientColor, d->GradientStyle, (float)x, (float)y, (float)W, (float)H, fc);
             size_t i = (size_t)y * W + x;
+            if (cmask && cmask[i] > mask[i])
+            {
+                fill_color(ccol[i], ccol[i], 0, 0, 0, 1, 1, fc);
+                compose(px + i * 4, cmask[i], fc, outline ? outline[i] : 0, oc);
+                continue;
+            }
+            fill_color(d->FontColor, d->GradientColor, d->GradientStyle, (float)x, (float)y, (float)W, (float)H, fc);
             compose(px + i * 4, mask[i], fc, outline ? outline[i] : 0, oc);
         }
     free(mask);
+    free(cmask);
+    free(ccol);
     free(outline);
-    dump(manager(mgr), "font", px, W, H);
+    dump(mgr, "font", px, W, H);
     r.Texture = xi_d3d_texture_bgra(px, W, H);
     free(px);
     if (r.Texture)
         r.Width = W, r.Height = H;
     return r;
 }
+
+/* the regions fork's layout: zero padding after GradientColor, then a family pointer, where the
+ * inline layout has the family's first characters */
+static int pointer_layout(const void* data)
+{
+    const uint8_t* b = (const uint8_t*)data;
+    size_t a = offsetof(GdiFontData, FontFamily), p = offsetof(GdiFontDataP, FontFamily);
+    if (p <= a)
+        return 0;
+    for (size_t i = a; i < p; ++i)
+        if (b[i])
+            return 0;
+    const char* family;
+    memcpy(&family, b + p, sizeof family);
+    return family != NULL;
+}
+
+static GdiFontReturn create_texture(uint32_t* mgr, const void* data, int marks)
+{
+    GdiFontReturn r = { 0, 0, NULL };
+    Text t = { NULL, 0, 0, 0 };
+    if (!data)
+        return r;
+    if (pointer_layout(data))
+    {
+        const GdiFontDataP* d = (const GdiFontDataP*)data;
+        if (d->FontText && text_utf8(&t, d->FontText, marks))
+        {
+            for (int k = 0; d->Regions && k < d->RegionsLength; ++k)
+            {
+                const GdiRegion* rg = &d->Regions[k];
+                for (int j = 0; rg->Ranges && j < rg->RangesLength; ++j)
+                    for (int i = 0; i < t.n; ++i)
+                        if (t.g[i].at >= rg->Ranges[j].First && t.g[i].at < rg->Ranges[j].First + rg->Ranges[j].Length)
+                            t.g[i].color = rg->FontColor, t.g[i].own = 1;
+            }
+            /* GDI+'s clip: a range of no characters clips nothing */
+            const GdiCharRange* clip = d->ClipRange;
+            if (clip && clip->Length > 0)
+                for (int i = 0; i < t.n; ++i)
+                    t.g[i].shown = t.g[i].at >= clip->First && t.g[i].at < clip->First + clip->Length;
+            r = render_text(manager(mgr), (const GdiFontHead*)data, d->FontFamily, &t);
+        }
+    }
+    else
+    {
+        const GdiFontData* d = (const GdiFontData*)data;
+        char family[256], text[4097];
+        memcpy(family, d->FontFamily, sizeof family);
+        family[255] = 0;
+        memcpy(text, d->FontText, 4096);
+        text[4096] = 0;
+        if (text_utf8(&t, text, marks))
+            r = render_text(manager(mgr), (const GdiFontHead*)data, family, &t);
+    }
+    free(t.g);
+    return r;
+}
+
+XI_FFI GdiFontReturn CreateTexture(uint32_t* mgr, const void* d) { return create_texture(mgr, d, 0); }
+
+/* fancychat's: its text's markers colour runs of it */
+XI_FFI GdiFontReturn CreateTextureColor(uint32_t* mgr, const void* d) { return create_texture(mgr, d, 1); }
 
 /* signed distance from p to a rounded rectangle [x0,x1]x[y0,y1] with corner radius rad */
 static float rr_dist(float px, float py, float x0, float y0, float x1, float y1, float rad)

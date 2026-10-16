@@ -1,7 +1,8 @@
 --[[
 ThornyFFXI's gdifonts library (tHotBar, tCrossBar...) on the host's renderer (host/addons/gdifont_ffi.c)
 and Direct3D (d3d_ffi.c). tests/addons/d3d8_ffi.py copies the library (not in this repository)
-into gdifonts/ next to this file. Prints PASS/FAIL lines and "DONE <passed>/<total>".
+into gdifonts/ next to this file; with fancychat's or balloon's version of it, their colours and
+clipping are checked too. Prints PASS/FAIL lines and "DONE <passed>/<total>".
 --]]
 
 package.path = xi.paths.ashita .. 'addons/libs/?.lua;' .. package.path
@@ -64,6 +65,75 @@ try('font', function()
     tex:UnlockRect(0)
     check('text pixels', lit > 100 and clear > 100, lit .. ' lit, ' .. clear .. ' clear')
 end)
+
+-- The library's own version: fancychat's colours runs of its text with markers, balloon's (the
+-- regions fork) colours character ranges and clips to one.
+local include = io.open(xi.info.path .. 'gdifonts/include.lua'):read('*a')
+
+-- opaque pixels: all of them, red ones (a run's or region's colour), white ones (the font's)
+local function opaque(tex, r)
+    local all, red, white = 0, 0, 0
+    local _, lr = tex:LockRect(0, nil, 0)
+    local p = ffi.cast('uint32_t*', lr.pBits)
+    for y = 0, r.bottom - 1 do
+        for x = 0, r.right - 1 do
+            local v = p[y * (lr.Pitch / 4) + x]
+            if bit.rshift(v, 24) > 200 then
+                all = all + 1
+                local R, G, B = bit.band(bit.rshift(v, 16), 255), bit.band(bit.rshift(v, 8), 255), bit.band(v, 255)
+                if R > 200 and G < 60 and B < 60 then
+                    red = red + 1
+                elseif R > 200 and G > 200 and B > 200 then
+                    white = white + 1
+                end
+            end
+        end
+    end
+    tex:UnlockRect(0)
+    return all, red, white
+end
+
+local function plain(text)
+    local o = gdi:create_object({ font_height = 24, text = text, outline_width = 0 }, false)
+    return o, o:get_texture()
+end
+
+try('wrap', function()
+    local _, _, one = plain('ABCD EFGH IJKL')
+    local o = gdi:create_object({ font_height = 24, text = 'ABCD EFGH IJKL', outline_width = 0, box_width = 90 }, false)
+    local tex, r = o:get_texture()
+    check('wrap in box_width', tex ~= nil and r.right <= 90 and r.bottom >= one.bottom * 2.5,
+        r and (r.right .. 'x' .. r.bottom .. ', one line ' .. one.bottom))
+end)
+
+if include:find('CreateTextureColor', 1, true) then
+    try('colour markers', function()
+        local _, pt, pr = plain('ABCD')
+        local _, mt, mr = plain('AB\\§FFFF0000ç\\CD\\§--------ç\\')
+        check('CreateTextureColor size', mt ~= nil and mr.right == pr.right and mr.bottom == pr.bottom,
+            mr and (mr.right .. 'x' .. mr.bottom .. ' for ' .. pr.right .. 'x' .. pr.bottom))
+        local _, red, white = opaque(mt, mr)
+        check('CreateTextureColor runs', red > 20 and white > 20, red .. ' red, ' .. white .. ' white')
+    end)
+end
+
+if include:find('GdiRegion_t', 1, true) then
+    try('regions', function()
+        local _, ft, fr = plain('ABCD')
+        local all = opaque(ft, fr)
+        local o = plain('ABCD')
+        o:set_regions({ ['255,0,0'] = { { start_u = 3, length_u = 2 } } })
+        local rt, rr = o:get_texture()
+        local _, red, white = opaque(rt, rr)
+        check('region colour', red > 20 and white > 20, red .. ' red, ' .. white .. ' white')
+        o = plain('ABCD')
+        o:set_clip_range(1, 2)
+        local ct, cr = o:get_texture()
+        local shown = opaque(ct, cr)
+        check('clip keeps the size', cr.right == fr.right and cr.bottom == fr.bottom, cr.right .. ' for ' .. fr.right)
+        check('clip shows the range', shown > 20 and shown < all * 0.75, shown .. ' of ' .. all)
+    end)
+end
 
 try('rect', function()
     rect = gdi:create_rect({ width = 50, height = 20, corner_rounding = 10, fill_color = 0xFF00FF00,

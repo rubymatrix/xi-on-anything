@@ -292,7 +292,9 @@ win32_ffi.c, gdifont_ffi.c; test: tests/addons/d3d8_ffi.py):
   process/thread ids and affinity, timers, code pages (UTF-8, Shift-JIS, Latin-1), PlaySound (WAV
   through SDL), ShellExecute of http(s) links, GetModuleHandleA (FFXiMain's base).
 - **gdifonts** (tHotBar, tCrossBar): its native renderer's exports draw text (stb_truetype) and
-  rounded rectangles into textures.
+  rounded rectangles into textures, wrapped in a box's width as GDI+ wraps it. The versions addons
+  carry are all served: fancychat's colour markers (CreateTextureColor) and its own fonts
+  (SetFontFolder), balloon's fork with coloured regions and a clip range (its text typing out).
 - Not done: render targets other than the back buffer, cube/volume textures, shaders, lighting,
   texture stage ops other than modulate.
 
