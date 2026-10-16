@@ -139,7 +139,7 @@ static int scan(void)
     static const int ORDER[] = { XI_KIND_XI, XI_KIND_ASHITA, XI_KIND_WINDOWER };
     for (int k = 0; k < 3; ++k)
     {
-        char dir[1200], file[1400];
+        char dir[1200], raw[1400], file[1400];
         snprintf(dir, sizeof dir, "%saddons", xi_kind_root(ORDER[k]));
         PlatDir* d = plat_dir_open(dir);
         const char* e;
@@ -148,7 +148,10 @@ static int scan(void)
             PlatStat st;
             if (e[0] == '.' || !strcasecmp(e, "libs") || strlen(e) >= sizeof g_list[0].name || listed(e))
                 continue;
-            snprintf(file, sizeof file, "%s/%s/%s.lua", dir, e, e);
+            /* the main file found as /addon load finds it (addon_file), without regard to case: tTimers'
+             * is ttimers.lua, balloon's Balloon.lua */
+            snprintf(raw, sizeof raw, "%s/%s/%s.lua", dir, e, e);
+            xi_host_path(raw, file, sizeof file);
             if (!plat_stat(file, &st))
                 continue;
             Listed* l = &g_list[g_nlist++];

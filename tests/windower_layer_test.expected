@@ -36,6 +36,8 @@
 [chat 1] command none 0
 [chat 1] args 2 via|lua
 [chat 1] unhandled command wlunknown x y
+[chat 207] config: FrameRateDivisor takes 0 (uncapped) or 1 and up (your own frame rate)
+[chat 207] config: AspectRatio is not supported here (FrameRateDivisor is)
 [chat 1] info true 230 true true true
 [chat 1] player Tester 16777507 WAR 99 THF 49 1500 93
 [chat 1] items table true table true

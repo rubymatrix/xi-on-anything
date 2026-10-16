@@ -360,6 +360,8 @@ static void set(const Row* r, float v)
     {
         if (g_setup.fps_divisor)
             *g_setup.fps_divisor = (uint32_t)v;
+        if (g_setup.fps_chosen)
+            g_setup.fps_chosen();
         g_host_touched = 1;
     }
     else if (!strcmp(r->key, "@ui"))

@@ -14,6 +14,11 @@ typedef struct AddonsSetup
     const char* game_dir; /* the game's install folder on the host */
     const char* const* dat_overlays; /* DAT overlay folders, first wins (resources read through them) */
     unsigned ndat_overlays;
+    /* host64's frame rate: where the game keeps its divisor (0 not known), and the divisor an addon asks
+     * for this session, -1 the player's own (Ashita's fps addon writing that field, Windower's
+     * //config FrameRateDivisor). NULL: no frame rate to change (the harness) */
+    uint32_t (*fps_field)(void);
+    void (*fps_request)(int divisor);
 } AddonsSetup;
 
 /* Before the game starts: installs the wraps (command line, chat log, packets) and the input and

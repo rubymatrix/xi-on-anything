@@ -169,6 +169,11 @@ wrap still holds the guest lock, but Lua must only be entered by one OS thread; 
   (`socket.core`, `mime.core`), **LuaFileSystem** (`lfs`), and a `zlib`/`struct`-style helper if
   the corpus needs it. No `package.loadlib` of foreign DLLs; a `require` of a known Windower native
   module maps to a built-in replacement or a clear error.
+- `os.clock` is wall time in every state, as Windows' C runtime counts it (elsewhere `clock()` is
+  CPU time, which runs several times slower than real time in the client); addons time actions
+  with it.
+- Ashita states also get the libraries Ashita builds into its Lua: `struct` and Lua 5.3's `utf8`
+  (`ashita_struct.lua`, `ashita_utf8.lua`), global and by `require`.
 - State setup order: stdlibs → `xi` (native) → `xi.lua` (events, tasks, print, error policy) →
   `ashita.lua` or `windower.lua` → the addon file with chunk name `@<full path>`.
 
@@ -259,6 +264,9 @@ because the recompiled C is what runs. Policy:
   0x...; ignored" once, and surface it in `//addon list`.
 - Keep a **patch table**: known addon patches (by addon name + pattern) mapped to a host option or
   a wrap hook that does the same thing. Existing precedents: draw distance, fps divisor, aspect.
+- Data the host itself keeps writing is the same problem: host64 puts the game's frame-rate divisor
+  back every frame, so an addon's write over it (Ashita's fps addon) is taken as that addon's frame
+  rate for the session (`xi_fps_write`), until the player picks one in Config > Display.
 
 ### 7.4 Win32 / D3D8 through `ffi.C`
 
@@ -284,7 +292,9 @@ win32_ffi.c, gdifont_ffi.c; test: tests/addons/d3d8_ffi.py):
   process/thread ids and affinity, timers, code pages (UTF-8, Shift-JIS, Latin-1), PlaySound (WAV
   through SDL), ShellExecute of http(s) links, GetModuleHandleA (FFXiMain's base).
 - **gdifonts** (tHotBar, tCrossBar): its native renderer's exports draw text (stb_truetype) and
-  rounded rectangles into textures.
+  rounded rectangles into textures, wrapped in a box's width as GDI+ wraps it. The versions addons
+  carry are all served: fancychat's colour markers (CreateTextureColor) and its own fonts
+  (SetFontFolder), balloon's fork with coloured regions and a clip range (its text typing out).
 - Not done: render targets other than the back buffer, cube/volume textures, shaders, lighting,
   texture stage ops other than modulate.
 
@@ -316,7 +326,9 @@ written against the upstream APIs' documentation and source, not derived from Va
 The `parse_input` wrap calls the router with `(line, mode, injected)`:
 
 1. Host commands: `//addon`, `/addon`, `//lua` (Windower's `lua load|unload|reload|list|command`),
-   `//exec`, `//bind`, `/bind`, `//alias`, `/alias`, `//unbind`.
+   `//exec`, `//bind`, `/bind`, `//alias`, `/alias`, `//unbind`, and Windower's Config plugin for
+   `//config FrameRateDivisor`: 0 uncaps (FastCS, through a cutscene), any other value hands the
+   frame rate back to the player's own.
 2. Aliases (Ashita `/alias`, Windower `alias`) expand, then re-enter the router.
 3. Addons' `command` events (Ashita: every addon sees it with `blocked`; Windower: `addon command`
    for `//<name|_addon.command(s)>`).

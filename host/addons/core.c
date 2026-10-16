@@ -615,6 +615,30 @@ extern int luaopen_mime_core(lua_State* L);
 extern int luaopen_lfs(lua_State* L);
 extern int luaopen_lsqlite3(lua_State* L);
 
+#if !defined(_WIN32)
+/* os.clock as Windows' C runtime gives it, wall time, here counted from the first addon state.
+ * Elsewhere C's clock() is the process's CPU time, which runs several times slower than real
+ * time in a mostly idle game, so addons that time actions with os.clock (LuAshitacast's midcast
+ * delays, for one) wait far longer than they asked. */
+static uint64_t g_clock_origin;
+
+static int os_clock(lua_State* L)
+{
+    lua_pushnumber(L, (double)(rt_monotonic_ns() - g_clock_origin) / 1e9);
+    return 1;
+}
+
+static void wall_os_clock(lua_State* L)
+{
+    if (!g_clock_origin)
+        g_clock_origin = rt_monotonic_ns();
+    lua_getglobal(L, "os");
+    lua_pushcfunction(L, os_clock);
+    lua_setfield(L, -2, "clock");
+    lua_pop(L, 1);
+}
+#endif
+
 static void preload(lua_State* L, const char* name, lua_CFunction f)
 {
     lua_getglobal(L, "package");
@@ -725,6 +749,9 @@ int xi_addon_load(const char* name, int kind)
     }
     a->L = L;
     luaL_openlibs(L);
+#if !defined(_WIN32)
+    wall_os_clock(L);
+#endif
     preload(L, "socket.core", luaopen_socket_core);
     preload(L, "mime.core", luaopen_mime_core);
     preload(L, "lfs", luaopen_lfs);
@@ -1025,8 +1052,29 @@ void xi_raise(XiEvent* e) { xi_raise_kind(e, -1); }
 static int g_started, g_shut;
 int xi_headless;
 
+static uint32_t (*g_fps_field)(void);
+static void (*g_fps_request)(int divisor);
+
+void xi_fps_write(uint32_t addr, const uint8_t* bytes, uint32_t n)
+{
+    uint32_t f = g_fps_field ? g_fps_field() : 0;
+    if (f && addr <= f && f + 4 <= addr + n)
+    {
+        uint32_t v;
+        memcpy(&v, bytes + (f - addr), 4);
+        g_fps_request(v > 60 ? 60 : (int)v);
+    }
+}
+
+void xi_fps_request(int divisor)
+{
+    if (g_fps_request)
+        g_fps_request(divisor);
+}
+
 void addons_init(const AddonsSetup* s)
 {
+    g_fps_field = s->fps_field, g_fps_request = s->fps_request;
     snprintf(g_data_dir, sizeof g_data_dir, "%s", s->data_dir ? s->data_dir : ".");
     with_slash(g_data_dir, sizeof g_data_dir);
     snprintf(g_game_dir, sizeof g_game_dir, "%s", s->game_dir ? s->game_dir : ".");

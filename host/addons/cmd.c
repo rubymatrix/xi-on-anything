@@ -460,6 +460,22 @@ static int host_command(const char* line)
     }
     if (dbl && !strcasecmp(c, "wait"))
         return 1; /* only meaningful in scripts and send_command chains */
+    if (dbl && !strcasecmp(c, "config"))
+    {
+        /* Windower's Config plugin. FrameRateDivisor alone: 0 uncaps (FastCS, through a cutscene); any
+         * other value hands the frame rate back to the player's own (Config > Display > Frame Rate),
+         * where FastCS's default would hold it at 30 after every cutscene */
+        if (n == 3 && !strcasecmp(w[1], "FrameRateDivisor"))
+        {
+            char* end;
+            long d = strtol(w[2], &end, 10);
+            if (*end || d < 0)
+                return chatf("config: FrameRateDivisor takes 0 (uncapped) or 1 and up (your own frame rate)"), 1;
+            xi_fps_request(d == 0 ? 0 : -1);
+            return 1;
+        }
+        return chatf("config: %s is not supported here (FrameRateDivisor is)", n > 1 ? w[1] : "a setting"), 1;
+    }
     return 0;
 }
 

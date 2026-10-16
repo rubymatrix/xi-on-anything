@@ -147,8 +147,10 @@ static uint32_t com_call(uint32_t obj, unsigned slot, unsigned nargs, const uint
  * of an object FFXiMain creates at startup; Ashita's fps addon finds it the same way: the code
  * `sub esp, 0x100; cmp eax, ecx; je +0x21; mov ecx, [global]` names the global that points at
  * the object, and the divisor is at +0x30. The game may reset it (zoning), so every frame puts
- * it back. */
+ * it back: the player's (g_fps_divisor, Config > Display > Frame Rate), or an addon's for the
+ * session (g_fps_addon: Ashita's fps addon, FastCS through a cutscene), until the player picks one. */
 static uint32_t g_fps_divisor = 1, g_fps_global;
+static int g_fps_addon = -1; /* an addon's divisor (fps_request); -1 none */
 
 static void find_fps_global(void)
 {
@@ -165,6 +167,29 @@ static void find_fps_global(void)
     rt_log("[recomp] frame-rate divisor: not found; the game keeps its own frame rate\n");
     g_fps_global = 0xFFFFFFFFu;
 }
+
+/* the addon host's (AddonsSetup): the divisor's address, and an addon's divisor for the session */
+static uint32_t fps_field(void)
+{
+    if (!g_fps_global)
+        find_fps_global();
+    uint32_t object = g_fps_global != 0xFFFFFFFFu ? rd32(g_fps_global) : 0;
+    return object ? object + 0x30 : 0;
+}
+
+static void fps_request(int divisor)
+{
+    if (divisor == g_fps_addon)
+        return;
+    g_fps_addon = divisor;
+    if (divisor < 0)
+        rt_log("[recomp] frame-rate divisor: back to the player's %u\n", g_fps_divisor);
+    else
+        rt_log("[recomp] frame-rate divisor: %d from an addon, until the menu's Frame Rate is picked\n", divisor);
+}
+
+/* Config > Display > Frame Rate picked (modern.c), the one it showed too: an addon's ends */
+static void fps_chosen(void) { fps_request(-1); }
 
 /* --- the aspect ratio ---------------------------------------------------------------------------------
  * FFXiMain's projection takes its shape from a float at +0x2F0 of its camera object, which the game
@@ -734,9 +759,10 @@ static void present_hook(void)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
         return;
+    uint32_t want = g_fps_addon >= 0 ? (uint32_t)g_fps_addon : g_fps_divisor;
     uint32_t object = rd32(g_fps_global);
-    if (object && rd32(object + 0x30) != g_fps_divisor)
-        wr32(object + 0x30, g_fps_divisor);
+    if (object && rd32(object + 0x30) != want)
+        wr32(object + 0x30, want);
 }
 
 /* A file or folder that comes with host64: beside it, in an app bundle's Resources, or in the
@@ -1272,7 +1298,7 @@ int main(int argc, char** argv)
     d3d8_setup();
     d3d8_set_present_hook(present_hook);
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
-        &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given };
+        &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen };
     modern_init(&ms);
     setup_nameplates();
     setup_water();
@@ -1291,7 +1317,7 @@ int main(int argc, char** argv)
             if (!where)
                 where = pref = SDL_GetPrefPath("FFXIRecompile", "FFXI");
 #endif
-            AddonsSetup as = { where ? where : ".", host_game, dats, ndats };
+            AddonsSetup as = { where ? where : ".", host_game, dats, ndats, fps_field, fps_request };
             addons_init(&as);
             modern_set_addons(addons_menu());
             g_addons_on = 1;
