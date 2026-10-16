@@ -268,21 +268,21 @@ static void list_set(List* l, int i)
     menu_size(g_win_w, g_win_h, scale, &g_menu_w, &g_menu_h);
 }
 
-/* Graphics' Overall Quality: the Lighting page's settings at each level. Low has no modern lighting,
- * sun shadows or occlusion; Medium is the defaults (gfx_fx.c); Max has every quality setting at its
- * highest, sun shadows and bounce light at full strength. Settings that are none of
- * these are Custom. */
+/* Graphics' Overall Quality: the Lighting page's settings at each level, and the contact shadows'
+ * (shadow, in no menu). Low has no modern lighting, sun or contact shadows, or occlusion; Medium is the
+ * defaults (gfx_fx.c); Max has every quality setting at its highest, sun shadows and bounce light at full
+ * strength. Settings that are none of these are Custom. */
 static const char* const QUALITY_KEYS[] = { "light", "sun", "sun_casters", "sun_soft", "sun_detail", "ao", "ao_quality",
-    "gi" };
+    "gi", "shadow" };
 enum
 {
     NQUALITY_KEYS = sizeof QUALITY_KEYS / sizeof QUALITY_KEYS[0],
     NQUALITY = 3,
 };
 static const float QUALITY[NQUALITY][NQUALITY_KEYS] = {
-    { 0, 0, 0, 0, 2048, 0, 0, 0 },          /* Low */
-    { 2, 0.45f, 0, 0, 4096, 0.8f, 1, 0 },   /* Medium */
-    { 2, 1.0f, 0, 0.03f, 8192, 0.8f, 2, 3.0f }, /* Max */
+    { 0, 0, 0, 0, 2048, 0, 0, 0, 0 },             /* Low */
+    { 2, 0.45f, 0, 0, 4096, 0.8f, 1, 0, 0.3f },   /* Medium */
+    { 2, 1.0f, 0, 0.03f, 8192, 0.8f, 2, 3.0f, 0.3f }, /* Max */
 };
 
 /* the level the settings are at; NQUALITY (Custom) when none */
@@ -487,7 +487,7 @@ static const Row LIGHTING_ROWS[] = {
     HEADER_ROW("Ambient Occlusion"),
     { "Strength", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
     { "Quality", "ao_quality", CHOICE, 3, { "Low", "Medium", "High" }, { 0, 1, 2 }, 0, 0,
-        "How many samples the shade takes a frame. Low is lightest on the GPU." },
+        "How many samples the shade and the contact shadows take a frame. Low is lightest on the GPU." },
     { "Radius", "radius", SLIDER, 0, { 0 }, { 0 }, 0.25f, 3.0f, "How far from a corner the shade reaches." },
 };
 

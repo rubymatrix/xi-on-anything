@@ -301,6 +301,14 @@ void gfx_sun_fit(const GfxScene* s, const float* invV, const float* L, float t0,
     k->slope = 2.0f * R / range;
 }
 
+int gfx_contact_steps(void)
+{
+    float n = g_fxs.contact_steps;
+    if (!(n >= 0.5f)) /* (NaN as well) */
+        return g_fxs.ao_quality >= 1.5f ? 16 : g_fxs.ao_quality >= 0.5f ? 12 : 8;
+    return n > 16.0f ? 16 : (int)(n + 0.5f);
+}
+
 /* the near map's texels across: sun_detail, a power of two from 512 to 8192; 0 and 1 are the old
  * switch (4096, 8192) */
 int gfx_sun_near_size(void)

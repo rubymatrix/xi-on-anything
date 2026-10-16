@@ -258,7 +258,7 @@ typedef struct FxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft,
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
-        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt;
+        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt, contact_steps;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -2773,6 +2773,8 @@ static const struct
      * and the occlusion traced through it; 0, the default, none (the bounce light from its map alone, the
      * occlusion from the depth); debug=clay shows it */
     FXS(rt, 0.0f),
+    /* the contact shadows' steps a frame, 1 to 16; 0 follows ao_quality (gfx_fx.c's) */
+    FXS(contact_steps, 0.0f),
 };
 #undef FXS
 
@@ -2787,6 +2789,15 @@ static int sun_near_size(void)
     while (n < 8192 && (float)n * 1.5f < d)
         n *= 2;
     return n;
+}
+
+/* the contact shadows' steps a frame (gfx_scene.c's gfx_contact_steps) */
+static int contact_steps(void)
+{
+    float n = g_fxs.contact_steps;
+    if (!(n >= 0.5f)) /* (NaN as well) */
+        return g_fxs.ao_quality >= 1.5f ? 16 : g_fxs.ao_quality >= 0.5f ? 12 : 8;
+    return n > 16.0f ? 16 : (int)(n + 0.5f);
 }
 
 void gfx_set_focus(const float* world)
@@ -4761,6 +4772,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         { hand, 0, 0, 0 },
     };
     u.aop[0] = g_fxs.ao_quality >= 1.5f ? 16.0f : g_fxs.ao_quality >= 0.5f ? 10.0f : 6.0f;
+    u.aop[1] = contact_steps();
     u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
     /* world up in view space: the world's y axis through the inverse view matrix, pointing the way
      * the camera's own up does (FFXI's world y points down) */
@@ -4830,8 +4842,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         g_fx.sunw_seen = g_serial;
         fx_ease(g_fx.suncol, s->sun_color, 3, 0.1f);
     }
-    int shadows = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f;
-    if (have_v && (own || (shadows && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
+    /* the sun kept for whatever wants it: its shadows, the god rays and the fog's glow toward it (Low has no
+     * shadows, and its rays would go out with no lit draw in view - the sky, where they show) */
+    int wanted = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f || g_fxs.rays > 0.0f || (g_fxs.fog > 0.0f && g_fxs.fog_sun > 0.0f);
+    if (have_v && (own || (wanted && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
     {
         for (int j = 0; j < 3; ++j) /* back into this frame's view */
             g_fx.sun[j] = g_fx.sunw[0] * s->view[j] + g_fx.sunw[1] * s->view[4 + j] + g_fx.sunw[2] * s->view[8 + j];
