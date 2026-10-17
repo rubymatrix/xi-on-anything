@@ -420,7 +420,7 @@ static int options(const Row* r)
 static int option(const Row* r)
 {
     float v = get(r);
-    for (int i = 0; i < options(r); ++i)
+    for (int i = 0, n = options(r); i < n; ++i)
         if (fabsf(v - r->val[i]) <= 1e-3f * (fabsf(r->val[i]) > 1 ? fabsf(r->val[i]) : 1))
             return i;
     return -1;
@@ -464,7 +464,7 @@ static const Row DISPLAY_ROWS[] = {
         "The size the world is drawn at before it fits the window. From the next start." },
     HEADER_ROW("Performance"),
     { "Frame Rate", "@fps", CHOICE, 5, { "30", "60", "120", "144", "Uncapped" }, { 2, 1, 120, 144, 0 }, 0, 0,
-        "The game's frame rate in the world. Uncapped: as fast as the display shows frames. Menus before the game keep their 30 fps pace." },
+        "The game's frame rate in the world. Uncapped, where offered: as fast as the display shows frames. Menus before the game keep their 30 fps pace." },
 #if !defined(FFXI_ANDROID_VULKAN)
     { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "The frame rate, in the screen's top left corner." },

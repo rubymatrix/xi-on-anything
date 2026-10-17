@@ -27,7 +27,8 @@
  * as retail's do, and --server is not used.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped;
- * 0 uncapped, the world at its own speed (frame.c). --fps-limit n: uncapped, held to n a second.
+ * 0 uncapped: the world at its own speed (frame.c) in a build with the frame sites, else as fast as the
+ * frames. --fps-limit n: uncapped at the world's speed, held to n a second (only with the frame sites).
  *
  * --aspect auto|off|<w:h>: the 3D scene's aspect ratio. auto (the default) follows the window's
  * shape, so a widescreen window shows more to the sides instead of a 4:3 view stretched across it.

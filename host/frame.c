@@ -450,7 +450,7 @@ static void motion_log(void)
     if (!f)
         return;
     int32_t pi = xi_game_player_index();
-    /* the scene (Modern's DISP_SCENE: the global the delta getters read too; 0 in a build without it) */
+    /* the scene (Modern's DISP_SCENE: the global the delta getters read too; 0 in a build without all of Modern's) */
     uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0, game = FFXI_MODERN_DISP_SCENE ? rd32(FFXI_MODERN_DISP_SCENE) : 0,
              cam = game ? rd32(game + 0x50) : 0;
     float p[3] = { 0 }, c[6] = { 0 };
@@ -474,6 +474,7 @@ void frame_present(int uncapped, int menus30, uint32_t limit)
     {
         g_on = uncapped;
         g_last = 0, g_carry = 0, g_whole = 0, g_dt = 1.0, g_next = 0, g_dt_sum = 0;
+        g_net_due = 0, g_net_ms = 0; /* (a tick held back then would give the next uncapped stretch its milliseconds) */
         rt_log("[recomp] frame: %s\n", g_on ? "uncapped, the world at the wall clock's speed" : "the game's own pacing");
     }
 #endif

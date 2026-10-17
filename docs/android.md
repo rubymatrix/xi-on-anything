@@ -76,7 +76,7 @@ before the portable host starts.
 | `--android-fast-sync 1`, `--android-trim-uniforms 1`, `--android-dont-care-loads 1` | Experimental fence, uniform and attachment-load controls. Each needs its own correctness and timing checks. |
 | `--android-bench-dir PATH` | Write frame times and markers (`frames.csv`, `markers.jsonl`) to PATH; refuses to overwrite either file. One branch per frame when off. |
 | `--android-control 54300` | Enable the existing control port, loopback only; default 0. |
-| `--fps-divisor 0` | Uncapped, the world kept at its speed; divisor 2 is 30 FPS. |
+| `--fps-divisor 0` | Uncapped, the world kept at its speed where the game build has frame sites (`tools/frame_sites.py`), else as fast as the frames (for measurements); divisor 2 is 30 FPS. |
 
 The diagnostic statistics (`--android-worker-stats`,
 `--android-visibility-storage-stats`), pass traces and query diagnostics add
