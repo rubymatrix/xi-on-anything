@@ -18,6 +18,7 @@ typedef struct ModernSetup
     float *nameplate_sx, *nameplate_sy; /* ... and their size across and down */
     int nameplates_given;     /* --nameplates or --nameplate-scale: modern.cfg does not override them */
     void (*fps_chosen)(void); /* host64's: the player picked a frame rate, even the one shown (an addon's ends) */
+    uint32_t* fps_limit;      /* host64's: uncapped (divisor 0), held to this many frames a second; 0 none */
 } ModernSetup;
 
 /* Reads modern.cfg, applying what the command line did not give. */

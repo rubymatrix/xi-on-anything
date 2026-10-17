@@ -40,6 +40,7 @@
 #include "cachedir.h"
 #include "d3d8.h"
 #include "datui.h"
+#include "frame.h"
 #include "gfx.h"
 #include "gthread.h"
 #include "gwin.h"
@@ -147,8 +148,8 @@ typedef struct Row
     const char* key; /* the settings file's; "@..." host64's */
     int kind;
     int nopt;
-    const char* opt[4];
-    float val[4];
+    const char* opt[5];
+    float val[5];
     float lo, hi; /* a slider's range */
     const char* help;
 } Row;
@@ -308,8 +309,11 @@ static float get(const Row* r)
         return (float)g_bg;
     if (!strcmp(r->key, "@mode"))
         return (float)g_mode;
-    if (!strcmp(r->key, "@fps"))
-        return g_setup.fps_divisor ? (float)*g_setup.fps_divisor : 1.0f;
+    if (!strcmp(r->key, "@fps")) /* 2 30 fps, 1 60, else uncapped: the cap (120, 144) or 0 */
+    {
+        uint32_t d = g_setup.fps_divisor ? *g_setup.fps_divisor : 1u;
+        return d ? (float)d : g_setup.fps_limit ? (float)*g_setup.fps_limit : 0.0f;
+    }
     if (!strcmp(r->key, "@ui"))
         return g_ui_aspect;
     if (!strcmp(r->key, "@quality"))
@@ -358,8 +362,13 @@ static void set(const Row* r, float v)
     }
     else if (!strcmp(r->key, "@fps"))
     {
+        int divisor = v > 0.5f && v < 2.5f ? (int)v : 0;
+        if (!divisor && !frame_supported())
+            return; /* this build's world would run as fast as the frames: not offered */
         if (g_setup.fps_divisor)
-            *g_setup.fps_divisor = (uint32_t)v;
+            *g_setup.fps_divisor = (uint32_t)divisor;
+        if (g_setup.fps_limit)
+            *g_setup.fps_limit = divisor ? 0u : (uint32_t)v;
         if (g_setup.fps_chosen)
             g_setup.fps_chosen();
         g_host_touched = 1;
@@ -448,7 +457,8 @@ static const Row DISPLAY_ROWS[] = {
     { "Background Resolution", "@bg", CHOICE, 4, { "2048", "4096", "6144", "8192" }, { 2048, 4096, 6144, 8192 }, 0, 0,
         "The size the world is drawn at before it fits the window. From the next start." },
     HEADER_ROW("Performance"),
-    { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
+    { "Frame Rate", "@fps", CHOICE, 5, { "30", "60", "120", "144", "Uncapped" }, { 2, 1, 120, 144, 0 }, 0, 0,
+        "The game's frame rate in the world. Uncapped: as fast as the display shows frames. Menus before the game keep their 30 fps pace." },
 #if !defined(FFXI_ANDROID_VULKAN)
     { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "The frame rate, in the screen's top left corner." },
@@ -665,8 +675,8 @@ static void save(void)
         FILE* f = fopen(path, "w");
         if (f)
         {
-            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
-                (double)g_ui_aspect, g_hide);
+            fprintf(f, "fps_divisor=%u\nfps_limit=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
+                g_setup.fps_limit ? *g_setup.fps_limit : 0u, (double)g_ui_aspect, g_hide);
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
             if (g_setup.nameplate_fix && g_setup.nameplate_sx && g_setup.nameplate_sy)
@@ -2744,8 +2754,13 @@ void modern_init(const ModernSetup* setup)
     if (!setup->fps_given && setup->fps_divisor && cfg_value(path, "fps_divisor", buf, sizeof buf))
     {
         long d = strtol(buf, NULL, 10);
-        if (d >= 1 && d <= 4)
+        if ((d >= 1 && d <= 4) || (d == 0 && frame_supported()))
             *setup->fps_divisor = (uint32_t)d;
+        if (*setup->fps_divisor == 0 && setup->fps_limit && cfg_value(path, "fps_limit", buf, sizeof buf))
+        {
+            long n = strtol(buf, NULL, 10);
+            *setup->fps_limit = n >= 30 && n <= 1000 ? (uint32_t)n : 0u;
+        }
     }
     if (!setup->ui_aspect_given && cfg_value(path, "ui_aspect", buf, sizeof buf))
     {

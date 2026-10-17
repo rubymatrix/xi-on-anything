@@ -53,6 +53,18 @@ def write_build_h():
         lines.append('#define FFXI_HOOK_%s 0x%08xu /* rt_hook_%s runs here */' % (k.upper(), int(v, 16), k))
     for k, v in BUILD['wraps'].items():
         lines.append('#define FFXI_WRAP_%s 0x%08xu /* rt_wrap_%s may replace this function */' % (k.upper(), int(v, 16), k))
+    # host/frame.c: the frame delta's callers that truncate it (tools/frame_sites.py)
+    sites = BUILD.get('frame_int_sites', [])
+    if sites:
+        lines.append('#define FFXI_FRAME_INT_SITE_COUNT %d' % len(sites))
+        lines.append('#define FFXI_FRAME_INT_SITES ' + ', '.join('0x%08xu' % int(v, 16) for v in sites))
+    once = BUILD.get('frame_cam_once', []) + BUILD.get('frame_look_once', [])
+    if len(once) == 4:
+        lines.append('#define FFXI_FRAME_CAM_ONCE ' + ', '.join('0x%08xu' % int(v, 16) for v in once))
+    waits = BUILD.get('frame_wait_sites', [])
+    if waits:
+        lines.append('#define FFXI_FRAME_WAIT_SITE_COUNT %d' % len(waits))
+        lines.append('#define FFXI_FRAME_WAIT_SITES ' + ', '.join('0x%08xu' % int(v, 16) for v in waits))
     geometry = BUILD.get('geometry', {})
     lines.append('#define FFXI_GEOMETRY_LAYOUT %d' % geometry.get('layout', 0))
     for k in ('info', 'callback', 'palette', 'counts'):
@@ -228,7 +240,7 @@ def rt_shaders(env):
 GFX_LIBS = ['d3d12.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dxguid.lib']
 HOST_BASE = ['runtime\\portable\\user32.c', 'runtime\\portable\\d3d8.c', 'runtime\\portable\\dsound.c',
              'runtime\\portable\\input.c', 'runtime\\portable\\dinput.c', 'runtime\\portable\\ws2.c', 'host\\host64.c',
-             'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\cexi.c', 'host\\discord.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c',
+             'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\cexi.c', 'host\\discord.c', 'host\\frame.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c',
              'host\\keychain.c', 'host\\appdefaults.c', 'runtime\\portable\\sampler_win.c',
              'runtime\\portable\\geometry_hooks.c']
 HOST_SOURCES = HOST_BASE + GFX_SOURCES
