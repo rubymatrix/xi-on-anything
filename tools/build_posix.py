@@ -61,6 +61,8 @@ CFLAGS = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-fno-strict-aliasing', 
           '-I', 'generated', '-I', 'third_party/stb']
 if sys.platform != 'darwin':
     CFLAGS.append('-D_GNU_SOURCE')  # glibc hides POSIX (strdup, getaddrinfo, sigaction) under -std=c11
+CFLAGS += thirdparty.PIE
+PIE_LINK = ['-pie'] if thirdparty.PIE else []  # host64 above 4 GB (thirdparty.PIE)
 # the generated C: every label and local is emitted whether used or not
 GEN_WARNINGS = ['-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-set-variable', '-Wno-unused-function',
                 '-Wno-parentheses-equality', '-Wno-unreachable-code']
@@ -159,15 +161,24 @@ def stale(s, obj, headers):
 
 def compile_stale(sources, objdir, extra):
     """Compiles every source whose object is missing or older than it (or than the newest runtime
-    header, for our own sources), in parallel; returns the objects."""
+    header, for our own sources), in parallel; returns the objects. Every one, when objdir's were
+    compiled with other flags (its .flags): their dates alone would keep position-dependent objects in
+    a position-independent host64."""
     os.makedirs(os.path.join(ROOT, objdir), exist_ok=True)
     headers = newest_header()
+    flags_file = os.path.join(ROOT, objdir, '.flags')
+    want = ' '.join(CC + CXX + CFLAGS + extra)
+    try:
+        with open(flags_file) as f:
+            same = f.read() == want
+    except OSError:
+        same = False
     objs, jobs = [], []
     for s in sources:
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(s))[0] + '.o')
         objs.append(obj)
         full_obj = os.path.join(ROOT, obj)
-        if stale(s, full_obj, headers):
+        if not same or stale(s, full_obj, headers):
             flags = CFLAGS + extra + (GEN_WARNINGS if s.startswith('generated/') else [])
             cc = CC
             if s.endswith('.m'):  # Objective-C: references counted by hand (gfx_metal.m)
@@ -192,6 +203,9 @@ def compile_stale(sources, objdir, extra):
             failed = [cmd[-3] for cmd in retry if subprocess.call(cmd, cwd=ROOT)]
         if failed:
             raise SystemExit('failed: ' + ', '.join(failed))
+    if not same:
+        with open(flags_file, 'w') as f:
+            f.write(want)
     return objs
 
 
@@ -312,7 +326,8 @@ def host64_kit(game, kitdir):
     # libxi.a whole, as the other builds link every object: addons find win32_ffi.c's and gdifont_ffi.c's
     # functions by name (ffi.C), so nothing references them and an archive would leave them out
     xi = ['-Wl,--whole-archive', os.path.join(kitdir, 'lib', 'libxi.a'), '-Wl,--no-whole-archive']
-    run(CXX + ['-o', 'build/host64'] + objs + xi + ['-Wl,--start-group'] + libs + ['-Wl,--end-group'] + k['system'] + ['-rdynamic'])
+    run(CXX + PIE_LINK + ['-o', 'build/host64'] + objs + xi + ['-Wl,--start-group'] + libs + ['-Wl,--end-group'] + k['system'] +
+        ['-rdynamic'])
     buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build/host64 from the kit; run: build/host64 --game %s --server <name>' % shlex.quote(game))
 
@@ -331,7 +346,7 @@ def host64(game):
     # -export_dynamic: addons' ffi.C finds D3DX and Win32 (host/addons/d3d_ffi.c, win32_ffi.c) with
     # dlsym(RTLD_DEFAULT), so their symbols stay in the executable's export table
     export = ['-Wl,-export_dynamic'] if sys.platform == 'darwin' else ['-rdynamic']
-    run(CC + ['-o', 'build/host64'] + objs + sdl_libs + tls_libs + addon_libs + GFX_LIBS + ['-lm', '-lpthread'] + export)
+    run(CC + PIE_LINK + ['-o', 'build/host64'] + objs + sdl_libs + tls_libs + addon_libs + GFX_LIBS + ['-lm', '-lpthread'] + export)
     buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build/host64; run: build/host64 --game %s --server <name>' % shlex.quote(game))
 
