@@ -176,6 +176,9 @@ void xi_gui_addon_end(Addon* a);
 int xi_gui_mouse(int msg, int x, int y, int delta);
 int xi_gui_key(uint32_t vk, int down, uint32_t scancode);
 int xi_gui_text(const char* utf8);
+/* The game's window gaining (1) or losing (0) focus; the mouse leaving it. */
+void xi_gui_focus(int on);
+void xi_gui_mouse_leave(void);
 int xi_gui_wants_keyboard(void);
 int xi_gui_wants_mouse(void);
 /* Objects an addon owns (text objects, primitives, textures) freed when it unloads. */
