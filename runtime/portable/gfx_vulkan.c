@@ -5662,6 +5662,13 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
     vkCmdPipelineBarrier(cb, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
+/* how long a frame waits for the window's next image: one the window system never hands back (#75, KDE
+ * on Wayland at /shutdown) leaves frames unshown, the game going on, not stuck in vkAcquireNextImageKHR
+ * (gfx_metal.m's nextDrawable gives up after a second) */
+#define ACQUIRE_TIMEOUT_NS 100000000ull
+static uint32_t g_timeouts; /* acquires timed out since the window last gave images steadily (60 in a row) */
+static uint32_t g_steady;   /* images in a row since one timed out */
+
 /* the back buffer onto the window's next image; 0 when there is none to draw to now */
 static int present_to_window(GfxTex* bb)
 {
@@ -5671,7 +5678,7 @@ static int present_to_window(GfxTex* bb)
     Frame* f = &g_frames[g_frame];
     uint32_t idx = 0;
     uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
-    VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, f->acquired, VK_NULL_HANDLE, &idx);
+    VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, ACQUIRE_TIMEOUT_NS, f->acquired, VK_NULL_HANDLE, &idx);
     if (gfx_profiling)
         g_prof.acquire_ns += gfx_now_ns() - t0;
     if (r == VK_ERROR_OUT_OF_DATE_KHR)
@@ -5679,8 +5686,18 @@ static int present_to_window(GfxTex* bb)
         g_swap_stale = 1;
         return 0;
     }
+    if (r == VK_TIMEOUT || r == VK_NOT_READY)
+    {
+        if (!g_timeouts++)
+            fprintf(stderr, "[recomp] gfx: no image from the window in %llu ms: frames go unshown until it gives one\n",
+                ACQUIRE_TIMEOUT_NS / 1000000);
+        g_steady = 0;
+        return 0;
+    }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
         return 0;
+    if (g_timeouts && ++g_steady == 60) /* (one that gives an image now and then logs once, not with each) */
+        fprintf(stderr, "[recomp] gfx: images from the window again, after %u acquires timed out\n", g_timeouts), g_timeouts = 0;
     gpu_sync();
     VkCommandBuffer cb = g_cb;
     image_barrier(cb, g_swap_images[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
