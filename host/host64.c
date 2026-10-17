@@ -762,7 +762,7 @@ static void present_hook(void)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
     {
-        frame_present(0, 0, 0);
+        frame_present(0, 0, 0, 0);
         return;
     }
     uint32_t want = g_fps_addon >= 0 ? (uint32_t)g_fps_addon : g_fps_divisor;
@@ -770,9 +770,10 @@ static void present_hook(void)
     if (object && rd32(object + 0x30) != want)
         wr32(object + 0x30, want);
     /* the player's uncapped frame rate keeps the world at its speed (frame.c); an addon's 0
-     * (FastCS through a cutscene) is the game's own, and runs fast as it means to */
+     * (FastCS through a cutscene) is the game's own, and runs fast as it means to. Either way the
+     * connection's wait for the server keeps the wall clock's pace (frame_net_wait) */
     frame_present(object && g_fps_addon < 0 && want == 0, object && g_fps_addon < 0 && want < 2 && xi_game_login_status() != 2,
-        g_fps_addon < 0 ? g_fps_limit : 0);
+        g_fps_addon < 0 ? g_fps_limit : 0, want == 0);
 }
 
 /* A file or folder that comes with host64: beside it, in an app bundle's Resources, or in the
