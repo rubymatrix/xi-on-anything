@@ -1101,7 +1101,7 @@ void addons_init(const AddonsSetup* s)
      * (docs/addon-compat-design.md 7.1): host64 and its heap must lie above it (on Linux, a
      * position-independent executable: #74) */
     void* heap = malloc(16);
-    if ((uintptr_t)&g_data_dir < 0x100000000ull || (uintptr_t)heap < 0x100000000ull)
+    if ((uintptr_t)&g_data_dir < 0x100000000ull || (heap && (uintptr_t)heap < 0x100000000ull))
         xi_log("host64's memory lies below 4 GB (%p, heap %p): addons take its pointers for the game's, and a "
                "call through one (a Direct3D device's) faults. Build host64 position-independent", (void*)&g_data_dir, heap);
     free(heap);

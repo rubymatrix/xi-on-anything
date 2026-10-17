@@ -163,24 +163,32 @@ def compile_stale(sources, objdir, extra):
     """Compiles every source whose object is missing or older than it (or than the newest runtime
     header, for our own sources), in parallel; returns the objects. Every one, when objdir's were
     compiled with other flags (its .flags): their dates alone would keep position-dependent objects in
-    a position-independent host64. A folder from before .flags is taken as compiled with these, but
+    a position-independent host64. They are deleted and the new flags recorded first, so a rebuild cut
+    short goes on where it stopped. A folder from before .flags is taken as compiled with these, but
     where they are position-independent (Linux, thirdparty.PIE)."""
     os.makedirs(os.path.join(ROOT, objdir), exist_ok=True)
     headers = newest_header()
     flags_file = os.path.join(ROOT, objdir, '.flags')
-    want = ' '.join(CC + CXX + CFLAGS + extra)
+    want = json.dumps(CC + CXX + CFLAGS + extra)
     try:
         with open(flags_file) as f:
             recorded = f.read()
     except OSError:
         recorded = None
-    same = recorded == want or (recorded is None and not thirdparty.PIE)
+    if recorded != want:
+        if recorded is not None or thirdparty.PIE:
+            for s in sources:
+                obj = os.path.join(ROOT, objdir, os.path.splitext(os.path.basename(s))[0] + '.o')
+                if os.path.exists(obj):
+                    os.remove(obj)
+        with open(flags_file, 'w') as f:
+            f.write(want)
     objs, jobs = [], []
     for s in sources:
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(s))[0] + '.o')
         objs.append(obj)
         full_obj = os.path.join(ROOT, obj)
-        if not same or stale(s, full_obj, headers):
+        if stale(s, full_obj, headers):
             flags = CFLAGS + extra + (GEN_WARNINGS if s.startswith('generated/') else [])
             cc = CC
             if s.endswith('.m'):  # Objective-C: references counted by hand (gfx_metal.m)
@@ -205,9 +213,6 @@ def compile_stale(sources, objdir, extra):
             failed = [cmd[-3] for cmd in retry if subprocess.call(cmd, cwd=ROOT)]
         if failed:
             raise SystemExit('failed: ' + ', '.join(failed))
-    if recorded != want:
-        with open(flags_file, 'w') as f:
-            f.write(want)
     return objs
 
 
@@ -302,6 +307,7 @@ def kit(out):
         'libs': libs,
         'system': ['-lpthread', '-ldl', '-lm'],
         'device_sources': device,
+        'pie': bool(thirdparty.PIE),  # its archives position-independent: host64 --kit links -pie
     }
     with open(os.path.join(out, 'kit.json'), 'w') as f:
         json.dump(manifest, f, indent=1)
@@ -314,6 +320,9 @@ def host64_kit(game, kitdir):
     kitdir = os.path.abspath(kitdir)
     with open(os.path.join(kitdir, 'kit.json')) as f:
         k = json.load(f)
+    if PIE_LINK and not k.get('pie'):
+        raise SystemExit('%s: a kit from before host64 was position-independent (#74): get the kit for these sources'
+                         % kitdir)
     translate()
     run([sys.executable, 'recomp/recomp.py', '--meta', build.FFXI_META, '--image', GEN_FFXI_IMAGE, '--retail',
          build.FFXI_RETAIL, '--module', 'ffxi', '--out', 'generated/ffxi', '--all'])

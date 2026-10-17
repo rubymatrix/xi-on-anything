@@ -246,10 +246,11 @@ Addresses Lua sees are **host addresses** (`rt_guest_base + guest`), and every A
   a nonzero number `< 2^32`, add `rt_guest_base`. (Implemented in Lua with `ffi.typeof` and a
   per-ctype cache; cheap.)
 - Bounds/mapping checks replace VanaCore's `__try` copies: `gwin` knows which pages are committed.
-- So the host's own addresses (`xi.d3d8_device()`, anything it allocates) must lie above 4 GB. They do
-  on macOS and Windows; on Linux host64 is linked position-independent for it (`tools/thirdparty.py`
-  `PIE`), and `addons_init` logs if it ever isn't (#74: a position-dependent build's device pointer
-  was taken for a guest address).
+- So the host's own addresses (`xi.d3d8_device()`, anything it allocates) must lie above 4 GB. On
+  macOS and Windows the executable is loaded there (Windows' heap lies there by its address space
+  layout randomization, not by rule); on Linux host64 is linked position-independent for it
+  (`tools/thirdparty.py` `PIE`). `addons_init` logs if host64 or its heap is ever below (#74: a
+  position-dependent build's device pointer was taken for a guest address).
 
 ### 7.2 Struct layouts
 
