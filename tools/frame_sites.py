@@ -297,9 +297,11 @@ def main():
     clocks = [struct.unpack('<I', m.group(1))[0] for m in NET_CLOCK.finditer(img[lo:hi])]
     if len(clocks) != 1:
         die('zone connection clock: %d matches, want 1' % len(clocks))
-    net_waits = [base + lo + m.start() for m in NET_WAIT.finditer(img[lo:hi])]
+    # (a function of its own: padding or a ret before it). Optional: without it frame.c says an uncapped
+    # zone change can time out, and the rest still runs
+    net_waits = [base + lo + m.start() for m in NET_WAIT.finditer(img[lo:hi]) if img[lo + m.start() - 1] in (0x90, 0xcc, 0xc3)]
     if len(net_waits) != 1:
-        die('wait for the server: %d matches, want 1' % len(net_waits))
+        print('frame_sites: wait for the server: %d matches, want 1; frame_net_wait left out' % len(net_waits))
     paces = [base + lo + m.start() + 3 for m in PACE.finditer(img[lo:hi])]
     if len(paces) != 1:
         die('frame pacer: %d matches, want 1' % len(paces))
@@ -350,17 +352,21 @@ def main():
         'frame_cam_once': ['0x%08x' % a for a in once],
         'wraps': {'frame_dt': '0x%08x' % getters[0], 'frame_dt2': '0x%08x' % getters[1],
                   'frame_count': '0x%08x' % counts_at[0], 'frame_yield': '0x%08x' % yields[0],
-                  'frame_net': '0x%08x' % nets[0], 'frame_net_wait': '0x%08x' % net_waits[0]},
+                  'frame_net': '0x%08x' % nets[0]},
         'frame_int_sites': ['0x%08x' % s for s in sites],
         'frame_wait_sites': ['0x%08x' % s for s in waits],
         'frame_net_clock': '0x%08x' % clocks[0],
     }
+    if len(net_waits) == 1:
+        out['wraps']['frame_net_wait'] = '0x%08x' % net_waits[0]
     if args.dry_run:
         print(json.dumps(out, indent=2))
         return
     with open(buildinfo.BUILDS) as f:
         meta = json.load(f)
     b = meta['builds'][build['build']]
+    if 'frame_net_wait' not in out['wraps']:
+        b.get('wraps', {}).pop('frame_net_wait', None)  # (an earlier run's, no longer found)
     for section, values in out.items():
         if isinstance(values, dict):
             b.setdefault(section, {}).update(values)

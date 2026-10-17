@@ -773,7 +773,7 @@ static void present_hook(void)
      * (FastCS through a cutscene) is the game's own, and runs fast as it means to. Either way the
      * connection's wait for the server keeps the wall clock's pace (frame_net_wait) */
     frame_present(object && g_fps_addon < 0 && want == 0, object && g_fps_addon < 0 && want < 2 && xi_game_login_status() != 2,
-        g_fps_addon < 0 ? g_fps_limit : 0, object && want == 0);
+        g_fps_addon < 0 ? g_fps_limit : 0, want == 0);
 }
 
 /* A file or folder that comes with host64: beside it, in an app bundle's Resources, or in the

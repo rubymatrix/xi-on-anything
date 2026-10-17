@@ -322,7 +322,7 @@ static double g_wait_carry;
 
 static void frame_net_wait(Guest* g)
 {
-    if (!g_unpaced)
+    if (!g_unpaced || g_mode == MODE_ORIG)
     {
         g_wait_last = 0, g_wait_carry = 0;
         rt_orig_frame_net_wait(g);
