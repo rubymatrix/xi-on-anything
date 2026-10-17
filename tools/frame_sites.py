@@ -34,7 +34,8 @@ gives the delta's users the real one instead, and needs:
   frame_net_wait      (wraps) the connection's wait for the server (signing in, a zone change): a step a
                       call, one call a frame, timed out at 3600 steps (FFXI-3001) - a minute at 60 fps,
                       a second on a loading screen past 3000. At divisor 0 the host steps it once a
-                      sixtieth of the wall clock. Optional: without it, the rest is still written
+                      sixtieth of the wall clock. Optional: not found, the rest is still written (and one
+                      already there, matched some other way, kept)
   frame_cam_once      the third-person camera's two calls that count its steps this frame (n = (int)dt,
                       then "step < n" after each): past 60 fps the host has it step once every frame,
                       not once a whole sixtieth, so it moves as often as the character it follows
@@ -302,7 +303,8 @@ def main():
     # zone change can time out, and the rest still runs
     net_waits = [base + lo + m.start() for m in NET_WAIT.finditer(img[lo:hi]) if img[lo + m.start() - 1] in (0x90, 0xcc, 0xc3)]
     if len(net_waits) != 1:
-        print('frame_sites: wait for the server: %d matches, want 1; frame_net_wait left out' % len(net_waits))
+        print('frame_sites: wait for the server: %d matches, want 1; frame_net_wait not written (one already in '
+              'meta/builds.json is kept: check it by hand)' % len(net_waits))
     paces = [base + lo + m.start() + 3 for m in PACE.finditer(img[lo:hi])]
     if len(paces) != 1:
         die('frame pacer: %d matches, want 1' % len(paces))
@@ -366,8 +368,6 @@ def main():
     with open(buildinfo.BUILDS) as f:
         meta = json.load(f)
     b = meta['builds'][build['build']]
-    if 'frame_net_wait' not in out['wraps']:
-        b.get('wraps', {}).pop('frame_net_wait', None)  # (an earlier run's, no longer found)
     for section, values in out.items():
         if isinstance(values, dict):
             b.setdefault(section, {}).update(values)
