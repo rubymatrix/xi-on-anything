@@ -1,7 +1,9 @@
 /* FFXiMain past 60 fps (frame.c): the frame delta's users get the real delta, in sixtieths of a
  * second, instead of at least one whole sixtieth a frame, so the world keeps its speed at any frame
  * rate. On only while the player's frame rate is Uncapped (divisor 0); 30 and 60 fps, and a
- * divisor an addon asks for (FastCS's 0, which runs cutscenes fast), stay as the game does them. */
+ * divisor an addon asks for (FastCS's 0, which runs cutscenes fast), stay as the game does them -
+ * but at any divisor 0 the connection's wait for the server keeps the wall clock's pace, or a zone
+ * change times out (frame_net_wait). */
 #pragma once
 
 #include <stdint.h>

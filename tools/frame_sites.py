@@ -33,7 +33,8 @@ gives the delta's users the real one instead, and needs:
                       frame): the host adds the skipped frames' to the next tick's
   frame_net_wait      (wraps) the connection's wait for the server (signing in, a zone change): a step a
                       call, one call a frame, timed out at 3600 steps (FFXI-3001) - a minute at 60 fps,
-                      a second on a loading screen past 3000. Uncapped, the host steps it once a sixtieth
+                      a second on a loading screen past 3000. At divisor 0 the host steps it once a
+                      sixtieth of the wall clock. Optional: without it, the rest is still written
   frame_cam_once      the third-person camera's two calls that count its steps this frame (n = (int)dt,
                       then "step < n" after each): past 60 fps the host has it step once every frame,
                       not once a whole sixtieth, so it moves as often as the character it follows

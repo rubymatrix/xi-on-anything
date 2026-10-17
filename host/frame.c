@@ -19,6 +19,9 @@
  * frame rate it keeps); the hook puts the real one there. The player's cap (Frame Rate 120, 144), or
  * FFXI_FPS_LIMIT=n over it, waits out each frame to an even pace while uncapped (vsync, on unless
  * FFXI_VSYNC=0, already holds it to the display).
+ *
+ * At any divisor 0, the player's or an addon's, the connection's wait for the server (a step a frame,
+ * given up at 3600: FFXI-3001) steps once a sixtieth of the wall clock instead (frame_net_wait).
  * FFXI_FRAMELOG=1 logs the frame rate, the mean delta and the sixtieths handed out each second. */
 #include "frame.h"
 
