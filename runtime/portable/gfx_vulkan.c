@@ -2011,7 +2011,7 @@ typedef struct Caster
     const uint8_t* ibp;
     size_t iblen;
     const GfxU* up; /* the uniforms, as bound: its g_caster_u, not the ring's copy */
-    VkImageView tex[8]; /* only for an alpha test */
+    VkImageView tex[8]; /* for an alpha test, and the bounce light's map (in colour); the cache's an alpha test's alone */
     GfxSampler samp[8];
     VkPrimitiveTopology prim;
     uint32_t n, vstart;
@@ -2019,7 +2019,7 @@ typedef struct Caster
     uint8_t fixed; /* every vertex and index from buffers the game keeps (the zone's): cached (sun_cache) */
     uint8_t keep;  /* not fixed, but a placed object (not a character): kept as a copy (sun_cache_update) */
     uint8_t has_pos;
-    uint8_t lost_tex; /* a texture it reads was destroyed this frame: drawn, but not cached (sun_cache_forget_tex) */
+    uint8_t lost_tex; /* its alpha test's texture was destroyed this frame: drawn, but not cached (sun_cache_forget_tex) */
     int32_t zbias;
     float clip0[4]; /* its first vertex in the camera's clip space (gfx_clip0): where this copy stands */
 } Caster;
@@ -3336,20 +3336,17 @@ static int reads_tex(const Caster* c, const GfxTex* t)
     return 0;
 }
 
-/* a texture the game destroyed: what the cache draws with it (an alpha test's) goes. This frame's casters
- * that read it still draw (its views go to the trash, kept until the frame is done), but none goes into
- * the cache, whose handle would outlive the view (gfx_d3d12.c's casters hold the GfxTex, freed now, so it
- * drops their draw instead) */
+/* a texture the game destroyed: what the cache draws with it (an alpha test's) goes. This frame's alpha
+ * tests that read it still draw (its views go to the trash, kept until the frame is done), but none goes
+ * into the cache, whose handle would outlive the view (gfx_d3d12.c's casters hold the GfxTex, freed now,
+ * so it drops their draw instead) */
 static void sun_cache_forget_tex(const GfxTex* t)
 {
     for (uint32_t i = 0; i < g_ncache; ++i)
         if (reads_tex(&g_cache[i].c, t))
-        {
             g_cache[i].dead = 1;
-            memset(g_cache[i].c.tex, 0, sizeof g_cache[i].c.tex);
-        }
     for (uint32_t i = 0; i < g_ncasters; ++i)
-        if (reads_tex(&g_casters[i], t))
+        if (alpha_tested(&g_casters[i].lib.fs) && reads_tex(&g_casters[i], t))
             g_casters[i].lost_tex = 1;
 }
 
@@ -3640,6 +3637,8 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
             memcpy(ce->c.samp, c->samp, sizeof c->samp);
             ce->c.n = c->n, ce->c.vstart = c->vstart, ce->c.prim = c->prim, ce->c.itype = c->itype;
         }
+        if (!alpha_tested(&c->lib.fs)) /* its textures are the bounce light's, which draws this frame's alone */
+            memset(ce->c.tex, 0, sizeof ce->c.tex);
         /* the uniforms as of this frame: in place, unless a frame the GPU may still be drawing read them */
         if (!(ce->ubuf && ce->replayed + FRAMES < g_serial))
         {
