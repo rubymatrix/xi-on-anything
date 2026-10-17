@@ -65,6 +65,8 @@ def write_build_h():
     if waits:
         lines.append('#define FFXI_FRAME_WAIT_SITE_COUNT %d' % len(waits))
         lines.append('#define FFXI_FRAME_WAIT_SITES ' + ', '.join('0x%08xu' % int(v, 16) for v in waits))
+    if BUILD.get('frame_net_clock'):
+        lines.append('#define FFXI_FRAME_NET_CLOCK 0x%08xu' % int(BUILD['frame_net_clock'], 16))
     geometry = BUILD.get('geometry', {})
     lines.append('#define FFXI_GEOMETRY_LAYOUT %d' % geometry.get('layout', 0))
     for k in ('info', 'callback', 'palette', 'counts'):

@@ -502,7 +502,8 @@
       "frame_look_once": [
         "0x1001f5a7",
         "0x1002014d"
-      ]
+      ],
+      "frame_net_clock": "0x10492e10"
     },
     "2025-12-26": {
       "FFXiMain.dll": {

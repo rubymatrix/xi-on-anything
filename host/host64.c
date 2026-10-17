@@ -971,9 +971,16 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--fps-limit"))
         {
             long n = strtol(argv[i + 1], NULL, 10);
-            if (n < 0 || n > 1000)
+            if (n != 0 && (n < 30 || n > 1000))
             {
-                fprintf(stderr, "--fps-limit: frames a second while uncapped (--fps-divisor 0), 0 none\n");
+                fprintf(stderr, "--fps-limit: frames a second while uncapped (--fps-divisor 0), 30 to 1000; 0 none\n");
+                return 2;
+            }
+            if (!frame_supported())
+            {
+                /* the game's own uncapped pacing would run the world as fast as the frames, unheld */
+                fprintf(stderr, "--fps-limit: game build %s cannot run uncapped at the game's speed (tools/frame_sites.py)\n",
+                    FFXI_BUILD);
                 return 2;
             }
             g_fps_limit = (uint32_t)n, g_fps_divisor = 0;
