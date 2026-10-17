@@ -1894,6 +1894,44 @@ static void IDirect3DDevice8_ValidateDevice(Guest* g)
     RET(D3D_OK, 2);
 }
 
+/* Palettes are held, never applied: no paletted format is offered, but the game sets a grey ramp
+ * before 8-bit uploads anyway (10281690). */
+#define PALETTES 64u
+static uint8_t g_palette[PALETTES][1024];
+static uint32_t g_cur_palette;
+
+/* SetPaletteEntries(PaletteNumber, pEntries) / GetPaletteEntries(PaletteNumber, pEntries) */
+static void IDirect3DDevice8_SetPaletteEntries(Guest* g)
+{
+    if (!ARG(2))
+        RET(D3DERR_INVALIDCALL, 3);
+    if (ARG(1) < PALETTES)
+        memcpy(g_palette[ARG(1)], ARGP(2), 1024);
+    RET(D3D_OK, 3);
+}
+
+static void IDirect3DDevice8_GetPaletteEntries(Guest* g)
+{
+    if (!ARG(2) || ARG(1) >= PALETTES)
+        RET(D3DERR_INVALIDCALL, 3);
+    memcpy(ARGP(2), g_palette[ARG(1)], 1024);
+    RET(D3D_OK, 3);
+}
+
+static void IDirect3DDevice8_SetCurrentTexturePalette(Guest* g)
+{
+    g_cur_palette = ARG(1);
+    RET(D3D_OK, 2);
+}
+
+static void IDirect3DDevice8_GetCurrentTexturePalette(Guest* g)
+{
+    if (!ARG(1))
+        RET(D3DERR_INVALIDCALL, 2);
+    wr32(ARG(1), g_cur_palette);
+    RET(D3D_OK, 2);
+}
+
 /* --- IDirect3DDevice8: drawing ----------------------------------------------------------------------------- */
 static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size, uint32_t up_data,
     uint32_t up_stride);
@@ -2448,6 +2486,49 @@ static void apply_targets(void)
 }
 
 static GfxDraw g_draw; /* one device, one draw at a time */
+static struct
+{
+    int on;
+    uint32_t stride, stream[GFX_NREGS], from[GFX_NREGS]; /* the device's stream and offset per element */
+    uint8_t* buf;
+    size_t cap;
+} g_merge;
+
+/* The merged stream for vertices first .. first + count: each element copied from its own stream. */
+static int merge_streams(GfxDraw* d, uint32_t first, uint32_t count)
+{
+    size_t need = (size_t)count * g_merge.stride;
+    if (need > g_merge.cap)
+    {
+        uint8_t* p = (uint8_t*)realloc(g_merge.buf, need);
+        if (!p)
+            return 0;
+        g_merge.buf = p, g_merge.cap = need;
+    }
+    for (int r = 0; r < GFX_NREGS; ++r)
+    {
+        if (!d->vs.el[r].used)
+            continue;
+        uint32_t st = g_merge.stream[r], stride = g_dev.cur.stride[st], n = type_size(d->vs.el[r].type);
+        Obj* b = obj(g_dev.cur.stream[st]);
+        if (!b || !b->mem)
+            return gfx_prof_skip(GFX_SKIP_NO_BUFFER), 0;
+        const uint8_t* src = (const uint8_t*)GUEST_PTR(b->mem);
+        uint8_t* dst = g_merge.buf + d->u.offset[r];
+        for (uint32_t i = 0; i < count; ++i, dst += g_merge.stride)
+        {
+            uint32_t at = (first + i) * stride + g_merge.from[r];
+            if (at + n > b->size)
+                memset(dst, 0, n);
+            else
+                memcpy(dst, src + at, n);
+        }
+    }
+    d->data[0] = g_merge.buf;
+    d->size[0] = (uint32_t)need;
+    d->u.stride[0] = (int32_t)g_merge.stride;
+    return 1;
+}
 
 /* The keys and uniforms for the current state; 0 when the state cannot be drawn. */
 static int build_draw(GfxDraw* d)
@@ -2475,13 +2556,27 @@ static int build_draw(GfxDraw* d)
         fvf_layout(s->vs, &fvf);
         lay = &fvf;
     }
+    /* D3D8 has 16 streams, the back ends GFX_NSTREAMS. A layout that reads past them (the character
+     * creation models' hair reads streams 0-4) is drawn from one stream that set_streams interleaves
+     * from the device's: g_merge holds where each element comes from. */
+    g_merge.on = 0;
+    for (int r = 0; r < GFX_NREGS; ++r)
+        if (lay->el[r].used && lay->el[r].stream >= GFX_NSTREAMS)
+            g_merge.on = 1;
+    uint32_t merged = 0;
     for (int r = 0; r < GFX_NREGS; ++r)
     {
-        if (lay->el[r].used && lay->el[r].stream >= GFX_NSTREAMS)
-            return gfx_prof_skip(GFX_SKIP_STREAM), 0;
         d->vs.el[r] = lay->el[r];
         d->u.offset[r] = lay->offset[r];
+        if (g_merge.on && lay->el[r].used)
+        {
+            g_merge.stream[r] = lay->el[r].stream, g_merge.from[r] = lay->offset[r];
+            d->vs.el[r].stream = 0;
+            d->u.offset[r] = (int32_t)merged;
+            merged += (type_size(lay->el[r].type) + 3) & ~3u;
+        }
     }
+    g_merge.stride = merged;
     if (!lay->el[GFX_R_POSITION].used && !(vs && vs->func))
         return gfx_prof_skip(GFX_SKIP_NO_POSITION), 0;
     d->vs.rhw = lay->rhw;
@@ -2671,6 +2766,8 @@ static int build_draw(GfxDraw* d)
  * vertex buffers, or the ...UP draw's memory as stream 0. */
 static int set_streams(GfxDraw* d, uint32_t first, uint32_t count, uint32_t up_data, uint32_t up_stride)
 {
+    if (g_merge.on)
+        return up_data ? (gfx_prof_skip(GFX_SKIP_STREAM), 0) : merge_streams(d, first, count);
     int used[GFX_NSTREAMS] = { 0 };
     for (int r = 0; r < GFX_NREGS; ++r)
         if (d->vs.el[r].used)
@@ -4219,6 +4316,10 @@ static const ShimDef D3D8[] = {
     D(IDirect3DDevice8, GetTextureStageState),
     D(IDirect3DDevice8, SetTextureStageState),
     D(IDirect3DDevice8, ValidateDevice),
+    D(IDirect3DDevice8, SetPaletteEntries),
+    D(IDirect3DDevice8, GetPaletteEntries),
+    D(IDirect3DDevice8, SetCurrentTexturePalette),
+    D(IDirect3DDevice8, GetCurrentTexturePalette),
     D(IDirect3DDevice8, DrawPrimitive),
     D(IDirect3DDevice8, DrawIndexedPrimitive),
     D(IDirect3DDevice8, DrawPrimitiveUP),
