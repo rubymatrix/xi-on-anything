@@ -36,7 +36,7 @@
 #if defined(FFXI_HOOK_FRAME_PACE) && defined(FFXI_WRAP_FRAME_DT) && defined(FFXI_WRAP_FRAME_DT2) && \
     defined(FFXI_WRAP_FRAME_COUNT) && defined(FFXI_WRAP_FRAME_YIELD) && defined(FFXI_FRAME_INT_SITE_COUNT) && \
     defined(FFXI_FRAME_WAIT_SITE_COUNT) && defined(FFXI_HOOK_FRAME_EASE) && \
-    defined(FFXI_WRAP_FRAME_NET) && defined(FFXI_FRAME_CAM_ONCE) && defined(FFXI_HOOK_FRAME_CAM_TICK) && \
+    defined(FFXI_WRAP_FRAME_NET) && defined(FFXI_FRAME_NET_CLOCK) && defined(FFXI_FRAME_CAM_ONCE) && defined(FFXI_HOOK_FRAME_CAM_TICK) && \
     defined(FFXI_HOOK_FRAME_CAM_SWING) && defined(FFXI_HOOK_FRAME_CAM_WAIT) && defined(FFXI_HOOK_FRAME_LOOK1) && \
     defined(FFXI_HOOK_FRAME_LOOK2) && defined(FFXI_HOOK_FRAME_CAM1) && defined(FFXI_HOOK_FRAME_CAM2) && defined(FFXI_HOOK_FRAME_CAM3) && defined(FFXI_HOOK_FRAME_CAM4)
 #define HAVE_FRAME 1
@@ -286,9 +286,9 @@ static void frame_net(Guest* g)
         rt_orig_frame_net(g);
         return;
     }
-    /* the connection clock ([0x10492e10]: +8 the milliseconds since its last frame) is moved on every
+    /* the connection clock ([frame_net_clock]: +8 the milliseconds since its last frame) is moved on every
      * frame; its timers (when to send) add +8 up at each tick, so a tick is given the skipped frames' too */
-    uint32_t clock = rd32(0x10492e10);
+    uint32_t clock = rd32(FFXI_FRAME_NET_CLOCK);
     const uint64_t tick = 1000000000ull / 30;
     uint64_t now = rt_monotonic_ns();
     if (g_net_due && now < g_net_due)
@@ -355,12 +355,15 @@ static void frame_cam_tick(Guest* g)
         ST(0) += 1.0 - g_dt;
 }
 
-/* the step's wait after the player moves, down 1 a step (eax, about to be stored): only on frames a whole
- * sixtieth ends, so it waits as long as at 60 fps */
+/* the step's wait after the player moves, down 1 a step (eax, about to be stored): down by the whole
+ * sixtieths the frame ends instead, so it waits as long as at 60 fps - a long frame's two or more too.
+ * The game puts it back to 0 when its own step went below (dec; jns): a longer one stops there too */
 static void frame_cam_wait(Guest* g)
 {
-    if (g_on && g_mode == MODE_SPLIT && !g_whole)
-        g->eax += 1;
+    if (!g_on || g_mode != MODE_SPLIT)
+        return;
+    int32_t left = (int32_t)g->eax + 1 - (int32_t)g_whole;
+    g->eax = (uint32_t)(left < 0 && (int32_t)g->eax >= 0 ? 0 : left);
 }
 
 /* The camera's look-at follows the player by a quarter, and in another state an eighth, of the way a
@@ -447,7 +450,9 @@ static void motion_log(void)
     if (!f)
         return;
     int32_t pi = xi_game_player_index();
-    uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0, game = rd32(0x104568fc), cam = game ? rd32(game + 0x50) : 0;
+    /* the scene (Modern's DISP_SCENE: the global the delta getters read too; 0 in a build without all of Modern's) */
+    uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0, game = FFXI_MODERN_DISP_SCENE ? rd32(FFXI_MODERN_DISP_SCENE) : 0,
+             cam = game ? rd32(game + 0x50) : 0;
     float p[3] = { 0 }, c[6] = { 0 };
     if (e)
         xi_game_rd(e + 4, p, sizeof p);
@@ -469,6 +474,7 @@ void frame_present(int uncapped, int menus30, uint32_t limit)
     {
         g_on = uncapped;
         g_last = 0, g_carry = 0, g_whole = 0, g_dt = 1.0, g_next = 0, g_dt_sum = 0;
+        g_net_due = 0, g_net_ms = 0; /* (a tick held back then would give the next uncapped stretch its milliseconds) */
         rt_log("[recomp] frame: %s\n", g_on ? "uncapped, the world at the wall clock's speed" : "the game's own pacing");
     }
 #endif

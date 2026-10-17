@@ -27,7 +27,8 @@
  * as retail's do, and --server is not used.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped;
- * 0 uncapped, the world at its own speed (frame.c). --fps-limit n: uncapped, held to n a second.
+ * 0 uncapped: the world at its own speed (frame.c) in a build with the frame sites, else as fast as the
+ * frames. --fps-limit n: uncapped at the world's speed, held to n a second (only with the frame sites).
  *
  * --aspect auto|off|<w:h>: the 3D scene's aspect ratio. auto (the default) follows the window's
  * shape, so a widescreen window shows more to the sides instead of a 4:3 view stretched across it.
@@ -971,9 +972,16 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--fps-limit"))
         {
             long n = strtol(argv[i + 1], NULL, 10);
-            if (n < 0 || n > 1000)
+            if (n != 0 && (n < 30 || n > 1000))
             {
-                fprintf(stderr, "--fps-limit: frames a second while uncapped (--fps-divisor 0), 0 none\n");
+                fprintf(stderr, "--fps-limit: frames a second while uncapped (--fps-divisor 0), 30 to 1000; 0 none\n");
+                return 2;
+            }
+            if (!frame_supported())
+            {
+                /* the game's own uncapped pacing would run the world as fast as the frames, unheld */
+                fprintf(stderr, "--fps-limit: game build %s cannot run uncapped at the game's speed (tools/frame_sites.py)\n",
+                    FFXI_BUILD);
                 return 2;
             }
             g_fps_limit = (uint32_t)n, g_fps_divisor = 0;

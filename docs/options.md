@@ -28,7 +28,7 @@ the Lighting and Atmosphere pages.
 | UI scale | Display › [Scaling] UI Scale | | | `FFXIMenuResolution` | list |
 | Interface shape | Display › [Scaling] Interface Shape | | `--ui-aspect` | `FFXIUIAspect` | off; Full / 16:9 / 4:3 |
 | Background (render) resolution | Display › [Scaling] Background Resolution | | | `FFXIBackground` | 2048 / 4096 / 6144 / 8192, next start |
-| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped. 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
+| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped (the last three only in game builds with frame sites in `meta/builds.json`, from `tools/frame_sites.py`; in others `--fps-divisor 0` is the game's own uncapped pacing, the world as fast as the frames). 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
 | FPS counter | Display › [Performance] FPS Counter | `fps` | | | 1 shown |
 | GPU pick (Vulkan) | | | | | `FFXI_GPU` env |
 

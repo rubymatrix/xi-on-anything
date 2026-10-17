@@ -29,6 +29,8 @@ gives the delta's users the real one instead, and needs:
                       (the character select's opening move is the under-3 one)
   frame_net           (wraps) the zone connection's tick (once a frame: what arrived handled, what is due
                       sent): the host runs it 30 times a second past 30 fps, as the game shipped
+  frame_net_clock     the global holding its clock (+8 the milliseconds since the last frame, set once a
+                      frame): the host adds the skipped frames' to the next tick's
   frame_cam_once      the third-person camera's two calls that count its steps this frame (n = (int)dt,
                       then "step < n" after each): past 60 fps the host has it step once every frame,
                       not once a whole sixtieth, so it moves as often as the character it follows
@@ -90,6 +92,10 @@ CAM_EASES = [  # (pattern, offset of the fmul, the constant before the fmul, the
 # the zone connection's tick: sub esp,0x10c; push ebx; push esi; push edi; xor bl,bl; call <now>;
 # mov esi,[esp+0x11c]; mov edi,eax; test esi,esi
 NET = re.compile(re.escape(bytes.fromhex('81ec0c01000053565732dbe8')) + b'....' + re.escape(bytes.fromhex('8bb4241c0100008bf885f6')), re.S)
+# its clock's update, once a frame: mov eax,[clock]; mov ecx,[eax+0x10]; mov edx,[eax+4]; push ecx; push edx;
+# push 1000; call <elapsed>; mov ecx,[clock]; add esp,0xc; mov [ecx+8],eax
+NET_CLOCK = re.compile(re.escape(bytes.fromhex('a1')) + b'(....)' + re.escape(bytes.fromhex('8b48108b5004515268e8030000e8')) +
+                       b'....' + re.escape(bytes.fromhex('8b0d')) + rb'\1' + re.escape(bytes.fromhex('83c40c894108')), re.S)
 # the third-person camera's step count: mov [esp+0x18],ebx; call getter; call ftol; test eax,eax; jle; mov ebx,10
 CAM_ONCE = [re.compile(re.escape(bytes.fromhex('895c2418e8')) + b'....\xe8....' + re.escape(bytes.fromhex('85c00f8e')) + b'....' +
                        re.escape(bytes.fromhex('bb0a000000')), re.S),
@@ -282,6 +288,9 @@ def main():
     nets = [base + lo + m.start() for m in NET.finditer(img[lo:hi])]
     if len(nets) != 1:
         die('zone connection tick: %d matches, want 1' % len(nets))
+    clocks = [struct.unpack('<I', m.group(1))[0] for m in NET_CLOCK.finditer(img[lo:hi])]
+    if len(clocks) != 1:
+        die('zone connection clock: %d matches, want 1' % len(clocks))
     paces = [base + lo + m.start() + 3 for m in PACE.finditer(img[lo:hi])]
     if len(paces) != 1:
         die('frame pacer: %d matches, want 1' % len(paces))
@@ -335,6 +344,7 @@ def main():
                   'frame_net': '0x%08x' % nets[0]},
         'frame_int_sites': ['0x%08x' % s for s in sites],
         'frame_wait_sites': ['0x%08x' % s for s in waits],
+        'frame_net_clock': '0x%08x' % clocks[0],
     }
     if args.dry_run:
         print(json.dumps(out, indent=2))

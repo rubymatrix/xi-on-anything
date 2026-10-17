@@ -73,6 +73,7 @@ def current(required=True):
         'frame_wait_sites': b.get('frame_wait_sites', []),
         'frame_cam_once': b.get('frame_cam_once', []),
         'frame_look_once': b.get('frame_look_once', []),
+        'frame_net_clock': b.get('frame_net_clock'),
         'crt': b['crt'],
         'modern': b.get('modern', {}),
         'modern_keys': sorted({k for other in known().values() for k in other.get('modern', {})}),
