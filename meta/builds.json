@@ -176,7 +176,8 @@
         "frame_dt2": "0x10014d20",
         "frame_count": "0x10014d50",
         "frame_yield": "0x1023e4b0",
-        "frame_net": "0x100fa180"
+        "frame_net": "0x100fa180",
+        "frame_net_wait": "0x100edeb0"
       },
       "patches": {
         "XIUI": {
