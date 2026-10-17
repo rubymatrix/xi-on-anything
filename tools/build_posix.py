@@ -163,16 +163,18 @@ def compile_stale(sources, objdir, extra):
     """Compiles every source whose object is missing or older than it (or than the newest runtime
     header, for our own sources), in parallel; returns the objects. Every one, when objdir's were
     compiled with other flags (its .flags): their dates alone would keep position-dependent objects in
-    a position-independent host64."""
+    a position-independent host64. A folder from before .flags is taken as compiled with these, but
+    where they are position-independent (Linux, thirdparty.PIE)."""
     os.makedirs(os.path.join(ROOT, objdir), exist_ok=True)
     headers = newest_header()
     flags_file = os.path.join(ROOT, objdir, '.flags')
     want = ' '.join(CC + CXX + CFLAGS + extra)
     try:
         with open(flags_file) as f:
-            same = f.read() == want
+            recorded = f.read()
     except OSError:
-        same = False
+        recorded = None
+    same = recorded == want or (recorded is None and not thirdparty.PIE)
     objs, jobs = [], []
     for s in sources:
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(s))[0] + '.o')
@@ -203,7 +205,7 @@ def compile_stale(sources, objdir, extra):
             failed = [cmd[-3] for cmd in retry if subprocess.call(cmd, cwd=ROOT)]
         if failed:
             raise SystemExit('failed: ' + ', '.join(failed))
-    if not same:
+    if recorded != want:
         with open(flags_file, 'w') as f:
             f.write(want)
     return objs
