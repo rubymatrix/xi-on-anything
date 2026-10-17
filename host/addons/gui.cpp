@@ -1015,7 +1015,10 @@ extern "C" void xi_gui_init(void)
     io.BackendRendererName = "ffxirecompile-gfx";
     io.BackendPlatformName = "ffxirecompile-sdl3";
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasVtxOffset;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+    /* no keyboard navigation: with it, any window that has focus (a click on it, or just appearing)
+     * wants the whole keyboard, and the arrows, Enter and Space the game also gets would work its
+     * widgets. The keyboard is ImGui's while a widget is active (a text field) or a modal is open. */
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     static std::string ini;
     ini = std::string(xi_data_dir()) + "imgui.ini";
     io.IniFilename = ini.c_str();
@@ -1043,6 +1046,8 @@ static void ensure_up(void)
     g_up = 1;
 }
 
+static int g_close_popups;
+
 extern "C" void xi_gui_begin(uint32_t w, uint32_t h)
 {
     if (!w || !h)
@@ -1057,7 +1062,10 @@ extern "C" void xi_gui_begin(uint32_t w, uint32_t h)
     if (io.DeltaTime <= 0)
         io.DeltaTime = 1.0f / 60.0f;
     last = now;
+    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard; /* off for good, an addon's ConfigFlags too (xi_gui_init) */
     ImGui::NewFrame();
+    if (g_close_popups) /* Escape (xi_gui_key) */
+        ImGui::ClosePopupsExceptModals(), g_close_popups = 0;
     ImGui::ErrorRecoveryStoreState(&g_recover);
     g_in_frame = 1;
     /* the addons' Direct3D draws start over each frame */
@@ -1282,10 +1290,36 @@ extern "C" int xi_gui_key(uint32_t scancode, int down, uint32_t dik)
     io.AddKeyEvent(ImGuiMod_Shift, (m & SDL_KMOD_SHIFT) != 0);
     io.AddKeyEvent(ImGuiMod_Alt, (m & SDL_KMOD_ALT) != 0);
     io.AddKeyEvent(ImGuiMod_Super, (m & SDL_KMOD_GUI) != 0);
+    int want = io.WantCaptureKeyboard || io.WantTextInput;
     ImGuiKey k = imgui_key((SDL_Scancode)scancode);
-    if (k != ImGuiKey_None)
+    /* Tab is the game's (its targeting) unless ImGui has the keyboard: given to ImGui as well, it
+     * would move into the focused window's first text field and take the keyboard from there */
+    if (k != ImGuiKey_None && (want || k != ImGuiKey_Tab || !down))
         io.AddKeyEvent(k, down != 0);
-    return io.WantCaptureKeyboard || io.WantTextInput;
+    /* Escape closes an open popup (a combo's list, a context menu), as keyboard navigation did */
+    if (!want && down && k == ImGuiKey_Escape && GImGui->OpenPopupStack.Size > 0)
+        return g_close_popups = 1;
+    return want;
+}
+
+/* The game's window gaining or losing focus: on losing it, ImGui lets go of the keys and buttons it
+ * holds (the releases may never come), and a Shift drag ends */
+extern "C" void xi_gui_focus(int on)
+{
+    if (!ImGui::GetCurrentContext())
+        return;
+    ImGui::GetIO().AddFocusEvent(on != 0);
+    if (!on)
+        g_drag_text = NULL, g_drag_prim = NULL;
+}
+
+/* The mouse leaving the game's window: no window of ours is under it, so the press that brings
+ * focus back is the game's (WantCaptureMouse would otherwise keep the last position's answer). Not
+ * while a button is held: a drag goes on outside (a slider would jump to its end). */
+extern "C" void xi_gui_mouse_leave(void)
+{
+    if (ImGui::GetCurrentContext() && !ImGui::IsAnyMouseDown())
+        ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
 }
 
 extern "C" int xi_gui_text(const char* utf8)
