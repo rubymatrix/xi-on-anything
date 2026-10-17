@@ -336,6 +336,13 @@ static int hook(const void* ev, int ww, int wh)
     }
     case SDL_EVENT_TEXT_INPUT:
         return xi_gui_text(e->text.text);
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        xi_gui_focus(e->type == SDL_EVENT_WINDOW_FOCUS_GAINED);
+        return 0;
+    case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+        xi_gui_mouse_leave();
+        return 0;
     default:
         return 0;
     }

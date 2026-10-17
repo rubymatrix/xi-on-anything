@@ -237,6 +237,10 @@ docker run --rm -v "$PWD":/src -v "<FINAL FANTASY XI>":/game:ro -w /src xi-linux
     # FFXI_VK_VALIDATION=1: the Khronos validation layer
 ```
 
+`python3 tools/build_posix.py desktop --game <FINAL FANTASY XI>` then puts `build/host64` in the
+applications menu (`~/.local/share/applications/xi-on-anything.desktop`, named for host64's app id),
+so docks and window switchers show the game's icon for its windows.
+
 The kit the launcher builds the Steam Deck's client from is `tools/linux/kit.sh` (zig, static SDL3
 and glslang; CI publishes it as the `kit-linux` pre-release): everything that is not the game,
 prebuilt, so the player's machine needs only zig and python3 to make `host64` from their files
@@ -345,7 +349,7 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--data-dir <folder>` | Where `host64` writes its own files (the `patch.ver` it makes for an install without one). Default: beside `host64`. |
 | `--reg-final <file.reg>` | Loaded after the overlay, so its values win over what the game saved (up to 8). Without one, the sign-in screen loads its `settings.reg` here. |
 | `--dats <folder>` | DAT overlays, the way XIPivot does them (up to 8; the first folder given wins). See below. |
-| `--fps-divisor <n>` | The game's frame divisor: `1` is 60 fps (the default here), `2` is 30 fps as shipped, `0` uncapped (for measurements). |
+| `--fps-divisor <n>` | The game's frame divisor: `1` is 60 fps (the default here), `2` is 30 fps as shipped, `0` uncapped: the world kept at its speed in game builds with frame sites (`tools/frame_sites.py`), else as fast as the frames (for measurements). `--fps-limit <n>` holds uncapped to n a second. |
 | `--aspect <auto, off or w:h>` | The 3D scene's aspect ratio. `auto` (the default) follows the window's shape, as Ashita's aspect addon does, so a widescreen or ultrawide window sees more to the sides instead of a 4:3 view stretched across it. `off` leaves it to the game; a shape (`16:9`, `1.778`) fixes it. |
 | `--ui-aspect <w:h>` | Keep the interface at this shape, full height and centered, in a wider window (`16:9` on an ultrawide), instead of stretched across it. The 3D world still fills the window. The mouse is mapped to match, so the sides outside the box can't be clicked. Off by default (`off`); an app bundle's `FFXIUIAspect` key is the default. Best with a 16:9 menu resolution (960x540). |
 | `--nameplates fix\|off` | The names over characters' heads. The game sizes them across by the window's width and down by its height, so they widen with the window (1.8 times at 3440x1440); `fix`, the default, keeps the shape they have in a 4:3 window. Builds with a `nameplate_scale` hook in `meta/builds.json` only. |
@@ -388,7 +392,7 @@ the log reports each one: `[recomp] dats: era-dats, 163 files`.
 | `FFXI_DISCORD=0` | No Discord Rich Presence. |
 | `FFXI_DISCORD_NAME=0` | Rich Presence without the character's name (jobs and zone only). |
 | `FFXI_DISCORD_APP_ID` | The Discord application the presence is shown as, in place of the built-in one. |
-| `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU, whatever Config > Modern's Occlusion Check says. By default it answers "visible" at once, which saves 7–8 ms a frame. |
+| `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU. By default it answers "visible" at once, which saves 7–8 ms a frame. |
 | `FFXI_DRAWLOG=<file>` | While `<file>.go` exists, write the next frame's draws to `<file>` (return addresses on the guest stack, texture, vertex box), then remove `.go`. For finding which game code draws what. |
 | `FFXI_ASYNC_READBACK=1` | Small read-only surface locks take the newest finished copy instead of waiting for the GPU. |
 | `FFXI_VSYNC=0` | Never wait for the display, for measuring frame rates past its refresh rate. |

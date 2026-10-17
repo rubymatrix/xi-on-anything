@@ -72,6 +72,7 @@ typedef struct Wnd
     int x, y, w, h, visible;
     int fullscreen; /* a full-screen D3D device is on it */
     SDL_Window* sdl;
+    uint64_t asked_until; /* asked for w x h through its size limits until then (ask_size), 0 when not */
 } Wnd;
 static Wnd g_wnds[MAX_WINDOWS];
 static uint32_t g_focus;
@@ -277,6 +278,97 @@ static int post(uint32_t tid, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t
     qunlock();
     k_poke(); /* wakes MsgWaitForMultipleObjects */
     return 1;
+}
+
+/* A window the compositor would not size as asked. Under Wayland a window it calls maximized or tiled
+ * is sized by the compositor alone, and SDL does not ask (Hyprland calls every window both, floating
+ * ones too, to keep apps from drawing their own frames). Its size limits still reach the compositor,
+ * which fits a floating window to them a frame later: they are made the size asked, and hold it there
+ * until the next size, full screen, or a resize by the compositor lets it go. A window the compositor
+ * calls maximized is made resizable as soon as it says so (compositor_window): SDL keeps a fixed
+ * window at the size it last gave it itself, the one refused, and puts it back at every configure (a
+ * focus change, a move, a resize by the player), where a resizable one takes the compositor's. One
+ * it does not (sway's floating windows) stays fixed, as compositors float those. No protocol says the limits were
+ * declined: not given after ASK_MS, the window is let go and the game follows the size the
+ * compositor keeps (follow_size), as it does any size the compositor gives it since. Desktop Linux
+ * only, where compositors size windows themselves; macOS's and Windows' windows take the size asked,
+ * and UWP's and Android's are the screen. */
+#define ASK_MS 1000
+
+void (*user32_resize_hook)(uint32_t hwnd, int width, int height); /* user32.h */
+
+#if defined(__linux__) && !defined(__ANDROID__)
+#define COMPOSITOR_SIZES 1
+
+static uint64_t now_ms(void) { return rt_monotonic_ns() / 1000000u; }
+
+static int windowed(const Wnd* w) { return !w->fullscreen && !(SDL_GetWindowFlags(w->sdl) & SDL_WINDOW_FULLSCREEN); }
+
+/* a game window the compositor calls maximized: resizable (see above) */
+static void compositor_window(Wnd* w)
+{
+    if (w->sdl && (SDL_GetWindowFlags(w->sdl) & SDL_WINDOW_MAXIMIZED))
+        SDL_SetWindowResizable(w->sdl, true);
+}
+
+static void ask_size(Wnd* w)
+{
+    SDL_SetWindowResizable(w->sdl, true); /* SDL keeps a fixed window's limits at its size */
+    SDL_SetWindowMinimumSize(w->sdl, w->w, w->h);
+    SDL_SetWindowMaximumSize(w->sdl, w->w, w->h);
+    w->asked_until = now_ms() + ASK_MS;
+}
+
+/* its limits off (none set: nothing to do), the compositor's to size */
+static void let_go(Wnd* w)
+{
+    w->asked_until = 0;
+    SDL_SetWindowMinimumSize(w->sdl, 0, 0);
+    SDL_SetWindowMaximumSize(w->sdl, 0, 0);
+}
+
+/* after SDL_SetWindowSize and a sync: the size asked through the limits when it was not given */
+static void check_size(Wnd* w)
+{
+    int aw = 0, ah = 0;
+    SDL_GetWindowSize(w->sdl, &aw, &ah);
+    if ((aw != w->w || ah != w->h) && windowed(w))
+        ask_size(w);
+}
+
+static void sync_check_size(Wnd* w)
+{
+    SDL_SyncWindow(w->sdl);
+    check_size(w);
+}
+
+/* the window at a size the compositor chose: its limits off (they would pull it back to the size
+ * asked, against a resize in progress), the game told, and drawn at it (user32_resize_hook) */
+static void follow_size(Wnd* w, int width, int height)
+{
+    if (width <= 0 || height <= 0 || (width == w->w && height == w->h) || !windowed(w))
+        return;
+    rt_log("[recomp] window: %dx%d, not the %dx%d asked (the compositor's choice): the game follows it\n", width, height,
+        w->w, w->h);
+    let_go(w);
+    w->w = width, w->h = height;
+    post(w->tid, w->hwnd, WM_SIZE, 0, ((uint32_t)(uint16_t)height << 16) | (uint16_t)width);
+    if (user32_resize_hook)
+        user32_resize_hook(w->hwnd, width, height);
+}
+#else
+#define COMPOSITOR_SIZES 0
+static void compositor_window(Wnd* w) { (void)w; }
+static void let_go(Wnd* w) { (void)w; }
+static void check_size(Wnd* w) { (void)w; }
+static void sync_check_size(Wnd* w) { (void)w; }
+#endif
+
+/* The window at w x h, the limits that held it at its last size off first */
+static void size_window(Wnd* w)
+{
+    let_go(w);
+    SDL_SetWindowSize(w->sdl, w->w, w->h);
 }
 
 /* takes the first message for hwnd (0 = any) in [lo, hi] (0,0 = any) */
@@ -496,6 +588,10 @@ static void pump(void)
                 SDL_GetWindowSize(sw, &ww, &wh);
             user32_event_hook(&e, ww, wh);
         }
+        /* a press the game gets: an earlier press of that button the overlay took is over (its release
+         * may never have come, focus gone while it was held), and this one's release is the game's */
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+            g_overlay_buttons &= ~SDL_BUTTON_MASK(e.button.button);
         /* the release of a press the overlay took: the game never saw the press (FFXI acts on the
          * release: targeting, its menus) */
         if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && (g_overlay_buttons & SDL_BUTTON_MASK(e.button.button)))
@@ -614,6 +710,25 @@ static void pump(void)
             }
             break;
         }
+#if COMPOSITOR_SIZES
+        case SDL_EVENT_WINDOW_MAXIMIZED: /* the compositor's word, not the player's: see compositor_window */
+            w = wnd_of_sdl(e.window.windowID);
+            if (w)
+                compositor_window(w);
+            break;
+        case SDL_EVENT_WINDOW_RESIZED:
+            w = wnd_of_sdl(e.window.windowID);
+            if (!w)
+                break;
+            if (w->asked_until) /* until it has the size asked, any other is on the way there */
+            {
+                if (e.window.data1 == w->w && e.window.data2 == w->h)
+                    w->asked_until = 0; /* had: its limits hold it there */
+                break;
+            }
+            follow_size(w, e.window.data1, e.window.data2);
+            break;
+#endif
         case SDL_EVENT_WINDOW_MOVED:
             w = wnd_of_sdl(e.window.windowID);
             if (w)
@@ -626,6 +741,22 @@ static void pump(void)
         default: break;
         }
     }
+#if COMPOSITOR_SIZES
+    /* a size asked through the limits (ask_size) and not had in time - after the events, which may
+     * say it was had: the compositor keeps its own */
+    uint64_t now = now_ms();
+    for (int i = 0; i < MAX_WINDOWS; ++i)
+    {
+        Wnd* w = &g_wnds[i];
+        if (w->used && w->sdl && w->asked_until && now > w->asked_until)
+        {
+            int aw = 0, ah = 0;
+            let_go(w);
+            SDL_GetWindowSize(w->sdl, &aw, &ah);
+            follow_size(w, aw, ah);
+        }
+    }
+#endif
 }
 
 /* --- window shims ---------------------------------------------------------------------------------- */
@@ -685,6 +816,8 @@ void user32_set_fullscreen(uint32_t hwnd, int on)
     if (!w)
         return;
     w->fullscreen = on != 0;
+    if (on && w->sdl) /* the screen's size, not the limits' */
+        let_go(w);
     apply_frame(w);
 }
 
@@ -706,11 +839,12 @@ void user32_set_window(uint32_t hwnd, int mode, int width, int height)
         /* out of full screen first: a full-screen window keeps its size */
         SDL_SetWindowFullscreen(w->sdl, false);
         SDL_SyncWindow(w->sdl);
-        SDL_SetWindowSize(w->sdl, w->w, w->h);
+        size_window(w);
         apply_frame(w);
         if (mode == 1 || mode == 2)
             SDL_SetWindowPosition(w->sdl, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         SDL_SyncWindow(w->sdl);
+        check_size(w);
     }
     call_wndproc(w, WM_SIZE, 0, ((uint32_t)(uint16_t)w->h << 16) | (uint16_t)w->w);
 }
@@ -755,7 +889,8 @@ static void sh_CreateWindowExA(Guest* g)
         w->sdl = g_adopt;
         g_adopt = NULL;
         SDL_SetWindowTitle(w->sdl, ARG(2) ? ARGS(2) : "");
-        SDL_SetWindowSize(w->sdl, w->w, w->h);
+        compositor_window(w); /* shown already: what the compositor called it is known */
+        size_window(w);
     }
     else
     {
@@ -767,6 +902,8 @@ static void sh_CreateWindowExA(Guest* g)
         w->sdl = SDL_CreateWindow(ARG(2) ? ARGS(2) : "", w->w, w->h, flags);
     }
     apply_frame(w);
+    if (w->sdl && (SDL_GetWindowFlags(w->sdl) & SDL_WINDOW_HIDDEN) == 0) /* adopted: its size given? */
+        sync_check_size(w);
     if (!w->sdl)
         rt_log("[recomp] SDL_CreateWindow: %s\n", SDL_GetError());
 #if defined(_WIN32)
@@ -1504,12 +1641,16 @@ static void sh_MoveWindow(Guest* g)
     Wnd* w = wnd(ARG(0));
     if (!w)
         RET(0, 6);
+    int resized = w->w != (int32_t)ARG(3) || w->h != (int32_t)ARG(4);
     w->x = (int32_t)ARG(1), w->y = (int32_t)ARG(2), w->w = (int32_t)ARG(3), w->h = (int32_t)ARG(4);
     if (w->sdl)
     {
         SDL_SetWindowPosition(w->sdl, w->x, w->y);
-        SDL_SetWindowSize(w->sdl, w->w, w->h);
+        if (resized)
+            size_window(w);
         apply_frame(w);
+        if (resized)
+            sync_check_size(w);
     }
     call_wndproc(w, WM_MOVE, 0, ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
     call_wndproc(w, WM_SIZE, 0, ((uint32_t)(uint16_t)w->h << 16) | (uint16_t)w->w);

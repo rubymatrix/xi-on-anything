@@ -84,12 +84,13 @@ static uint32_t arg_addr(lua_State* L, int i)
 static void push_addr(lua_State* L, uint32_t guest) { lua_pushnumber(L, xi_host_addr(guest)); }
 
 /* Writes into FFXiMain's code change nothing by themselves (the recompiled C is what runs): each is
- * reported as a code patch (patch.c), which a translated variant may stand for. Called before the
- * bytes are written. */
+ * reported as a code patch (patch.c), which a translated variant may stand for. A write over the
+ * game's frame-rate divisor is host64's to keep (xi_fps_write). Called before the bytes are written. */
 static void code_write(lua_State* L, uint32_t a, const void* src, uint32_t n)
 {
     Addon* ad = addon_of(L);
     xi_code_patch(ad, a, (const uint8_t*)src, n);
+    xi_fps_write(a, (const uint8_t*)src, n);
 }
 
 /* --- xi.memory -------------------------------------------------------------------------------- */

@@ -1,0 +1,8 @@
+# The airship scene's settings (README, "The airship"), as host64's settings file in place of the
+# machine's own:
+#   FFXI_FX_FILE="$PWD/tools/replay/airship-fx.txt" python3 tools/replay.py run tools/replay/default.txt --play airship
+# Indoor Shadows on: the effects take the airship for a zone with no sky, where the sun's shadows stay
+# off without it. The longest draw distance: it brings in the scenery that moves past the ship.
+moghouse = 0.5
+draw = 6
+draw_entities = 4

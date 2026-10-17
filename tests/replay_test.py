@@ -84,6 +84,19 @@ class Recordings(Folder):
         self.assertEqual(s.name(), 'Replay')
         self.assertIn(b'Recorders', bytes(s.packets[1][1]))  # not a whole field: left alone
 
+    def test_renumber_moves_the_character_id_where_it_knows_it(self):
+        own = struct.pack('<I', 7)
+        update = packet(0x037, bytes(0x20) + own)  # +0x24 with the header
+        gauges = packet(0x0DF, own + bytes(8))       # +0x04
+        chat = packet(0x017, b'\x06\x00' + own)     # not a field renumber knows
+        s = replayscene.Scene.load(self.write('scene.jsonl', recording(
+            [(0, zone_in(char=7)), (10, update), (20, gauges), (30, action(7, 7)), (40, chat)])))
+        self.assertEqual(s.renumber(ME), (5, 1))  # zone-in, update, gauges, actor and target; the chat left
+        self.assertEqual(s.character, ME)
+        s.save(os.path.join(self.dir, 'saved.jsonl'))
+        self.assertEqual(replayscene.Scene.load(os.path.join(self.dir, 'saved.jsonl')).character, ME)
+        self.assertEqual(s.renumber(ME), (0, 0))
+
     def test_a_saved_scene_loads_back_the_same(self):
         s = replayscene.Scene.load(self.write('scene.jsonl', recording(
             [(500, packet(0x017, b'before')), (1000, zone_in()), (1500, packet(0x037, b'x')), (3000, packet(0x00B, b''))],

@@ -39,6 +39,7 @@ import replayscene  # noqa: E402
 import replayserver  # noqa: E402
 
 SCENES = os.path.join(TOOLS, 'replay', 'scenes')  # the committed recordings tools/replay/default.txt plays
+REFERENCE_CHARACTER = 1  # the character id every scene there has (the replay server signs in one for a suite)
 
 SETTLE = 3.0         # seconds after a scene's READY before its capture: effects take a moment to show
 LOBBY_TIMEOUT = 180  # seconds from the client's start to the character in a zone
@@ -382,13 +383,15 @@ def client_build(label):
 
 def keep_file(src, dst, meta):
     """A recording as the reference set keeps it: what playback reads (Scene.load), the character named
-    Replay, trimmed (replayscene.trim), and meta added to its meta line. Returns the counts."""
+    Replay, trimmed (replayscene.trim), its id the set's (REFERENCE_CHARACTER, once trimmed: the trim
+    tells its actions by it), and meta added to its meta line. Returns the counts."""
     s = replayscene.Scene.load(src)
     renamed = s.rename('Replay')
     dropped, held = replayscene.trim(s)
+    renumbered, left = s.renumber(REFERENCE_CHARACTER)
     s.meta.update(meta)
     s.save(dst)
-    return renamed, dropped, held
+    return renamed, dropped, held, renumbered, left
 
 
 def keep(a):
@@ -398,9 +401,11 @@ def keep(a):
     out = a.out or SCENES
     os.makedirs(out, exist_ok=True)
     for src in a.suite:
-        renamed, dropped, held = keep_file(src, os.path.join(out, os.path.basename(src)), meta)
+        renamed, dropped, held, renumbered, left = keep_file(src, os.path.join(out, os.path.basename(src)), meta)
         print(f"kept {os.path.basename(src)}: {renamed} packets renamed Replay, {dropped} others' actions dropped, "
-              f'{held} updates held')
+              f'{held} updates held, {renumbered} character ids made {REFERENCE_CHARACTER}')
+        if left:
+            print(f'  warning: the recorded character id still stands {left} times, in fields keep does not know')
 
 
 def main():

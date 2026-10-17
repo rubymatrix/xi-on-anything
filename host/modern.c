@@ -40,6 +40,7 @@
 #include "cachedir.h"
 #include "d3d8.h"
 #include "datui.h"
+#include "frame.h"
 #include "gfx.h"
 #include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
 #include "gthread.h"
@@ -149,8 +150,8 @@ typedef struct Row
     const char* key; /* the settings file's; "@..." host64's */
     int kind;
     int nopt;
-    const char* opt[4];
-    float val[4];
+    const char* opt[5];
+    float val[5];
     float lo, hi; /* a slider's range */
     const char* help;
 } Row;
@@ -225,6 +226,9 @@ static List g_res = { "@res" }, g_scale = { "@menu" };
 static char g_settings_reg[1100];
 static int g_win_w, g_win_h, g_bg, g_menu_w, g_menu_h, g_mode; /* as the settings file has them; g_mode 0034 */
 static int g_display_live; /* the window's mode or size changed: display_apply, between frames */
+/* the window's size as the compositor keeps it when that is not the one chosen (a tiling one, or one
+ * that refused it: user32_resize_hook), for this run only; 0 when it is the one chosen */
+static int g_now_w, g_now_h;
 
 static List* list_of(const char* key) { return !strcmp(key, "@res") ? &g_res : !strcmp(key, "@menu") ? &g_scale : NULL; }
 
@@ -252,17 +256,50 @@ static int list_at(const List* l)
     return best;
 }
 
+/* the menus' scale as it is: a step of its list */
+static float scale_now(void) { return g_scale.n ? g_scale.v[list_at(&g_scale)] : 1.0f; }
+
 static void list_set(List* l, int i)
 {
     if (i < 0 || i >= l->n)
         return;
-    /* the scale as it is (a step of its list), before the window changes it */
-    float scale = g_scale.n ? g_scale.v[list_at(&g_scale)] : 1.0f;
+    float scale = scale_now(); /* before the window changes it */
     if (l == &g_res)
         g_win_w = l->w[i], g_win_h = l->h[i];
     else
         scale = l->v[i];
     menu_size(g_win_w, g_win_h, scale, &g_menu_w, &g_menu_h);
+}
+
+/* Graphics' Overall Quality: the Lighting page's settings at each level, and the contact shadows'
+ * (shadow, in no menu). Low has no modern lighting, sun or contact shadows, or occlusion; Medium is the
+ * defaults (gfx_fx.c); Max has every quality setting at its highest, sun shadows and bounce light at full
+ * strength. Settings that are none of these are Custom. */
+static const char* const QUALITY_KEYS[] = { "light", "sun", "sun_casters", "sun_soft", "sun_detail", "ao", "ao_quality",
+    "gi", "shadow" };
+enum
+{
+    NQUALITY_KEYS = sizeof QUALITY_KEYS / sizeof QUALITY_KEYS[0],
+    NQUALITY = 3,
+};
+static const float QUALITY[NQUALITY][NQUALITY_KEYS] = {
+    { 0, 0, 0, 0, 2048, 0, 0, 0, 0 },             /* Low */
+    { 2, 0.45f, 0, 0, 4096, 0.8f, 1, 0, 0.3f },   /* Medium */
+    { 2, 1.0f, 0, 0.03f, 8192, 0.8f, 2, 3.0f, 0.3f }, /* Max */
+};
+
+/* the level the settings are at; NQUALITY (Custom) when none */
+static int quality_now(void)
+{
+    for (int q = 0; q < NQUALITY; ++q)
+    {
+        int i = 0;
+        while (i < NQUALITY_KEYS && fabsf(gfx_fx_get(QUALITY_KEYS[i]) - QUALITY[q][i]) <= 1e-3f * (QUALITY[q][i] > 1 ? QUALITY[q][i] : 1))
+            ++i;
+        if (i == NQUALITY_KEYS)
+            return q;
+    }
+    return NQUALITY;
 }
 
 static float get(const Row* r)
@@ -274,12 +311,15 @@ static float get(const Row* r)
         return (float)g_bg;
     if (!strcmp(r->key, "@mode"))
         return (float)g_mode;
-    if (!strcmp(r->key, "@fps"))
-        return g_setup.fps_divisor ? (float)*g_setup.fps_divisor : 1.0f;
+    if (!strcmp(r->key, "@fps")) /* 2 30 fps, 1 60, else uncapped: the cap (120, 144) or 0 */
+    {
+        uint32_t d = g_setup.fps_divisor ? *g_setup.fps_divisor : 1u;
+        return d ? (float)d : g_setup.fps_limit ? (float)*g_setup.fps_limit : 0.0f;
+    }
     if (!strcmp(r->key, "@ui"))
         return g_ui_aspect;
-    if (!strcmp(r->key, "@occlusion"))
-        return (float)d3d8_occlusion();
+    if (!strcmp(r->key, "@quality"))
+        return (float)quality_now();
     if (!strcmp(r->key, "@nameplates"))
         return g_setup.nameplate_fix ? (float)*g_setup.nameplate_fix : 1.0f;
     if (!strcmp(r->key, "@nameplate_size"))
@@ -294,6 +334,18 @@ static float get(const Row* r)
 
 static void save_display(void);
 
+/* a scene setting set, and kept to write to the settings file (save_fx) */
+static void fx_put(const char* key, float v)
+{
+    gfx_fx_set(key, v);
+    int known = 0;
+    for (int i = 0; i < g_nfx_keys; ++i)
+        known |= !strcmp(g_fx_keys[i], key);
+    if (!known && g_nfx_keys < 32)
+        SDL_strlcpy(g_fx_keys[g_nfx_keys++], key, sizeof g_fx_keys[0]);
+    g_fx_touched = 1;
+}
+
 static void set(const Row* r, float v)
 {
     List* l = list_of(r->key);
@@ -305,14 +357,22 @@ static void set(const Row* r, float v)
             g_bg = (int)v;
         else
             g_mode = (int)v;
-        g_display_live |= l || !strcmp(r->key, "@mode"); /* at once (display_apply) */
+        if (l || !strcmp(r->key, "@mode"))
+            g_display_live = 1, g_now_w = 0; /* at once (display_apply), the size chosen asked again */
         /* written at once: a window closed other than by its close (the lobby's) still keeps it */
         save_display();
     }
     else if (!strcmp(r->key, "@fps"))
     {
+        int divisor = v > 0.5f && v < 2.5f ? (int)v : 0;
+        if (!divisor && !frame_supported())
+            return; /* this build's world would run as fast as the frames: not offered */
         if (g_setup.fps_divisor)
-            *g_setup.fps_divisor = (uint32_t)v;
+            *g_setup.fps_divisor = (uint32_t)divisor;
+        if (g_setup.fps_limit)
+            *g_setup.fps_limit = divisor ? 0u : (uint32_t)v;
+        if (g_setup.fps_chosen)
+            g_setup.fps_chosen();
         g_host_touched = 1;
     }
     else if (!strcmp(r->key, "@ui"))
@@ -321,10 +381,11 @@ static void set(const Row* r, float v)
         user32_set_ui_aspect(v);
         g_host_touched = 1;
     }
-    else if (!strcmp(r->key, "@occlusion"))
+    else if (!strcmp(r->key, "@quality"))
     {
-        d3d8_set_occlusion((int)v);
-        g_host_touched = 1;
+        if ((int)v < NQUALITY) /* Custom: the settings as they are */
+            for (int i = 0; i < NQUALITY_KEYS; ++i)
+                fx_put(QUALITY_KEYS[i], QUALITY[(int)v][i]);
     }
     else if (!strcmp(r->key, "@nameplates") || !strcmp(r->key, "@nameplate_size"))
     {
@@ -348,22 +409,20 @@ static void set(const Row* r, float v)
             g_addons->set(i, v != 0.0f);
     }
     else
-    {
-        gfx_fx_set(r->key, v);
-        int known = 0;
-        for (int i = 0; i < g_nfx_keys; ++i)
-            known |= !strcmp(g_fx_keys[i], r->key);
-        if (!known && g_nfx_keys < 32)
-            SDL_strlcpy(g_fx_keys[g_nfx_keys++], r->key, sizeof g_fx_keys[0]);
-        g_fx_touched = 1;
-    }
+        fx_put(r->key, v);
+}
+
+/* how many of its options a row offers: Frame Rate's past 60 only where this build can run them (frame.c) */
+static int options(const Row* r)
+{
+    return !strcmp(r->key, "@fps") && !frame_supported() ? 2 : r->nopt;
 }
 
 /* the option the setting is at; -1 when it is none of them */
 static int option(const Row* r)
 {
     float v = get(r);
-    for (int i = 0; i < r->nopt; ++i)
+    for (int i = 0, n = options(r); i < n; ++i)
         if (fabsf(v - r->val[i]) <= 1e-3f * (fabsf(r->val[i]) > 1 ? fabsf(r->val[i]) : 1))
             return i;
     return -1;
@@ -406,52 +465,35 @@ static const Row DISPLAY_ROWS[] = {
     { "Background Resolution", "@bg", CHOICE, 4, { "2048", "4096", "6144", "8192" }, { 2048, 4096, 6144, 8192 }, 0, 0,
         "The size the world is drawn at before it fits the window. From the next start." },
     HEADER_ROW("Performance"),
-    { "Frame Rate", "@fps", CHOICE, 2, { "30 fps", "60 fps" }, { 2, 1 }, 0, 0, "The game's frame rate." },
+    { "Frame Rate", "@fps", CHOICE, 5, { "30", "60", "120", "144", "Uncapped" }, { 2, 1, 120, 144, 0 }, 0, 0,
+        "The game's frame rate in the world. Uncapped, where offered: as fast as the display shows frames. Menus before the game keep their 30 fps pace." },
 #if !defined(FFXI_ANDROID_VULKAN)
     { "FPS Counter", "fps", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "The frame rate, in the screen's top left corner." },
 #endif
 };
 
-static const Row GRAPHICS_ROWS[] = {
 #if !defined(FFXI_ANDROID_VULKAN)
+static const Row GRAPHICS_ROWS[] = {
     HEADER_ROW("Quality"),
+    { "Overall Quality", "@quality", CHOICE, 4, { "Low", "Medium", "Max", "Custom" }, { 0, 1, 2, 3 }, 0, 0,
+        "Sets the Lighting page: Low has no modern lighting, shadows or occlusion. Custom: as you set them." },
     { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
     { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
         "Sharper ground and walls at an angle." },
-    { "Anti-Shimmer", "filter", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0, "Steadies fine detail in motion." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
     HEADER_ROW("Color"),
-    { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast. Needs Modern Effects." },
+    { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast." },
     { "Saturation", "sat", SLIDER, 0, { 0 }, { 0 }, 0.5f, 1.5f, "How strong the colors are, with Color Grading." },
     { "Contrast", "contrast", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Darker darks and brighter lights, with Color Grading." },
-#endif
     HEADER_ROW("World Detail"),
-#if !defined(FFXI_ANDROID_VULKAN)
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
-    { "Level of Detail", "lod", CHOICE, 2, { "Game", "Near" }, { 2, 1 }, 0, 0,
-        "Near draws the world's most detailed models at every distance." },
-#endif
-#if defined(FFXI_ANDROID_VULKAN)
-    { "Occlusion Check", "@occlusion", CHOICE, 3, { "Off", "Delayed", "Exact" }, { 0, 1, 2 }, 0, 0,
-        "What walls hide from the game's checks. Off treats all as seen; Delayed asks the last frames; Exact waits." },
-#else /* no Delayed: without Android's per-probe history it makes characters flicker (d3d8.c lock_rect) */
-    { "Occlusion Check", "@occlusion", CHOICE, 2, { "Off", "Exact" }, { 0, 2 }, 0, 0,
-        "What walls hide from the game's checks. Off treats all as seen; Exact waits for the GPU." },
-#endif
 };
 
-#if !defined(FFXI_ANDROID_VULKAN)
 static const Row LIGHTING_ROWS[] = {
-    { "Modern Effects", "fx", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Shadows, occlusion, lighting, fog, rays and bloom: these pages' effects." },
-    { "Per-Pixel Lighting", "light", CHOICE, 3, { "Off", "Sun", "All" }, { 0, 1, 2 }, 0, 0,
-        "Smooth light across surfaces: the sun's, or every light's." },
     { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
         "Sunlit ground and walls light what stands near them. Off at the left." },
-    { "Ray Tracing", "rt", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Bounce light and soft shade traced through the world. Needs a graphics card that traces rays; on a Mac, macOS 13." },
     HEADER_ROW("Shadows"),
     { "Sun Shadows", "sun", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How dark the sun's shadows are." },
     { "Shadow Casters", "sun_casters", CHOICE, 3, { "Characters", "World", "All" }, { 1, 2, 0 }, 0, 0,
@@ -462,22 +504,20 @@ static const Row LIGHTING_ROWS[] = {
         "Sharper shadows close up. High uses more video memory." },
     { "Indoor Shadows", "moghouse", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f,
         "How much of the sun's shadows reach indoors: your Mog House, caves, towers. Off lights them as the game does." },
-    { "Character Shadows", "gameshadows", CHOICE, 3, { "Auto", "On", "Off" }, { 0, 1, 2 }, 0, 0,
-        "The game's own round shadows under characters: Auto hides them while the sun's are on." },
     HEADER_ROW("Ambient Occlusion"),
     { "Strength", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
     { "Quality", "ao_quality", CHOICE, 3, { "Low", "Medium", "High" }, { 0, 1, 2 }, 0, 0,
-        "How many samples the shade takes a frame. Low is lightest on the GPU." },
+        "How many samples the shade and the contact shadows take a frame. Low is lightest on the GPU." },
     { "Radius", "radius", SLIDER, 0, { 0 }, { 0 }, 0.25f, 3.0f, "How far from a corner the shade reaches." },
 };
 
 static const Row ATMOSPHERE_ROWS[] = {
     HEADER_ROW("Fog"),
-    { "Density", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun. Needs Modern Effects." },
+    { "Density", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun." },
     HEADER_ROW("God Rays"),
-    { "Strength", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun. Needs Modern Effects." },
+    { "Strength", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun." },
     HEADER_ROW("Bloom"),
-    { "Strength", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights. Needs Modern Effects." },
+    { "Strength", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights." },
     { "Threshold", "threshold", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f, "How bright a light must be to glow. Lower: more glows." },
     HEADER_ROW("Water"),
     { "Modern Water", "water", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
@@ -643,8 +683,8 @@ static void save(void)
         FILE* f = fopen(path, "w");
         if (f)
         {
-            fprintf(f, "fps_divisor=%u\nui_aspect=%g\nhide=%u\nocclusion=%d\n",
-                g_setup.fps_divisor ? *g_setup.fps_divisor : 1u, (double)g_ui_aspect, g_hide, d3d8_occlusion());
+            fprintf(f, "fps_divisor=%u\nfps_limit=%u\nui_aspect=%g\nhide=%u\n", g_setup.fps_divisor ? *g_setup.fps_divisor : 1u,
+                g_setup.fps_limit ? *g_setup.fps_limit : 0u, (double)g_ui_aspect, g_hide);
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
             if (g_setup.nameplate_fix && g_setup.nameplate_sx && g_setup.nameplate_sy)
@@ -1085,10 +1125,10 @@ typedef struct Page
 static Page PAGES[] = {
     { "menu    displayw", "Display", "Window mode, resolution, the interface's size and shape, and the frame rate.",
         0x1c0209u, DISPLAY_ROWS, sizeof DISPLAY_ROWS / sizeof DISPLAY_ROWS[0] },
-    { "menu    graphicw", "Graphics", "Anti-aliasing, texture filtering, sharpening, color and draw distance.", 0x1c0201u,
-        GRAPHICS_ROWS, sizeof GRAPHICS_ROWS / sizeof GRAPHICS_ROWS[0] },
 #if !defined(FFXI_ANDROID_VULKAN)
-    { "menu    lightinw", "Lighting", "Modern effects, lighting, sun shadows and ambient occlusion.", 0x1c0201u,
+    { "menu    graphicw", "Graphics", "Overall quality, anti-aliasing, texture filtering, sharpening, color and draw distance.",
+        0x1c0201u, GRAPHICS_ROWS, sizeof GRAPHICS_ROWS / sizeof GRAPHICS_ROWS[0] },
+    { "menu    lightinw", "Lighting", "Bounce light, sun shadows and ambient occlusion.", 0x1c0201u,
         LIGHTING_ROWS, sizeof LIGHTING_ROWS / sizeof LIGHTING_ROWS[0] },
     { "menu    atmosphw", "Atmosphere", "Fog, god rays, bloom and water.", 0x1c0201u, ATMOSPHERE_ROWS,
         sizeof ATMOSPHERE_ROWS / sizeof ATMOSPHERE_ROWS[0] },
@@ -1173,14 +1213,14 @@ static void layout_items(Page* p)
         }
         else
         {
-            int w = row->nopt > 3 ? 52 : 64;
-            for (int o = 0; o < row->nopt; ++o)
+            int n = options(row), w = n > 3 ? 52 : 64;
+            for (int o = 0; o < n; ++o)
                 if (text_width(row->opt[o]) + 20 > w)
                     w = (text_width(row->opt[o]) + 21) & ~1;
-            for (int o = 0; o < row->nopt; ++o)
+            for (int o = 0; o < n; ++o)
                 p->items[p->nitems++] = (Item){ r, o, p->cx + o * (w + 12), w, 0 };
-            if (p->cx + row->nopt * (w + 12) + 12 > p->w)
-                p->w = p->cx + row->nopt * (w + 12) + 12;
+            if (p->cx + n * (w + 12) + 12 > p->w)
+                p->w = p->cx + n * (w + 12) + 12;
         }
     }
     p->row_item[p->nrows] = p->nitems;
@@ -2585,14 +2625,20 @@ void modern_window_size(int w, int h, int menu_w, int menu_h)
  * follows. What its size decides at its start - the menu target's - stays until it starts again. */
 static void display_apply(void)
 {
-    if (!g_display_live)
+    uint32_t hwnd = g_display_live ? d3d8_window() : 0;
+    if (!hwnd) /* nothing changed, or no device yet: kept for when there is one */
         return;
     g_display_live = 0;
-    uint32_t hwnd = d3d8_window();
-    if (!hwnd || !FFXI_MODERN)
+    if (!FFXI_MODERN)
         return;
-    int w = g_win_w, h = g_win_h;
-    user32_set_window(hwnd, g_mode, w, h);
+    int w = g_win_w, h = g_win_h, mw = g_menu_w, mh = g_menu_h;
+    if (g_now_w) /* the size the window has already: the game drawn at it, the menus at the scale chosen */
+    {
+        w = g_now_w, h = g_now_h;
+        menu_size(w, h, scale_now(), &mw, &mh);
+    }
+    else
+        user32_set_window(hwnd, g_mode, w, h);
     if (!d3d8_resize((uint32_t)w, (uint32_t)h))
         return;
     wr32(DISP_WIN_W, (uint32_t)w), wr32(DISP_WIN_H, (uint32_t)h), wr32(DISP_MODE, (uint32_t)g_mode);
@@ -2609,8 +2655,18 @@ static void display_apply(void)
         wr16(scene + 0x10, (uint16_t)w), wr16(scene + 0x12, (uint16_t)h);
     if (dev)
         wr32(dev + 0xc, (uint32_t)w), wr32(dev + 0x10, (uint32_t)h), wr32(dev + 0x28, g_mode != 0);
-    menu_apply(g_menu_w, g_menu_h);
-    fprintf(stderr, "[modern] display now: mode %d, %dx%d, menus %dx%d\n", g_mode, w, h, g_menu_w, g_menu_h);
+    menu_apply(mw, mh);
+    fprintf(stderr, "[modern] display now: mode %d, %dx%d, menus %dx%d%s\n", g_mode, w, h, mw, mh,
+        g_now_w ? " (the window's size as the compositor keeps it)" : "");
+}
+
+/* user32_resize_hook: the window at a size the compositor chose, not the one chosen here - the game
+ * drawn at it from the next frame, rather than its picture stretched onto it */
+static void window_resized(uint32_t hwnd, int w, int h)
+{
+    uint32_t dev = d3d8_window();
+    if (!dev || hwnd == dev) /* before the device: its window, made at the size the compositor keeps */
+        g_now_w = w, g_now_h = h, g_display_live = 1;
 }
 
 /* The game's own character shadows, Config > Shadows (option 58: 0 Normal, the blob under each
@@ -2694,6 +2750,7 @@ void modern_init(const ModernSetup* setup)
 {
     g_setup = *setup;
     d3d8_set_after_present(display_apply);
+    user32_resize_hook = window_resized;
     SDL_strlcpy(g_game, setup->game ? setup->game : "", sizeof g_game);
     if (setup->data_dir)
         SDL_strlcpy(g_data_dir, setup->data_dir, sizeof g_data_dir);
@@ -2716,8 +2773,13 @@ void modern_init(const ModernSetup* setup)
     if (!setup->fps_given && setup->fps_divisor && cfg_value(path, "fps_divisor", buf, sizeof buf))
     {
         long d = strtol(buf, NULL, 10);
-        if (d >= 1 && d <= 4)
+        if ((d >= 1 && d <= 4) || (d == 0 && frame_supported()))
             *setup->fps_divisor = (uint32_t)d;
+        if (*setup->fps_divisor == 0 && setup->fps_limit && cfg_value(path, "fps_limit", buf, sizeof buf))
+        {
+            long n = strtol(buf, NULL, 10);
+            *setup->fps_limit = n >= 30 && n <= 1000 ? (uint32_t)n : 0u;
+        }
     }
     if (!setup->ui_aspect_given && cfg_value(path, "ui_aspect", buf, sizeof buf))
     {
@@ -2731,8 +2793,6 @@ void modern_init(const ModernSetup* setup)
         if (g_hide >> HIDE_OLD_MAGIC_TRUST & 1)
             g_hide = (g_hide & ~(1u << HIDE_OLD_MAGIC_TRUST)) | 1u << HIDE_TRUST;
     }
-    if (cfg_value(path, "occlusion", buf, sizeof buf))
-        d3d8_set_occlusion((int)strtol(buf, NULL, 10));
     if (!setup->nameplates_given && setup->nameplate_fix && cfg_value(path, "nameplates", buf, sizeof buf))
         *setup->nameplate_fix = atoi(buf) != 0;
     float sx, sy;

@@ -790,9 +790,28 @@ done:
 
 const char* res_auto_translate(uint8_t kind, uint8_t lang, uint8_t b2, uint8_t b3)
 {
+    int l = lang == 1 ? 1 : 0;
+    /* items (base 07) and key items (base 13) by id, high byte b2; a zero byte would end the string,
+     * so it is sent as FF with the kind saying which: base+2 the high byte, base+3 the low one */
+    uint8_t base = kind >= 0x13 ? 0x13 : 0x07, off = (uint8_t)(kind - base);
+    if (off == 0 || off == 2 || off == 3)
+    {
+        uint32_t id = (uint32_t)(off == 2 ? 0 : b2) << 8 | (off == 3 ? 0 : b3);
+        const char* name;
+        if (base == 0x13)
+        {
+            const ResKeyItem* k = res_key_item(id);
+            name = k ? k->name[l] : NULL;
+        }
+        else
+        {
+            const ResItem* it = res_item(id);
+            name = it ? it->name[l] : NULL;
+        }
+        return name && name[0] ? name : NULL;
+    }
     if (kind != 2)
         return NULL;
-    int l = lang == 1 ? 1 : 0;
     at_load(l);
     AtEntry key = {(uint16_t)(b2 << 8 | b3), NULL};
     AtEntry* e = g_at[l] ? bsearch(&key, g_at[l], g_at_n[l], sizeof key, at_cmp) : NULL;
@@ -1550,7 +1569,7 @@ static void load_spdata(void)
     free(d);
 }
 
-static int unnamed(const char* const name[2])
+int res_unnamed(const char* const name[2])
 {
     for (int l = 0; l < 2; ++l)
         if (name[l][0] && strcmp(name[l], "."))
@@ -1561,7 +1580,7 @@ static int unnamed(const char* const name[2])
 const ResSpell* res_spell(uint32_t index)
 {
     load_spdata();
-    if (index >= g_nspells || !g_spells || unnamed(g_spells[index].name))
+    if (index >= g_nspells || !g_spells)
         return NULL;
     return &g_spells[index];
 }
@@ -1569,7 +1588,7 @@ const ResSpell* res_spell(uint32_t index)
 const ResAbility* res_ability(uint32_t id)
 {
     load_spdata();
-    if (id >= g_nabilities || !g_abilities || unnamed(g_abilities[id].name))
+    if (id >= g_nabilities || !g_abilities)
         return NULL;
     return &g_abilities[id];
 }
@@ -1598,7 +1617,7 @@ const ResAbility* res_ability_by_recast(uint32_t id)
 {
     load_spdata();
     for (uint32_t i = 0x200; g_abilities && i < g_nabilities; ++i)
-        if (g_abilities[i].recast_id == id && !unnamed(g_abilities[i].name) && g_abilities[i].type != 3)
+        if (g_abilities[i].recast_id == id && !res_unnamed(g_abilities[i].name) && g_abilities[i].type != 3)
             return &g_abilities[i];
     return NULL;
 }

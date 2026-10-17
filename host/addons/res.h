@@ -67,7 +67,8 @@ char* res_utf8_dup(const char* in, int flags);
 /* One Shift-JIS double-byte character to its Unicode code point (0 if unmapped). */
 uint32_t res_sjis_char(uint8_t lead, uint8_t trail);
 /* An auto-translate phrase by its code bytes (FD <kind> <lang> <b2> <b3> FD, give the middle four),
- * raw game text with its @-references resolved; NULL if unknown. */
+ * raw game text with its @-references resolved: the phrase list's (kind 02), an item's name (07, 09,
+ * 0A) or a key item's (13, 15, 16). NULL if unknown. */
 const char* res_auto_translate(uint8_t kind, uint8_t lang, uint8_t b2, uint8_t b3);
 
 /* --- string tables (Ashita's names: "zones.names", "buffs.names", "keyitems.names", ...) ------ */
@@ -234,15 +235,19 @@ typedef struct ResAbility
     const char* description[2];
 } ResAbility;
 
-/* Spell by index (0..1023). NULL when out of range or unnamed ("." / empty in both languages). */
+/* Spell by index (0..1023), named or not, as Ashita answers: addons count ids up to the first
+ * NULL (SimpleLog), so a gap would end their list. NULL only out of range. */
 const ResSpell* res_spell(uint32_t index);
 const ResSpell* res_spell_by_name(const char* name, int lang);
-/* Ability by id: weapon skills 1-255, job abilities and pet commands 0x200 + id, ... */
+/* Ability by id: weapon skills 1-255, job abilities and pet commands 0x200 + id, ... (named or not,
+ * as res_spell; NULL only out of range) */
 const ResAbility* res_ability(uint32_t id);
 const ResAbility* res_ability_by_name(const char* name, int lang);
 /* The first job ability using recast timer `id`. */
 const ResAbility* res_ability_by_recast(uint32_t id);
 uint32_t res_spell_count(void);   /* records (1024) */
+/* A record with no name ("." / empty in both languages): an unused slot of the table. */
+int res_unnamed(const char* const name[2]);
 uint32_t res_ability_count(void); /* records (0xB00) */
 /* The same table Windower names: "JobAbility", "WeaponSkill", "BloodPactRage", ... ("" unknown) */
 const char* res_ability_type_name(int type);

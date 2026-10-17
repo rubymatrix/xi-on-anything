@@ -10,9 +10,9 @@ account given in `run.args` as `--user` and `--pass`; the sign-in screen and
 saved sessions are not offered. It contains no password, game files, captures or
 generated game code: bring your own compatible client installation and local
 test server. The C++ back end does not implement the Modern FX extensions; the
-game's own D3D8 lighting, fog, textures and shadows work. Config > Modern and
-Display show only the settings that apply here: Occlusion Check, Frame Rate,
-Interface Shape and the window and resolution settings. A controller or keyboard
+game's own D3D8 lighting, fog, textures and shadows work. Config > Advanced
+shows only the pages that apply here: Display (Frame Rate, Interface Shape and
+the window and resolution settings), Interface and Addons. A controller or keyboard
 is recommended. On-screen buttons are enabled by the activity's `touch_controls`
 boolean extra.
 
@@ -76,7 +76,7 @@ before the portable host starts.
 | `--android-fast-sync 1`, `--android-trim-uniforms 1`, `--android-dont-care-loads 1` | Experimental fence, uniform and attachment-load controls. Each needs its own correctness and timing checks. |
 | `--android-bench-dir PATH` | Write frame times and markers (`frames.csv`, `markers.jsonl`) to PATH; refuses to overwrite either file. One branch per frame when off. |
 | `--android-control 54300` | Enable the existing control port, loopback only; default 0. |
-| `--fps-divisor 0` | Uncapped, for measurements; divisor 2 is 30 FPS. |
+| `--fps-divisor 0` | Uncapped, the world kept at its speed where the game build has frame sites (`tools/frame_sites.py`), else as fast as the frames (for measurements); divisor 2 is 30 FPS. |
 
 The diagnostic statistics (`--android-worker-stats`,
 `--android-visibility-storage-stats`), pass traces and query diagnostics add
@@ -84,17 +84,16 @@ overhead; leave them out of performance comparisons. The older geometry
 diagnostics in the generated code (scalar, capture) are not included, and the
 Android entry rejects their options.
 
-The game's occlusion check is Config > Modern's Occlusion Check, live, and kept
-as `occlusion` in `modern.cfg` in the data folder: 0 Off (the default, as on
-desktop) answers that everything is visible, without waiting for the GPU; 1 Delayed uses each probe's
+The game's occlusion check has no menu setting: it is Off (as on desktop), which answers that everything is visible, without waiting for the GPU; 1 Delayed uses each probe's
 answer the GPU finished in an earlier frame, up to 16 frames old, and reads
 exactly where the probe's lifetime is unknown; 2 Exact waits for the GPU every
 probe. On the Pixel Fold, in a camera sweep through Markets and the crowd and
 spell scenes (alternating runs), Off was 3.5-5.4% faster than Delayed in every
 scene, with a shorter tail (player-crowd's 99th-percentile frame 38 ms against
-63-68 ms); Exact runs at a fifth to a third of their speed. Desktop's menu has no
-Delayed: there the late answer is the render target's newest copy, not each
-probe's, and makes characters flicker.
+63-68 ms); Exact runs at a fifth to a third of their speed. Delayed and Exact
+were Config's Occlusion Check, now removed. Desktop never had Delayed: there the
+late answer is the render target's newest copy, not each probe's, and makes
+characters flicker.
 
 ## Correctness checks
 

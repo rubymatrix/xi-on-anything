@@ -682,14 +682,17 @@ static void test_scene_rays(void)
 
 /* Sun shadows: a post standing on the floor, the sun beyond it and high: the floor before the post
  * (toward the camera) is in its shadow, the floor beside it is not; with the sun behind the camera,
- * or no sun, no shadow. */
+ * or no sun, no shadow. The shaded case again at 16 and 8 steps, and at ao_quality 1's (12). */
 static void test_scene_shadow(void)
 {
     const float beyond[3] = { 0, 0.5f, 1 }, behind[3] = { 0, 0.5f, -1 };
-    const float* suns[3] = { beyond, behind, NULL };
-    for (int k = 0; k < 3; ++k)
+    const float* suns[5] = { beyond, behind, NULL, beyond, beyond };
+    const float steps[5] = { 16, 16, 16, 8, 0 };
+    for (int k = 0; k < 5; ++k)
     {
         fx_only("shadow", 1.0f);
+        gfx_fx_set("contact_steps", steps[k]);
+        gfx_fx_set("ao_quality", 1.0f);
         gfx_fx_set("shadow_length", 3.0f);
         scene_begin(1, 0xFF000000u);
         float floor[4][3] = { { -8, -3, 20 }, { 8, -3, 20 }, { -8, -3, 0.6f }, { 8, -3, 0.6f } };
@@ -700,13 +703,15 @@ static void test_scene_shadow(void)
         /* the floor 5 ahead: row 102; before the post (x 0) and beside it (x 3) */
         uint32_t before = spx(64, 102, 0), beside = spx(102, 102, 0);
         CHECK(beside >= 245, "sun shadows (%d): open floor %u (want lit)", k, beside);
-        if (k == 0)
-            CHECK(before <= 160, "sun shadows: floor before the post %u (want shaded)", before);
+        if (suns[k] == beyond)
+            CHECK(before <= 160, "sun shadows (%d steps): floor before the post %u (want shaded)", (int)steps[k], before);
         else
             CHECK(before >= 245, "sun shadows (%d): floor before the post %u (want lit: the sun is %s)", k, before,
                 k == 1 ? "behind the camera" : "absent");
     }
     gfx_fx_set("shadow_length", 0.6f);
+    gfx_fx_set("contact_steps", 0.0f);
+    gfx_fx_set("ao_quality", 0.0f);
 }
 
 /* The sun's shadow map: a post 10 ahead, 3 high, the sun beyond it and up at about 27 degrees - its
@@ -834,8 +839,9 @@ static void test_scene_new_place(void)
 }
 
 /* a card from buffer b (x -1..1, y -3..0 at z 0: strip order) placed at t (view space, right-handed)
- * by its own world matrix, as the zone's copies of one mesh are */
-static void scene_card(GfxBuf* b, float tx, float ty, float tz)
+ * by its own world matrix, as the zone's copies of one mesh are; tex (NULL none) its alpha's texture, with
+ * an alpha test or not */
+static void scene_card(GfxBuf* b, float tx, float ty, float tz, GfxTex* tex, int alpha_test)
 {
     float w[16];
     identity(w);
@@ -851,6 +857,16 @@ static void scene_card(GfxBuf* b, float tx, float ty, float tz)
     d.vs.el[0] = (GfxElem){ 1, 0, GFX_FLOAT3, 0 };
     d.u.stride[0] = 12;
     d.fs.st[0] = (GfxStage){ 2, 3, 1, 1, 2, 3, 1, 1, 1, 0, 0, 2 };
+    if (tex)
+    {
+        d.fs.st[0].aa1 = 2, d.fs.st[0].tex = 1; /* the alpha the texture's, at the position's x and y */
+        d.vs.el[GFX_R_TEXCOORD0] = (GfxElem){ 1, 0, GFX_FLOAT2, 0 };
+        d.vs.ntex = 1;
+        d.tex[0] = tex;
+        d.samp[0] = (GfxSampler){ 3, 3, 3, 1, 1, 0, 1, 0, 0 };
+    }
+    if (alpha_test)
+        d.fs.alpha_func = 5, d.u.params[1] = 128;
     d.depth.zenable = 1, d.depth.zwrite = 1, d.depth.zfunc = 4;
     d.caster = 1;
     d.buf[0] = b, d.size[0] = 48;
@@ -883,8 +899,8 @@ static void test_scene_sun_cache(void)
         scene_begin(1, 0xFF000000u);
         scene_floor();
         if (frame == 0)
-            scene_card(b, 0, 0, 1), scene_card(b, 0, 0, -10);
-        scene_card(b, 4, 0, -10);
+            scene_card(b, 0, 0, 1, NULL, 0), scene_card(b, 0, 0, -10, NULL, 0);
+        scene_card(b, 4, 0, -10, NULL, 0);
         scene_end(behind, 0);
         /* A's shadow: the floor 4 ahead (row 112); B's: 13 ahead (row 79), hidden behind B in frame 1 */
         uint32_t a_sh = spx(64, 112, 0), b_sh = spx(64, 79, 0), open = spx(20, 112, 0);
@@ -900,13 +916,65 @@ static void test_scene_sun_cache(void)
     fx_only("sun", 1.0f);
     scene_begin(1, 0xFF000000u);
     scene_floor();
-    scene_card(b, 0, 0, 1);
+    scene_card(b, 0, 0, 1, NULL, 0);
     scene_end(behind, 0);
     CHECK(spx(64, 112, 0) >= 245, "sun casters 1: the floor in the zone's card's shadow %u (want lit: the zone does not cast)",
         spx(64, 112, 0));
     gfx_present(NULL);
     gfx_fx_set("temporal", 0.85f);
     gfx_buf_destroy(b);
+}
+
+/* A texture the game destroys: a card a unit behind the camera, drawn with it for its alpha test, out of
+ * view and drawn from the cache (shaded the frame after). The texture destroyed between frames, the
+ * cached card goes; destroyed partway through the scene that drew it, the card goes into no cache.
+ * Either way no later frame draws it, which would read the texture that went (#83: on Vulkan, a
+ * destroyed image view). gfx_metal.m's cache holds its own reference to the texture, so there the card
+ * still casts until its entry goes. A card with no alpha test casts with no texture: it stays. */
+static void test_scene_sun_cache_tex(void)
+{
+    const float behind[3] = { 0, 0.5f, -1 };
+    float card[4][3] = { { -1, 0, 0 }, { 1, 0, 0 }, { -1, -3, 0 }, { 1, -3, 0 } };
+    GfxBuf* b[3];
+    uint32_t opaque = 0xFFFFFFFFu;
+    gfx_fx_set("sun_casters", 0.0f); /* the zone casts too */
+    gfx_fx_set("temporal", 0.0f);
+    for (int k = 0; k < 3; ++k) /* the alpha test's texture destroyed after its frame, during it; no alpha test */
+    {
+        int mid = k == 1, alpha_test = k < 2;
+        b[k] = gfx_buf_create(sizeof card); /* a card of its own (its own entry in the cache) */
+        gfx_buf_upload(b[k], card, sizeof card);
+        GfxTex* t = gfx_tex_create(GFX_TEX_2D, 21, 1, 1, 1, GFX_USE_SAMPLE);
+        gfx_tex_upload(t, 0, 0, &opaque, 4);
+        for (int frame = 0; frame < 6; ++frame) /* past the frames a destroyed texture's views are kept for */
+        {
+            fx_only("sun", 1.0f);
+            scene_begin(1, 0xFF000000u);
+            scene_floor();
+            if (frame == 0)
+                scene_card(b[k], 0, 0, 1, t, alpha_test);
+            if (frame == 0 && mid)
+                gfx_tex_destroy(t), t = NULL;
+            scene_end(behind, 0);
+            uint32_t sh = spx(64, 112, 0); /* the card's shadow: the floor 4 ahead */
+            if (frame == 1 && !mid)
+                CHECK(sh <= 160, "sun cache: floor in the shadow of a textured card out of view %u (want shaded, from the cache)", sh);
+            if (frame > 1 && !alpha_test)
+                CHECK(sh <= 160, "sun cache (frame %d): floor in the shadow of a card with no alpha test whose texture went %u (want shaded)",
+                    frame, sh);
+#ifndef __APPLE__
+            if (frame > (mid ? 0 : 1) && alpha_test)
+                CHECK(sh >= 245, "sun cache (frame %d): floor in the shadow of a card whose texture went %s %u (want lit: not drawn again)",
+                    frame, mid ? "as it was drawn" : "after", sh);
+#endif
+            gfx_present(NULL);
+            if (frame == 1 && !mid)
+                gfx_tex_destroy(t), t = NULL;
+        }
+    }
+    gfx_fx_set("temporal", 0.85f);
+    for (int k = 0; k < 3; ++k)
+        gfx_buf_destroy(b[k]);
 }
 
 /* Over time: a post (a character) stands for three frames, then steps sideways. Its shadow is at full
@@ -1327,6 +1395,7 @@ static void test_scene_effects(void)
     test_scene_sun_map();
     test_scene_shown();
     test_scene_new_place();
+    test_scene_sun_cache_tex();
     test_scene_sun_cache();
     test_scene_temporal();
     test_scene_sun_hard();

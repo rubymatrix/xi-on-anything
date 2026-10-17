@@ -47,3 +47,7 @@ scenes/markets-1.jsonl --label player-crowd --group crowd --length 20 --players 
 # effects: thirty characters echoing a red mage's casts with spells of their own, staggered; the mob crowd casting spells at each other
 scenes/effects-1.jsonl --label effects --group effects --players 30 --looks scenes/markets-1.jsonl,scenes/mines-1.jsonl --echo --echo-spread 2.5 --echo-spells all
 scenes/crowd-1.jsonl --label mob-spells --group effects --clone 4 --mob-name Monster --mob-spells all --mob-spells-every 5
+
+# airship: the Kazham-Jeuno airship's deck in flight, by day, three one-minute phases; its scenery moves past a
+# camera that stays put, so a cost that grows with time aboard climbs phase to phase (README, "The airship")
+scenes/airship-1.jsonl --label airship --group airship

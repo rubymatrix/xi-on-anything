@@ -402,15 +402,16 @@ on('command', function(e)
         e.blocked = true
         return true
     end
-    -- unhandled command: a console command no loaded addon is named for
+    -- unhandled command: a console command no loaded addon is named for. Handed to the addons
+    -- listening for one, it is theirs: Windower's handlers return nothing (shortcuts casts //cocoon
+    -- that way), so a handler having run is what makes it handled, not what it returned.
     if has('unhandled command') then
         for _, a in ipairs(xi.addons.list()) do
             if a.name:lower() == lw then return end
         end
-        if fire('unhandled command', word, unpack(split_args(rest))) then
-            e.blocked = true
-            return true
-        end
+        fire('unhandled command', word, unpack(split_args(rest)))
+        e.blocked = true
+        return true
     end
 end)
 
@@ -613,8 +614,8 @@ function windower.to_shift_jis(s) return native.utf8_to_sjis(tostring(s)) end
 function windower.convert_auto_trans(s)
     s = tostring(s)
     return (s:gsub('\253(....)\253', function(code)
-        local t = native.res.auto_translate(code:byte(1), code:byte(2), code:byte(3), code:byte(4))
-        return t
+        -- one we cannot read as a ?, not its raw bytes (see ashita_core.lua's ParseAutoTranslate)
+        return native.res.auto_translate(code:byte(1), code:byte(2), code:byte(3), code:byte(4)) or '?'
     end))
 end
 

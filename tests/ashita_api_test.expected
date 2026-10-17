@@ -9,6 +9,7 @@
 [chat 1] ashtest: item 4096=Fire Crystal stack=12
 [chat 1] ashtest: spell 1=Cure mp=8 whm level=1
 [chat 1] ashtest: ability 1=Combo
+[chat 1] ashtest: spells up to the first nil=1023, abilities=2815
 [chat 1] ashtest: string zones.names 230=Southern San d'Oria
 [chat 1] ashtest: string index of Cure=1
 [chat 1] ashtest: find=true base=true
@@ -34,6 +35,11 @@
 [chat 1] ashtest: task ran
 [chat 1] ashtest: command slept
 [chat 1] ashtest: task slept
+[chat 1] ashtest: command /ashtest clock mode=1 injected=false
+[chat 1] ashtest: command /ashtest clock mode=1 injected=false
+[chat 1] ashtest: os.clock follows real time: true
+[chat 1] ashtest: command /ashtest utf8 mode=1 injected=false
+[chat 1] ashtest: utf8: 10 bytes, 4 characters, 72,233,8364,128512, offset 7, bad byte at 3, require true
 [chat 1] the xxxxxx word
 [harness] packet_in: 36 bytes in, 36 out : 0a04010011223344
 [harness] packet_in: 36 bytes in, 28 out

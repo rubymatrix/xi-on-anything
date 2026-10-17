@@ -72,6 +72,17 @@ def lua_files(folder):
     return out
 
 
+def main_file(folder, name):
+    """The addon's main file in any letter case, as the host finds it (tTimers/ttimers.lua,
+    balloon/Balloon.lua): the exact name first. None when there is none."""
+    if os.path.isfile(os.path.join(folder, name + '.lua')):
+        return os.path.join(folder, name + '.lua')
+    for f in sorted(os.listdir(folder)):
+        if f.lower() == name.lower() + '.lua':
+            return os.path.join(folder, f)
+    return None
+
+
 def read(path):
     with open(path, 'rb') as f:
         return f.read().decode('latin-1')
@@ -129,7 +140,7 @@ def script_for(kind, name, folder, main):
 
 def survey_one(args, kind, name):
     folder = os.path.join(args.data_dir, kind, 'addons', name)
-    main = os.path.join(folder, name + '.lua')
+    main = main_file(folder, name)
     text, cmds, subs = script_for(kind, name, folder, main)
     work = os.path.join(args.data_dir, '.survey')
     os.makedirs(work, exist_ok=True)
@@ -223,7 +234,7 @@ def main():
 
     base = os.path.join(args.data_dir, args.kind, 'addons')
     names = sorted(n for n in os.listdir(base)
-                   if n != 'libs' and os.path.isfile(os.path.join(base, n, n + '.lua')))
+                   if n != 'libs' and os.path.isdir(os.path.join(base, n)) and main_file(os.path.join(base, n), n))
     if args.only:
         want = set(args.only.split(','))
         names = [n for n in names if n in want]

@@ -42,3 +42,5 @@ int gfx_clip0(const GfxDraw* d, const uint8_t* const* base, const size_t* have, 
 void gfx_sun_fit(const GfxScene* s, const float* invV, const float* L, float t0, float t1, int size, SunCascade* k);
 /* the near cascade's texels across (sun_detail) */
 int gfx_sun_near_size(void);
+/* the contact shadows' steps a frame (contact_steps) */
+int gfx_contact_steps(void);

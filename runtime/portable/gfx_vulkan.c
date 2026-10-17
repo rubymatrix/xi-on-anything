@@ -416,11 +416,13 @@ static int host_buffer(VkDeviceSize size, VkBufferUsageFlags usage, int readback
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
 
 /* --- frames, command buffers and the upload ring ------------------------------------------------------- */
+/* destroyed once the frame that may have used it is done: this one, or between frames (g_frame the next,
+ * whose slot is emptied as it opens, while the two before may still be drawing) the last one */
 static void trash(int kind, uint64_t h, VmaAllocation mem)
 {
     if (!h)
         return;
-    Frame* f = &g_frames[g_frame];
+    Frame* f = &g_frames[g_frame_open ? g_frame : (g_frame + FRAMES - 1) % FRAMES];
     if (f->ntrash == f->cap)
     {
         f->cap = f->cap ? f->cap * 2 : 64;
@@ -2011,7 +2013,7 @@ typedef struct Caster
     const uint8_t* ibp;
     size_t iblen;
     const GfxU* up; /* the uniforms, as bound: its g_caster_u, not the ring's copy */
-    VkImageView tex[8]; /* only for an alpha test */
+    VkImageView tex[8]; /* for an alpha test, and the bounce light's map (in colour); the cache's an alpha test's alone */
     GfxSampler samp[8];
     VkPrimitiveTopology prim;
     uint32_t n, vstart;
@@ -2019,6 +2021,7 @@ typedef struct Caster
     uint8_t fixed; /* every vertex and index from buffers the game keeps (the zone's): cached (sun_cache) */
     uint8_t keep;  /* not fixed, but a placed object (not a character): kept as a copy (sun_cache_update) */
     uint8_t has_pos;
+    uint8_t lost_tex; /* its alpha test's texture was destroyed this frame: drawn, but not cached (sun_cache_forget_tex) */
     int32_t zbias;
     float clip0[4]; /* its first vertex in the camera's clip space (gfx_clip0): where this copy stands */
 } Caster;
@@ -2526,7 +2529,7 @@ static const char FX_GLSL[] =
     "  float nl = dot(N, u.sun.xyz);\n"
     "  float fade = smoothstep(0.0, 0.15, nl) * (1.0 - smoothstep(0.6 * u.shadow.w, u.shadow.w, dist));\n"
     "  if (fade <= 0.0) return 1.0;\n"
-    "  const int NS = 16;\n"
+    "  int NS = max(int(u.aop.y), 1);\n" /* contact_steps, jittered by k and gathered over frames */
     "  vec3 O = P + N * (0.01 * dist);\n"
     "  for (int i = 0; i < NS; ++i) {\n"
     "    float a = (float(i) + k) / float(NS);\n"
@@ -3222,8 +3225,9 @@ static GfxTex* fx_lz(uint32_t w, uint32_t h)
     return fx_tex(&g_fx.lz, VK_FORMAT_R32_SFLOAT, w, h, GFX_USE_RT, 4);
 }
 
-enum { SUN_CACHE_FRAMES = 60 * 30 };
+enum { SUN_CACHE_FRAMES = 60 * 30, SUN_CACHE_MAX = 8192 };
 #define SUN_CACHE_NEAR 40.0f               /* what was seen within this of the camera stays past SUN_CACHE_FRAMES */
+#define SUN_CACHE_FAR 4.0f                 /* kept within this many times the far map's reach (sun_distance, 100 at least), and 200 more */
 #define SUN_COPY_BYTES (48u * 1024 * 1024) /* the copies' vertices and indices, all told */
 
 /* The zone's casters, kept after they leave the view (gfx_metal.m's note): each caster drawn from
@@ -3248,7 +3252,7 @@ typedef struct Cached
     uint64_t seen, replayed;
     int32_t next;        /* the next entry with its key, -1 none */
     uint32_t copy_bytes; /* a copy's vertices and indices */
-    int dead;            /* a buffer it draws from went (the game let go of it: a zone left behind) */
+    int dead;            /* a buffer or texture it draws from went (the game let go of it: a zone left behind) */
     VkBuffer own, ubuf;
     VmaAllocation own_mem, ubuf_mem;
     void *own_p, *ubuf_p;
@@ -3256,6 +3260,7 @@ typedef struct Cached
 
 static Cached* g_cache;
 static uint32_t g_ncache, g_cache_cap, g_copy_bytes;
+static uint32_t g_ncache_over; /* where a trim left the cache past SUN_CACHE_MAX (else 0): the next waits for a quarter more */
 static Map g_cache_map; /* CacheKey -> the first entry's index + 1 */
 static float g_cache_cam[3];
 
@@ -3324,13 +3329,27 @@ static void sun_cache_forget(VkBuffer buf)
     }
 }
 
-/* a texture the game destroyed: the cache's alpha tests no longer read it */
+/* caster c draws with texture t (either of its views) */
+static int reads_tex(const Caster* c, const GfxTex* t)
+{
+    for (int k = 0; k < 8; ++k)
+        if (c->tex[k] && (c->tex[k] == t->view || c->tex[k] == t->mipview))
+            return 1;
+    return 0;
+}
+
+/* a texture the game destroyed: what the cache draws with it (an alpha test's) goes. This frame's alpha
+ * tests that read it still draw (its views go to the trash, kept until the frame is done), but none goes
+ * into the cache, whose handle would outlive the view (gfx_d3d12.c's casters hold the GfxTex, freed now,
+ * so it drops their draw instead) */
 static void sun_cache_forget_tex(const GfxTex* t)
 {
     for (uint32_t i = 0; i < g_ncache; ++i)
-        for (int k = 0; k < 8; ++k)
-            if (g_cache[i].c.tex[k] && (g_cache[i].c.tex[k] == t->view || g_cache[i].c.tex[k] == t->mipview))
-                g_cache[i].c.tex[k] = VK_NULL_HANDLE;
+        if (reads_tex(&g_cache[i].c, t))
+            g_cache[i].dead = 1;
+    for (uint32_t i = 0; i < g_ncasters; ++i)
+        if (alpha_tested(&g_casters[i].lib.fs) && reads_tex(&g_casters[i], t))
+            g_casters[i].lost_tex = 1;
 }
 
 /* gone from the cache's view: not seen for SUN_CACHE_FRAMES, and the camera has moved on from where it was */
@@ -3342,7 +3361,16 @@ static int cached_expired(const Cached* ce)
     return dx * dx + dy * dy + dz * dz > SUN_CACHE_NEAR * SUN_CACHE_NEAR;
 }
 
-/* drops what is dead or expired (all of it when all is true) and rebuilds the map and its chains */
+/* qsort's order for frames seen: the latest first */
+static int seen_later(const void* a, const void* b)
+{
+    uint64_t x = *(const uint64_t*)a, y = *(const uint64_t*)b;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+/* drops what is dead or expired (all of it when all is true) and rebuilds the map and its chains;
+ * past SUN_CACHE_MAX, down to three quarters of it, what was seen longest ago going first (what the
+ * latest frame drew all stays, so it can end above that) */
 static void sun_cache_trim(int all)
 {
     uint32_t n = 0;
@@ -3353,7 +3381,25 @@ static void sun_cache_trim(int all)
         else
             g_cache[n++] = g_cache[i];
     }
-    g_ncache = n;
+    uint64_t* seen = n > SUN_CACHE_MAX ? (uint64_t*)malloc(n * sizeof *seen) : NULL;
+    if (seen)
+    {
+        for (uint32_t i = 0; i < n; ++i)
+            seen[i] = g_cache[i].seen;
+        qsort(seen, n, sizeof *seen, seen_later);
+        uint64_t oldest = seen[SUN_CACHE_MAX * 3 / 4 - 1];
+        free(seen);
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            if (g_cache[i].seen < oldest)
+                cached_release(&g_cache[i]);
+            else
+                g_cache[kept++] = g_cache[i];
+        }
+        n = kept;
+    }
+    g_ncache = n, g_ncache_over = n > SUN_CACHE_MAX ? n : 0;
     cache_map_free();
     for (uint32_t i = 0; i < n; ++i)
     {
@@ -3527,7 +3573,7 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
         g_fx.fogc_set = 0;
     }
     memcpy(g_cache_cam, cam, 12);
-    if (!(g_serial & 255))
+    if (!(g_serial & 255) || (g_ncache > SUN_CACHE_MAX && g_ncache > g_ncache_over + SUN_CACHE_MAX / 4))
         sun_cache_trim(0);
     /* what is not drawn from the zone's own buffers: a placed object (keep) or a character (not kept) */
     float invView[16];
@@ -3549,11 +3595,15 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
     }
     if (g_fxs.sun_casters == 1.0f) /* characters alone cast: the cache is not drawn */
         return;
+    /* none of what stands further out casts into the map (whose casters stand up to 200 units sunward
+     * of it: gfx_sun_fit), and what moves out there (an airship's view at the longest draw distance)
+     * would leave a new entry each frame, never expiring while the camera stays aboard */
+    float keep_within = SUN_CACHE_FAR * fmaxf(g_fxs.sun_distance, 100.0f) + 200.0f;
     for (uint32_t i = 0; i < g_ncasters; ++i)
     {
         Caster* c = &g_casters[i];
         const GfxU* src = c->up;
-        if (!c->fixed && (!c->keep || !c->has_pos))
+        if (c->lost_tex || (!c->fixed && (!c->keep || !c->has_pos)))
             continue;
         float pos[3] = { 0, 0, 0 };
         if (c->has_pos)
@@ -3563,6 +3613,9 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
             if (fabsf(h[3]) < 1e-6f)
                 continue;
             pos[0] = h[0] / h[3], pos[1] = h[1] / h[3], pos[2] = h[2] / h[3];
+            float ox = pos[0] - cam[0], oy = pos[1] - cam[1], oz = pos[2] - cam[2];
+            if (ox * ox + oy * oy + oz * oz > keep_within * keep_within)
+                continue;
         }
         CacheKey k;
         int copy = !c->fixed, fresh;
@@ -3586,6 +3639,8 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
             memcpy(ce->c.samp, c->samp, sizeof c->samp);
             ce->c.n = c->n, ce->c.vstart = c->vstart, ce->c.prim = c->prim, ce->c.itype = c->itype;
         }
+        if (!alpha_tested(&c->lib.fs)) /* its textures are the bounce light's, which draws this frame's alone */
+            memset(ce->c.tex, 0, sizeof ce->c.tex);
         /* the uniforms as of this frame: in place, unless a frame the GPU may still be drawing read them */
         if (!(ce->ubuf && ce->replayed + FRAMES < g_serial))
         {
@@ -5025,6 +5080,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             { hand, 0, 0, 0 },
         };
         u.aop[0] = g_fxs.ao_quality >= 1.5f ? 16.0f : g_fxs.ao_quality >= 0.5f ? 10.0f : 6.0f;
+        u.aop[1] = gfx_contact_steps();
         u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
         /* world up in view space: the world's y axis through the inverse view matrix, pointing the way
          * the camera's own up does (FFXI's world y points down) */
@@ -5090,8 +5146,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.sunw_seen = g_serial;
             fx_ease(g_fx.suncol, s->sun_color, 3, 0.1f);
         }
-        int shadows = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f;
-        if (have_v && (own || (shadows && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
+        /* the sun kept for whatever wants it: its shadows, the god rays and the fog's glow toward it (Low has no
+         * shadows, and its rays would go out with no lit draw in view - the sky, where they show) */
+        int wanted = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f || g_fxs.rays > 0.0f || (g_fxs.fog > 0.0f && g_fxs.fog_sun > 0.0f);
+        if (have_v && (own || (wanted && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
         {
             for (int j = 0; j < 3; ++j)
                 g_fx.sun[j] = g_fx.sunw[0] * s->view[j] + g_fx.sunw[1] * s->view[4 + j] + g_fx.sunw[2] * s->view[8 + j];

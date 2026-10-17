@@ -128,6 +128,12 @@ size_t xi_packets_process(int outgoing, const uint8_t* buf, size_t size, uint8_t
 void xi_code_patch(Addon* a, uint32_t addr, const uint8_t* bytes, uint32_t n);
 /* Every frame: finds code changed by other means (ffi stores). */
 void xi_patch_watch(void);
+/* An addon is about to write n bytes at addr (xi.memory): if they cover the game's frame-rate divisor,
+ * host64 takes the new value as the addon's frame rate (AddonsSetup.fps_request); it would put its own
+ * back the next frame otherwise. */
+void xi_fps_write(uint32_t addr, const uint8_t* bytes, uint32_t n);
+/* Windower's //config FrameRateDivisor: the divisor asked for, -1 the player's own */
+void xi_fps_request(int divisor);
 
 /* --- commands (cmd.c) ------------------------------------------------------------------------ */
 
@@ -170,6 +176,9 @@ void xi_gui_addon_end(Addon* a);
 int xi_gui_mouse(int msg, int x, int y, int delta);
 int xi_gui_key(uint32_t vk, int down, uint32_t scancode);
 int xi_gui_text(const char* utf8);
+/* The game's window gaining (1) or losing (0) focus; the mouse leaving it. */
+void xi_gui_focus(int on);
+void xi_gui_mouse_leave(void);
 int xi_gui_wants_keyboard(void);
 int xi_gui_wants_mouse(void);
 /* Objects an addon owns (text objects, primitives, textures) freed when it unloads. */

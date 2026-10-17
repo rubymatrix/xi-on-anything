@@ -19,8 +19,9 @@ visit (the packets the client got, with their times). Record only on a server yo
 ## Scenes
 
 The addon also directs scenes: a fixed list of GM commands, with markers for the measured window,
-recorded as one file per zone visit. It has seven (`home`, `markets`, `mines`, `lighting`, `weather`,
-`crowd`, `effects`); `default.txt` makes these from the recordings in `scenes/`, with scene flags:
+recorded as one file per zone visit. It has eight (`home`, `markets`, `mines`, `lighting`, `weather`,
+`crowd`, `effects`, and `airship`, recorded on its own); `default.txt` makes these from the recordings
+in `scenes/`, with scene flags:
 
 | scene | group | what it shows |
 | --- | --- | --- |
@@ -33,6 +34,7 @@ recorded as one file per zone visit. It has seven (`home`, `markets`, `mines`, `
 | `player-crowd` | crowd | 150 geared characters in a city |
 | `effects` | effects | a red mage's Chainspell, spikes and barriers, echoed by thirty characters casting about thirty different self spells, staggered |
 | `mob-spells` | effects | the mob crowd, every mob casting spells at its neighbour: about 33 spell effects a second |
+| `airship` | airship | the Kazham-Jeuno airship's upper deck in flight, by day, three one-minute phases: scenery moving past a camera that stays put (below) |
 
 To record them on a LandSandBoat server of yours, with a GM account and the two commands in
 `lsb/` copied to its `scripts/commands/` (`!perftime` pins the clock, `!perfcrowd` brings a
@@ -44,9 +46,38 @@ A client signs in (Enter through the lobby, by the control port), runs `/xirepla
 when it is done; the recordings land in `generated/replay/`, not in `scenes/`.
 `--revive-container <database container>` first gives a character left K.O. its HP back, in a
 LandSandBoat Docker setup's database (a K.O. character can't run GM commands). Every scene but home
-pins the clock and clears the weather at its zone-in.
+and airship pins the clock and clears the weather at its zone-in.
+
+`airship` isn't in `record all`. LandSandBoat puts anyone aboard an airship ashore whenever no voyage is
+under way, and the ships keep the server's clock, so `!perftime` would move their timetable too.
+Record it on its own, by day (the sun's shadows are what it stresses) and while a Kazham-Jeuno
+voyage has four minutes or more to run: the timetable is in the server's
+`data/zones/kazham/zone.yaml` and `data/zones/port_jeuno/zone.yaml`.
+
+    python3 tools/replay.py record airship --server <your server> --user <GM account> --password ...
 
     python3 tools/replay.py run tools/replay/default.txt
+
+### The airship
+
+Played back, the airship never docks, so the scene lasts as long as its markers. Each phase is a
+minute on the deck: a cost that grows the longer the camera stays aboard shows as frame times that
+climb from one phase to the next, where a steady scene's stay flat. It is the scene for the sun
+shadows' cache of casters out of view, which once grew without bound there (#78). `!replay all`
+plays it too: three minutes, at whatever settings the run has.
+
+That takes two settings a suite can't give, so `airship-fx.txt` beside this file has them, as
+host64's settings file in place of the machine's own: Indoor Shadows on (the effects take the
+airship for a zone with no sky, where the sun's shadows stay off without it), and the longest draw
+distance, which brings in the scenery moving past the ship. With either one alone the cache stays
+small, and the scene shows nothing.
+
+    FFXI_FX_FILE="$PWD/tools/replay/airship-fx.txt" python3 tools/replay.py run tools/replay/default.txt --play airship
+
+At 60 fps a fast machine has room to spare, so the climb shows first in p99 and max, phase to phase,
+before the mean moves. With `FFXI_PROFILE=1` the client's log has it directly: the cache's size
+(`N cached`) and the Direct3D work a frame (`encode`). Without the bound, the cache here grew from
+about 1,000 entries to 23,000 over the three minutes and encode from 2 ms to 11; with it, both stay flat.
 
 ## The reference set
 

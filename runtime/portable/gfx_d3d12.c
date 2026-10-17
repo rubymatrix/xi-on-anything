@@ -258,7 +258,7 @@ typedef struct FxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft,
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
-        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt;
+        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt, contact_steps;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -2749,13 +2749,13 @@ static const struct
     size_t at;
     float def;
 } FX_SETTINGS[] = {
-    FXS(fx, 0.0f), FXS(ao, 0.8f), FXS(radius, 1.0f), FXS(grade, 1.0f), FXS(sat, 1.12f), FXS(contrast, 0.2f),
+    FXS(fx, 1.0f), FXS(ao, 0.8f), FXS(radius, 1.0f), FXS(grade, 1.0f), FXS(sat, 1.12f), FXS(contrast, 0.2f),
     FXS(sharpen, 0.3f), FXS(filter, 1.0f), FXS(aniso, 16.0f), FXS(fog, 0.004f), FXS(fog_falloff, 0.08f),
     FXS(fog_height, 2.0f), FXS(fog_max, 0.5f), FXS(fog_sun, 0.5f), FXS(fog_g, 0.6f), FXS(bloom, 0.3f),
-    FXS(threshold, 0.75f), FXS(rays, 0.6f), FXS(rays_decay, 0.965f), FXS(rays_length, 0.85f), FXS(light, 0.0f),
+    FXS(threshold, 0.75f), FXS(rays, 0.6f), FXS(rays_decay, 0.965f), FXS(rays_length, 0.85f), FXS(light, 2.0f),
     FXS(shadow, 0.3f), FXS(shadow_length, 0.6f), FXS(sun, 0.45f), FXS(sun_distance, 100.0f), FXS(sun_soft, 0.0f),
     FXS(sun_face, 0.0f), FXS(sun_min, 0.15f), FXS(sun_direct, 0.5f), FXS(sun_casters, 0.0f), FXS(sun_near, 10.0f),
-    FXS(sun_detail, 4096.0f), FXS(ao_quality, 0.0f), FXS(temporal, 0.85f), FXS(debug, 0.0f), FXS(draw, 0.0f),
+    FXS(sun_detail, 4096.0f), FXS(ao_quality, 1.0f), FXS(temporal, 0.85f), FXS(debug, 0.0f), FXS(draw, 0.0f),
     FXS(draw_entities, 0.0f), FXS(fps, 1.0f), FXS(aa, 0.0f), FXS(sun_dusk, 1.0f),
     /* gfx_metal.m's water pass (GfxDraw.water): kept, read back and saved here, not drawn yet */
     FXS(water, 1.0f), FXS(water_refract, 0.015f), FXS(water_clarity, 3.0f), FXS(water_soft, 0.15f), FXS(water_foam, 0.6f),
@@ -2773,6 +2773,8 @@ static const struct
      * and the occlusion traced through it; 0, the default, none (the bounce light from its map alone, the
      * occlusion from the depth); debug=clay shows it */
     FXS(rt, 0.0f),
+    /* the contact shadows' steps a frame, 1 to 16; 0 follows ao_quality (gfx_fx.c's) */
+    FXS(contact_steps, 0.0f),
 };
 #undef FXS
 
@@ -2787,6 +2789,15 @@ static int sun_near_size(void)
     while (n < 8192 && (float)n * 1.5f < d)
         n *= 2;
     return n;
+}
+
+/* the contact shadows' steps a frame (gfx_scene.c's gfx_contact_steps) */
+static int contact_steps(void)
+{
+    float n = g_fxs.contact_steps;
+    if (!(n >= 0.5f)) /* (NaN as well) */
+        return g_fxs.ao_quality >= 1.5f ? 16 : g_fxs.ao_quality >= 0.5f ? 12 : 8;
+    return n > 16.0f ? 16 : (int)(n + 0.5f);
 }
 
 void gfx_set_focus(const float* world)
@@ -2821,6 +2832,8 @@ void gfx_set_moghouse(int in) { g_moghouse = in; }
 /* the last frame the sun's shadows were drawn a quarter or more of a day's strength (scene_fx) */
 static uint64_t g_sun_shown;
 int gfx_sun_shadows_shown(void) { return g_sun_shown && g_serial - g_sun_shown <= 30; }
+/* the sun's shadows are on: the effects, a sun strength, and characters among the casters (as gfx_fx.c) */
+int gfx_sun_shadows_on(void) { return g_fxs.fx != 0.0f && g_fxs.sun > 0.0f && g_fxs.sun_casters != 2.0f; }
 float gfx_sun_prime(float* center) { (void)center; return 0.0f; } /* the zone out of view: Metal's only */
 
 float gfx_fx_get(const char* key)
@@ -2853,14 +2866,21 @@ static void fx_reload(void)
     FILE* f = fopen(g_fx_file, "r");
     if (!f)
         return;
+    /* the settings no menu sets any more (gfx_fx.c FX_FIXED): from the environment and the defaults only */
+    static const char* const FIXED[] = { "fx", "gameshadows", "filter", "lod", "rt" };
     char line[256], key[64];
     float v;
     uint8_t seen[FX_NSETTINGS] = { 0 };
     while (fgets(line, sizeof line, f))
         if (sscanf(line, " %63[a-z_] = %f", key, &v) == 2)
-            for (size_t i = 0; i < FX_NSETTINGS; ++i)
+        {
+            int fixed = 0;
+            for (size_t i = 0; i < sizeof FIXED / sizeof FIXED[0]; ++i)
+                fixed |= !strcmp(FIXED[i], key);
+            for (size_t i = 0; i < FX_NSETTINGS && !fixed; ++i)
                 if (!strcmp(FX_SETTINGS[i].key, key))
                     *(float*)((char*)&g_fxs + FX_SETTINGS[i].at) = v, seen[i] = 1;
+        }
     fclose(f);
     /* a line taken out of the file: its key back to what it was at start, not the file's last word */
     for (size_t i = 0; i < FX_NSETTINGS; ++i)
@@ -3292,8 +3312,9 @@ static void mat_mul(float* o, const float* a, const float* b)
 
 void gfx_trace_dump(const char* path) { (void)path; } /* the shadows' frame-by-frame trace: Metal's only */
 
-enum { SUN_MAP = 4096, SUN_CACHE_FRAMES = 60 * 30 };
+enum { SUN_MAP = 4096, SUN_CACHE_FRAMES = 60 * 30, SUN_CACHE_MAX = 8192 };
 #define SUN_CACHE_NEAR 40.0f               /* what was seen within this of the camera stays past SUN_CACHE_FRAMES */
+#define SUN_CACHE_FAR 4.0f                 /* kept within this many times the far map's reach (sun_distance, 100 at least), and 200 more */
 #define SUN_COPY_BYTES (48u * 1024 * 1024) /* the copies' vertices and indices, all told */
 
 /* The zone's casters, kept after they leave the view (gfx_metal.m's sun cache): the game draws only
@@ -3329,6 +3350,7 @@ typedef struct Cached
 
 static Cached* g_cache;
 static uint32_t g_ncache, g_cache_cap, g_copy_bytes;
+static uint32_t g_ncache_over; /* where a trim left the cache past SUN_CACHE_MAX (else 0): the next waits for a quarter more */
 static Map g_cache_map; /* CacheKey -> the first entry's index + 1 */
 static float g_cache_cam[3];
 
@@ -3427,7 +3449,16 @@ static int cached_expired(const Cached* ce)
     return dx * dx + dy * dy + dz * dz > SUN_CACHE_NEAR * SUN_CACHE_NEAR;
 }
 
-/* drops what is dead or expired (all of it when all is true) and rebuilds the map and its chains */
+/* qsort's order for frames seen: the latest first */
+static int seen_later(const void* a, const void* b)
+{
+    uint64_t x = *(const uint64_t*)a, y = *(const uint64_t*)b;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+/* drops what is dead or expired (all of it when all is true) and rebuilds the map and its chains;
+ * past SUN_CACHE_MAX, down to three quarters of it, what was seen longest ago going first (what the
+ * latest frame drew all stays, so it can end above that) */
 static void sun_cache_trim(int all)
 {
     uint32_t n = 0;
@@ -3438,7 +3469,25 @@ static void sun_cache_trim(int all)
         else
             g_cache[n++] = g_cache[i];
     }
-    g_ncache = n;
+    uint64_t* seen = n > SUN_CACHE_MAX ? (uint64_t*)malloc(n * sizeof *seen) : NULL;
+    if (seen)
+    {
+        for (uint32_t i = 0; i < n; ++i)
+            seen[i] = g_cache[i].seen;
+        qsort(seen, n, sizeof *seen, seen_later);
+        uint64_t oldest = seen[SUN_CACHE_MAX * 3 / 4 - 1];
+        free(seen);
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            if (g_cache[i].seen < oldest)
+                cached_release(&g_cache[i]);
+            else
+                g_cache[kept++] = g_cache[i];
+        }
+        n = kept;
+    }
+    g_ncache = n, g_ncache_over = n > SUN_CACHE_MAX ? n : 0;
     cache_map_free();
     for (uint32_t i = 0; i < n; ++i)
     {
@@ -3659,7 +3708,7 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
         g_fx.fogc_set = 0;
     }
     memcpy(g_cache_cam, cam, 12);
-    if (!(g_serial & 255))
+    if (!(g_serial & 255) || (g_ncache > SUN_CACHE_MAX && g_ncache > g_ncache_over + SUN_CACHE_MAX / 4))
         sun_cache_trim(0);
     /* what is not drawn from the zone's own buffers: a placed object (keep: kept as a copy) or a
      * character (not kept: its vertices are in the world already, and it moves). A fixed-function
@@ -3683,6 +3732,10 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
     }
     if (g_fxs.sun_casters == 1.0f) /* characters alone cast: the cache is not drawn */
         return;
+    /* none of what stands further out casts into the map (whose casters stand up to 200 units sunward
+     * of it: gfx_sun_fit), and what moves out there (an airship's view at the longest draw distance)
+     * would leave a new entry each frame, never expiring while the camera stays aboard */
+    float keep_within = SUN_CACHE_FAR * fmaxf(g_fxs.sun_distance, 100.0f) + 200.0f;
     for (uint32_t i = 0; i < g_ncasters; ++i)
     {
         Caster* c = &g_casters[i];
@@ -3696,6 +3749,9 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
             if (fabsf(h[3]) < 1e-6f)
                 continue;
             pos[0] = h[0] / h[3], pos[1] = h[1] / h[3], pos[2] = h[2] / h[3];
+            float ox = pos[0] - cam[0], oy = pos[1] - cam[1], oz = pos[2] - cam[2];
+            if (ox * ox + oy * oy + oz * oz > keep_within * keep_within)
+                continue;
         }
         CacheKey k;
         int copy = !c->fixed, fresh;
@@ -4752,6 +4808,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         { hand, 0, 0, 0 },
     };
     u.aop[0] = g_fxs.ao_quality >= 1.5f ? 16.0f : g_fxs.ao_quality >= 0.5f ? 10.0f : 6.0f;
+    u.aop[1] = contact_steps();
     u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
     /* world up in view space: the world's y axis through the inverse view matrix, pointing the way
      * the camera's own up does (FFXI's world y points down) */
@@ -4821,8 +4878,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         g_fx.sunw_seen = g_serial;
         fx_ease(g_fx.suncol, s->sun_color, 3, 0.1f);
     }
-    int shadows = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f;
-    if (have_v && (own || (shadows && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
+    /* the sun kept for whatever wants it: its shadows, the god rays and the fog's glow toward it (Low has no
+     * shadows, and its rays would go out with no lit draw in view - the sky, where they show) */
+    int wanted = g_fxs.sun > 0.0f || g_fxs.shadow > 0.0f || g_fxs.rays > 0.0f || (g_fxs.fog > 0.0f && g_fxs.fog_sun > 0.0f);
+    if (have_v && (own || (wanted && g_fx.sunw_seen && g_fx.sunw_seen + 600 > g_serial)))
     {
         for (int j = 0; j < 3; ++j) /* back into this frame's view */
             g_fx.sun[j] = g_fx.sunw[0] * s->view[j] + g_fx.sunw[1] * s->view[4 + j] + g_fx.sunw[2] * s->view[8 + j];

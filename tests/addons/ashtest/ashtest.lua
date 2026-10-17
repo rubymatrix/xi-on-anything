@@ -37,6 +37,10 @@ ashita.events.register('load', 'load_cb', function ()
     local spell = res:GetSpellById(1);
     say('spell 1=%s mp=%d whm level=%d', spell.Name[1], spell.ManaCost, spell.LevelRequired[3 + 1]);
     say('ability 1=%s', res:GetAbilityById(1).Name[1]);
+    -- an unnamed id inside the table is an empty record, as Ashita's; only past the end is nil
+    -- (addons count ids up to the first nil: SimpleLog)
+    local function upto(get) local n = 0; while get(res, n + 1) ~= nil do n = n + 1 end; return n end
+    say('spells up to the first nil=%d, abilities=%d', upto(res.GetSpellById), upto(res.GetAbilityById));
     say('string zones.names 230=%s', tostring(res:GetString('zones.names', 230)));
     say('string index of Cure=%d', res:GetString('spells.names', 'Cure'));
 
@@ -96,6 +100,7 @@ ashita.events.register('load', 'load_cb', function ()
     ashita.tasks.once(0.05, function () say('task ran'); coroutine.sleep(0.05); say('task slept'); end);
 end);
 
+local clock_start;
 ashita.events.register('command', 'command_cb', function (e)
     if (e.command:sub(1, 8) ~= '/ashtest') then return; end
     e.blocked = true;
@@ -103,6 +108,21 @@ ashita.events.register('command', 'command_cb', function (e)
     if (e.command == '/ashtest sleep') then
         coroutine.sleep(0.05);
         say('command slept');
+    elseif (e.command == '/ashtest clock') then
+        -- os.clock is wall time, as on Windows: the harness script sleeps about a second (`run 1`)
+        -- between the two calls.
+        if (clock_start == nil) then
+            clock_start = os.clock();
+        else
+            local elapsed = os.clock() - clock_start;
+            say('os.clock follows real time: %s', tostring(elapsed > 0.8 and elapsed < 3));
+        end
+    elseif (e.command == '/ashtest utf8') then
+        -- Ashita's built-in utf8 library (Lua 5.3's), global and by require
+        local s = utf8.char(0x48, 0xE9, 0x20AC, 0x1F600);
+        local n, bad = utf8.len('ab\255');
+        say('utf8: %d bytes, %d characters, %s, offset %d, bad byte at %d, require %s', #s, utf8.len(s),
+            table.concat({ utf8.codepoint(s, 1, -1) }, ','), utf8.offset(s, 4), bad, tostring(require('utf8') == utf8));
     end
 end);
 

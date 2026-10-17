@@ -29,6 +29,9 @@ WEATHER = 0x057
 # (0x036), the server message (0x04D, the login welcome), system messages (0x053) and the treasure
 # pool (0x0D2, 0x0D3: "You find ...").
 TEXT = {0x009, 0x017, 0x029, 0x02A, 0x02D, 0x036, 0x04D, 0x053, 0x0D2, 0x0D3}
+# Where the character's own id stands outside actions (offsets, header included): the zone-in, the
+# character's update (0x037) and gauges (0x0DF), and 0x067
+OWN_ID = {ZONE_IN: (0x04,), 0x037: (0x24,), 0x067: (0x08,), 0x0DF: (0x04,)}
 
 
 def ptype(data):
@@ -133,6 +136,30 @@ class Scene:
                     n += 1
                 i = at + len(want)
         return n
+
+    def renumber(self, char_id):
+        """The recorded character's id made char_id: in the fields OWN_ID names, and as an action's actor
+        or target. The replay server signs in one character for a suite, so a scene recorded by another
+        joins the others under theirs. Returns the fields changed, and how many times the old id still
+        stands anywhere (4 bytes): what this does not know to change."""
+        old = self.character
+        if not old or old == char_id:
+            return 0, 0
+        want, repl = struct.pack('<I', old), struct.pack('<I', char_id)
+        n = 0
+        for _, d in self.packets:
+            if is_action(d):
+                walk = action_walk(d)
+                for off in [ACTOR_BIT] + (walk[0] if walk else []):
+                    if get_bits(d, off, 32) == old:
+                        set_bits(d, off, 32, char_id)
+                        n += 1
+            for off in OWN_ID.get(ptype(d), ()):
+                if d[off:off + 4] == want:
+                    d[off:off + 4] = repl
+                    n += 1
+        self.character = char_id
+        return n, sum(bytes(d).count(want) for _, d in self.packets)
 
     def quiet(self):
         """The recorded chat and other text (TEXT) dropped."""

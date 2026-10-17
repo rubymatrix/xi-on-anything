@@ -1,0 +1,49 @@
+[chat 207] addon: loaded inputtest (xi)
+[harness] sdl key 26 1 -> game
+[harness] sdl key 26 0 -> game
+[harness] sdl key 43 1 -> game
+[harness] sdl key 43 0 -> game
+[harness] = false
+[harness] sdl motion 50 50 -> game
+[harness] sdl button 1 1 50 50 -> overlay
+[harness] sdl button 1 0 50 50 -> game
+[harness] sdl key 26 1 -> game
+[harness] sdl key 26 0 -> game
+[harness] sdl key 43 1 -> game
+[harness] sdl key 43 0 -> game
+[harness] sdl key 26 1 -> game
+[harness] sdl key 26 0 -> game
+[harness] sdl key 26 1 -> game
+[harness] sdl key 26 0 -> game
+[harness] sdl motion 420 415 -> game
+[harness] sdl button 1 1 420 415 -> overlay
+[harness] sdl button 1 0 420 415 -> game
+[harness] = true
+[harness] sdl key 26 1 -> overlay
+[harness] sdl key 26 0 -> game
+[harness] sdl key 43 1 -> overlay
+[harness] sdl key 43 0 -> game
+[harness] sdl motion 900 600 -> game
+[harness] sdl button 1 1 900 600 -> game
+[harness] sdl button 1 0 900 600 -> game
+[harness] sdl key 26 1 -> game
+[harness] sdl key 26 0 -> game
+[harness] sdl motion 50 50 -> game
+[harness] sdl leave -> game
+[harness] sdl focus 0 -> game
+[harness] sdl focus 1 -> game
+[harness] sdl button 1 1 900 600 -> game
+[harness] sdl button 1 0 900 600 -> game
+[harness] sdl motion 50 50 -> game
+[harness] sdl button 1 1 50 50 -> overlay
+[harness] sdl focus 0 -> game
+[harness] sdl focus 1 -> game
+[harness] = false
+[harness] = false
+[harness] = true
+[harness] sdl key 41 1 -> overlay
+[harness] sdl key 41 0 -> game
+[harness] = false
+[harness] sdl key 41 1 -> game
+[harness] sdl key 41 0 -> game
+[chat 207] addon: unloaded inputtest
