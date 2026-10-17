@@ -5666,7 +5666,8 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
  * on Wayland at /shutdown) leaves frames unshown, the game going on, not stuck in vkAcquireNextImageKHR
  * (gfx_metal.m's nextDrawable gives up after a second) */
 #define ACQUIRE_TIMEOUT_NS 100000000ull
-static uint32_t g_unshown; /* frames in a row with no image to draw to */
+static uint32_t g_timeouts; /* acquires timed out since the window last gave images steadily (60 in a row) */
+static uint32_t g_steady;   /* images in a row since one timed out */
 
 /* the back buffer onto the window's next image; 0 when there is none to draw to now */
 static int present_to_window(GfxTex* bb)
@@ -5687,15 +5688,16 @@ static int present_to_window(GfxTex* bb)
     }
     if (r == VK_TIMEOUT || r == VK_NOT_READY)
     {
-        if (!g_unshown++)
+        if (!g_timeouts++)
             fprintf(stderr, "[recomp] gfx: no image from the window in %llu ms: frames go unshown until it gives one\n",
                 ACQUIRE_TIMEOUT_NS / 1000000);
+        g_steady = 0;
         return 0;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
         return 0;
-    if (g_unshown)
-        fprintf(stderr, "[recomp] gfx: an image from the window again, after %u frames unshown\n", g_unshown), g_unshown = 0;
+    if (g_timeouts && ++g_steady == 60) /* (one that gives an image now and then logs once, not with each) */
+        fprintf(stderr, "[recomp] gfx: images from the window again, after %u acquires timed out\n", g_timeouts), g_timeouts = 0;
     gpu_sync();
     VkCommandBuffer cb = g_cb;
     image_barrier(cb, g_swap_images[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
