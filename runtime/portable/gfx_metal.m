@@ -3122,8 +3122,9 @@ static id<MTLTexture> fx_lz(NSUInteger w, NSUInteger h)
     return g_fx.lz;
 }
 
-enum { SUN_CACHE_FRAMES = 60 * 30 };
+enum { SUN_CACHE_FRAMES = 60 * 30, SUN_CACHE_MAX = 8192 };
 #define SUN_CACHE_NEAR 40.0f                  /* what was seen within this of the camera stays past SUN_CACHE_FRAMES */
+#define SUN_CACHE_FAR 4.0f                    /* kept within this many times the far map's reach (sun_distance, 100 at least), and 200 more */
 #define SUN_COPY_BYTES (48u * 1024 * 1024)    /* the copies' vertices and indices, all told */
 enum { SUN_PRIME_FRAMES = 3 };          /* frames the game draws the zone round the camera (gfx_sun_prime) */
 #define SUN_PRIME_MOVE 20.0f              /* and again once the camera is this far from where it last did */
@@ -3164,6 +3165,7 @@ typedef struct Cached
 
 static Cached* g_cache;
 static uint32_t g_ncache, g_cache_cap, g_copy_bytes;
+static uint32_t g_ncache_over; /* where a trim left the cache past SUN_CACHE_MAX (else 0): the next waits for a quarter more */
 static Map g_cache_map; /* CacheKey -> the first entry's index + 1 */
 static float g_cache_cam[3];
 /* What the cache holds is only what the game drew, and it draws only what the camera sees: until the
@@ -3244,7 +3246,16 @@ static int cached_expired(const Cached* ce)
     return dx * dx + dy * dy + dz * dz > SUN_CACHE_NEAR * SUN_CACHE_NEAR;
 }
 
-/* drops what is dead or expired (all of it when all is true) and rebuilds the map and its chains */
+/* qsort's order for frames seen: the latest first */
+static int seen_later(const void* a, const void* b)
+{
+    uint64_t x = *(const uint64_t*)a, y = *(const uint64_t*)b;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+/* drops what is dead or expired (all of it when all is true) and rebuilds the map and its chains;
+ * past SUN_CACHE_MAX, down to three quarters of it, what was seen longest ago going first (what the
+ * latest frame drew all stays, so it can end above that) */
 static void sun_cache_trim(int all)
 {
     uint32_t n = 0;
@@ -3255,7 +3266,25 @@ static void sun_cache_trim(int all)
         else
             g_cache[n++] = g_cache[i];
     }
-    g_ncache = n;
+    uint64_t* seen = n > SUN_CACHE_MAX ? (uint64_t*)malloc(n * sizeof *seen) : NULL;
+    if (seen)
+    {
+        for (uint32_t i = 0; i < n; ++i)
+            seen[i] = g_cache[i].seen;
+        qsort(seen, n, sizeof *seen, seen_later);
+        uint64_t oldest = seen[SUN_CACHE_MAX * 3 / 4 - 1];
+        free(seen);
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            if (g_cache[i].seen < oldest)
+                cached_release(&g_cache[i]);
+            else
+                g_cache[kept++] = g_cache[i];
+        }
+        n = kept;
+    }
+    g_ncache = n, g_ncache_over = n > SUN_CACHE_MAX ? n : 0;
     cache_map_free();
     for (uint32_t i = 0; i < n; ++i)
     {
@@ -3444,7 +3473,7 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
         memcpy(g_prime_at, cam, 12);
         g_prime_set = 1, g_prime_serial = g_serial;
     }
-    if (!(g_serial & 255))
+    if (!(g_serial & 255) || (g_ncache > SUN_CACHE_MAX && g_ncache > g_ncache_over + SUN_CACHE_MAX / 4))
         sun_cache_trim(0);
     /* what is not drawn from the zone's own buffers: a placed object (keep: kept as a copy) or a
      * character (not kept: its vertices are in the world already, and it moves). A fixed-function
@@ -3469,6 +3498,10 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
     }
     if (g_fxs.sun_casters == 1.0f) /* characters alone cast: the cache is not drawn */
         return;
+    /* none of what stands further out casts into the map (whose casters stand up to 200 units sunward
+     * of it: gfx_sun_fit), and what moves out there (an airship's view at the longest draw distance)
+     * would leave a new entry each frame, never expiring while the camera stays aboard */
+    float keep_within = fmaxf(SUN_CACHE_FAR * fmaxf(g_fxs.sun_distance, 100.0f) + 200.0f, g_fxs.sun_prime); /* the primed zone's too */
     for (uint32_t i = 0; i < g_ncasters; ++i)
     {
         Caster* c = &g_casters[i];
@@ -3483,6 +3516,9 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
             if (fabsf(h[3]) < 1e-6f)
                 continue;
             pos[0] = h[0] / h[3], pos[1] = h[1] / h[3], pos[2] = h[2] / h[3];
+            float ox = pos[0] - cam[0], oy = pos[1] - cam[1], oz = pos[2] - cam[2];
+            if (ox * ox + oy * oy + oz * oz > keep_within * keep_within)
+                continue;
         }
         CacheKey k;
         int copy = !c->fixed, fresh;
