@@ -9,6 +9,7 @@
 
 #include "datui.h"
 #include "gfx.h"
+#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
 
 typedef struct UiTex
 {

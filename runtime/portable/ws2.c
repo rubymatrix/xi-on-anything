@@ -29,7 +29,12 @@ static int host_errno(void) { return WSAGetLastError(); }
 #include <unistd.h>
 typedef int host_sock;
 #define HOST_INVALID (-1)
+#if defined(__EMSCRIPTEN__) /* the browser: sockets over the local server's WebSocket */
+#include "net_web.h"
+#define host_close wn_close
+#else
 #define host_close close
+#endif
 static int host_errno(void) { return errno; }
 #endif
 #include <ctype.h>

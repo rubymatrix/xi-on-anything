@@ -3,13 +3,19 @@
  * Waiting on an address: macOS 14.4+ has os_sync_wait_on_address (the supported form of the
  * __ulock calls libc++ uses); Linux has futex. Address space: one PROT_NONE reservation; commit
  * is mprotect, decommit maps fresh zero pages over the range, as Win32's decommit + commit gives
- * zeroed memory back. */
+ * zeroed memory back.
+ *
+ * The browser (Emscripten, wasm32): no address space to reserve. Guest addresses are linear-memory
+ * addresses (guest.h without RT_GUEST_WINDOW; gwin.c keeps the host's region below the images), so
+ * commit grows the memory to cover the range and decommit zeroes it (wasm memory never shrinks).
+ * Waiting is Emscripten's futex (Atomics.wait). */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -24,6 +30,11 @@
 #if defined(__APPLE__)
 #include <os/os_sync_wait_on_address.h>
 #include <sys/sysctl.h>
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#include <emscripten/heap.h>
+#include <emscripten/threading.h>
+#include "httpfs_web.h"
 #else
 #include <linux/futex.h>
 #include <sys/syscall.h>
@@ -35,6 +46,48 @@
 
 const char plat_path_sep = '/';
 
+/* The browser: the game install and host64's files are the local server's (httpfs_web.c), read only;
+ * everything else (the data folder) is Emscripten's file system. */
+#if defined(__EMSCRIPTEN__)
+#define HTTP(path) httpfs_owns(path)
+#else
+#define HTTP(path) 0
+typedef struct HttpFile HttpFile;
+typedef struct HttpDir HttpDir;
+#endif
+
+#if defined(__EMSCRIPTEN__)
+void* plat_reserve(size_t size)
+{
+    (void)size;
+    return NULL; /* gwin.c's flat mode never reserves */
+}
+
+int plat_commit(void* p, size_t size)
+{
+    size_t end = (size_t)(uintptr_t)p + size;
+    return end <= emscripten_get_heap_size() || emscripten_resize_heap(end);
+}
+
+void plat_decommit(void* p, size_t size)
+{
+    memset(p, 0, size);
+}
+
+/* The host's malloc (sbrk) may not grow into the guest's part of memory: linked with
+ * -Wl,--wrap=sbrk, every sbrk comes here first. */
+void* __real_sbrk(intptr_t increment);
+void* __wrap_sbrk(intptr_t increment)
+{
+    uintptr_t now = (uintptr_t)__real_sbrk(0);
+    if (increment > 0 && now + (uintptr_t)increment > PLAT_HOST_TOP)
+    {
+        errno = ENOMEM;
+        return (void*)-1;
+    }
+    return __real_sbrk(increment);
+}
+#else
 void* plat_reserve(size_t size)
 {
     void* p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
@@ -50,6 +103,7 @@ void plat_decommit(void* p, size_t size)
 {
     mmap(p, size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0);
 }
+#endif
 
 /* --- threads ------------------------------------------------------------------------------------- */
 uint32_t plat_thread_id(void)
@@ -58,6 +112,8 @@ uint32_t plat_thread_id(void)
     uint64_t id = 0;
     pthread_threadid_np(NULL, &id);
     return (uint32_t)id;
+#elif defined(__EMSCRIPTEN__)
+    return (uint32_t)(uintptr_t)pthread_self();
 #else
     /* once per thread: gettid is a system call, and the critical sections (kobj.c) and the profile's
      * per-shim timing (thunk.c) ask on every call - with FFXI_PROFILE, about 1.3 million times a second
@@ -93,7 +149,13 @@ int plat_thread_start(void (*fn)(void*), void* arg)
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+#if defined(__EMSCRIPTEN__)
+    /* only the C shadow stack (locals whose address is taken): wasm keeps its own call stack, and
+     * gate 0 measured 20 KB of native stack at most (docs/web-port-plan.md) */
+    pthread_attr_setstacksize(&a, 1u << 20);
+#else
     pthread_attr_setstacksize(&a, 8u << 20); /* translated frames are large; Windows gives 1 MB+ and grows */
+#endif
     pthread_t t;
     int r = pthread_create(&t, &a, thread_entry, s);
     pthread_attr_destroy(&a);
@@ -128,6 +190,8 @@ void plat_wait32(volatile uint32_t* addr, uint32_t expected)
 {
 #if defined(__APPLE__)
     os_sync_wait_on_address((void*)addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+#elif defined(__EMSCRIPTEN__)
+    emscripten_futex_wait(addr, expected, INFINITY);
 #else
     syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, NULL, NULL, 0);
 #endif
@@ -143,6 +207,8 @@ void plat_wait32_ms(volatile uint32_t* addr, uint32_t expected, uint32_t ms)
 #if defined(__APPLE__)
     os_sync_wait_on_address_with_timeout((void*)addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME,
         (uint64_t)ms * 1000000u);
+#elif defined(__EMSCRIPTEN__)
+    emscripten_futex_wait(addr, expected, (double)ms);
 #else
     struct timespec t = { (time_t)(ms / 1000), (long)(ms % 1000) * 1000000L };
     syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, &t, NULL, 0);
@@ -153,6 +219,8 @@ void plat_wake_all32(volatile uint32_t* addr)
 {
 #if defined(__APPLE__)
     os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE);
+#elif defined(__EMSCRIPTEN__)
+    emscripten_futex_wake(addr, 0x7FFFFFFF);
 #else
     syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, 0x7FFFFFFF, NULL, NULL, 0);
 #endif
@@ -172,6 +240,12 @@ uint32_t plat_atomic_cas32(volatile uint32_t* p, uint32_t expected, uint32_t des
 
 uint64_t rt_monotonic_ns(void)
 {
+#if defined(__EMSCRIPTEN__)
+    /* performance.now() straight: Emscripten's clock_gettime goes through JS with 64-bit (BigInt)
+     * arguments and was most of the game thread's busy time (the guest lock's quantum, the game's
+     * timers, the profile's per-call timing all read this) */
+    return (uint64_t)(emscripten_get_now() * 1e6);
+#endif
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
@@ -186,6 +260,10 @@ uint64_t plat_wall_ms(void)
 
 unsigned char* plat_read_file(const char* path, size_t* size)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+        return httpfs_read_all(path, size);
+#endif
     FILE* f = fopen(path, "rb");
     if (!f)
         return NULL;
@@ -255,10 +333,33 @@ static void set_error(const char* path)
 struct PlatFile
 {
     int fd;
+    HttpFile* h; /* the browser's served files */
 };
 
 PlatFile* plat_file_open(const char* path, int flags)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+    {
+        int64_t size;
+        int dir;
+        if (!httpfs_stat(path, &size, &dir))
+        {
+            t_error = (flags & PLAT_CREATE) ? PLAT_ACCESS : PLAT_NOT_FOUND;
+            return NULL;
+        }
+        HttpFile* h = (flags & (PLAT_WRITE | PLAT_TRUNCATE | PLAT_EXCL)) || dir ? NULL : httpfs_open(path);
+        if (!h)
+        {
+            t_error = PLAT_ACCESS;
+            return NULL;
+        }
+        PlatFile* f = (PlatFile*)calloc(1, sizeof *f);
+        f->fd = -1, f->h = h;
+        t_error = PLAT_OK;
+        return f;
+    }
+#endif
     int rw = (flags & PLAT_READ) && (flags & PLAT_WRITE) ? O_RDWR : (flags & PLAT_WRITE) ? O_WRONLY : O_RDONLY;
     int o = rw | ((flags & PLAT_CREATE) ? O_CREAT : 0) | ((flags & PLAT_EXCL) ? O_CREAT | O_EXCL : 0) |
         ((flags & PLAT_TRUNCATE) ? O_TRUNC : 0);
@@ -275,7 +376,7 @@ PlatFile* plat_file_open(const char* path, int flags)
         t_error = PLAT_ACCESS;
         return NULL;
     }
-    PlatFile* f = (PlatFile*)malloc(sizeof *f);
+    PlatFile* f = (PlatFile*)calloc(1, sizeof *f);
     f->fd = fd;
     t_error = PLAT_OK;
     return f;
@@ -283,6 +384,15 @@ PlatFile* plat_file_open(const char* path, int flags)
 
 int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n)
 {
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+    {
+        int64_t r = httpfs_read(f->h, buf, n);
+        if (r < 0)
+            t_error = PLAT_FAILED;
+        return r;
+    }
+#endif
     ssize_t r;
     do
         r = read(f->fd, buf, n);
@@ -294,6 +404,11 @@ int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n)
 
 int64_t plat_file_write(PlatFile* f, const void* buf, uint32_t n)
 {
+    if (f->h)
+    {
+        t_error = PLAT_ACCESS;
+        return -1;
+    }
     ssize_t r;
     do
         r = write(f->fd, buf, n);
@@ -305,6 +420,10 @@ int64_t plat_file_write(PlatFile* f, const void* buf, uint32_t n)
 
 int64_t plat_file_seek(PlatFile* f, int64_t offset, int whence)
 {
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+        return httpfs_seek(f->h, offset, whence);
+#endif
     off_t r = lseek(f->fd, (off_t)offset, whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET);
     if (r < 0)
         set_error(NULL);
@@ -313,24 +432,37 @@ int64_t plat_file_seek(PlatFile* f, int64_t offset, int whence)
 
 int64_t plat_file_size(PlatFile* f)
 {
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+        return httpfs_size(f->h);
+#endif
     struct stat st;
     return fstat(f->fd, &st) == 0 ? (int64_t)st.st_size : -1;
 }
 
 int plat_file_truncate(PlatFile* f)
 {
+    if (f->h)
+        return 0;
     off_t at = lseek(f->fd, 0, SEEK_CUR);
     return at >= 0 && ftruncate(f->fd, at) == 0;
 }
 
 int plat_file_flush(PlatFile* f)
 {
+    if (f->h)
+        return 1;
     return fsync(f->fd) == 0;
 }
 
 void plat_file_close(PlatFile* f)
 {
-    close(f->fd);
+#if defined(__EMSCRIPTEN__)
+    if (f->h)
+        httpfs_close(f->h);
+    else
+#endif
+        close(f->fd);
     free(f);
 }
 
@@ -338,6 +470,21 @@ static uint64_t ts_ms(struct timespec t) { return (uint64_t)t.tv_sec * 1000u + (
 
 int plat_stat(const char* path, PlatStat* st)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+    {
+        int64_t size;
+        int dir;
+        if (!httpfs_stat(path, &size, &dir))
+        {
+            t_error = PLAT_NOT_FOUND;
+            return 0;
+        }
+        memset(st, 0, sizeof *st);
+        st->is_dir = dir, st->readonly = 1, st->size = (uint64_t)size;
+        return 1;
+    }
+#endif
     struct stat s;
     if (stat(path, &s) != 0)
     {
@@ -361,6 +508,11 @@ int plat_stat(const char* path, PlatStat* st)
 
 int plat_mkdir(const char* path)
 {
+    if (HTTP(path))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (mkdir(path, 0755) == 0)
         return 1;
     set_error(path);
@@ -369,6 +521,11 @@ int plat_mkdir(const char* path)
 
 int plat_rmdir(const char* path)
 {
+    if (HTTP(path))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (rmdir(path) == 0)
         return 1;
     set_error(path);
@@ -377,6 +534,11 @@ int plat_rmdir(const char* path)
 
 int plat_unlink(const char* path)
 {
+    if (HTTP(path))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (unlink(path) == 0)
         return 1;
     set_error(path);
@@ -385,6 +547,11 @@ int plat_unlink(const char* path)
 
 int plat_rename(const char* from, const char* to)
 {
+    if (HTTP(from) || HTTP(to))
+    {
+        t_error = PLAT_ACCESS;
+        return 0;
+    }
     if (rename(from, to) == 0)
         return 1;
     set_error(from);
@@ -394,23 +561,42 @@ int plat_rename(const char* from, const char* to)
 struct PlatDir
 {
     DIR* d;
+    HttpDir* h;
 };
 
 PlatDir* plat_dir_open(const char* path)
 {
+#if defined(__EMSCRIPTEN__)
+    if (HTTP(path))
+    {
+        HttpDir* h = httpfs_dir_open(path);
+        if (!h)
+        {
+            t_error = PLAT_PATH_NOT_FOUND;
+            return NULL;
+        }
+        PlatDir* p = (PlatDir*)calloc(1, sizeof *p);
+        p->h = h;
+        return p;
+    }
+#endif
     DIR* d = opendir(path);
     if (!d)
     {
         set_error(path);
         return NULL;
     }
-    PlatDir* p = (PlatDir*)malloc(sizeof *p);
+    PlatDir* p = (PlatDir*)calloc(1, sizeof *p);
     p->d = d;
     return p;
 }
 
 const char* plat_dir_next(PlatDir* d)
 {
+#if defined(__EMSCRIPTEN__)
+    if (d->h)
+        return httpfs_dir_next(d->h);
+#endif
     for (struct dirent* e; (e = readdir(d->d));)
         if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
             return e->d_name;
@@ -419,7 +605,12 @@ const char* plat_dir_next(PlatDir* d)
 
 void plat_dir_close(PlatDir* d)
 {
-    closedir(d->d);
+#if defined(__EMSCRIPTEN__)
+    if (d->h)
+        httpfs_dir_close(d->h);
+    else
+#endif
+        closedir(d->d);
     free(d);
 }
 
@@ -458,6 +649,9 @@ void plat_memory(uint64_t* total, uint64_t* avail)
     sysctlbyname("hw.memsize", &mem, &len, NULL, 0);
     *total = mem;
     *avail = mem / 2; /* the guest only uses this for a "memory load" figure */
+#elif defined(__EMSCRIPTEN__)
+    *total = 4ull << 30; /* wasm32's whole memory */
+    *avail = *total - emscripten_get_heap_size();
 #else
     struct sysinfo si;
     sysinfo(&si);
