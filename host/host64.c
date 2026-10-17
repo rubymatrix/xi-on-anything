@@ -27,7 +27,7 @@
  * as retail's do, and --server is not used.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped;
- * 0 uncapped.
+ * 0 uncapped, the world at its own speed (frame.c). --fps-limit n: uncapped, held to n a second.
  *
  * --aspect auto|off|<w:h>: the 3D scene's aspect ratio. auto (the default) follows the window's
  * shape, so a widescreen window shows more to the sides instead of a 4:3 view stretched across it.
@@ -88,6 +88,7 @@
 #include "modern.h"
 #include "cexi.h"
 #include "discord.h"
+#include "frame.h"
 #include "addons/addons.h"
 #include "addons/game.h"
 #if defined(_WIN32)
@@ -150,6 +151,7 @@ static uint32_t com_call(uint32_t obj, unsigned slot, unsigned nargs, const uint
  * it back: the player's (g_fps_divisor, Config > Display > Frame Rate), or an addon's for the
  * session (g_fps_addon: Ashita's fps addon, FastCS through a cutscene), until the player picks one. */
 static uint32_t g_fps_divisor = 1, g_fps_global;
+static uint32_t g_fps_limit; /* uncapped, held to this many frames a second (Frame Rate 120, 144); 0 none */
 static int g_fps_addon = -1; /* an addon's divisor (fps_request); -1 none */
 
 static void find_fps_global(void)
@@ -758,11 +760,18 @@ static void present_hook(void)
     if (!g_fps_global)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
+    {
+        frame_present(0, 0, 0);
         return;
+    }
     uint32_t want = g_fps_addon >= 0 ? (uint32_t)g_fps_addon : g_fps_divisor;
     uint32_t object = rd32(g_fps_global);
     if (object && rd32(object + 0x30) != want)
         wr32(object + 0x30, want);
+    /* the player's uncapped frame rate keeps the world at its speed (frame.c); an addon's 0
+     * (FastCS through a cutscene) is the game's own, and runs fast as it means to */
+    frame_present(object && g_fps_addon < 0 && want == 0, object && g_fps_addon < 0 && want < 2 && xi_game_login_status() != 2,
+        g_fps_addon < 0 ? g_fps_limit : 0);
 }
 
 /* A file or folder that comes with host64: beside it, in an app bundle's Resources, or in the
@@ -957,6 +966,17 @@ int main(int argc, char** argv)
                 return 2;
             }
             g_fps_divisor = (uint32_t)d;
+            fps_given = 1;
+        }
+        else if (!strcmp(argv[i], "--fps-limit"))
+        {
+            long n = strtol(argv[i + 1], NULL, 10);
+            if (n < 0 || n > 1000)
+            {
+                fprintf(stderr, "--fps-limit: frames a second while uncapped (--fps-divisor 0), 0 none\n");
+                return 2;
+            }
+            g_fps_limit = (uint32_t)n, g_fps_divisor = 0;
             fps_given = 1;
         }
         else if (!strcmp(argv[i], "--ui-aspect"))
@@ -1298,11 +1318,12 @@ int main(int argc, char** argv)
     d3d8_setup();
     d3d8_set_present_hook(present_hook);
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
-        &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen };
+        &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen, &g_fps_limit };
     modern_init(&ms);
     setup_nameplates();
     setup_water();
     setup_lod();
+    frame_setup();
     setup_cull_prime();
     cexi_init(cexi, game);
     addons_packet_tap(moghouse_tap);
