@@ -14,6 +14,10 @@
  *   text_in <mode> <text>               a line the chat log is given
  *   key <dik> <0|1>                     a key event
  *   mouse <message> <x> <y> [delta]     a mouse event
+ *   sdl <event> ...                     an SDL event through the window's input hook, as the pump
+ *                                       gives it (prints whether the overlay took it from the game):
+ *                                       key <scancode> <0|1>, button <1-3> <0|1> <x> <y>,
+ *                                       motion <x> <y>, focus <0|1>, leave
  *   xpad <buttons hex>                  pad 0 read by the game with these XInput buttons (prints what
  *                                       the game gets)
  *   lua <addon> <code>                  runs code in an addon's state (prints what it returns)
@@ -23,11 +27,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <SDL3/SDL.h>
+
 #include "addons.h"
 #include "dinput.h"
 #include "gthread.h"
 #include "host.h"
 #include "plat.h"
+#include "user32.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -109,6 +116,38 @@ static void run_lua(const char* rest)
         }
     gt_noyield(0);
     lua_settop(L, top);
+}
+
+static void sdl_event(const char* rest)
+{
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    char kind[16] = "";
+    int a = 0, b = 0, c = 0, d = 0;
+    sscanf(rest, "%15s %d %d %d %d", kind, &a, &b, &c, &d);
+    if (!strcmp(kind, "key"))
+    {
+        e.type = b ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        e.key.scancode = (SDL_Scancode)a, e.key.down = b != 0;
+    }
+    else if (!strcmp(kind, "button"))
+    {
+        e.type = b ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+        e.button.button = (Uint8)a, e.button.down = b != 0, e.button.x = (float)c, e.button.y = (float)d;
+    }
+    else if (!strcmp(kind, "motion"))
+        e.type = SDL_EVENT_MOUSE_MOTION, e.motion.x = (float)a, e.motion.y = (float)b;
+    else if (!strcmp(kind, "focus"))
+        e.type = a ? SDL_EVENT_WINDOW_FOCUS_GAINED : SDL_EVENT_WINDOW_FOCUS_LOST;
+    else if (!strcmp(kind, "leave"))
+        e.type = SDL_EVENT_WINDOW_MOUSE_LEAVE;
+    else
+    {
+        printf("[harness] sdl: unknown event %s\n", kind);
+        return;
+    }
+    int taken = user32_event_hook ? user32_event_hook(&e, 0, 0) : 0;
+    printf("[harness] sdl %s -> %s\n", rest, taken ? "overlay" : "game");
 }
 
 int addons_harness(const char* script)
@@ -206,6 +245,8 @@ int addons_harness(const char* script)
             xi_raise(&e);
             printf("[harness] mouse %x%s\n", msg, e.blocked || e.handled ? " (blocked)" : "");
         }
+        else if (!strcmp(cmd, "sdl"))
+            sdl_event(p);
         else if (!strcmp(cmd, "xpad"))
         {
             XPad x;

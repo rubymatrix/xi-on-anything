@@ -588,6 +588,10 @@ static void pump(void)
                 SDL_GetWindowSize(sw, &ww, &wh);
             user32_event_hook(&e, ww, wh);
         }
+        /* a press the game gets: an earlier press of that button the overlay took is over (its release
+         * may never have come, focus gone while it was held), and this one's release is the game's */
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+            g_overlay_buttons &= ~SDL_BUTTON_MASK(e.button.button);
         /* the release of a press the overlay took: the game never saw the press (FFXI acts on the
          * release: targeting, its menus) */
         if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && (g_overlay_buttons & SDL_BUTTON_MASK(e.button.button)))

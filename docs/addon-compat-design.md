@@ -429,8 +429,13 @@ We own DirectInput, user32 and the SDL pump, so capture is simpler than on Windo
   that returned true from `mouse` → the message isn't posted, and `dinput.c` zeroes buttons and
   wheel in `GetDeviceState` and drops those `GetDeviceData` events (X/Y still flow). A press that
   starts over the overlay stays the overlay's until release.
-- ImGui text focus → no key presses reach DirectInput (releases still do), and SDL text input goes
-  to ImGui instead of `WM_CHAR`.
+- ImGui using the keyboard (a text field or other widget active, or a modal open) → no key presses
+  reach DirectInput (releases still do), and SDL text input goes to ImGui instead of `WM_CHAR`. A
+  window that merely has focus (clicked, or just appeared) doesn't take the keyboard: ImGui's keyboard
+  navigation is off, and Tab goes to the game alone unless ImGui has the keyboard; Escape with a popup
+  open closes it and is kept from the game. The window's focus
+  changes and the mouse leaving it are passed on to ImGui (`AddFocusEvent`, an invalid position).
+  `tests/overlay_input_test.sh` drives SDL events through the hook (the harness's `sdl` command).
 - `key` (Ashita) / `keyboard` (Windower, DIK code, down, flags, blocked) events fire from the
   DirectInput layer; returning true hides the key from the game until release.
 - **Binds**: a host bind table keyed by DIK code + modifiers (Ashita `/bind` syntax: `^` ctrl,

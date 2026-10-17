@@ -1,0 +1,87 @@
+# The overlay's input capture (tests/overlay_input_test.sh): SDL events through the window's input
+# hook, with tests/addons/inputtest's windows. Scancodes: 26 W, 43 Tab, 41 Escape. ImGui takes one
+# change of a key a frame (its input trickling), so a few frames follow the keys before the mouse moves.
+load inputtest
+frames 3
+# the hud appeared (ImGui focuses a window that appears): keys are the game's
+sdl key 26 1
+sdl key 26 0
+sdl key 43 1
+sdl key 43 0
+frames 5
+lua inputtest select(2, xi.ui.wants())
+# a click on the hud is the overlay's; keys after it, Tab too, are the game's
+sdl motion 50 50
+frames 1
+sdl button 1 1 50 50
+frames 1
+sdl button 1 0 50 50
+frames 2
+sdl key 26 1
+sdl key 26 0
+sdl key 43 1
+sdl key 43 0
+frames 5
+sdl key 26 1
+sdl key 26 0
+frames 5
+# the hud hidden for a frame and shown again
+lua inputtest hud = false
+frames 1
+lua inputtest hud = true
+frames 2
+sdl key 26 1
+sdl key 26 0
+frames 5
+# a click in the form's text field: keys are ImGui's until a click on the game
+sdl motion 420 415
+frames 1
+sdl button 1 1 420 415
+frames 1
+sdl button 1 0 420 415
+frames 2
+lua inputtest select(2, xi.ui.wants())
+sdl key 26 1
+sdl key 26 0
+sdl key 43 1
+sdl key 43 0
+frames 5
+sdl motion 900 600
+frames 1
+sdl button 1 1 900 600
+frames 1
+sdl button 1 0 900 600
+frames 2
+sdl key 26 1
+sdl key 26 0
+frames 5
+# the cursor leaves over the hud and focus goes; the click that brings it back is the game's
+sdl motion 50 50
+frames 2
+sdl leave
+sdl focus 0
+frames 2
+sdl focus 1
+sdl button 1 1 900 600
+sdl button 1 0 900 600
+frames 2
+# focus lost while pressing on the hud: the press is let go
+sdl motion 50 50
+frames 1
+sdl button 1 1 50 50
+frames 2
+sdl focus 0
+frames 2
+sdl focus 1
+lua inputtest xi.ui.wants()
+# Escape closes an open popup and is kept from the game; with none open it is the game's
+lua inputtest pop = true
+frames 3
+lua inputtest menu_open
+sdl key 41 1
+sdl key 41 0
+frames 3
+lua inputtest menu_open
+sdl key 41 1
+sdl key 41 0
+unload inputtest
