@@ -53,6 +53,7 @@ end
 local MARKETS = '!exec player:setPos(-201.904,1.928,-194.828,192,235)';
 local MINES_PLAZA = '!exec player:setPos(39,0,-49,128,234)';
 local CROWD_SPOT = '!exec player:setPos(0.840,-5.027,76.838,192,106)';  -- North Gustaberg, facing the open field
+local AIRSHIP_DECK = '!exec player:setPos(0,-8,-10,0,226)';              -- the Kazham-Jeuno airship's upper deck
 -- North Gustaberg again, for the lighting scene: Lua to append to the !exec that sets the clock, so
 -- the move's zone change brings the new time with it
 local LIGHTING_SPOT = 'player:setPos(0.020,-4.409,-75.405,192,106)';
@@ -116,6 +117,12 @@ local scenes = {
     end)(),
     -- forty mobs around the character in the open (the replay holds them in place)
     crowd = hold(CROWD_SPOT, 0, { { 3, '!perfcrowd 40' }, { 1, PIN_CROWD }, { 8, 'mark start' }, { 40, 'mark end' } }),
+    -- the airship's deck in flight, a minute a phase: its scenery moves past a camera that stays put,
+    -- so a cost that grows with time aboard shows as a frame time that climbs. The clock runs (not
+    -- !perftime: moving it moves the ships' timetable too), and LandSandBoat puts anyone aboard
+    -- ashore outside a voyage, so record it on its own, in the day, while one is under way.
+    airship = { { 2, AIRSHIP_DECK }, { 0, 'zone' }, { 3, '!setweather 0' }, { 5, 'mark minute 1' },
+        { 60, 'mark minute 2' }, { 60, 'mark minute 3' }, { 60, 'mark end' }, { 1, 'end' } },
     -- the character casting: Chainspell then spikes and barriers, three rounds
     effects = (function()
         local s = { { 1, '!perftime 12' }, { 2, '!changejob RDM 99' }, { 3, '!addallspells' },
@@ -135,6 +142,7 @@ local scenes = {
     end)(),
 };
 local ALL = { 'home', 'markets', 'mines', 'lighting', 'weather', 'crowd', 'effects' };
+local ALONE = { 'airship' }; -- not in all: each needs its own moment on the server
 
 local run = nil;        -- { name, steps, index, due (ms), waiting_zone, armed, part, queue }
 local BANG_GAP = 2000;  -- ms
@@ -445,7 +453,7 @@ ashita.events.register('command', 'xireplay_command', function (e)
         print('[xireplay] stopped');
         return;
     elseif verb == 'list' then
-        print('[xireplay] scenes: ' .. table.concat(ALL, ', '));
+        print('[xireplay] scenes: ' .. table.concat(ALL, ', ') .. '; on their own: ' .. table.concat(ALONE, ', '));
         return;
     end
     print('[xireplay] ' .. USAGE);
