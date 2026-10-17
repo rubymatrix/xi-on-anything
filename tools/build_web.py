@@ -18,6 +18,7 @@ Needs Emscripten (emcc on PATH, or EMSDK set: source <emsdk>/emsdk_env.sh).
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,12 @@ def main():
     os.makedirs(os.path.join(ROOT, out), exist_ok=True)
     names = ['--profiling-funcs'] if a.profile else []
     bp.run(['em++', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env + names)
+    # an SDL function sdl_web.c lacks doesn't fail the link: Emscripten's SDL 1/2 JavaScript stands in, with
+    # the old signatures (a Number for SDL3's 64-bit returns throws in the wasm)
+    with open(os.path.join(ROOT, out, 'host64.js'), encoding='utf-8') as fh:
+        stand_ins = sorted(set(re.findall(r'\bfunction _(SDL_\w+)\(', fh.read())))
+    if stand_ins:
+        sys.exit('build_web: SDL functions missing from runtime/portable/sdl_web.c: ' + ' '.join(stand_ins))
     if not a.node:
         # the build's id, in each page's ?v= (index.html's XI_BUILD): the wasm and the pages, hashed
         h = hashlib.sha1()

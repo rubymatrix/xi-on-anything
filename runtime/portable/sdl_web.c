@@ -75,6 +75,7 @@ bool SDL_InitSubSystem(SDL_InitFlags flags) { (void)flags; return true; }
 /* nothing is reported initialized: callers that check (modern.c's display modes, the addons' sounds)
  * take their paths for no SDL */
 SDL_InitFlags SDL_WasInit(SDL_InitFlags flags) { (void)flags; return 0; }
+Uint64 SDL_GetTicks(void) { return (Uint64)emscripten_get_now(); } /* 64-bit: see SDL_GetWindowFlags */
 bool SDL_SetClipboardText(const char* text) { (void)text; return false; }
 bool SDL_HasClipboardText(void) { return false; }
 char* SDL_GetClipboardText(void) { return (char*)calloc(1, 1); } /* SDL's "" for none, freed with SDL_free */
@@ -123,6 +124,7 @@ bool SDL_PollEvent(SDL_Event* e)
 struct SDL_Window
 {
     int w, h;
+    SDL_WindowFlags flags; /* hidden or not, as the game asked */
 };
 static SDL_Window g_window;
 static volatile int g_view_w = 1920, g_view_h = 1080;
@@ -130,8 +132,8 @@ static int g_have_window;
 
 SDL_Window* SDL_CreateWindow(const char* title, int w, int h, SDL_WindowFlags flags)
 {
-    (void)title, (void)flags;
-    g_window.w = w, g_window.h = h;
+    (void)title;
+    g_window.w = w, g_window.h = h, g_window.flags = flags & SDL_WINDOW_HIDDEN;
     g_have_window = 1;
     return &g_window;
 }
@@ -155,13 +157,27 @@ bool SDL_GetWindowSizeInPixels(SDL_Window* w, int* width, int* height)
 }
 bool SDL_GetWindowSize(SDL_Window* w, int* width, int* height) { return SDL_GetWindowSizeInPixels(w, width, height); }
 SDL_Window* SDL_GetWindowFromEvent(const SDL_Event* e) { (void)e; return g_have_window ? &g_window : NULL; }
-bool SDL_ShowWindow(SDL_Window* w) { (void)w; return true; }
+bool SDL_ShowWindow(SDL_Window* w)
+{
+    if (w)
+        w->flags &= ~SDL_WINDOW_HIDDEN;
+    return true;
+}
+/* SDL_WindowFlags is 64-bit: defined here, not left to Emscripten's SDL 1/2 JavaScript, which hands back a
+ * Number where the wasm wants a BigInt and throws */
+SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* w) { return w ? w->flags : 0; }
 bool SDL_SetWindowTitle(SDL_Window* w, const char* title) { (void)w, (void)title; return true; } /* the app's */
-bool SDL_HideWindow(SDL_Window* w) { (void)w; return true; }
+bool SDL_HideWindow(SDL_Window* w)
+{
+    if (w)
+        w->flags |= SDL_WINDOW_HIDDEN;
+    return true;
+}
 bool SDL_SetWindowFullscreen(SDL_Window* w, bool on) { (void)w, (void)on; return true; } /* the view is the screen */
 bool SDL_SyncWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_RaiseWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; }
+bool SDL_StopTextInput(SDL_Window* w) { (void)w; return true; }
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window* w) { (void)w; return 0; }
 void* SDL_GetPointerProperty(SDL_PropertiesID props, const char* name, void* default_value)
 {
