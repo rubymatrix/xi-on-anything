@@ -10,9 +10,11 @@
  * reads FFXI_FPS_LIMIT (a cap in frames a second while uncapped, over the player's) and FFXI_FRAMELOG=1. */
 void frame_setup(void);
 /* From the Present hook: whether the player's uncapped frame rate is in effect this frame, whether
- * the menus out of the world keep their 30 fps pace (the player's 60 fps or uncapped there), and the
+ * the menus out of the world keep their 30 fps pace (the player's 60 fps or uncapped there), the
  * player's cap while uncapped (Frame Rate 120, 144; 0 none), which this holds frames to - waiting out
- * each frame to an even pace. FFXI_FPS_LIMIT, when set, takes its place. */
-void frame_present(int uncapped, int menus30, uint32_t limit);
+ * each frame to an even pace (FFXI_FPS_LIMIT, when set, takes its place) - and whether the game's
+ * divisor is 0 this frame, the player's or an addon's (the connection's wait for the server then
+ * keeps the wall clock's pace: frame_net_wait). */
+void frame_present(int uncapped, int menus30, uint32_t limit, int unpaced);
 /* Whether this build can run uncapped at the game's speed (Config > Display offers it then). */
 int frame_supported(void);

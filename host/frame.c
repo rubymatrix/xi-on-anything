@@ -54,6 +54,7 @@ static const uint32_t WAIT_SITES[] = { FFXI_FRAME_WAIT_SITES }; /* the lobby's c
 
 static int g_on;           /* this frame: the player's uncapped frame rate, the real delta handed out */
 static int g_menus30;      /* this frame: out of the world at the player's 60 fps or uncapped, kept to the menus' 30 fps pace */
+static int g_unpaced;      /* this frame: the game's divisor is 0, the player's or an addon's (FastCS) */
 static double g_dt = 1.0;  /* this frame's delta, sixtieths */
 static double g_carry;     /* the sixtieths not yet handed out whole */
 static double g_dt_sum;    /* 0 to start the steady delta again */
@@ -304,7 +305,44 @@ static void frame_net(Guest* g)
     g_net_ms = 0;
     rt_orig_frame_net(g);
 }
+#endif
 
+#if defined(FFXI_WRAP_FRAME_NET_WAIT)
+extern GuestFn rt_wrap_frame_net_wait;
+extern const GuestFn rt_orig_frame_net_wait;
+
+/* The connection's wait for the server (signing in, a zone change) counts a step a call, one call a
+ * frame, and gives up at 3600 steps (FFXI-3001): a minute at 60 fps, but a second on a loading screen
+ * drawn at 3000. While the game's divisor is 0 - the player's uncapped, or an addon's (FastCS through
+ * a zone change) - it steps once a sixtieth of the wall clock, at most once a frame, as at 60 fps; the
+ * calls between return "not yet" without a step (cdecl, eax 0). At the game's own pacing, 30 and 60
+ * fps, every call steps, as the game does it. */
+static uint64_t g_wait_last;
+static double g_wait_carry;
+
+static void frame_net_wait(Guest* g)
+{
+    if (!g_unpaced)
+    {
+        g_wait_last = 0, g_wait_carry = 0;
+        rt_orig_frame_net_wait(g);
+        return;
+    }
+    uint64_t now = rt_monotonic_ns();
+    double d = g_wait_last ? (double)(now - g_wait_last) * 60e-9 : 1.0;
+    g_wait_last = now;
+    g_wait_carry += d < 1.0 ? d : 1.0; /* (a long frame, or the first wait in a while: one step, as at 60) */
+    if (g_wait_carry < 1.0)
+    {
+        rt_return(g, 0, 0);
+        return;
+    }
+    g_wait_carry -= 1.0;
+    rt_orig_frame_net_wait(g);
+}
+#endif
+
+#if HAVE_FRAME
 /* The scene camera (the title's, the character select's, a cutscene's) eases toward its next pose
  * by a fraction k of the way each frame, its time apart: past the frame rate it was made for, the
  * ease ends sooner. The fraction is made one for the frame's length - 1 - (1 - k)^(frames), in
@@ -414,6 +452,12 @@ void frame_setup(void)
         g_flip[g_nflip++] = (uint32_t)a;
         s = *end ? end + 1 : end;
     }
+#if defined(FFXI_WRAP_FRAME_NET_WAIT)
+    rt_wrap_frame_net_wait = frame_net_wait;
+#elif HAVE_FRAME
+    rt_log("[recomp] frame: build %s has no wait-for-the-server site (tools/frame_sites.py); an uncapped zone change "
+           "can time out (FFXI-3001)\n", FFXI_BUILD);
+#endif
 #if HAVE_FRAME
     rt_hook_frame_pace = frame_pace;
     rt_hook_frame_ease = frame_ease;
@@ -463,10 +507,10 @@ static void motion_log(void)
     fflush(f);
 }
 
-void frame_present(int uncapped, int menus30, uint32_t limit)
+void frame_present(int uncapped, int menus30, uint32_t limit, int unpaced)
 {
     motion_log();
-    g_menus30 = menus30;
+    g_menus30 = menus30, g_unpaced = unpaced;
     if ((g_env_limit ? g_env_limit : limit) != g_limit)
         g_limit = g_env_limit ? g_env_limit : limit, g_next = 0;
 #if HAVE_FRAME

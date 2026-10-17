@@ -31,6 +31,9 @@ gives the delta's users the real one instead, and needs:
                       sent): the host runs it 30 times a second past 30 fps, as the game shipped
   frame_net_clock     the global holding its clock (+8 the milliseconds since the last frame, set once a
                       frame): the host adds the skipped frames' to the next tick's
+  frame_net_wait      (wraps) the connection's wait for the server (signing in, a zone change): a step a
+                      call, one call a frame, timed out at 3600 steps (FFXI-3001) - a minute at 60 fps,
+                      a second on a loading screen past 3000. Uncapped, the host steps it once a sixtieth
   frame_cam_once      the third-person camera's two calls that count its steps this frame (n = (int)dt,
                       then "step < n" after each): past 60 fps the host has it step once every frame,
                       not once a whole sixtieth, so it moves as often as the character it follows
@@ -96,6 +99,9 @@ NET = re.compile(re.escape(bytes.fromhex('81ec0c01000053565732dbe8')) + b'....' 
 # push 1000; call <elapsed>; mov ecx,[clock]; add esp,0xc; mov [ecx+8],eax
 NET_CLOCK = re.compile(re.escape(bytes.fromhex('a1')) + b'(....)' + re.escape(bytes.fromhex('8b48108b5004515268e8030000e8')) +
                        b'....' + re.escape(bytes.fromhex('8b0d')) + rb'\1' + re.escape(bytes.fromhex('83c40c894108')), re.S)
+# its wait for the server: mov eax,[n]; xor ecx,ecx; inc eax; cmp eax,3600; mov [n],eax; setge cl; mov eax,ecx; ret
+NET_WAIT = re.compile(re.escape(bytes.fromhex('a1')) + b'(....)' + re.escape(bytes.fromhex('33c9403d100e0000a3')) + rb'\1' +
+                      re.escape(bytes.fromhex('0f9dc18bc1c3')), re.S)
 # the third-person camera's step count: mov [esp+0x18],ebx; call getter; call ftol; test eax,eax; jle; mov ebx,10
 CAM_ONCE = [re.compile(re.escape(bytes.fromhex('895c2418e8')) + b'....\xe8....' + re.escape(bytes.fromhex('85c00f8e')) + b'....' +
                        re.escape(bytes.fromhex('bb0a000000')), re.S),
@@ -291,6 +297,9 @@ def main():
     clocks = [struct.unpack('<I', m.group(1))[0] for m in NET_CLOCK.finditer(img[lo:hi])]
     if len(clocks) != 1:
         die('zone connection clock: %d matches, want 1' % len(clocks))
+    net_waits = [base + lo + m.start() for m in NET_WAIT.finditer(img[lo:hi])]
+    if len(net_waits) != 1:
+        die('wait for the server: %d matches, want 1' % len(net_waits))
     paces = [base + lo + m.start() + 3 for m in PACE.finditer(img[lo:hi])]
     if len(paces) != 1:
         die('frame pacer: %d matches, want 1' % len(paces))
@@ -341,7 +350,7 @@ def main():
         'frame_cam_once': ['0x%08x' % a for a in once],
         'wraps': {'frame_dt': '0x%08x' % getters[0], 'frame_dt2': '0x%08x' % getters[1],
                   'frame_count': '0x%08x' % counts_at[0], 'frame_yield': '0x%08x' % yields[0],
-                  'frame_net': '0x%08x' % nets[0]},
+                  'frame_net': '0x%08x' % nets[0], 'frame_net_wait': '0x%08x' % net_waits[0]},
         'frame_int_sites': ['0x%08x' % s for s in sites],
         'frame_wait_sites': ['0x%08x' % s for s in waits],
         'frame_net_clock': '0x%08x' % clocks[0],
