@@ -416,11 +416,13 @@ static int host_buffer(VkDeviceSize size, VkBufferUsageFlags usage, int readback
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
 
 /* --- frames, command buffers and the upload ring ------------------------------------------------------- */
+/* destroyed once the frame that may have used it is done: this one, or between frames (g_frame the next,
+ * whose slot is emptied as it opens, while the two before may still be drawing) the last one */
 static void trash(int kind, uint64_t h, VmaAllocation mem)
 {
     if (!h)
         return;
-    Frame* f = &g_frames[g_frame];
+    Frame* f = &g_frames[g_frame_open ? g_frame : (g_frame + FRAMES - 1) % FRAMES];
     if (f->ntrash == f->cap)
     {
         f->cap = f->cap ? f->cap * 2 : 64;
