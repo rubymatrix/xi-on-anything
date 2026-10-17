@@ -2019,6 +2019,7 @@ typedef struct Caster
     uint8_t fixed; /* every vertex and index from buffers the game keeps (the zone's): cached (sun_cache) */
     uint8_t keep;  /* not fixed, but a placed object (not a character): kept as a copy (sun_cache_update) */
     uint8_t has_pos;
+    uint8_t lost_tex; /* a texture it reads was destroyed this frame: drawn, but not cached (sun_cache_forget_tex) */
     int32_t zbias;
     float clip0[4]; /* its first vertex in the camera's clip space (gfx_clip0): where this copy stands */
 } Caster;
@@ -3249,7 +3250,7 @@ typedef struct Cached
     uint64_t seen, replayed;
     int32_t next;        /* the next entry with its key, -1 none */
     uint32_t copy_bytes; /* a copy's vertices and indices */
-    int dead;            /* a buffer it draws from went (the game let go of it: a zone left behind) */
+    int dead;            /* a buffer or texture it draws from went (the game let go of it: a zone left behind) */
     VkBuffer own, ubuf;
     VmaAllocation own_mem, ubuf_mem;
     void *own_p, *ubuf_p;
@@ -3326,13 +3327,30 @@ static void sun_cache_forget(VkBuffer buf)
     }
 }
 
-/* a texture the game destroyed: the cache's alpha tests no longer read it */
+/* caster c draws with texture t (either of its views) */
+static int reads_tex(const Caster* c, const GfxTex* t)
+{
+    for (int k = 0; k < 8; ++k)
+        if (c->tex[k] && (c->tex[k] == t->view || c->tex[k] == t->mipview))
+            return 1;
+    return 0;
+}
+
+/* a texture the game destroyed: what the cache draws with it (an alpha test's) goes. This frame's casters
+ * that read it still draw (its views go to the trash, kept until the frame is done), but none goes into
+ * the cache, whose handle would outlive the view (gfx_d3d12.c's casters hold the GfxTex, freed now, so it
+ * drops their draw instead) */
 static void sun_cache_forget_tex(const GfxTex* t)
 {
     for (uint32_t i = 0; i < g_ncache; ++i)
-        for (int k = 0; k < 8; ++k)
-            if (g_cache[i].c.tex[k] && (g_cache[i].c.tex[k] == t->view || g_cache[i].c.tex[k] == t->mipview))
-                g_cache[i].c.tex[k] = VK_NULL_HANDLE;
+        if (reads_tex(&g_cache[i].c, t))
+        {
+            g_cache[i].dead = 1;
+            memset(g_cache[i].c.tex, 0, sizeof g_cache[i].c.tex);
+        }
+    for (uint32_t i = 0; i < g_ncasters; ++i)
+        if (reads_tex(&g_casters[i], t))
+            g_casters[i].lost_tex = 1;
 }
 
 /* gone from the cache's view: not seen for SUN_CACHE_FRAMES, and the camera has moved on from where it was */
@@ -3586,7 +3604,7 @@ static void sun_cache_update(const float* clip_world, const float* view, const f
     {
         Caster* c = &g_casters[i];
         const GfxU* src = c->up;
-        if (!c->fixed && (!c->keep || !c->has_pos))
+        if (c->lost_tex || (!c->fixed && (!c->keep || !c->has_pos)))
             continue;
         float pos[3] = { 0, 0, 0 };
         if (c->has_pos)
