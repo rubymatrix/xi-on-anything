@@ -116,6 +116,8 @@ def local_library(directory, config):
     lib = C.CDLL(str(library))
     lib.test_page.argtypes = [C.c_uint32, C.c_void_p]
     lib.test_run.argtypes = [C.POINTER(Guest)]
+    lib.test_guest_base.restype = C.c_void_p
+    lib.test_reloc_delta.argtypes = [C.c_uint32]
     assert lib.test_init()
     return lib
 
@@ -182,8 +184,8 @@ def synthetic(frame, dual, remap, layout):
 
 
 def compare(lib, g, pages, delta, image, layout, ordinal):
-    base = C.c_void_p.in_dll(lib, 'rt_guest_base').value
-    C.c_uint32.in_dll(lib, 'rt_reloc_delta').value = delta
+    base = lib.test_guest_base()
+    lib.test_reloc_delta(delta)
     lib.test_reset_pages()
     for a, data in pages.items():
         lib.test_page(a, data)
