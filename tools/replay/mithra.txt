@@ -1,0 +1,7 @@
+# A Mithra in Valkurm Dunes at 17:00, the sun low, turned four ways, for her tail's shadow.
+# The recordings are made by hand, no server needed: python3 tools/replay/synth.py <out> --zone 103 --at 60.989,-4.898,-151,<0-255>
+../../generated/replay/mithra-0.jsonl --home --label home --length 1
+../../generated/replay/mithra-0.jsonl --label rot0 --group shadows --length 15
+../../generated/replay/mithra-64.jsonl --label rot64 --group shadows --length 15
+../../generated/replay/mithra-128.jsonl --label rot128 --group shadows --length 15
+../../generated/replay/mithra-192.jsonl --label rot192 --group shadows --length 15

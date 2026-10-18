@@ -180,14 +180,14 @@ static void test_up_texture(void)
 }
 
 /* XYZ | DIFFUSE (0x042) in a vertex buffer, identity transforms, lighting off; then indexed */
-static void test_buffers(void)
+static void test_buffers(uint32_t usage)
 {
     clear(0xFF000000u);
     call(g_dev, D_SetRenderState, 2, 137, 0); /* LIGHTING off */
     call(g_dev, D_SetRenderState, 2, 22, 1);  /* CULL none */
     call(g_dev, D_SetTextureStageState, 3, 0, 1, 2 /* SELECTARG1 */);
     call(g_dev, D_SetTextureStageState, 3, 0, 2, 0 /* DIFFUSE */);
-    call(g_dev, D_CreateVertexBuffer, 5, 4 * 16, 0x8, 0x42, 1, g_out);
+    call(g_dev, D_CreateVertexBuffer, 5, 4 * 16, usage, 0x42, 1, g_out);
     uint32_t vb = rd32(g_out);
     uint32_t pp = galloc(4);
     call(vb, B_Lock, 4, 0, 0, pp, 0);
@@ -205,7 +205,7 @@ static void test_buffers(void)
     CHECK(pixel(4, 4) == 0xFF8000 && pixel(20, 20) == 0, "vertex buffer: %06x %06x", pixel(4, 4), pixel(20, 20));
 
     /* the same four vertices through an index buffer: indices 1, 2, 3 from startIndex 1 */
-    call(g_dev, D_CreateIndexBuffer, 5, 6 * 2, 0x8, 101, 1, g_out);
+    call(g_dev, D_CreateIndexBuffer, 5, 6 * 2, usage, 101, 1, g_out);
     uint32_t ib = rd32(g_out);
     call(ib, B_Lock, 4, 0, 0, pp, 0);
     uint16_t idx[6] = { 0, 1, 2, 3, 0, 0 };
@@ -391,6 +391,28 @@ static void test_state_blocks(void)
     call(g_dev, D_DeleteStateBlock, 1, block);
 }
 
+/* Record a deliberately nondefault layer recipe without changing earlier pixel assertions. */
+static void test_zone_capture_states(void)
+{
+    const uint32_t states[][2] = {
+        { 7, 1 }, { 14, 0 }, { 23, 7 }, { 47, (uint32_t)-7 },
+        { 27, 1 }, { 19, 9 }, { 20, 1 }, { 171, 1 }, { 168, 7 },
+        { 15, 1 }, { 25, 5 }, { 24, 91 },
+        { 52, 1 }, { 53, 1 }, { 54, 1 }, { 55, 1 }, { 56, 8 },
+        { 57, 7 }, { 58, 0x5a }, { 59, 0xa5 }
+    };
+    for (size_t i = 0; i < sizeof states / sizeof states[0]; ++i)
+        call(g_dev, D_SetRenderState, 2, states[i][0], states[i][1]);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(g_dev, D_SetVertexShader, 1, 0x144);
+    UiVert q[3] = { { 0, 0, 0.5f, 1, 0xFFFFFFFFu, 0, 0 },
+        { 16, 0, 0.5f, 1, 0xFFFFFFFFu, 1, 0 }, { 0, 16, 0.5f, 1, 0xFFFFFFFFu, 0, 1 } };
+    uint32_t v = galloc(sizeof q);
+    memcpy(GUEST_PTR(v), q, sizeof q);
+    CHECK(call(g_dev, D_DrawPrimitiveUP, 4, 4, 1, v, (uint32_t)sizeof(UiVert)) == 0,
+        "capture nondefault depth/blend/stencil recipe");
+}
+
 int main(void)
 {
     if (!gwin_init())
@@ -420,13 +442,20 @@ int main(void)
     call(g_dev, D_GetBackBuffer, 3, 0, 0, g_out);
     g_bb = rd32(g_out);
 
+    CHECK(d3d8_zone_capture("build/d3d8test/zone.jsonl", 107), "start diagnostic zone capture");
+    CHECK(!d3d8_zone_capture("build/d3d8test/busy.jsonl", 103), "reject overlapping captures");
     test_clear_and_lock();
     test_up_texture();
-    test_buffers();
+    const uint32_t parents[4] = { 0x697a696d, 0, 0, 0 };
+    d3d8_model_loading(0x1234, 0x74736574, parents);
+    test_buffers(0x8); /* dynamic guest copies */
+    test_buffers(0);   /* static GPU buffer path must still export guest bytes */
+    d3d8_model_loading(0, 0, NULL);
     test_declaration();
     test_copyrects();
     test_texture_pack();
     test_state_blocks();
+    test_zone_capture_states();
     call(g_dev, D_Present, 4, 0, 0, 0, 0);
     printf(g_fails ? "d3d8_test: %d failed\n" : "d3d8_test: ok\n", g_fails);
     return g_fails != 0;

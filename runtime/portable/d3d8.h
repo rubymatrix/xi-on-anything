@@ -47,3 +47,10 @@ void d3d8_water_loading(int on);
  * for the GPU. 0 until set. */
 void d3d8_set_occlusion(int mode);
 int d3d8_occlusion(void);
+
+/* Diagnostic model-load provenance: call at the loader entry, then with resource=0 at exit.
+ * Parent FourCCs are nearest first. Guest-thread/lock rules match the water hook. */
+void d3d8_model_loading(uint32_t resource, uint32_t fourcc, const uint32_t parents[4]);
+/* Capture the next partial/full frame through Present to path + path.bin. Returns 0 on failure
+ * or an active request. Caller supplies the zone label (not inferred or authenticated). */
+int d3d8_zone_capture(const char* path, uint32_t zone);

@@ -438,6 +438,7 @@ static void water_model_load(Guest* g)
     if (g_water_log)
         rt_log("[recomp] water: model %.4s in %.4s/%.4s/%.4s%s\n", (const char*)&cc, (const char*)&up[2], (const char*)&up[1],
             (const char*)&up[0], water ? " - water" : "");
+    d3d8_model_loading(res, cc, up);
     d3d8_water_loading(water);
 }
 
@@ -445,6 +446,7 @@ static void water_model_loaded(Guest* g)
 {
     (void)g;
     d3d8_water_loading(0);
+    d3d8_model_loading(0, 0, NULL);
 }
 
 static void setup_water(void)

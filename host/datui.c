@@ -171,7 +171,7 @@ static int decode_dxt(const uint8_t* src, size_t n, int kind, uint32_t w, uint32
     return 1;
 }
 
-static int decode_image(const uint8_t* p, size_t n, DatImage* out)
+static int decode_image(const uint8_t* p, size_t n, DatImage* out, int expand_alpha)
 {
     /* flag, category, name, then the BITMAPINFOHEADER */
     if (n < 17 + 40)
@@ -223,7 +223,7 @@ static int decode_image(const uint8_t* p, size_t n, DatImage* out)
         return 0;
     }
     /* PS2 alpha: 0x80 is opaque. DXT1's 0/255 stays as it is. */
-    for (size_t i = 0; i < px; ++i)
+    for (size_t i = 0; expand_alpha && i < px; ++i)
     {
         unsigned a = rgba[i * 4 + 3] * 2u;
         rgba[i * 4 + 3] = (uint8_t)(a > 255 ? 255 : a);
@@ -234,7 +234,7 @@ static int decode_image(const uint8_t* p, size_t n, DatImage* out)
     return 1;
 }
 
-int dat_image(const DatFile* f, const char* category, const char* name, DatImage* out)
+static int dat_image_impl(const DatFile* f, const char* category, const char* name, DatImage* out, int expand_alpha)
 {
     memset(out, 0, sizeof *out);
     size_t off = 0, n;
@@ -242,8 +242,18 @@ int dat_image(const DatFile* f, const char* category, const char* name, DatImage
     const uint8_t* p;
     while (next_chunk(f, &off, &type, &p, &n))
         if (type == 0x20 && n >= 17 && name_is(p + 1, category) && name_is(p + 9, name))
-            return decode_image(p, n, out);
+            return decode_image(p, n, out, expand_alpha);
     return 0;
+}
+
+int dat_image(const DatFile* f, const char* category, const char* name, DatImage* out)
+{
+    return dat_image_impl(f, category, name, out, 1);
+}
+
+int dat_image_native(const DatFile* f, const char* category, const char* name, DatImage* out)
+{
+    return dat_image_impl(f, category, name, out, 0);
 }
 
 void dat_image_free(DatImage* img)
