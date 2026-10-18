@@ -135,6 +135,36 @@ static int hexval(int c)
     return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
 }
 
+/* Scans whose match lies in the image's headers or code are cached. Addons scan on every frame
+ * (hgather's moon phase and weather, rest's menu check: a few MB each time). The code changes only
+ * by a code patch (xi_code_changes: a write through xi.memory at once, any other store when the
+ * watcher next looks, within 30 frames); the headers are compared with a copy taken at the first
+ * scan; the bytes at the match are checked again on every hit. A scan that fails, or matches in
+ * data, is never cached, nor is any while the code isn't watched. */
+typedef struct FindEntry
+{
+    uint32_t start, size, count, at, changes;
+    int32_t offset;
+    char pattern[128];
+} FindEntry;
+static FindEntry g_finds[64];
+static unsigned g_find_next;
+static uint8_t* g_headers; /* the image's headers, [base, text), as at the first scan */
+static uint32_t g_headers_size;
+
+/* Whether the image's headers are as they were at the first scan (they precede the code). */
+static int headers_same(uint32_t base, uint32_t text)
+{
+    if (!g_headers)
+    {
+        if (text <= base || !xi_mapped(base, text - base) || !(g_headers = (uint8_t*)malloc(text - base)))
+            return 0;
+        g_headers_size = text - base;
+        memcpy(g_headers, GUEST_PTR(base), g_headers_size);
+    }
+    return g_headers_size == text - base && !memcmp(g_headers, GUEST_PTR(base), g_headers_size);
+}
+
 uint32_t xi_find_pattern(uint32_t start, uint32_t size, const char* pattern, int32_t offset, uint32_t count)
 {
     uint8_t want[512], any[512];
@@ -158,18 +188,61 @@ uint32_t xi_find_pattern(uint32_t start, uint32_t size, const char* pattern, int
         any[n] = 0, want[n++] = (uint8_t)(h << 4 | l);
         p += 2;
     }
-    if (!n || size < n || !xi_mapped(start, size))
+    if (!n || size < n)
         return 0;
     const uint8_t* mem = GUEST_PTR(start);
+    uint32_t base, image_size, text, text_size;
+    xi_image(&base, &image_size, &text, &text_size);
+    /* only inside the image, which stays mapped: a hit skips xi_mapped's walk over its pages */
+    int cacheable = strlen(pattern) < sizeof g_finds[0].pattern && start >= base &&
+                    (uint64_t)start + size <= (uint64_t)base + image_size && xi_code_watched() &&
+                    (start >= text || headers_same(base, text));
+    for (unsigned e = 0; cacheable && e < sizeof g_finds / sizeof *g_finds; ++e)
+    {
+        FindEntry* f = &g_finds[e];
+        if (f->at && f->start == start && f->size == size && f->offset == offset && f->count == count &&
+            f->changes == xi_code_changes() && !strcmp(f->pattern, pattern))
+        {
+            size_t k = 0;
+            while (k < n && (any[k] || mem[f->at - start + k] == want[k]))
+                ++k;
+            if (k == n)
+                return f->at + (uint32_t)offset;
+            f->at = 0;
+            break;
+        }
+    }
+    if (!xi_mapped(start, size))
+        return 0;
+    /* candidates by the first byte that isn't a wildcard (memchr), the rest compared at each */
+    uint32_t nth = count;
+    size_t lead = 0;
+    while (lead < n && any[lead])
+        ++lead;
     for (uint32_t i = 0; i + n <= size; ++i)
     {
-        if (mem[i] != want[0] && !any[0])
-            continue;
-        size_t k = 1;
+        if (lead < n)
+        {
+            const uint8_t* c = (const uint8_t*)memchr(mem + i + lead, want[lead], size - n - i + 1);
+            if (!c)
+                break;
+            i = (uint32_t)(c - mem - lead);
+        }
+        size_t k = 0;
         while (k < n && (any[k] || mem[i + k] == want[k]))
             ++k;
         if (k == n && count-- == 0)
-            return start + i + (uint32_t)offset;
+        {
+            uint32_t at = start + i;
+            if (cacheable && at + n <= text + text_size)
+            {
+                FindEntry* f = &g_finds[g_find_next++ % (sizeof g_finds / sizeof *g_finds)];
+                f->start = start, f->size = size, f->offset = offset, f->count = nth;
+                f->at = at, f->changes = xi_code_changes();
+                snprintf(f->pattern, sizeof f->pattern, "%s", pattern);
+            }
+            return at + (uint32_t)offset;
+        }
     }
     return 0;
 }

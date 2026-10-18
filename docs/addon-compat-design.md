@@ -272,6 +272,12 @@ because the recompiled C is what runs. Policy:
 - Data the host itself keeps writing is the same problem: host64 puts the game's frame-rate divisor
   back every frame, so an addon's write over it (Ashita's fps addon) is taken as that addon's frame
   rate for the session (`xi_fps_write`), until the player picks one in Config > Display.
+- **Pattern scans** (`xi_find_pattern`, Ashita's `ashita.memory.find`): some addons scan on every
+  frame (hgather's moon phase and weather, rest's menu check: a few MB each time). A scan whose match
+  lies in the image's headers or code is cached until a code change is seen (`xi_code_changes`:
+  writes through `xi.memory` at once, other stores when the watcher next compares the code, within
+  30 frames); the headers are compared with a copy, and the bytes at the match are checked again on
+  every hit. A scan that fails, or matches in data, is never cached.
 
 ### 7.4 Win32 / D3D8 through `ffi.C`
 

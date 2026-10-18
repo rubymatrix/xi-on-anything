@@ -128,6 +128,11 @@ size_t xi_packets_process(int outgoing, const uint8_t* buf, size_t size, uint8_t
 void xi_code_patch(Addon* a, uint32_t addr, const uint8_t* bytes, uint32_t n);
 /* Every frame: finds code changed by other means (ffi stores). */
 void xi_patch_watch(void);
+/* How many code changes were seen so far (writes through xi.memory and the watcher's finds): what a
+ * cached pattern scan depends on. */
+uint32_t xi_code_changes(void);
+/* Whether code changes are seen at all (the watcher has its snapshot of the code). */
+int xi_code_watched(void);
 /* An addon is about to write n bytes at addr (xi.memory): if they cover the game's frame-rate divisor,
  * host64 takes the new value as the addon's frame rate (AddonsSetup.fps_request); it would put its own
  * back the next frame otherwise. */
