@@ -310,9 +310,10 @@ class Server:
         hour = getattr(args, 'hour', None)
         self.clock = vana_offset(hour) if hour is not None else 0  # added to the game clock (--hour, !time)
         # The key the client's zone cipher starts from: 16 bytes of the account service's session
-        # value (zero without one), then the view key with the client's own adjustment (+9).
+        # value - md5(session hash), as LandSandBoat's profile service answers it (host64 since its
+        # LSB #11736 sign-in) - then the view key with the client's own adjustment (+9).
         # A login data connection that sends 0xA2 replaces it with what the client said.
-        self.key = bytearray(16) + struct.pack('<I', (VIEW_KEY + 9) & M32)
+        self.key = bytearray(md5(self.hash)) + struct.pack('<I', (VIEW_KEY + 9) & M32)
         self.sessions = {}  # (ip, port) -> ZoneSession
         self.by_char = {}   # char id -> ZoneSession waiting for its next 0x00A
 

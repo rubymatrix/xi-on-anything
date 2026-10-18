@@ -117,6 +117,15 @@ static const struct
     /* ray tracing: the bounce light and the occlusion traced through the frame's casters (rt_capture), where
      * the GPU can; off unless asked for */
     { "rt", offsetof(GfxFxSettings, rt), 0.0f },
+    /* not an effect: the world drawn at fewer pixels and made up to the screen's (gfx_metal.m upscale_*),
+     * 0 off (the game's background resolution, as it was), 1 spatial (MetalFX's spatial scaler: one
+     * frame at a time), 2 temporal (MetalFX's temporal scaler: the frames before too, through jittered
+     * pixels, the depth and the camera's motion; anti-aliased as well). upscale_scale: the world's pixels
+     * across against the screen's, 0.34 (the most the temporal scaler makes up) to 1 (anti-aliasing
+     * alone); upscale_sharpen: a sharpening of what comes out (0 none). Metal only. */
+    { "upscale", offsetof(GfxFxSettings, upscale), 0.0f },
+    { "upscale_scale", offsetof(GfxFxSettings, upscale_scale), 0.5f },
+    { "upscale_sharpen", offsetof(GfxFxSettings, upscale_sharpen), 0.0f },
 };
 
 static float* fx_setting(const char* key)
