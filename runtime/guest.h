@@ -13,10 +13,19 @@
 #include <stdint.h>
 #include <string.h>
 
+/* The globals every translated function reads, defined in host64 itself. On desktop Linux, a
+ * position-independent executable (#74), they would otherwise be read through the GOT: an extra load
+ * on every guest memory access. */
+#if defined(__ELF__) && !defined(__ANDROID__)
+#define RT_HOT_GLOBAL __attribute__((visibility("hidden")))
+#else
+#define RT_HOT_GLOBAL
+#endif
+
 #if defined(RT_GUEST_WINDOW)
 /* 64-bit hosts (R3: the Windows x64 target and arm64 macOS): guest memory is a reserved 4 GB
  * window somewhere in the host address space; runtime/portable/gwin.c sets its base. */
-extern unsigned char* rt_guest_base;
+extern RT_HOT_GLOBAL unsigned char* rt_guest_base;
 #define GUEST_PTR(a) (rt_guest_base + (uint32_t)(a))
 #else
 #ifndef GUEST_BASE
@@ -68,7 +77,7 @@ typedef void (*GuestFn)(Guest*);
  * FFXiMain. Every address constant the image's relocation table covers is emitted as
  * `constant + RD`; jump-table entries and indirect-call targets are turned back into static
  * addresses before lookup. RD is 0 when the image sits at its preferred base. */
-extern uint32_t rt_reloc_delta;
+extern RT_HOT_GLOBAL uint32_t rt_reloc_delta;
 extern uint32_t rt_image_lo, rt_image_hi; /* runtime range of the image */
 #define RD rt_reloc_delta
 
@@ -106,7 +115,7 @@ void rt_rdtsc(Guest* g);
  * it on every host->guest entry; a loop that never calls out would starve the other guest threads,
  * so every backward jump is a safepoint that yields when another thread is waiting. The same
  * hand-off is what gives arm64 x86's memory ordering for the guest. */
-extern volatile uint32_t rt_lock_contended;
+extern RT_HOT_GLOBAL volatile uint32_t rt_lock_contended;
 void rt_safepoint(void);
 #define RT_SAFEPOINT do { if (rt_lock_contended) rt_safepoint(); } while (0)
 
