@@ -25,6 +25,7 @@
  * Not here: render targets other than the back buffer, cube and volume textures, shaders
  * (vertex shader handles other than FVF codes, pixel shaders), lighting (vertices keep their
  * diffuse colour), texture stage operations other than modulate. Each logs once when asked for. */
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -345,9 +346,10 @@ static int slab_fits(uintptr_t a, size_t n)
 }
 
 /* where in [p, p + r) n bytes fit (slab_fits): p itself, else 0x10000000 into p's 4 GB (p sits below
- * that) or into the next (n bytes from p would cross into it); 0 if not inside. Any r of
- * SLAB_RESERVE(n) holds one. */
+ * that) or into the next (n bytes from p would cross into it); 0 if not inside. An r of at least
+ * SLAB_RESERVE(n) always holds one. */
 #define SLAB_RESERVE(n) (2 * (n) + 0x10000000u)
+_Static_assert(sizeof(uintptr_t) == 8, "slab_place reaches into the next 4 GB: a 64-bit host's");
 static uintptr_t slab_place(uintptr_t p, size_t r, size_t n)
 {
     uintptr_t s = p;
@@ -356,34 +358,33 @@ static uintptr_t slab_place(uintptr_t p, size_t r, size_t n)
     return s + n <= p + r ? s : 0;
 }
 
-/* the slab's n bytes, mapped at a place that fits: SLAB_RESERVE(n) bytes of address space reserved,
- * the slab mapped where it fits inside, the rest let go */
+/* the slab's n bytes, mapped at a place that fits: SLAB_RESERVE(n) bytes of address space reserved
+ * (no memory behind them), the slab mapped where it fits inside and, on POSIX, the rest let go (Windows
+ * lets a reservation go only whole: there it stays, address space alone). NULL with why logged. */
 static void* slab_map(size_t n)
 {
     size_t r = SLAB_RESERVE(n);
 #if defined(_WIN32)
-    /* a reservation can only be let go whole: the place found, then taken (another thread may take it
-     * between the two: once more) */
-    for (int tries = 0; tries < 4; ++tries)
+    uint8_t* p = (uint8_t*)VirtualAlloc(NULL, r, MEM_RESERVE, PAGE_NOACCESS);
+    uint8_t* s = p ? (uint8_t*)slab_place((uintptr_t)p, r, n) : NULL;
+    if (!s || !VirtualAlloc(s, n, MEM_COMMIT, PAGE_READWRITE))
     {
-        void* p = VirtualAlloc(NULL, r, MEM_RESERVE, PAGE_NOACCESS);
-        if (!p)
-            return NULL;
-        uintptr_t s = slab_place((uintptr_t)p, r, n);
-        VirtualFree(p, 0, MEM_RELEASE);
-        void* q = s ? VirtualAlloc((void*)s, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) : NULL;
-        if (q)
-            return q;
-    }
-    return NULL;
-#else
-    uint8_t* p = (uint8_t*)mmap(NULL, r, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED)
+        xi_log_once("d3d8 slab", "d3d8 ffi: no memory for texture objects where their ids fit (%s %zu bytes: error %lu)",
+            p ? "committing" : "reserving", p ? n : r, (unsigned long)GetLastError());
+        if (p)
+            VirtualFree(p, 0, MEM_RELEASE);
         return NULL;
-    uint8_t* s = (uint8_t*)slab_place((uintptr_t)p, r, n);
+    }
+    return s;
+#else
+    uint8_t* p = (uint8_t*)mmap(NULL, r, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+    uint8_t* s = p != MAP_FAILED ? (uint8_t*)slab_place((uintptr_t)p, r, n) : NULL;
     if (!s || mmap(s, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
     {
-        munmap(p, r);
+        xi_log_once("d3d8 slab", "d3d8 ffi: no memory for texture objects where their ids fit (%s %zu bytes: %s)",
+            p != MAP_FAILED ? "mapping" : "reserving", p != MAP_FAILED ? n : r, strerror(errno));
+        if (p != MAP_FAILED)
+            munmap(p, r);
         return NULL;
     }
     if (s > p)
@@ -402,10 +403,7 @@ static void* slab_alloc(size_t n)
         g_slab_bytes = g_slot_size * TEX_SLOTS;
         uint8_t* p = (uint8_t*)slab_map(g_slab_bytes);
         if (!p)
-        {
-            xi_log("d3d8 ffi: no memory for texture objects where their ids fit");
             return NULL;
-        }
         g_slab = p;
     }
     if (n > g_slot_size)
