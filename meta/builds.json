@@ -49,7 +49,9 @@
         "present_site": "0x100035cb"
       },
       "hooks": {
-        "nameplate_scale": "0x100863d6"
+        "nameplate_scale": "0x100863d6",
+        "water_model_load": "0x10176ed0",
+        "water_model_loaded": "0x10176f52"
       },
       "modern": {
         "mgr": "0x10621838",

@@ -324,6 +324,72 @@ static void setup_nameplates(void)
 #endif
 }
 
+/* --- water ---------------------------------------------------------------------------------------------
+ * FFXiMain loads a map model (DAT chunk type 0x2e) in 0x10176ed0 (2026-09-03), with ecx the resource:
+ * its FourCC at +0x20, and at +0x28 its parent's handle (*handle is the parent resource). The zone
+ * DATs keep their water models under effect directories named for it - mizu, miz1, umi1, sea, taki
+ * (waterfalls), kawa (rivers) - so a model with one of those above it is water. The hooks bracket the
+ * load (meta/builds.json "water_model_load" at its start, "water_model_loaded" just after the call
+ * that makes the model's vertex buffers) and d3d8 marks the buffers made meanwhile (d3d8_water_loading).
+ * FFXI_WATERLOG=1 logs every model loaded with the directories above it, to find more. */
+#ifdef FFXI_HOOK_WATER_MODEL_LOAD
+extern GuestFn rt_hook_water_model_load;
+#endif
+#ifdef FFXI_HOOK_WATER_MODEL_LOADED
+extern GuestFn rt_hook_water_model_loaded;
+#endif
+static int g_water_log;
+
+static int water_dir(uint32_t cc)
+{
+    char n[5];
+    memcpy(n, &cc, 4), n[4] = 0;
+    static const char* const prefix[] = { "miz", "umi", "sea", "taki", "kawa", "wat" };
+    for (size_t i = 0; i < sizeof prefix / sizeof prefix[0]; ++i)
+        if (!strncmp(n, prefix[i], strlen(prefix[i])))
+            return 1;
+    return 0;
+}
+
+static void water_model_load(Guest* g)
+{
+    uint32_t res = g->ecx, cc = rd32(res + 0x20), up[4] = { 0 };
+    int water = 0, n = 0;
+    uint32_t h = rd32(res + 0x28);
+    for (; n < 4 && h; ++n)
+    {
+        uint32_t parent = rd32(h);
+        if (!parent)
+            break;
+        up[n] = rd32(parent + 0x20);
+        water |= water_dir(up[n]);
+        h = rd32(parent + 0x28);
+    }
+    if (g_water_log)
+        rt_log("[recomp] water: model %.4s in %.4s/%.4s/%.4s%s\n", (const char*)&cc, (const char*)&up[2], (const char*)&up[1],
+            (const char*)&up[0], water ? " - water" : "");
+    d3d8_water_loading(water);
+}
+
+static void water_model_loaded(Guest* g)
+{
+    (void)g;
+    d3d8_water_loading(0);
+}
+
+static void setup_water(void)
+{
+    const char* log = getenv("FFXI_WATERLOG");
+    g_water_log = log && log[0] && log[0] != '0';
+#if defined(FFXI_HOOK_WATER_MODEL_LOAD) && defined(FFXI_HOOK_WATER_MODEL_LOADED)
+    rt_hook_water_model_load = water_model_load;
+    rt_hook_water_model_loaded = water_model_loaded;
+#else
+    (void)water_model_load, (void)water_model_loaded;
+    rt_log("[recomp] water: build %s has no model-loader hook; its water is drawn as the game draws it\n", FFXI_BUILD);
+#endif
+}
+
 /* s, or sx x sy (1.25, 1x1.2); 0 if it is neither */
 static int parse_scale(const char* s, float* sx, float* sy)
 {
@@ -800,6 +866,7 @@ int main(int argc, char** argv)
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given };
     modern_init(&ms);
     setup_nameplates();
+    setup_water();
     if (getenv("FFXI_PROFILE") && getenv("FFXI_PROFILE")[0] && getenv("FFXI_PROFILE")[0] != '0')
         thunk_timer = gfx_prof_shim, g_profile_shims = 1; /* the profile splits the game's time into its code and our API calls */
     dsound_setup();
