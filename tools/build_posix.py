@@ -383,6 +383,8 @@ def host64_kit(game, kitdir):
     addon_cflags, _ = addons(make=False)
     inc = ['-I', 'third_party/sdl3/include'] + thirdparty.flags('mbedtls') + addon_cflags
     objs += compile_stale(k['device_sources'], 'build/obj/host64-kit', inc)
+    # compiler_rt's memcpy, memcmp and the rest local to host64, so its libraries use glibc's (host/kit_mem.c)
+    objs += compile_stale(['host/kit_mem.c'], 'build/obj/host64-kit', [])
     libs = [os.path.join(kitdir, 'lib', l) for l in k['libs'] if l != 'libxi.a']
     # libxi.a whole, as the other builds link every object: addons find win32_ffi.c's and gdifont_ffi.c's
     # functions by name (ffi.C), so nothing references them and an archive would leave them out
