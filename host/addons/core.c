@@ -592,7 +592,10 @@ static int call(Addon* a, int nargs, int nres, const char* where)
     g_running[g_depth++] = a;
     if (g_depth == 1)
         gt_noyield(1);
+    XiProfMark mark;
+    xi_prof_begin(&mark, a);
     int r = guarded_pcall(a, L, nargs, nres, base);
+    xi_prof_end(&mark, a, where);
     if (--g_depth == 0)
         gt_noyield(0);
     if (r == -1)
@@ -1102,7 +1105,9 @@ void xi_raise_kind(XiEvent* e, int kind)
         int drawing = !strcmp(e->name, "present");
         if (drawing)
             xi_gui_addon_begin();
+        const XiEvent* outer = xi_prof_event(e);
         int ok = call(a, 1, 1, e->name);
+        xi_prof_event(outer);
         if (drawing)
             xi_gui_addon_end(a);
         if (ok)
@@ -1192,6 +1197,7 @@ void addons_frame(void)
             xi_addon_load_builtin("control");
     }
     g_started = 1;
+    xi_prof_frame();
     xi_patch_watch();
     xi_cmd_frame();
     xi_manage_frame();
@@ -1215,6 +1221,7 @@ void addons_frame(void)
         xi_gui_end();
         xi_frame_draw("postrender");
     }
+    xi_prof_frame_end();
 }
 
 /* The frame's drawing events, inside the overlay's frame. */

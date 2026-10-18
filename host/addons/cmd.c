@@ -2,7 +2,7 @@
  * or an addon runs.
  *
  *   1. aliases expand (Ashita's /alias, Windower's alias), then route again;
- *   2. the host's own commands: //addon and /addon (load, unload, reload, list), Windower's //lua
+ *   2. the host's own commands: //addon and /addon (load, unload, reload, list, prof), Windower's //lua
  *      (load, unload, reload, list, command), //exec and /exec, //bind /bind //unbind /unbind,
  *      //alias /alias, //input (a line for the game), //echo (to the chat log);
  *   3. the addons' command event (every addon sees the line; one may block it);
@@ -278,7 +278,7 @@ static void addon_list(void)
     }
 }
 
-/* //addon and /addon: load, unload, reload, list. kind_hint: Windower's //lua prefers its folder. */
+/* //addon and /addon: load, unload, reload, list, prof (prof.c). kind_hint: Windower's //lua prefers its folder. */
 static int addon_command(char w[][256], int n, int kind_hint)
 {
     const char* op = n > 1 ? w[1] : "list";
@@ -326,7 +326,12 @@ static int addon_command(char w[][256], int n, int kind_hint)
         addon_list();
         return 1;
     }
-    chatf("addon: load, unload, reload, list");
+    if (!strcasecmp(op, "prof"))
+    {
+        xi_prof_command(w, n);
+        return 1;
+    }
+    chatf("addon: load, unload, reload, list, prof");
     return 1;
 }
 

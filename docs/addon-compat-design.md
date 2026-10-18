@@ -226,6 +226,20 @@ call:
   acquired *before* the guest lock, never after, to rule out lock-order deadlocks. `guest_call` from
   inside a Lua callback can hit a safepoint and yield the guest lock, so every Lua entry point is
   re-entrancy safe: queued events are drained, never nested more than one deep per addon.
+- **Time** (`prof.c`): every entry into Lua is timed, wall clock and the thread's CPU time, per addon
+  and per kind of call (frame, present, packet_in, ...), each addon charged its own time when calls
+  nest. `/addon prof` shows it per second of play; `/addon prof <name>` one addon's calls. Any call,
+  and any frame, over 100 ms (`FFXI_ADDON_SLOW`, `/addon prof slow <ms>`) goes to `host64.log` with
+  the time of day, at most one line a second (a line says how many it held back since the last):
+
+      slow 12:59:24.475: frame 631 ms (game thread cpu 471 ms), addon host 160.5 ms, addons' Lua 204.6 ms: ...
+      slow 12:51:46.955: simplelog packet_in 0x00A 394.1 ms (cpu 392.9 ms, heap 14.2 -> 111.5 MB)
+
+  A frame's line splits the wait: the game thread's CPU time against the wall clock (well below it:
+  the thread waited on something), the addon host's frame (`addons_frame`: the drawing events, ImGui
+  and the overlay's objects) and the addons' Lua anywhere in the frame (packets too), with the three
+  that took longest. A call's line gives its Lua heap before and after: smaller after, a garbage
+  collection finished inside it.
 - **Unload on exit**: addons commonly save settings in `unload`. Unload every addon on `/shutdown`,
   window close and `atexit`, before the guest is torn down (VanaCore still loses these saves).
 

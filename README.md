@@ -89,6 +89,10 @@ windows, text and images over the game's frame.
   translated variants of the patched functions, chosen while the addon's bytes are in place.
 - **Native plugins** (Ashita and Windower DLLs) don't run: they're 32-bit Windows code. Addons that
   need one (Windower's Timers-based ones, for example) won't either.
+- **Which addon makes the game stutter**: `/addon prof` lists the addons by the time they take per
+  second of play (`/addon prof <name>` for one addon's events, `/addon prof reset` to start
+  counting again). Frames that come late are logged with the addons' share of them; see
+  [the design notes](docs/addon-compat-design.md#64-errors-crashes-threads).
 
 See [docs/addon-compat-design.md](docs/addon-compat-design.md) for how it works.
 

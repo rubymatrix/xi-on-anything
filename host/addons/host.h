@@ -22,6 +22,15 @@ enum
 };
 extern const char* const xi_kind_name[XI_KINDS]; /* "xi", "ashita", "windower" */
 
+/* An addon's time in one kind of call (prof.c): self time, without the addons it called into. */
+typedef struct XiProfSlot
+{
+    uint64_t calls, wall_ns, cpu_ns, max_ns;
+} XiProfSlot;
+/* frame, present, postrender, packet_in, packet_out, text_in, text_out, command, key, mouse, load,
+ * other (prof.c's names) */
+#define XI_PROF_SLOTS 12
+
 typedef struct Addon
 {
     char name[64];
@@ -40,6 +49,10 @@ typedef struct Addon
      * raised to it. listen_all when there are more names than fit. */
     char listen[24][24];
     unsigned nlisten, listen_all;
+    /* its time in Lua (prof.c): per kind of call, since the last /addon prof reset */
+    XiProfSlot prof[XI_PROF_SLOTS];
+    uint64_t prof_frame_ns; /* in the current frame */
+    int heap_kb;            /* its Lua heap after its last call */
 } Addon;
 
 /* --addon-harness: no game running (chat lines to stdout, commands routed directly, no GPU). */
@@ -121,6 +134,26 @@ void xi_packet_inject_handled(int outgoing, const uint8_t* p, size_t n);
 size_t xi_packet_last(int outgoing, uint16_t id, uint8_t* out, size_t cap, uint64_t* when_ms);
 /* A plain buffer (0x1C header, packets) through the pipeline, as the packet hooks do (the harness). */
 size_t xi_packets_process(int outgoing, const uint8_t* buf, size_t size, uint8_t* out, size_t cap);
+
+/* --- profile (prof.c) ------------------------------------------------------------------------ */
+
+/* One call into an addon's Lua, timed: begin before it, end after (where: the event's name, "frame",
+ * "load"...). Calls nest (a command from an addon): each addon is charged its own time only. */
+typedef struct XiProfMark
+{
+    uint64_t wall, cpu;
+    int heap_kb;
+} XiProfMark;
+void xi_prof_begin(XiProfMark* m, Addon* a);
+void xi_prof_end(const XiProfMark* m, Addon* a, const char* where);
+/* The event being raised, for the slow-call log; returns the one before (a raise inside a raise). */
+const XiEvent* xi_prof_event(const XiEvent* e);
+/* At the start of every frame: logs a frame that came late and the addons' share of the wait. */
+void xi_prof_frame(void);
+/* At the end of the addon host's frame (addons_frame). */
+void xi_prof_frame_end(void);
+/* /addon prof [reset | slow <ms> | <name>] */
+void xi_prof_command(char w[][256], int n);
 
 /* --- code patches (patch.c) ------------------------------------------------------------------ */
 
