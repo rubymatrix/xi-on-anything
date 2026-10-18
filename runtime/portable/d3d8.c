@@ -2728,7 +2728,7 @@ static int g_ui_nbars;
 
 /* Where the interface was drawn, on a coarse grid over the screen: this frame's, and the last
  * finished one's, which user32 asks (user32_ui_hit) to tell the interface from the world under the
- * mouse. g_ui_composited: the menu target is on the screen this frame, so what goes over it after
+ * mouse (and the orbit camera, whose wheel zooms only over the world). g_ui_composited: the menu target is on the screen this frame, so what goes over it after
  * is the game's cursor. */
 #define UI_GW 128
 #define UI_GH 64
@@ -2801,7 +2801,8 @@ static void ui_target_size(float* w, float* h)
 static void ui_squeeze(GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data, uint32_t up_stride, int mark)
 {
     float s = user32_ui_squeeze(g_dev.hwnd), sy = user32_ui_squeeze_y(g_dev.hwnd);
-    if (s >= 1.0f && sy >= 1.0f)
+    int as_drawn = s >= 1.0f && sy >= 1.0f; /* nothing to squeeze: only where it is, for the grid */
+    if (as_drawn && !mark)
         return;
     uint32_t base, stride, size;
     if (up_data)
@@ -2815,6 +2816,10 @@ static void ui_squeeze(GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data,
         base = b->mem, stride = g_dev.cur.stride[st], size = b->size;
     }
     float lo = 1e30f, hi = -1e30f, ylo = 1e30f, yhi = -1e30f;
+    /* the vertices' colour, when it is in the positions' stream: a window the game keeps drawing
+     * faded out (alpha 0 at every corner) is not there for the grid */
+    int colour = d->vs.el[GFX_R_DIFFUSE].used && d->vs.el[GFX_R_DIFFUSE].stream == d->vs.el[GFX_R_POSITION].stream;
+    uint32_t alpha = 0;
     for (uint32_t i = 0; i < n; ++i)
     {
         uint32_t at = (first + i) * stride + (uint32_t)d->u.offset[GFX_R_POSITION];
@@ -2825,8 +2830,13 @@ static void ui_squeeze(GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data,
         hi = x > hi ? x : hi;
         ylo = y < ylo ? y : ylo;
         yhi = y > yhi ? y : yhi;
+        uint32_t c = (first + i) * stride + (uint32_t)d->u.offset[GFX_R_DIFFUSE];
+        if (colour && c <= size - 4)
+            alpha |= rd32(base + c) >> 24;
     }
     if (lo > hi)
+        return;
+    if (as_drawn && colour && !alpha)
         return;
     /* everything is squeezed toward the target's middle, whatever viewport the draw has (the chat
      * log's text and the menus' titles are clipped to their windows); "the whole width" with some
@@ -2834,6 +2844,14 @@ static void ui_squeeze(GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data,
     float W, h;
     ui_target_size(&W, &h);
     float slack = 1.0f + W / 256.0f;
+    if (as_drawn)
+    {
+        /* what covers the whole width (the scene put on the screen, fades, the dimming behind a
+         * menu, a cutscene's bars) is not the interface */
+        if (!(lo <= slack && hi >= W - slack))
+            ui_mark(lo / W, hi / W, ylo / h, yhi / h);
+        return;
+    }
     if (sy < 1.0f)
     {
         /* a window taller than the interface's shape: squeezed toward the middle up and down. What
@@ -3539,7 +3557,15 @@ static int ui_is_world_pointer(uint32_t first, uint32_t n, uint32_t up_data, uin
 static int menu_target(const Obj* o)
 {
     const Obj* t = o && o->container ? obj(o->container) : NULL;
-    return t && t->kind == O_TEXTURE && (t->usage & USAGE_RENDERTARGET) && ui_box_shape(t->width, t->height);
+    if (!t || t->kind != O_TEXTURE || !(t->usage & USAGE_RENDERTARGET))
+        return 0;
+    if (ui_box_shape(t->width, t->height))
+        return 1;
+    /* with nothing to squeeze, the menus' smaller target of the screen's shape (native_size's): its
+     * draws only mark the grid, for the orbit camera's wheel (host/camera.c) */
+    uint32_t bw = g_dev.pp[0], bh = g_dev.pp[1];
+    return user32_ui_squeeze(g_dev.hwnd) >= 1.0f && user32_ui_squeeze_y(g_dev.hwnd) >= 1.0f && t->width < bw &&
+        t->height < bh && (uint64_t)t->width * bh == (uint64_t)t->height * bw;
 }
 
 /* FFXI's own character shadow: the character drawn into a render target of the game's, then that

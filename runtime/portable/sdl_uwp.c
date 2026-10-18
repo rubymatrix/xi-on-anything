@@ -103,6 +103,8 @@ bool SDL_PollEvent(SDL_Event* e)
     return any;
 }
 
+bool SDL_PushEvent(SDL_Event* e) { return push(e) != 0; }
+
 /* --- the window ------------------------------------------------------------------------------------ */
 #define WINDOW_ID 1
 struct SDL_Window
@@ -313,6 +315,9 @@ SDL_MouseButtonFlags SDL_GetGlobalMouseState(float* x, float* y) { return SDL_Ge
 void SDL_WarpMouseGlobal(float x, float y) { (void)x, (void)y; }
 bool SDL_ShowCursor(void) { return true; }
 bool SDL_HideCursor(void) { return true; }
+/* the console's pointer is absolute only: the orbit camera's drags read relative motion from it all the same */
+bool SDL_SetWindowRelativeMouseMode(SDL_Window* w, bool on) { (void)w, (void)on; return true; }
+void SDL_WarpMouseInWindow(SDL_Window* w, float x, float y) { (void)w, (void)x, (void)y; }
 
 /* --- the controller ------------------------------------------------------------------------------------ */
 #define PAD_ID 1

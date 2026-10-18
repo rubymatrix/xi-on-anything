@@ -48,6 +48,11 @@
  * (near, the default), or with the one the game picks for the distance (game). An app bundle's
  * FFXILod key is the default; the settings file's lod (1 near, 2 game) overrides it live.
  *
+ * --camera orbit|game: the mouse turns the camera round the character as in FINAL FANTASY XIV (orbit,
+ * the default: drag with either button over the world, both to run, the wheel to zoom; host/camera.c),
+ * or the game's own (game). An app bundle's FFXICamera key is the default; the settings file's camera
+ * (1 orbit, 2 game) overrides it live.
+ *
  * --cexi off|items|full: client changes for a CatsEyeXI-style server (host/cexi.c), off by default.
  * items: custom item ids 0x7800-0xDFFF and gear model ids up to 4095; full: those, and spell and
  * job-ability ids up to 0xFFF. They need the server's DATs in a --dats overlay. An app bundle's
@@ -87,6 +92,7 @@
 #include "modern.h"
 #include "cexi.h"
 #include "discord.h"
+#include "camera.h"
 #include "addons/addons.h"
 #include "addons/game.h"
 #if defined(_WIN32)
@@ -714,6 +720,7 @@ static void present_hook(void)
     fix_aspect();
     fix_draw_distance();
     lod_frame();
+    camera_frame();
     modern_frame();
     cexi_frame();
     shadow_focus();
@@ -833,6 +840,7 @@ int main(int argc, char** argv)
         bundled_tex[0] = 0;
     const char* server_name = NULL; /* --server as given, for the sign-in screen */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0, lod_given = 0;
+    int camera_orbit = 1, camera_given = 0;
     int cexi = CEXI_OFF, cexi_given = 0;
     float ui_aspect = 0.0f;
     for (int i = 1; i + 1 < argc; i += 2)
@@ -964,6 +972,16 @@ int main(int argc, char** argv)
             g_lod_near = !strcmp(argv[i + 1], "near");
             lod_given = 1;
         }
+        else if (!strcmp(argv[i], "--camera"))
+        {
+            if (strcmp(argv[i + 1], "orbit") && strcmp(argv[i + 1], "game"))
+            {
+                fprintf(stderr, "--camera: orbit (the mouse turns it round the character) or game (the game's own)\n");
+                return 2;
+            }
+            camera_orbit = !strcmp(argv[i + 1], "orbit");
+            camera_given = 1;
+        }
         else if (!strcmp(argv[i], "--cexi"))
         {
             if ((cexi = cexi_parse(argv[i + 1])) < 0)
@@ -1001,13 +1019,15 @@ int main(int argc, char** argv)
         g_draw_world = g_draw_entities = 1.0f;
     if (!lod_given && app_default("FFXILod", app_val, sizeof app_val))
         g_lod_near = !strcmp(app_val, "near");
+    if (!camera_given && app_default("FFXICamera", app_val, sizeof app_val))
+        camera_orbit = strcmp(app_val, "game") != 0;
     if (!cexi_given && app_default("FFXICexi", app_val, sizeof app_val) && (cexi = cexi_parse(app_val)) < 0)
         cexi = CEXI_OFF;
     if (!game)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
                         "[--server name] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
-                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--cexi off|items|full]\n");
+                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--camera orbit|game] [--cexi off|items|full]\n");
         return 2;
     }
     if (!lsb.password)
@@ -1256,6 +1276,7 @@ int main(int argc, char** argv)
     setup_water();
     setup_lod();
     setup_cull_prime();
+    camera_init(camera_orbit);
     cexi_init(cexi, game);
     addons_packet_tap(moghouse_tap);
     {

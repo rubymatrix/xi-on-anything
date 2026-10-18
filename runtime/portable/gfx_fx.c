@@ -108,6 +108,10 @@ static const struct
     { "lod", offsetof(GfxFxSettings, lod), 0.0f },
     /* not an effect: anti-aliasing of the finished scene, 0 none, 1 FXAA (scene_aa); with or without the effects */
     { "aa", offsetof(GfxFxSettings, aa), 0.0f },
+    /* not an effect: the host's camera (host64 --camera, host/camera.c), 1 the mouse orbits it, 2 the game's
+     * own, 0 as the command line says; and how far a drag turns it (1 as shipped) */
+    { "camera", offsetof(GfxFxSettings, camera), 0.0f },
+    { "camera_speed", offsetof(GfxFxSettings, camera_speed), 1.0f },
 };
 
 static float* fx_setting(const char* key)

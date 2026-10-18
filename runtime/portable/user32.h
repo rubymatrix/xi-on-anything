@@ -28,12 +28,26 @@ float user32_ui_squeeze(uint32_t hwnd);
 /* The fraction of hwnd's height the interface keeps: 1 when off, or the window is not taller. */
 float user32_ui_squeeze_y(uint32_t hwnd);
 /* Set by the graphics layer: whether the interface covers this point of the window (0..1 across
- * and down), as drawn last frame. The mouse is unsqueezed only there. */
+ * and down), as drawn last frame. The mouse is unsqueezed only there; the orbit camera's wheel zooms
+ * only elsewhere. */
 extern int (*user32_ui_hit)(float fx, float fy);
 /* Set by the addon host: sees every SDL event (an SDL_Event*) first, with the size of the window it
  * is for (points); returns 1 to keep a press, a wheel turn or typed text from the game (DirectInput
  * and the window messages alike). Releases and motion always reach the game. */
 extern int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h);
+/* Set by the host's camera (host/camera.c): sees the mouse's motion, presses, releases and wheel
+ * turns after the addon overlay (what the overlay took never reaches it), with the window's size;
+ * returns 1 to keep one from the game. user32_replay hands the game one it kept earlier (a press that
+ * turned out to be a click); user32_mouse_capture(1) hides the cursor and reports motion only
+ * (relative), 0 puts it back where it was. */
+extern int (*user32_mouse_hook)(const void* sdl_event, int window_w, int window_h);
+void user32_replay(const void* sdl_event);
+void user32_mouse_capture(int on);
+/* The control port's mouse (FFXI_CONTROL): kind 0 a move to x, y (the window's points), 1 a press
+ * and 2 a release of button (SDL's: 1 left, 3 right), 3 the wheel turned y notches. */
+void user32_inject_mouse(int kind, float x, float y, int button);
+/* the mouse id (SDL_MouseID, the events' `which`) of those: no real cursor to hide or move for them */
+#define USER32_INJECTED_MOUSE 0x7F11u
 /* Set by the addon host: runs once when the player quits (the window closing), before the process
  * ends. */
 extern void (*user32_quit_hook)(void);

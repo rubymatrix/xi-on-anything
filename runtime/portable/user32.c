@@ -464,6 +464,134 @@ static uint32_t mouse_keys(SDL_MouseButtonFlags b)
  * overlay's too, and the game's window is not told they are down while they are. */
 static SDL_MouseButtonFlags g_overlay_buttons;
 
+/* An event to the game: DirectInput's view of it, and the window messages it makes. */
+static void deliver(const SDL_Event* e)
+{
+    input_sdl_event(e); /* DirectInput's view of the same events */
+    Wnd* w = NULL;
+    switch (e->type)
+    {
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+    {
+        w = wnd_of_sdl(e->key.windowID);
+        uint32_t vk = vk_of(e->key.scancode);
+        if (!w || !vk)
+            break;
+        int down = e->type == SDL_EVENT_KEY_DOWN;
+        uint32_t scan = scan_of_vk(vk);
+        if (e->key.scancode == SDL_SCANCODE_RCTRL || e->key.scancode == SDL_SCANCODE_RALT || e->key.scancode == SDL_SCANCODE_KP_ENTER)
+            scan |= 0x100;
+        if (e->key.scancode == SDL_SCANCODE_RSHIFT)
+            scan = 0x36;
+        /* lParam: repeat 1, scan code, extended bit 24, previous state 30, transition 31 */
+        uint32_t lp = 1u | ((scan & 0xFFu) << 16) | ((scan & 0x100u) << 16) |
+            (down ? (e->key.repeat ? 0x40000000u : 0) : 0xC0000000u);
+        g_keys[vk] = down ? 0x80 : 0;
+        uint32_t msg = vk == 0x12 || (g_keys[0x12] && vk != 0x12) ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP);
+        post(w->tid, w->hwnd, msg, vk, lp);
+        break;
+    }
+    case SDL_EVENT_TEXT_INPUT:
+    {
+        w = wnd_of_sdl(e->text.windowID);
+        if (!w)
+            break;
+        /* UTF-8 -> code page 1252 characters, one WM_CHAR each */
+        for (const unsigned char* p = (const unsigned char*)e->text.text; *p;)
+        {
+            unsigned c = *p++;
+            if (c >= 0x80)
+            {
+                unsigned n = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1, v = c & (0x3F >> n);
+                for (unsigned k = 0; k < n && (*p & 0xC0) == 0x80; ++k)
+                    v = (v << 6) | (*p++ & 0x3F);
+                c = v <= 0xFF ? v : '?';
+            }
+            post(w->tid, w->hwnd, WM_CHAR, c, 1);
+        }
+        break;
+    }
+    case SDL_EVENT_MOUSE_MOTION:
+        w = wnd_of_sdl(e->motion.windowID);
+        if (w)
+        {
+            int mx = (int)e->motion.x, my = (int)e->motion.y;
+            ui_unsqueeze(w, &mx, &my);
+            post(w->tid, w->hwnd, WM_MOUSEMOVE, mouse_keys(e->motion.state & ~g_overlay_buttons),
+                ((uint32_t)(uint16_t)my << 16) | (uint16_t)mx);
+        }
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+    {
+        w = wnd_of_sdl(e->button.windowID);
+        if (!w)
+            break;
+        int down = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        uint32_t msg = e->button.button == SDL_BUTTON_LEFT    ? (down ? WM_LBUTTONDOWN : WM_LBUTTONUP)
+                     : e->button.button == SDL_BUTTON_RIGHT   ? (down ? WM_RBUTTONDOWN : WM_RBUTTONUP)
+                     : e->button.button == SDL_BUTTON_MIDDLE ? (down ? WM_MBUTTONDOWN : WM_MBUTTONUP)
+                                                             : 0;
+        if (!msg)
+            break;
+        int bx = (int)e->button.x, by = (int)e->button.y;
+        ui_unsqueeze(w, &bx, &by);
+        uint32_t lp = ((uint32_t)(uint16_t)by << 16) | (uint16_t)bx;
+        g_mouse_held = SDL_GetMouseState(NULL, NULL) != 0;
+        post(w->tid, w->hwnd, msg, mouse_keys(SDL_GetMouseState(NULL, NULL) & ~g_overlay_buttons), lp);
+        break;
+    }
+    case SDL_EVENT_MOUSE_WHEEL:
+        w = wnd_of_sdl(e->wheel.windowID);
+        if (w)
+            post(w->tid, w->hwnd, WM_MOUSEWHEEL, ((uint32_t)(uint16_t)(int16_t)(e->wheel.y * 120) << 16),
+                ((uint32_t)(uint16_t)(int)e->wheel.mouse_y << 16) | (uint16_t)(int)e->wheel.mouse_x);
+        break;
+    case SDL_EVENT_QUIT:
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        /* Cmd+Q, the Dock's Quit, Ctrl+C, the window's close button: the player leaving. FFXI
+         * only leaves from its own menus (its window procedure ignores WM_CLOSE), so the host
+         * ends the run here; nothing is lost - the registry is saved as the game changes it. */
+        rt_log("[recomp] quit\n");
+        if (user32_quit_hook)
+            user32_quit_hook();
+        fflush(NULL);
+        _Exit(0);
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+    {
+        w = wnd_of_sdl(e->window.windowID);
+        if (!w)
+            break;
+        int on = e->type == SDL_EVENT_WINDOW_FOCUS_GAINED;
+        post(w->tid, w->hwnd, WM_ACTIVATEAPP, (uint32_t)on, 0);
+        post(w->tid, w->hwnd, WM_ACTIVATE, on ? 1u : 0u, 0);
+        post(w->tid, w->hwnd, on ? WM_SETFOCUS : WM_KILLFOCUS, 0, 0);
+        if (on)
+            g_focus = w->hwnd;
+        else
+        {
+            memset(g_keys, 0, sizeof g_keys);
+            input_release_all();
+        }
+        break;
+    }
+    case SDL_EVENT_WINDOW_MOVED:
+        w = wnd_of_sdl(e->window.windowID);
+        if (w)
+        {
+            w->x = e->window.data1;
+            w->y = e->window.data2;
+            post(w->tid, w->hwnd, WM_MOVE, 0, ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
+        }
+        break;
+    default: break;
+    }
+}
+
+void user32_replay(const void* sdl_event) { deliver((const SDL_Event*)sdl_event); }
+
 /* Pumps SDL on the window's thread and turns its events into queued messages. */
 static void pump(void)
 {
@@ -504,127 +632,17 @@ static void pump(void)
             g_mouse_held = SDL_GetMouseState(NULL, NULL) != 0;
             continue;
         }
-        input_sdl_event(&e); /* DirectInput's view of the same events */
-        Wnd* w = NULL;
-        switch (e.type)
+        if (user32_mouse_hook && (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                                  e.type == SDL_EVENT_MOUSE_BUTTON_UP || e.type == SDL_EVENT_MOUSE_WHEEL))
         {
-        case SDL_EVENT_KEY_DOWN:
-        case SDL_EVENT_KEY_UP:
-        {
-            w = wnd_of_sdl(e.key.windowID);
-            uint32_t vk = vk_of(e.key.scancode);
-            if (!w || !vk)
-                break;
-            int down = e.type == SDL_EVENT_KEY_DOWN;
-            uint32_t scan = scan_of_vk(vk);
-            if (e.key.scancode == SDL_SCANCODE_RCTRL || e.key.scancode == SDL_SCANCODE_RALT || e.key.scancode == SDL_SCANCODE_KP_ENTER)
-                scan |= 0x100;
-            if (e.key.scancode == SDL_SCANCODE_RSHIFT)
-                scan = 0x36;
-            /* lParam: repeat 1, scan code, extended bit 24, previous state 30, transition 31 */
-            uint32_t lp = 1u | ((scan & 0xFFu) << 16) | ((scan & 0x100u) << 16) |
-                (down ? (e.key.repeat ? 0x40000000u : 0) : 0xC0000000u);
-            g_keys[vk] = down ? 0x80 : 0;
-            uint32_t msg = vk == 0x12 || (g_keys[0x12] && vk != 0x12) ? (down ? WM_SYSKEYDOWN : WM_SYSKEYUP) : (down ? WM_KEYDOWN : WM_KEYUP);
-            post(w->tid, w->hwnd, msg, vk, lp);
-            break;
+            int ww = 0, wh = 0;
+            SDL_Window* sw = SDL_GetWindowFromEvent(&e);
+            if (sw)
+                SDL_GetWindowSize(sw, &ww, &wh);
+            if (user32_mouse_hook(&e, ww, wh))
+                continue;
         }
-        case SDL_EVENT_TEXT_INPUT:
-        {
-            w = wnd_of_sdl(e.text.windowID);
-            if (!w)
-                break;
-            /* UTF-8 -> code page 1252 characters, one WM_CHAR each */
-            for (const unsigned char* p = (const unsigned char*)e.text.text; *p;)
-            {
-                unsigned c = *p++;
-                if (c >= 0x80)
-                {
-                    unsigned n = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1, v = c & (0x3F >> n);
-                    for (unsigned k = 0; k < n && (*p & 0xC0) == 0x80; ++k)
-                        v = (v << 6) | (*p++ & 0x3F);
-                    c = v <= 0xFF ? v : '?';
-                }
-                post(w->tid, w->hwnd, WM_CHAR, c, 1);
-            }
-            break;
-        }
-        case SDL_EVENT_MOUSE_MOTION:
-            w = wnd_of_sdl(e.motion.windowID);
-            if (w)
-            {
-                int mx = (int)e.motion.x, my = (int)e.motion.y;
-                ui_unsqueeze(w, &mx, &my);
-                post(w->tid, w->hwnd, WM_MOUSEMOVE, mouse_keys(e.motion.state & ~g_overlay_buttons),
-                    ((uint32_t)(uint16_t)my << 16) | (uint16_t)mx);
-            }
-            break;
-        case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        case SDL_EVENT_MOUSE_BUTTON_UP:
-        {
-            w = wnd_of_sdl(e.button.windowID);
-            if (!w)
-                break;
-            int down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-            uint32_t msg = e.button.button == SDL_BUTTON_LEFT    ? (down ? WM_LBUTTONDOWN : WM_LBUTTONUP)
-                         : e.button.button == SDL_BUTTON_RIGHT   ? (down ? WM_RBUTTONDOWN : WM_RBUTTONUP)
-                         : e.button.button == SDL_BUTTON_MIDDLE ? (down ? WM_MBUTTONDOWN : WM_MBUTTONUP)
-                                                                 : 0;
-            if (!msg)
-                break;
-            int bx = (int)e.button.x, by = (int)e.button.y;
-            ui_unsqueeze(w, &bx, &by);
-            uint32_t lp = ((uint32_t)(uint16_t)by << 16) | (uint16_t)bx;
-            g_mouse_held = SDL_GetMouseState(NULL, NULL) != 0;
-            post(w->tid, w->hwnd, msg, mouse_keys(SDL_GetMouseState(NULL, NULL) & ~g_overlay_buttons), lp);
-            break;
-        }
-        case SDL_EVENT_MOUSE_WHEEL:
-            w = wnd_of_sdl(e.wheel.windowID);
-            if (w)
-                post(w->tid, w->hwnd, WM_MOUSEWHEEL, ((uint32_t)(uint16_t)(int16_t)(e.wheel.y * 120) << 16),
-                    ((uint32_t)(uint16_t)(int)e.wheel.mouse_y << 16) | (uint16_t)(int)e.wheel.mouse_x);
-            break;
-        case SDL_EVENT_QUIT:
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            /* Cmd+Q, the Dock's Quit, Ctrl+C, the window's close button: the player leaving. FFXI
-             * only leaves from its own menus (its window procedure ignores WM_CLOSE), so the host
-             * ends the run here; nothing is lost - the registry is saved as the game changes it. */
-            rt_log("[recomp] quit\n");
-            if (user32_quit_hook)
-                user32_quit_hook();
-            fflush(NULL);
-            _Exit(0);
-        case SDL_EVENT_WINDOW_FOCUS_GAINED:
-        case SDL_EVENT_WINDOW_FOCUS_LOST:
-        {
-            w = wnd_of_sdl(e.window.windowID);
-            if (!w)
-                break;
-            int on = e.type == SDL_EVENT_WINDOW_FOCUS_GAINED;
-            post(w->tid, w->hwnd, WM_ACTIVATEAPP, (uint32_t)on, 0);
-            post(w->tid, w->hwnd, WM_ACTIVATE, on ? 1u : 0u, 0);
-            post(w->tid, w->hwnd, on ? WM_SETFOCUS : WM_KILLFOCUS, 0, 0);
-            if (on)
-                g_focus = w->hwnd;
-            else
-            {
-                memset(g_keys, 0, sizeof g_keys);
-                input_release_all();
-            }
-            break;
-        }
-        case SDL_EVENT_WINDOW_MOVED:
-            w = wnd_of_sdl(e.window.windowID);
-            if (w)
-            {
-                w->x = e.window.data1;
-                w->y = e.window.data2;
-                post(w->tid, w->hwnd, WM_MOVE, 0, ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
-            }
-            break;
-        default: break;
-        }
+        deliver(&e);
     }
 }
 
@@ -1860,6 +1878,66 @@ void* user32_sdl_window(uint32_t hwnd)
 {
     Wnd* w = wnd(hwnd);
     return w ? w->sdl : NULL;
+}
+
+/* --- the mouse held by the host (host/camera.c) --------------------------------------------------- */
+int (*user32_mouse_hook)(const void* sdl_event, int window_w, int window_h);
+
+void user32_mouse_capture(int on)
+{
+    static float hx, hy;
+    static SDL_Window* held;
+    if (!g_sdl_up)
+        return;
+    if (on && !held)
+    {
+        Wnd* w = wnd(g_focus);
+        if (!w || !w->sdl)
+            return;
+        held = w->sdl;
+        SDL_GetMouseState(&hx, &hy);
+        SDL_SetWindowRelativeMouseMode(held, true);
+    }
+    else if (!on && held)
+    {
+        /* back where the drag began, where the game still has the cursor */
+        SDL_SetWindowRelativeMouseMode(held, false);
+        SDL_WarpMouseInWindow(held, hx, hy);
+        held = NULL;
+    }
+}
+
+/* the control port's mouse: events as SDL would make them, through the same pump */
+void user32_inject_mouse(int kind, float x, float y, int button)
+{
+    static float at_x, at_y;
+    static SDL_MouseButtonFlags state;
+    Wnd* w = wnd(g_focus);
+    if (!g_sdl_up || !w || !w->sdl)
+        return;
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    SDL_WindowID id = SDL_GetWindowID(w->sdl);
+    if (kind == 0)
+    {
+        e.type = SDL_EVENT_MOUSE_MOTION;
+        e.motion.windowID = id, e.motion.which = USER32_INJECTED_MOUSE, e.motion.x = x, e.motion.y = y, e.motion.xrel = x - at_x, e.motion.yrel = y - at_y;
+        e.motion.state = state;
+        at_x = x, at_y = y;
+    }
+    else if (kind == 1 || kind == 2)
+    {
+        e.type = kind == 1 ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+        e.button.windowID = id, e.button.which = USER32_INJECTED_MOUSE, e.button.button = (Uint8)button, e.button.down = kind == 1, e.button.clicks = 1;
+        e.button.x = at_x, e.button.y = at_y;
+        state = kind == 1 ? state | SDL_BUTTON_MASK(button) : state & ~SDL_BUTTON_MASK(button);
+    }
+    else
+    {
+        e.type = SDL_EVENT_MOUSE_WHEEL;
+        e.wheel.windowID = id, e.wheel.which = USER32_INJECTED_MOUSE, e.wheel.y = y, e.wheel.mouse_x = at_x, e.wheel.mouse_y = at_y;
+    }
+    SDL_PushEvent(&e);
 }
 
 void user32_set_ui_aspect(float aspect) { g_ui_aspect = aspect; }

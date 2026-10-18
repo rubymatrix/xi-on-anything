@@ -23,6 +23,9 @@ key holds, frame captures, waits). Commands:
   capture {path}             the next frame to a file (see d3d8_capture); -> path, w, h, format
   entities {radius, limit}   entities near the player: index, id, name, type, distance, hp%
   target {index}             target an entity as the game does
+  mouse {at, click, drag, button, both, steps, ms, wheel}  the mouse: move to at = {x, y} (the
+                             window's points), click a button there, drag = {dx, dy} with a button
+                             held (both: the other one too; in steps over ms), or turn the wheel
   wait {ms | frames}         returns after that long
   lua {code}                 Lua run in this addon (xi.* available): what it returns, as JSON
 --]==]
@@ -347,6 +350,44 @@ local function release_keys()
     return { released = n }
 end
 
+-------------------------------------------------------------------------------- the mouse
+
+local mouse_at = { 0, 0 }
+
+local function mouse(a)
+    local m = xi.input.mouse
+    local button = a.button == 'right' and 3 or a.button == 'middle' and 2 or 1
+    if type(a.at) == 'table' then
+        mouse_at = { tonumber(a.at[1]) or 0, tonumber(a.at[2]) or 0 }
+        m('move', mouse_at[1], mouse_at[2])
+        coroutine.sleepf(2)
+    end
+    if a.click then
+        m('down', 0, 0, button) coroutine.sleepf(2)
+        m('up', 0, 0, button) coroutine.sleepf(2)
+    end
+    if type(a.drag) == 'table' then
+        local dx, dy = tonumber(a.drag[1]) or 0, tonumber(a.drag[2]) or 0
+        local steps = math.max(1, tonumber(a.steps) or 10)
+        local both = a.both and (button == 1 and 3 or 1)
+        m('down', 0, 0, button) coroutine.sleepf(1)
+        if both then m('down', 0, 0, both) coroutine.sleepf(1) end
+        local x0, y0 = mouse_at[1], mouse_at[2]
+        for i = 1, steps do
+            m('move', x0 + dx * i / steps, y0 + dy * i / steps)
+            sleep_ms((tonumber(a.ms) or 300) / steps)
+        end
+        mouse_at = { x0 + dx, y0 + dy }
+        if both then m('up', 0, 0, both) coroutine.sleepf(1) end
+        m('up', 0, 0, button) coroutine.sleepf(2)
+    end
+    if a.wheel then
+        m('wheel', 0, tonumber(a.wheel) or 0)
+        coroutine.sleepf(2)
+    end
+    return { at = mouse_at }
+end
+
 -------------------------------------------------------------------------------- the rest of the commands
 
 local function capture(a)
@@ -406,6 +447,7 @@ local commands = {
         return true
     end,
     release_keys = release_keys,
+    mouse = mouse,
     capture = capture,
     entities = entities,
     target = function(a)

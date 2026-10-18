@@ -25,6 +25,7 @@
 #include "host.h"
 #include "res.h"
 #include "plat.h"
+#include "user32.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -683,8 +684,17 @@ static int i_inject(lua_State* L)
     xi_key_inject((uint32_t)d, lua_toboolean(L, 2));
     return 0;
 }
+/* mouse(kind, x, y, button): an event as the mouse makes it - "move" to x, y (the window's points),
+ * "down"/"up" of button 1 (left) or 3 (right), "wheel" turned y notches (the control port's) */
+static int i_mouse(lua_State* L)
+{
+    static const char* const KINDS[] = { "move", "down", "up", "wheel", NULL };
+    int kind = luaL_checkoption(L, 1, NULL, KINDS);
+    user32_inject_mouse(kind, (float)luaL_optnumber(L, 2, 0), (float)luaL_optnumber(L, 3, 0), (int)luaL_optinteger(L, 4, 1));
+    return 0;
+}
 static const luaL_Reg INPUT_FNS[] = { { "bind", i_bind }, { "unbind", i_unbind }, { "key_down", i_key_down },
-    { "code", i_code }, { "inject", i_inject }, { NULL, NULL } };
+    { "code", i_code }, { "inject", i_inject }, { "mouse", i_mouse }, { NULL, NULL } };
 
 /* --- xi.addons -------------------------------------------------------------------------------- */
 

@@ -216,6 +216,11 @@ def t_lua(a):
     return text(GAME.call('lua', {'code': a['code']}, timeout=float(a.get('timeout_s', 30))))
 
 
+def t_mouse(a):
+    args = {k: a[k] for k in ('at', 'drag', 'button', 'steps', 'ms', 'wheel', 'click', 'both') if k in a}
+    return text(GAME.call('mouse', args, timeout=10 + float(a.get('ms', 300)) / 1000))
+
+
 def t_launch(a):
     exe = a.get('executable') or os.environ.get('XI_GAME')
     if not exe:
@@ -284,6 +289,13 @@ TOOLS = [
     ('game_entities', t_entities, 'Entities (players, NPCs, monsters) near the player, nearest first.',
      {'radius': {'type': 'number'}, 'limit': {'type': 'integer'}}),
     ('game_target', t_target, 'Target an entity by its index (from game_entities).', {'index': {'type': 'integer'}}, ['index']),
+    ('game_mouse', t_mouse, 'The mouse, through the same path as the real one: move to at = [x, y] (the '
+     'window\'s points), click there, drag = [dx, dy] with a button held (both=true holds the other button too), '
+     'or turn the wheel (notches, positive away from you).',
+     {'at': {'type': 'array', 'items': {'type': 'number'}}, 'click': {'type': 'boolean'},
+      'drag': {'type': 'array', 'items': {'type': 'number'}}, 'button': {'type': 'string', 'enum': ['left', 'right']},
+      'both': {'type': 'boolean'}, 'steps': {'type': 'integer'}, 'ms': {'type': 'integer'},
+      'wheel': {'type': 'number'}}),
     ('game_wait', t_wait, 'Wait in game time (frames keep drawing).', {'ms': {'type': 'integer'}}),
     ('game_lua', t_lua, 'Run Lua inside the game (the addon host\'s xi.* API: xi.game, xi.memory, xi.chat, '
      'xi.packets, xi.res...); returns what the code returns, as JSON. coroutine.sleep(s) works.',

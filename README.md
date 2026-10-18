@@ -32,6 +32,8 @@ sign-in screen's Settings.
   - texture filtering up to 16x, and longer draw and character distances
   - 30 or 60 fps
   - interface shape: full width, 16:9 or 4:3
+- **An orbit camera** like FINAL FANTASY XIV's: drag to turn the camera round your character,
+  both buttons to run, the wheel to zoom out farther than the game allows.
 - **Widescreen and ultrawide**: the 3D view widens with the window instead of stretching a 4:3
   view, the interface can stay 16:9 in the middle of an ultrawide, and nameplates keep their shape.
 - **A native sign-in screen** in the game's own window themes and font, with the password kept in
@@ -340,6 +342,7 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--ui-aspect <w:h>` | Keep the interface at this shape, full height and centered, in a wider window (`16:9` on an ultrawide), instead of stretched across it. The 3D world still fills the window. The mouse is mapped to match, so the sides outside the box can't be clicked. Off by default (`off`); an app bundle's `FFXIUIAspect` key is the default. Best with a 16:9 menu resolution (960x540). |
 | `--nameplates fix\|off` | The names over characters' heads. The game sizes them across by the window's width and down by its height, so they widen with the window (1.8 times at 3440x1440); `fix`, the default, keeps the shape they have in a 4:3 window. Builds with a `nameplate_scale` hook in `meta/builds.json` only. |
 | `--nameplate-scale <s>` | Their size: `1.25`, or across x down (`1x1.2`). 1 by default. |
+| `--camera orbit\|game` | The mouse and the camera. `orbit`, the default, works as in FINAL FANTASY XIV: drag with either button to turn the camera round your character (the cursor hides while you drag), hold both buttons to run, and turn the wheel over the world to zoom out past the game's limit (the wheel over the chat log still scrolls it). A click that does not move is still a click. `game` leaves the game's own drag. An app bundle's `FFXICamera` key is the default; `camera` in `fx.txt` (`1` orbit, `2` game) and `camera_speed` (1 by default) change it while the game runs. First person and cutscenes keep the game's camera. |
 
 The install folder is never written. The registry's install paths are set to where the game
 actually is, and an install that has no `patch.ver` (common for private-server installs) gets one
