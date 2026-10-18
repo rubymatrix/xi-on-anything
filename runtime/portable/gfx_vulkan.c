@@ -270,12 +270,24 @@ typedef struct Map
     uint32_t cap, n;
 } Map;
 
-static uint64_t fnv(const void* p, size_t n)
+/* Eight bytes a step: a pipeline's key is a few hundred bytes, looked up one to three times per draw,
+ * and FNV's byte at a time was a measurable share of the frame. Only these maps use it (never saved). */
+static uint64_t key_hash(const void* p, size_t n)
 {
     const uint8_t* b = (const uint8_t*)p;
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; ++i)
-        h = (h ^ b[i]) * 1099511628211ull;
+    uint64_t h = 0x9E3779B97F4A7C15ull ^ n, w;
+    for (; n >= 8; b += 8, n -= 8)
+    {
+        memcpy(&w, b, 8);
+        h = (h ^ w) * 0xFF51AFD7ED558CCDull;
+        h ^= h >> 32;
+    }
+    w = 0;
+    memcpy(&w, b, n);
+    h = (h ^ w) * 0xC4CEB9FE1A85EC53ull;
+    h ^= h >> 29;
+    h *= 0x94D049BB133111EBull;
+    h ^= h >> 32;
     return h ? h : 1;
 }
 
@@ -283,7 +295,7 @@ static void* map_get(Map* m, const void* key, size_t klen)
 {
     if (!m->cap)
         return NULL;
-    uint64_t h = fnv(key, klen);
+    uint64_t h = key_hash(key, klen);
     for (uint32_t i = (uint32_t)h & (m->cap - 1);; i = (i + 1) & (m->cap - 1))
     {
         MapEnt* e = &m->e[i];
@@ -313,7 +325,7 @@ static void map_put(Map* m, const void* key, size_t klen, void* obj)
             }
         free(old.e);
     }
-    uint64_t h = fnv(key, klen);
+    uint64_t h = key_hash(key, klen);
     uint32_t j = (uint32_t)h & (m->cap - 1);
     while (m->e[j].hash)
         j = (j + 1) & (m->cap - 1);

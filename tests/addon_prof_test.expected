@@ -1,0 +1,19 @@
+[chat N] find again: true
+[chat N] second match: true
+[chat N] cached: true
+[chat N] after a patch: true
+[chat N] patch undone: true
+[chat N] addon: loaded proftest (xi)
+[addons] slow N: proftest command N ms (cpu N ms, heap N -> N MB)
+[chat N] proftest over N s (heap N MB):
+[chat N] frame N ms/s N calls/s avg N us max N ms cpu N%
+[chat N] command N ms/s N calls/s avg N us max N ms cpu N%
+[chat N] load N ms/s N calls/s avg N us max N ms cpu N%
+[chat N] other N ms/s N calls/s avg N us max N ms cpu N%
+[chat N] addon prof: the slow-call log is off
+[chat N] addon prof: calls and frames over N ms go to the log
+[chat N] addon prof: nope is not loaded (addon prof [reset | slow <ms> | <name>])
+[chat N] addon prof: counting from now
+[chat N] addons' time over N s: N ms a second (N% of the time)
+[chat N] proftest N ms/s max N ms cpu N% heap N MB (frame N)
+[chat N] addon: unloaded proftest

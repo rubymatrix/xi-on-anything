@@ -1,0 +1,17 @@
+# The addons' profile and cached pattern scans (tests/addon_prof_test.sh): proftest in the harness.
+frames 1
+load proftest
+frames 2
+# past the slow-call log's one line a second, should loading have been slow
+run 1.1
+command //busy 150
+frames 2
+command //addon prof proftest
+command //addon prof slow 0
+command //busy 150
+command //addon prof slow 250
+command //addon prof nope
+command //addon prof reset
+run 0.1
+command //addon prof
+unload proftest

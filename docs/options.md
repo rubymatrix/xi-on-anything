@@ -139,6 +139,7 @@ the Lighting and Atmosphere pages.
 |---|---|---|
 | Per-addon on/off | Advanced › Addons, `addons.cfg` | Ashita, Windower, xi |
 | Addons master switch | `FFXI_ADDONS` env | |
+| Slow-call log threshold | `FFXI_ADDON_SLOW` env (ms), `/addon prof slow <ms>` | default 100; 0 off |
 | Addon test harness | `--addon-harness` | dev |
 
 ## 11. Server & sign-in

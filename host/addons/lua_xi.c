@@ -199,7 +199,7 @@ static int m_write_string(lua_State* L)
     int terminate = lua_isnoneornil(L, 3) || lua_toboolean(L, 3);
     if (!xi_mapped(a, (uint32_t)n + (terminate ? 1 : 0)))
         return lua_pushboolean(L, 0), 1;
-    code_write(L, a, s, (uint32_t)n);
+    code_write(L, a, s, (uint32_t)n + (terminate ? 1 : 0)); /* a Lua string ends in its NUL */
     memcpy(GUEST_PTR(a), s, n);
     if (terminate)
         wr8(a + (uint32_t)n, 0);
