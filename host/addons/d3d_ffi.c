@@ -331,36 +331,67 @@ static int valid(const void* p, int kind)
 /* Texture objects live in one slab mapped where every address, cut to 32 bits, is at least
  * 0x10000000 (never one of ImGui's small ids) and unique among live textures: the id Lua gets from
  * tonumber(ffi.cast('uint32_t', tex)) is the gui texture's. (Taking blocks from malloc and retrying
- * failed whenever the allocator's region sat low in its 4 GB.) */
+ * failed whenever the allocator's region sat low in its 4 GB; so did mapping it and retrying with
+ * hints higher in the same 4 GB, which the guest's own reservation could fill: #76.) */
 #define TEX_SLOTS 16384u
 static uint8_t* g_slab;
 static size_t g_slot_size, g_slab_bytes, g_slab_next;
 static void* g_slab_free;
 
-static void* map_bytes(void* hint, size_t n)
-{
-#if defined(_WIN32)
-    return VirtualAlloc(hint, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-#else
-    void* p = mmap(hint, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    return p == MAP_FAILED ? NULL : p;
-#endif
-}
-
-static void unmap_bytes(void* p, size_t n)
-{
-#if defined(_WIN32)
-    (void)n;
-    VirtualFree(p, 0, MEM_RELEASE);
-#else
-    munmap(p, n);
-#endif
-}
-
 static int slab_fits(uintptr_t a, size_t n)
 {
     uint64_t lo = (uint32_t)a;
     return lo >= 0x10000000u && lo + n <= 0xFFFFFFFFull;
+}
+
+/* where in [p, p + r) n bytes fit (slab_fits): p itself, else 0x10000000 into p's 4 GB (p sits below
+ * that) or into the next (n bytes from p would cross into it); 0 if not inside. Any r of
+ * SLAB_RESERVE(n) holds one. */
+#define SLAB_RESERVE(n) (2 * (n) + 0x10000000u)
+static uintptr_t slab_place(uintptr_t p, size_t r, size_t n)
+{
+    uintptr_t s = p;
+    if (!slab_fits(s, n))
+        s = (s & ~(uintptr_t)0xFFFFFFFFu) + ((uint32_t)s < 0x10000000u ? 0 : 0x100000000ull) + 0x10000000u;
+    return s + n <= p + r ? s : 0;
+}
+
+/* the slab's n bytes, mapped at a place that fits: SLAB_RESERVE(n) bytes of address space reserved,
+ * the slab mapped where it fits inside, the rest let go */
+static void* slab_map(size_t n)
+{
+    size_t r = SLAB_RESERVE(n);
+#if defined(_WIN32)
+    /* a reservation can only be let go whole: the place found, then taken (another thread may take it
+     * between the two: once more) */
+    for (int tries = 0; tries < 4; ++tries)
+    {
+        void* p = VirtualAlloc(NULL, r, MEM_RESERVE, PAGE_NOACCESS);
+        if (!p)
+            return NULL;
+        uintptr_t s = slab_place((uintptr_t)p, r, n);
+        VirtualFree(p, 0, MEM_RELEASE);
+        void* q = s ? VirtualAlloc((void*)s, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) : NULL;
+        if (q)
+            return q;
+    }
+    return NULL;
+#else
+    uint8_t* p = (uint8_t*)mmap(NULL, r, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED)
+        return NULL;
+    uint8_t* s = (uint8_t*)slab_place((uintptr_t)p, r, n);
+    if (!s || mmap(s, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
+    {
+        munmap(p, r);
+        return NULL;
+    }
+    if (s > p)
+        munmap(p, (size_t)(s - p));
+    if (s + n < p + r)
+        munmap(s + n, (size_t)(p + r - (s + n)));
+    return s;
+#endif
 }
 
 static void* slab_alloc(size_t n)
@@ -369,19 +400,10 @@ static void* slab_alloc(size_t n)
     {
         g_slot_size = (n + 63) & ~(size_t)63;
         g_slab_bytes = g_slot_size * TEX_SLOTS;
-        uint8_t* p = (uint8_t*)map_bytes(NULL, g_slab_bytes);
-        for (int tries = 0; p && !slab_fits((uintptr_t)p, g_slab_bytes) && tries < 32; ++tries)
-        {
-            /* the same 4 GB, higher up (0x20000000 + a step each try) */
-            uintptr_t hint = ((uintptr_t)p & ~(uintptr_t)0xFFFFFFFFu) + 0x20000000u + (uintptr_t)tries * 0x04000000u;
-            unmap_bytes(p, g_slab_bytes);
-            p = (uint8_t*)map_bytes((void*)hint, g_slab_bytes);
-        }
-        if (!p || !slab_fits((uintptr_t)p, g_slab_bytes))
+        uint8_t* p = (uint8_t*)slab_map(g_slab_bytes);
+        if (!p)
         {
             xi_log("d3d8 ffi: no memory for texture objects where their ids fit");
-            if (p)
-                unmap_bytes(p, g_slab_bytes);
             return NULL;
         }
         g_slab = p;
