@@ -186,6 +186,7 @@ typedef struct Obj
     uint32_t pw, ph;     /* render-target textures drawn at the screen's resolution (native_size): gpu's
                           * size, where the game sees width x height; 0 when they are the same */
     uint8_t water;       /* vertex buffers: made while the game loaded a water model (d3d8_water_loading) */
+    uint8_t unread;      /* render-target textures: drawn into since last cleared or sampled (d3d8_probe_test) */
 } Obj;
 
 static Obj* g_objs;
@@ -727,6 +728,9 @@ static void raise_top(int* top, uint32_t n)
 /* A 16x16 occlusion probe tests a quad at the sky's depth (z 0x3f7ffffe, 1 - 2^-23: the game's
  * probe for the sun and its lens flare) since the last probe was read; see lock_rect. */
 static int g_probe_sky;
+static int g_gpu_skip; /* inside a call whose draws, clears and copies nobody sees (d3d8_probe_test) */
+static int g_gpu_skip_seen; /* the call's first draw has been looked at */
+static int g_probe_wrapped; /* d3d8_probe_test installed: render targets' unread is kept */
 static int g_occlusion; /* d3d8_set_occlusion */
 static uint32_t g_d3d;
 
@@ -1195,6 +1199,47 @@ static void IDirect3DDevice8_Reset(Guest* g)
     RET(D3D_OK, 2);
 }
 
+static int async_readback(void)
+{
+    static int async = -1;
+    if (async < 0)
+        async = getenv("FFXI_ASYNC_READBACK") && getenv("FFXI_ASYNC_READBACK")[0] == '1';
+    return async;
+}
+
+/* the occlusion mode FFXI_PROBE forces on the probes' reads (lock_rect), 0 for none */
+static int probe_forced(void)
+{
+    static int forced = -1;
+    if (forced < 0)
+    {
+        int gpu = getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu");
+#if defined(FFXI_ANDROID_VULKAN)
+        forced = async_readback() ? 1 : gpu ? 2 : 0;
+#else
+        forced = gpu ? (async_readback() ? 1 : 2) : 0;
+#endif
+    }
+    return forced;
+}
+
+/* The game's occlusion test of a character's screen rectangle (host64.c wraps it where the build is known): it
+ * draws the rectangle black and then white where the scene's depth is behind the character, into a 4096x4096
+ * scratch target, samples that into 16x16 and reads the copy back to decide whether the name is drawn. Occlusion
+ * 0 answers that read fully visible without the GPU (lock_rect), so while it runs its draws, clears and copies
+ * are dropped: up to 12 a frame, each two quads of as much as 3,000x3,000 pixels. The game's code still runs,
+ * its state and answer as before. Not the sun flare's probe (character 0), whose answer is read. */
+void d3d8_probe_test(Guest* g, GuestFn orig, int character)
+{
+    g_probe_wrapped = 1;
+    g_gpu_skip = character && g_occlusion == 0 && !probe_forced();
+    g_gpu_skip_seen = 0;
+    orig(g);
+    g_gpu_skip = 0;
+}
+
+void d3d8_probe_wrapped(void) { g_probe_wrapped = 1; }
+
 /* Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion): the frame is done */
 static void (*g_present_hook)(void);
 
@@ -1642,6 +1687,8 @@ static void IDirect3DDevice8_CopyRects(Guest* g)
     Obj* d = obj(ARG(4));
     if (!s || !d || s->format != d->format)
         RET(D3DERR_INVALIDCALL, 6);
+    if (g_gpu_skip)
+        RET(D3D_OK, 6);
     if (surface_scaled(s) || surface_scaled(d))
     {
         static int said;
@@ -1737,6 +1784,15 @@ static void apply_targets(void);
 static void IDirect3DDevice8_Clear(Guest* g)
 {
     WORLD_FLUSH();
+    if (g_gpu_skip)
+        RET(D3D_OK, 7);
+    if (g_probe_wrapped && (ARG(3) & 1u) && !ARG(1)) /* D3DCLEAR_TARGET, all of it */
+    {
+        Obj* rt = obj(g_dev.rt);
+        Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+        if (t)
+            t->unread = 0;
+    }
     apply_targets();
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
@@ -3874,6 +3930,19 @@ static int game_shadow_hidden(const GfxDraw* d)
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
     uint32_t up_data, uint32_t up_stride, uint32_t n)
 {
+    if (g_gpu_skip)
+    {
+        /* what the call draws over must not be waiting to be used: the scratch target is also where a fading
+         * character is drawn before it is composited (cleared at the start, not after), so a probe between the
+         * two would have been composited with it - drawn then as the game draws it */
+        Obj* rt = obj(g_dev.rt);
+        Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+        if (!g_gpu_skip_seen && t && t->unread)
+            g_gpu_skip = 0;
+        g_gpu_skip_seen = 1;
+        if (g_gpu_skip)
+            return;
+    }
     GfxDraw* d = &g_draw;
     if (!build_draw(d))
         return;
@@ -3922,6 +3991,19 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
     d->prim = prim, d->count = count;
     apply_targets();
     gfx_draw(d);
+    if (g_probe_wrapped)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            Obj* t = (d->fs.prog || i < d->fs.nstages) && d->fs.st[i].tex ? obj(g_dev.cur.tex[i]) : NULL;
+            if (t && (t->usage & USAGE_RENDERTARGET))
+                t->unread = 0;
+        }
+        Obj* rt = obj(g_dev.rt);
+        Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+        if (t)
+            t->unread = 1;
+    }
     if (g_cap)
         cap_dump_target(g_cap_n - 1);
 }
@@ -4196,18 +4278,7 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
              * - 2, exactly: the CPU waits for the scene so far (7-8 ms a frame at a 4096x4096 background).
              * FFXI_PROBE=gpu reads exactly; FFXI_ASYNC_READBACK=1 makes that late (Android: always late),
              * and on desktop also reads other small read-only locks late. */
-            static int async = -1, forced = -1;
-            if (async < 0)
-                async = getenv("FFXI_ASYNC_READBACK") && getenv("FFXI_ASYNC_READBACK")[0] == '1';
-            if (forced < 0)
-            {
-                int gpu = getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu");
-#if defined(FFXI_ANDROID_VULKAN)
-                forced = async ? 1 : gpu ? 2 : 0;
-#else
-                forced = gpu ? (async ? 1 : 2) : 0;
-#endif
-            }
+            int async = async_readback(), forced = probe_forced();
             int probe = (flags & LOCK_READONLY) && s->width == 16 && s->height == 16, sky = probe && g_probe_sky;
             int mode = forced ? forced : g_occlusion;
             if (probe)

@@ -217,7 +217,7 @@ Not for players.
 | Area | Switches |
 |---|---|
 | Effects | `debug` (fx), `FFXI_FX_DEBUG` |
-| Rendering | `FFXI_DRAWLOG`, `FFXI_TEXLOG`, `FFXI_TEXDUMP`, `FFXI_PROBE`, `FFXI_ASYNC_READBACK`, `FFXI_UI_NATIVE`, `FFXI_FPS` |
+| Rendering | `FFXI_DRAWLOG`, `FFXI_TEXLOG`, `FFXI_TEXDUMP`, `FFXI_PROBE`, `FFXI_PROBE_DRAW`, `FFXI_ASYNC_READBACK`, `FFXI_UI_NATIVE`, `FFXI_FPS` |
 | GPU validation | `FFXI_VK_VALIDATION`, `FFXI_D3D12_DEBUG` |
 | World | `FFXI_LODLOG`, `FFXI_WATERLOG`, `FFXI_PRIMELOG` |
 | Files / net | `FFXI_DATS_TRACE`, `FFXI_NET_TRACE` |

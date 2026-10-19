@@ -53,6 +53,11 @@ void d3d8_water_loading(int on);
  * 1 the newest copy the GPU has finished (Android only; elsewhere it reads as 0), 2 exactly, waiting
  * for the GPU. 0 until set. */
 void d3d8_set_occlusion(int mode);
+/* the game's occlusion test of a character's rectangle (character != 0) or the sun's, run as orig: with occlusion 0
+ * a character's draws nothing reads are dropped (host64.c's wrap, d3d8.c's note); d3d8_probe_wrapped: installed */
+struct Guest;
+void d3d8_probe_test(struct Guest* g, void (*orig)(struct Guest*), int character);
+void d3d8_probe_wrapped(void);
 int d3d8_occlusion(void);
 
 /* The scene renderer (host/scene.c, gfx_world_draw): fn runs before the next piece of work that would come

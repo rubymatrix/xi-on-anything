@@ -132,6 +132,30 @@ extern const RtModule rt_module_ffxi; /* recomp.py --module ffxi */
 #define DEFAULT_GAME_SERVER 0x7F000001u /* 127.0.0.1: a server on this machine */
 #define XI_APP_ID "xi-on-anything"      /* Linux: the windows' app id, its .desktop file's name */
 
+#if defined(FFXI_WRAP_PROBE_TEST) && !defined(FFXI_ANDROID_VULKAN)
+/* FFXiMain 2025-11-12's occlusion test of a screen rectangle (0x1006c110): its eighth argument is 0 for the sun
+ * flare's, at the sky's depth (d3d8_probe_test). FFXI_PROBE_DRAW=1 leaves it as the game draws it. */
+extern GuestFn rt_wrap_probe_test;
+extern const GuestFn rt_orig_probe_test;
+static void probe_test(Guest* g) { d3d8_probe_test(g, rt_orig_probe_test, (rt_arg(g, 7) & 0xFFu) != 0); }
+#endif
+
+static void probe_hooks_init(void)
+{
+#if defined(FFXI_WRAP_PROBE_TEST) && !defined(FFXI_ANDROID_VULKAN)
+    static const uint8_t entry[16] = { 0x83, 0xec, 0x18, 0x53, 0x55, 0x56, 0x57, 0x8b,
+                                       0x7c, 0x24, 0x2c, 0x89, 0x4c, 0x24, 0x14, 0xd9 }; /* its first bytes */
+    const char* keep = getenv("FFXI_PROBE_DRAW");
+    int ok = FFXI_WRAP_PROBE_TEST == 0x1006c110u && !rt_wrap_probe_test && !(keep && keep[0] == '1');
+    for (int i = 0; ok && i < 16; ++i)
+        ok = rd8(FFXI_WRAP_PROBE_TEST + RD + i) == entry[i];
+    if (ok)
+        rt_wrap_probe_test = probe_test, d3d8_probe_wrapped();
+    rt_log("[recomp] d3d8: characters' occlusion probes %s\n",
+        ok ? "answered without drawing" : "drawn as the game draws them");
+#endif
+}
+
 /* FFXiEntry {989D790D-6236-11D4-80E9-00105A81E890}, IFFXiEntry {989D790C-...} */
 static const uint8_t CLSID_FFXiEntry[16] = { 0x0D, 0x79, 0x9D, 0x98, 0x36, 0x62, 0xD4, 0x11,
                                              0x80, 0xE9, 0x00, 0x10, 0x5A, 0x81, 0xE8, 0x90 };
@@ -1666,6 +1690,7 @@ int main(int argc, char** argv)
     ole_register_class(CLSID_FFXiEntry, FFXI_BASE);
     gamecore_init();
     geometry_hooks_init();
+    probe_hooks_init();
     d3d8_setup();
     d3d8_set_present_hook(present_hook);
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
