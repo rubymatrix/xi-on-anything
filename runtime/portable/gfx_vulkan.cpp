@@ -3395,6 +3395,20 @@ extern "C"
     {
         return 0;
     }
+    // No scene renderer here: the game's own draws stay.
+    int gfx_world_supported(void)
+    {
+        return 0;
+    }
+    int gfx_world_draw(const GfxWorldFrame* f)
+    {
+        (void)f;
+        return 0;
+    }
+    void gfx_world_time(int begin)
+    {
+        (void)begin;
+    }
     // No GPU time per pass here.
     void gfx_pass_timing(int on)
     {

@@ -4,7 +4,7 @@
  *   1. aliases expand (Ashita's /alias, Windower's alias), then route again;
  *   2. the host's own commands: //addon and /addon (load, unload, reload, list, prof), Windower's //lua
  *      (load, unload, reload, list, command), //exec and /exec, //bind /bind //unbind /unbind,
- *      //alias /alias, //input (a line for the game), //echo (to the chat log), /fx prof (the GPU's
+ *      //alias /alias, //input (a line for the game), //echo (to the chat log), /fx set (one scene-effect setting), /fx prof (the GPU's
  *      time per scene-effects pass, gfx.h gfx_pass_report);
  *   3. the addons' command event (every addon sees the line; one may block it);
  *   4. a line nobody handled that starts with // is an error, never chat the server would see;
@@ -485,6 +485,14 @@ static int host_command(const char* line)
     }
     if (!strcasecmp(c, "fx") && n > 1 && !strcasecmp(w[1], "prof"))
         return fx_prof(n > 2 ? w[2] : ""), 1;
+    /* /fx set <key> <value>: one scene-effect setting now, until the settings file next changes (tests: the
+     * scene renderer turned on and off between frame captures) */
+    if (!strcasecmp(c, "fx") && n > 3 && !strcasecmp(w[1], "set"))
+    {
+        gfx_fx_set(w[2], (float)atof(w[3]));
+        chatf("fx: %s = %g", w[2], gfx_fx_get(w[2]));
+        return 1;
+    }
     if (dbl && !strcasecmp(c, "input"))
     {
         xi_chat_queue(1, rest(body, 1));

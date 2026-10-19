@@ -122,6 +122,10 @@ static const struct
      * are and gathered by the same temporal pass; 0 follows ao_quality: 8 low, 12 medium, 16 high (16
      * every frame was nearly a quarter of the effects' cost on a ROG Ally) */
     { "contact_steps", offsetof(GfxFxSettings, contact_steps), 0.0f },
+    /* not an effect: the scene renderer (host/scene.c) draws the zone from the game's own data in place of
+     * the game's draws, 0 off (the game's draws, as before), 1 lit per vertex as the game lights it, 2 lit
+     * per pixel; with or without the effects */
+    { "scene", offsetof(GfxFxSettings, scene), 0.0f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
@@ -234,7 +238,7 @@ void fx_config(void)
 
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
-    "bloom", "rays", "comp", "fxaa", "present" };
+    "bloom", "rays", "comp", "fxaa", "present", "world", "chars" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */

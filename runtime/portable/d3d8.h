@@ -47,3 +47,20 @@ void d3d8_water_loading(int on);
  * for the GPU. 0 until set. */
 void d3d8_set_occlusion(int mode);
 int d3d8_occlusion(void);
+
+/* The scene renderer (host/scene.c, gfx_world_draw): fn runs before the next piece of work that would come
+ * after its batch (a draw, a clear, a change of target, a copy or lock of one, Present); a game texture
+ * (IDirect3DTexture8*) and static vertex buffer as the back end holds them, uploaded if they were written
+ * since (NULL for others); stage 0's sampler as the game has it set, for that texture; and the game's
+ * current target bound for drawing, with its viewport in the target's pixels and in the game's (0 when there
+ * is none). */
+typedef struct GfxBuf GfxBuf;
+void d3d8_set_world_flush(void (*fn)(void));
+/* For comparison: the game's draws that return to site (its fixed-function zone draw), timed as a pass of their own;
+ * 0 none. */
+void d3d8_world_time(uint32_t site);
+GfxTex* d3d8_world_texture(uint32_t iface);
+typedef struct GfxSampler GfxSampler;
+int d3d8_world_sampler(uint32_t iface, GfxSampler* out);
+GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size);
+int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6]);

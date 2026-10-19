@@ -880,6 +880,9 @@ static id<MTLTexture> depth_attachment(void)
     return g_scratch_depth;
 }
 
+static void ts_mark(MTLRenderPassDescriptor* rp, int pass);
+static int g_pass_next = -1; /* the next render pass is timed as this GFX_PASS_* (the scene renderer's) */
+
 static int begin_pass(void)
 {
     if (g_enc)
@@ -887,6 +890,8 @@ static int begin_pass(void)
     if (!g_rt)
         return 0;
     MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+    if (g_pass_next >= 0)
+        ts_mark(p, g_pass_next), g_pass_next = -1;
     p.colorAttachments[0].texture = g_rt->tex;
     p.colorAttachments[0].slice = g_rt_face;
     p.colorAttachments[0].level = g_rt_level;
@@ -4344,6 +4349,286 @@ static void water_bind(void)
 }
 
 /* The finished scene anti-aliased (g_fxs.aa: FXAA), within its viewport, before the interface goes on */
+/* --- the scene renderer (gfx_world_draw, gfx.h) --------------------------------------------------------------
+ * The zone from the game's own data (host/scene.c): one draw per submesh from the game's static vertex buffers,
+ * its instances and lights in two arrays for the whole batch, lit with the game's fixed-function equation per
+ * vertex (mode 1, to match what the game's draws gave) or per pixel (mode 2). Pipelines: the per-pixel switch and
+ * the alpha test are function constants, blending is the pipeline's; built in place the first time (a handful). */
+static const char WORLD_MSL[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "constant bool k_pixel [[function_constant(0)]];\n"
+    "constant bool k_atest [[function_constant(1)]];\n"
+    "struct WF { float4x4 vp; float4 params; };\n" /* params: alpha reference 0..255, the pixel-centre fixup */
+    "struct WL { float4 pos, diffuse, ambient, att; };\n"
+    "struct WI { float4x4 wvp, world, world_inv; float4 sun_dir, sun_col, sun2_dir, sun2_col, ambient, fog, fog_col; int4 light; };\n"
+    "struct WD { uint inst, flags; };\n"
+    "struct VI { float3 pos [[attribute(0)]]; float3 nrm [[attribute(1)]]; float4 col [[attribute(2)]]; float2 uv [[attribute(3)]]; };\n"
+    "struct VO { float4 pos [[position]]; float2 uv; float4 col; float3 wpos; float3 nrm; float z; uint inst [[flat]]; };\n"
+    /* D3D's fixed function, COLORVERTEX with the vertex colour as diffuse and ambient reflectance, no specular:
+     * saturate(vc * (ambient + sum of each light's ambient) + vc * sum of N.L x diffuse), point lights with
+     * 1 / (a0 + a1 d + a2 d^2) out to their range */
+    "static float3 lit(float3 P, float3 N, float3 vc, const device WI& I, const device WL* L) {\n"
+    "  float3 a = I.ambient.rgb, d = float3(0.0);\n"
+    "  if (I.sun_dir.w > 0.0) d += I.sun_col.rgb * max(dot(N, I.sun_dir.xyz), 0.0);\n"
+    "  if (I.sun2_dir.w > 0.0) d += I.sun2_col.rgb * max(dot(N, I.sun2_dir.xyz), 0.0);\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    int li = I.light[k];\n"
+    "    if (li < 0) continue;\n"
+    "    WL l = L[li];\n"
+    "    float3 v = l.pos.xyz - P;\n"
+    "    float dist = length(v);\n"
+    "    if (dist > l.pos.w) continue;\n"
+    "    float at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
+    "    a += l.ambient.rgb * at;\n"
+    "    d += l.diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
+    "  }\n"
+    "  return saturate(vc * a + vc * d);\n"
+    "}\n"
+    "vertex VO world_vs(VI v [[stage_in]], constant WF& F [[buffer(1)]], const device WI* I [[buffer(2)]],\n"
+    "                   const device WL* L [[buffer(3)]], constant WD& D [[buffer(4)]]) {\n"
+    "  const device WI& in = I[D.inst];\n"
+    "  float4 wp = in.world * float4(v.pos, 1.0);\n"
+    "  float3 n = (float4(v.nrm, 0.0) * in.world_inv).xyz;\n"
+    "  if (D.flags & 32u) n = normalize(n);\n"
+    "  VO o;\n"
+    "  o.pos = in.wvp * float4(v.pos, 1.0);\n"
+    "  o.z = o.pos.w;\n"
+    "  o.pos.x += o.pos.w * F.params.y;\n" /* D3D's pixel centres onto Metal's, as gfx_msl.c's fixup */
+    "  o.pos.y -= o.pos.w * F.params.z;\n"
+    "  o.uv = v.uv;\n"
+    "  o.wpos = wp.xyz;\n"
+    "  o.nrm = n;\n"
+    "  o.inst = D.inst;\n"
+    "  o.col = k_pixel ? v.col : float4(lit(wp.xyz, n, v.col.rgb, in, L), v.col.a);\n"
+    "  return o;\n"
+    "}\n"
+    "fragment float4 world_fs(VO i [[stage_in]], constant WF& F [[buffer(1)]], const device WI* I [[buffer(2)]],\n"
+    "                         const device WL* L [[buffer(3)]], constant WD& D [[buffer(4)]],\n"
+    "                         texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  const device WI& in = I[i.inst];\n"
+    "  float3 c = k_pixel ? lit(i.wpos, (D.flags & 32u) ? normalize(i.nrm) : i.nrm, i.col.rgb, in, L) : i.col.rgb;\n"
+    "  float4 tx = t.sample(s, i.uv);\n"
+    "  float4 o = float4(saturate(2.0 * tx.rgb * c), saturate(4.0 * tx.a * i.col.a));\n" /* MODULATE2X, MODULATE4X */
+    "  if (k_atest && !(o.a * 255.0 > F.params.x)) discard_fragment();\n"
+    "  if (in.fog.z > 0.0) o.rgb = mix(in.fog_col.rgb, o.rgb, saturate((in.fog.y - i.z) / max(in.fog.y - in.fog.x, 1e-6)));\n"
+    "  return o;\n"
+    "}\n";
+
+static struct
+{
+    int tried;
+    id<MTLLibrary> lib;
+    MTLVertexDescriptor* vd;
+    struct
+    {
+        uint32_t key;
+        id<MTLRenderPipelineState> p;
+    } pipe[32];
+    uint32_t npipe;
+    id<MTLDepthStencilState> ds[2]; /* opaque (depth written), blended */
+} g_world;
+
+int gfx_world_supported(void) { return g_dev != nil; }
+
+void gfx_world_time(int begin)
+{
+    if (!g_dev || !gfx_pass_timing_on())
+        return;
+    @autoreleasepool
+    {
+        end_pass();
+    }
+    g_pass_next = begin ? GFX_PASS_WORLD : -1;
+}
+
+static int world_init(void)
+{
+    if (g_world.tried)
+        return g_world.lib != nil;
+    g_world.tried = 1;
+    g_world.lib = compile(WORLD_MSL);
+    if (!g_world.lib)
+        return 0;
+    MTLVertexDescriptor* vd = [[MTLVertexDescriptor alloc] init];
+    vd.attributes[0].format = MTLVertexFormatFloat3, vd.attributes[0].offset = 0, vd.attributes[0].bufferIndex = 0;
+    vd.attributes[1].format = MTLVertexFormatFloat3, vd.attributes[1].offset = 12, vd.attributes[1].bufferIndex = 0;
+    vd.attributes[2].format = MTLVertexFormatUChar4Normalized_BGRA, vd.attributes[2].offset = 24, vd.attributes[2].bufferIndex = 0;
+    vd.attributes[3].format = MTLVertexFormatFloat2, vd.attributes[3].offset = 28, vd.attributes[3].bufferIndex = 0;
+    vd.layouts[0].stride = 36;
+    g_world.vd = vd;
+    for (int i = 0; i < 2; ++i)
+    {
+        MTLDepthStencilDescriptor* d = [[MTLDepthStencilDescriptor alloc] init];
+        d.depthCompareFunction = MTLCompareFunctionLessEqual;
+        d.depthWriteEnabled = i == 0;
+        g_world.ds[i] = [g_dev newDepthStencilStateWithDescriptor:d];
+        [d release];
+    }
+    return 1;
+}
+
+static id<MTLRenderPipelineState> world_pipeline(int pixel, int atest, int blend, MTLPixelFormat color, MTLPixelFormat depth,
+    MTLPixelFormat stencil)
+{
+    uint32_t key = (uint32_t)pixel | (uint32_t)atest << 1 | (uint32_t)blend << 2 | (uint32_t)color << 3 | (uint32_t)depth << 13 |
+        (uint32_t)(stencil != MTLPixelFormatInvalid) << 23;
+    for (uint32_t i = 0; i < g_world.npipe; ++i)
+        if (g_world.pipe[i].key == key)
+            return g_world.pipe[i].p;
+    if (g_world.npipe == sizeof g_world.pipe / sizeof g_world.pipe[0])
+        return nil;
+    id<MTLRenderPipelineState> p = nil;
+    @autoreleasepool
+    {
+        MTLFunctionConstantValues* fc = [[MTLFunctionConstantValues alloc] init];
+        bool bp = pixel != 0, ba = atest != 0;
+        [fc setConstantValue:&bp type:MTLDataTypeBool atIndex:0];
+        [fc setConstantValue:&ba type:MTLDataTypeBool atIndex:1];
+        NSError* err = nil;
+        id<MTLFunction> vf = [g_world.lib newFunctionWithName:@"world_vs" constantValues:fc error:&err];
+        id<MTLFunction> ff = [g_world.lib newFunctionWithName:@"world_fs" constantValues:fc error:&err];
+        [fc release];
+        MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+        pd.vertexFunction = vf;
+        pd.fragmentFunction = ff;
+        pd.vertexDescriptor = g_world.vd;
+        MTLRenderPipelineColorAttachmentDescriptor* c = pd.colorAttachments[0];
+        c.pixelFormat = color;
+        if (blend)
+        {
+            c.blendingEnabled = YES;
+            c.sourceRGBBlendFactor = c.sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+            c.destinationRGBBlendFactor = c.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        }
+        pd.depthAttachmentPixelFormat = depth;
+        pd.stencilAttachmentPixelFormat = stencil;
+        if (vf && ff)
+            p = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (!p)
+            __atomic_fetch_add(&g_failures, 1, __ATOMIC_RELAXED),
+                fprintf(stderr, "[recomp] gfx: scene renderer pipeline failed: %s\n", err ? [[err localizedDescription] UTF8String] : "?");
+        [vf release];
+        [ff release];
+        [pd release];
+    }
+    if (p)
+        g_world.pipe[g_world.npipe].key = key, g_world.pipe[g_world.npipe++].p = p;
+    return p;
+}
+
+static void mat_mul(float* out, const float* a, const float* b) /* D3D order: out = a x b */
+{
+    float r[16];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            r[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + a[i * 4 + 3] * b[12 + j];
+    memcpy(out, r, sizeof r);
+}
+
+int gfx_world_draw(const GfxWorldFrame* f)
+{
+    if (!g_dev || !f->nitem || !world_init())
+        return 0;
+    uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
+    int drew = 0;
+    @autoreleasepool
+    {
+        /* timed: a render pass of its own (an extra load and store of the target, only while timing) */
+        int timed = gfx_pass_timing_on();
+        if (timed)
+            end_pass(), g_pass_next = GFX_PASS_WORLD;
+        if (!begin_pass())
+        {
+            g_pass_next = -1;
+            return 0;
+        }
+        id<MTLTexture> depth = depth_attachment();
+        MTLPixelFormat cf = g_rt->tex.pixelFormat, df = depth ? depth.pixelFormat : MTLPixelFormatInvalid;
+        MTLPixelFormat sf = depth && g_ds->has_stencil ? df : MTLPixelFormatInvalid;
+        struct
+        {
+            float vp[16];
+            float params[4];
+        } fu;
+        mat_mul(fu.vp, f->view, f->proj);
+        fu.params[0] = f->alpha_ref, fu.params[1] = f->pixel[0], fu.params[2] = f->pixel[1], fu.params[3] = 0.0f;
+        id<MTLBuffer> fb, ib, lb;
+        NSUInteger fo, io, lo;
+        memcpy(ring(sizeof fu, 256, &fb, &fo), &fu, sizeof fu);
+        memcpy(ring((size_t)f->ninst * sizeof(GfxWorldInst), 256, &ib, &io), f->inst, (size_t)f->ninst * sizeof(GfxWorldInst));
+        GfxWorldLight none;
+        memset(&none, 0, sizeof none);
+        const GfxWorldLight* lights = f->nlight ? f->light : &none;
+        uint32_t nl = f->nlight ? f->nlight : 1;
+        memcpy(ring((size_t)nl * sizeof(GfxWorldLight), 256, &lb, &lo), lights, (size_t)nl * sizeof(GfxWorldLight));
+        [g_enc setVertexBuffer:fb offset:fo atIndex:1];
+        [g_enc setFragmentBuffer:fb offset:fo atIndex:1];
+        [g_enc setVertexBuffer:ib offset:io atIndex:2];
+        [g_enc setFragmentBuffer:ib offset:io atIndex:2];
+        [g_enc setVertexBuffer:lb offset:lo atIndex:3];
+        [g_enc setFragmentBuffer:lb offset:lo atIndex:3];
+        bound_forget();
+        set_viewport(f->vp);
+        int32_t none_sc[4] = { 0, 0, 0, 0 };
+        set_scissor(none_sc);
+        g_bound.valid = 1;
+        int pixel = f->mode == 2;
+        id<MTLRenderPipelineState> cur = nil;
+        id<MTLDepthStencilState> curds = nil;
+        int cull = -1, bias = INT_MIN;
+        for (uint32_t i = 0; i < f->nitem; ++i)
+        {
+            const GfxWorldItem* it = &f->item[i];
+            if (!it->vb || !it->tex || !it->count)
+                continue;
+            int blend = (it->flags & GFX_WORLD_BLEND) != 0;
+            id<MTLRenderPipelineState> p = world_pipeline(pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, cf, df, sf);
+            if (!p)
+                continue;
+            if (p != cur)
+                [g_enc setRenderPipelineState:p], cur = p;
+            id<MTLDepthStencilState> ds = g_world.ds[blend];
+            if (ds != curds)
+                [g_enc setDepthStencilState:ds], curds = ds;
+            int c = (it->flags & GFX_WORLD_TWOSIDED) ? 0 : (it->flags & GFX_WORLD_MIRRORED) ? 1 : 2;
+            if (c != cull)
+                [g_enc setCullMode:c == 2 ? MTLCullModeBack : c == 1 ? MTLCullModeFront : MTLCullModeNone], cull = c;
+            int zb = blend ? f->zbias_blend : f->zbias_opaque;
+            if (zb != bias)
+                [g_enc setDepthBias:-(float)zb slopeScale:-(float)zb * 0.5f clamp:0], bias = zb;
+            [g_enc setVertexBuffer:it->vb->b offset:0 atIndex:0];
+            it->vb->used = g_serial;
+            struct
+            {
+                uint32_t inst, flags;
+            } dc = { it->inst, it->flags };
+            [g_enc setVertexBytes:&dc length:sizeof dc atIndex:4];
+            [g_enc setFragmentBytes:&dc length:sizeof dc atIndex:4];
+            GfxSampler sk = it->samp;
+            sk.addr_u = sk.addr_v = sk.addr_w = (it->flags & GFX_WORLD_CLAMP) ? 3 : 1;
+            if (g_fxs.fx != 0.0f && g_fxs.aniso > 1.0f && it->tex->levels > 1 && it->tex->levels < 32 && sk.min >= 2 &&
+                it->tex->filled == (1u << it->tex->levels) - 1)
+                sk.min = 3, sk.mip = 2, sk.max_aniso = (uint8_t)(g_fxs.aniso > 16.0f ? 16.0f : g_fxs.aniso);
+            [g_enc setFragmentTexture:it->tex->view atIndex:0];
+            [g_enc setFragmentSamplerState:sampler(&sk) atIndex:0];
+            it->tex->used = g_serial;
+            uint32_t n = vertex_count(it->prim, it->count);
+            [g_enc drawPrimitives:it->prim == GFX_TRIANGLESTRIP ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle
+                      vertexStart:it->first
+                      vertexCount:n];
+            ++drew;
+        }
+        bound_forget(); /* what the game's next draw finds bound is not what g_bound says */
+        g_cmd_draws += drew;
+        if (timed)
+            end_pass();
+    }
+    if (gfx_profiling)
+        g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws += drew;
+    return drew > 0;
+}
+
 static void scene_aa(GfxTex* color, const GfxScene* s)
 {
     if (g_fxs.aa < 0.5f || !fx_init())

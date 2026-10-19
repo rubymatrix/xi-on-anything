@@ -1100,6 +1100,24 @@ static void (*g_present_hook)(void);
 
 void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
 
+/* the scene renderer (host/scene.c): its batch goes out before anything that comes after it draws, clears,
+ * changes the targets, copies from them or shows them */
+static void (*g_world_flush)(void);
+void d3d8_set_world_flush(void (*fn)(void)) { g_world_flush = fn; }
+/* timing the game's own zone draws for comparison (scene = -1): the draws returning to site go into a timed pass
+ * of their own (gfx_world_time), which the next other piece of work ends */
+static uint32_t g_world_time_site;
+static int g_world_timing, g_draw_zone;
+void d3d8_world_time(uint32_t site) { g_world_time_site = site; }
+#define WORLD_FLUSH() \
+    do \
+    { \
+        if (g_world_flush) \
+            g_world_flush(); \
+        if (g_world_timing && !g_draw_zone) \
+            gfx_world_time(0), g_world_timing = 0; \
+    } while (0)
+
 void d3d8_set_occlusion(int mode)
 {
 #if defined(FFXI_ANDROID_VULKAN)
@@ -1161,6 +1179,7 @@ static void capture_frame(Obj* bb)
 
 static void IDirect3DDevice8_Present(Guest* g)
 {
+    WORLD_FLUSH();
     cap_present();
     scene_present();
     ui_present();
@@ -1487,6 +1506,7 @@ static void IDirect3DDevice8_CreateImageSurface(Guest* g)
  * destination is uploaded: at once if the GPU owns it, before its next draw if not. */
 static void IDirect3DDevice8_CopyRects(Guest* g)
 {
+    WORLD_FLUSH();
     Obj* s = obj(ARG(1));
     Obj* d = obj(ARG(4));
     if (!s || !d || s->format != d->format)
@@ -1547,6 +1567,7 @@ static void IDirect3DDevice8_CopyRects(Guest* g)
 /* SetRenderTarget(pRenderTarget, pNewZStencil): NULL render target keeps the current one */
 static void IDirect3DDevice8_SetRenderTarget(Guest* g)
 {
+    WORLD_FLUSH();
     if (ARG(1))
     {
         bind(&g_dev.rt, ARG(1));
@@ -1584,6 +1605,7 @@ static void apply_targets(void);
 /* Clear(Count, pRects, Flags, Color, Z, Stencil): D3DRECTs are x1, y1, x2, y2 */
 static void IDirect3DDevice8_Clear(Guest* g)
 {
+    WORLD_FLUSH();
     apply_targets();
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
@@ -1940,7 +1962,12 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
 static void IDirect3DDevice8_DrawPrimitive(Guest* g)
 {
     g_cap_esp = g->esp;
+    /* (the game's DrawPrimitive wrapper, 1000cb20 in 2026-09-03, leaves its caller's return 0x2c up the stack) */
+    g_draw_zone = g_world_time_site && rd32(g->esp + 0x2c) == g_world_time_site;
+    if (g_draw_zone && !g_world_timing)
+        gfx_world_time(1), g_world_timing = 1;
     draw(ARG(1), ARG(3), ARG(2), 0, 0, 0, 0);
+    g_draw_zone = 0;
     RET(D3D_OK, 4);
 }
 
@@ -3568,6 +3595,7 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
 static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size, uint32_t up_data,
     uint32_t up_stride)
 {
+    WORLD_FLUSH();
     uint32_t n = prim_vertices(prim, count);
     if (!n)
         return;
@@ -4070,6 +4098,7 @@ static void unlock_rect(Obj* s)
 /* LockRect(Level, pLockedRect, pRect, Flags) */
 static void Texture_LockRect(Guest* g)
 {
+    WORLD_FLUSH();
     Obj* s = sub(ARG(0), 0, ARG(1));
     if (!s)
         RET(D3DERR_INVALIDCALL, 5);
@@ -4182,6 +4211,7 @@ static void Surface_GetDesc(Guest* g)
 /* LockRect(pLockedRect, pRect, Flags) */
 static void Surface_LockRect(Guest* g)
 {
+    WORLD_FLUSH();
     Obj* s = obj(ARG(0));
     if (!s)
         RET(D3DERR_INVALIDCALL, 4);
@@ -4448,4 +4478,48 @@ void d3d8_setup(void)
     g_vtbl[O_VB] = make_vtbl("IDirect3DVertexBuffer8", kVB);
     g_vtbl[O_IB] = make_vtbl("IDirect3DIndexBuffer8", kIB);
     g_vtbl[O_SURFACE] = make_vtbl("IDirect3DSurface8", kSurface);
+}
+
+/* --- the scene renderer's view of the device (host/scene.c) ------------------------------------------------- */
+GfxTex* d3d8_world_texture(uint32_t iface)
+{
+    int kind = 0;
+    GfxTex* t = texture_for_draw(iface, &kind);
+    return kind == 1 ? t : NULL;
+}
+
+/* stage 0's sampler as a draw now would have it with this texture (build_draw's) */
+int d3d8_world_sampler(uint32_t iface, GfxSampler* out)
+{
+    Obj* to = obj(iface);
+    if (!to)
+        return 0;
+    const uint32_t* t = g_dev.cur.tss[0];
+    uint32_t maxlevel = t[20] > to->lod ? t[20] : to->lod;
+    *out = (GfxSampler){ (uint8_t)t[13], (uint8_t)t[14], (uint8_t)t[25], (uint8_t)t[16], (uint8_t)t[17], (uint8_t)t[18], (uint8_t)t[21],
+        (uint8_t)maxlevel, 0, { 0 }, t[15] };
+    if (to->repl) /* a texture pack's: as build_draw draws it */
+        out->mag = out->min = out->mip = 2, out->max_level = 0, out->lod_cap = 2;
+    return 1;
+}
+
+GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size)
+{
+    Obj* b = obj(iface);
+    if (!b || b->kind != O_VB)
+        return NULL;
+    if (size)
+        *size = b->size;
+    return static_buffer(b);
+}
+
+int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
+{
+    if (!g_dev.rt)
+        return 0;
+    apply_targets();
+    memcpy(game_vp, g_dev.cur.vp, 6 * sizeof *game_vp);
+    memcpy(vp, g_dev.cur.vp, 6 * sizeof *vp);
+    scale_to_target(vp, NULL, 0);
+    return 1;
 }

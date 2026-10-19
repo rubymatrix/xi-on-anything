@@ -310,6 +310,75 @@ int gfx_sun_shadows_on(void); /* the setting: effects, sun > 0, characters cast 
  * before were let go (a zone-in) and as the camera moves on, so what stands behind it casts. */
 float gfx_sun_prime(float* center);
 
+/* The scene renderer (host/scene.c, the scene setting): the zone drawn from the game's own data rather
+ * than from its D3D8 draws, into the current targets (the game's world target and its depth), with
+ * the game's lighting equation - 2 x texture x vertex colour x (ambient + sun + points), table fog -
+ * per vertex (mode 1, as the game's fixed function lights it) or per pixel (mode 2). Positions,
+ * normals and directions are in world space; matrices are D3D's (row vectors, row-major). */
+enum
+{
+    GFX_WORLD_BLEND = 1,     /* alpha blended (SRCALPHA, INVSRCALPHA), no depth write */
+    GFX_WORLD_TWOSIDED = 2,  /* no culling */
+    GFX_WORLD_MIRRORED = 4,  /* placed mirrored: the other faces culled (D3D's CULL_CW) */
+    GFX_WORLD_ATEST = 8,     /* alpha test, GREATER the frame's alpha reference */
+    GFX_WORLD_CLAMP = 16,    /* texture addressing clamped (else wrapped) */
+    GFX_WORLD_NORMALIZE = 32 /* the instance's normals renormalised after the transform (NORMALIZENORMALS) */
+};
+#define GFX_WORLD_LIGHTS 4
+typedef struct GfxWorldLight
+{
+    float pos[4];     /* world; w = range */
+    float diffuse[4];
+    float ambient[4];
+    float att[4];     /* attenuation 0, 1, 2 */
+} GfxWorldLight;
+typedef struct GfxWorldInst
+{
+    float wvp[16];      /* world x view x projection, multiplied as d3d8.c does for the game's draws */
+    float world[16];
+    float world_inv[16];
+    float sun_dir[4];   /* toward the light; w = 1 when there is one */
+    float sun_col[4];
+    float sun2_dir[4];  /* a second directional, w = 1 when there is one */
+    float sun2_col[4];
+    float ambient[4];   /* D3DRS_AMBIENT */
+    float fog[4];       /* start, end, on */
+    float fog_col[4];
+    int32_t light[GFX_WORLD_LIGHTS]; /* into GfxWorldFrame.light; -1 none */
+} GfxWorldInst;
+typedef struct GfxWorldItem
+{
+    GfxBuf* vb;         /* 36-byte vertices: position, normal, D3DCOLOR, uv (FVF 0x152) */
+    GfxTex* tex;
+    uint32_t first, count, prim; /* first vertex, primitive count, GFX_TRIANGLELIST or GFX_TRIANGLESTRIP */
+    uint32_t inst;      /* into GfxWorldFrame.inst */
+    uint32_t flags;     /* GFX_WORLD_* */
+    GfxSampler samp;    /* as the game set stage 0 (its addressing from flags) */
+} GfxWorldItem;
+typedef struct GfxWorldFrame
+{
+    float view[16], proj[16];
+    uint32_t vp[6];        /* D3DVIEWPORT8 */
+    float pixel[2];        /* 1 / the viewport's width and height in the game's pixels: D3D's pixel centres (the
+                            * generated functions' position fixup, gfx_msl.c) */
+    uint32_t mode;         /* 1 per vertex, 2 per pixel */
+    float alpha_ref;       /* 0..255 */
+    int32_t zbias_opaque, zbias_blend;
+    const GfxWorldInst* inst;
+    uint32_t ninst;
+    const GfxWorldItem* item; /* drawn in order: the caller puts the opaque ones first */
+    uint32_t nitem;
+    const GfxWorldLight* light;
+    uint32_t nlight;
+} GfxWorldFrame;
+/* Whether this back end has the scene renderer (asked once, before the game's draws are dropped). */
+int gfx_world_supported(void);
+/* Draws one batch into the current targets; 0 when it drew nothing (no target). */
+int gfx_world_draw(const GfxWorldFrame* f);
+/* While the GPU's passes are timed: 1 the draws from here on are a timed pass of their own (as the scene renderer's
+ * zone, GFX_PASS_WORLD), 0 that pass ends here (the game's own zone draws, timed for comparison). */
+void gfx_world_time(int begin);
+
 /* Whether the scene effects can trace rays here (the rt setting: the GPU's ray queries, and on
  * Direct3D 12 the shaders built with dxc); the first call asks the device. */
 int gfx_rt_supported(void);

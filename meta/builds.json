@@ -62,7 +62,17 @@
         "map_cull_ret4": "0x1017dfd3",
         "map_cull_ret5": "0x10183e3f",
         "map_cull_model1": "0x101834df",
-        "map_cull_model2": "0x101837af"
+        "map_cull_model2": "0x101837af",
+        "scene_mgr": "0x10631f24",
+        "scene_dev": "0x1045666c",
+        "scene_light_factor": "0x1000be50",
+        "scene_fog": "0x10189120",
+        "scene_sun": "0x10188ca0",
+        "scene_sun_pair": "0x10188b70",
+        "scene_ambient": "0x10188e00",
+        "scene_zbias_blend": "0x10631f18",
+        "scene_zbias_opaque": "0x10632038",
+        "scene_zone_draw_ret": "0x1017ddb0"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
@@ -92,7 +102,9 @@
         "frame_cam_swing": "0x1001fcc8",
         "frame_cam_wait": "0x1001fb9c",
         "frame_look1": "0x1001f5d9",
-        "frame_look2": "0x1002017c"
+        "frame_look2": "0x1002017c",
+        "fx_draw": "0x10046070",
+        "model_draw": "0x1002b6e0"
       },
       "modern": {
         "mgr": "0x10621838",
@@ -177,7 +189,8 @@
         "frame_count": "0x10014d50",
         "frame_yield": "0x1023e4b0",
         "frame_net": "0x100fa180",
-        "frame_net_wait": "0x100edeb0"
+        "frame_net_wait": "0x100edeb0",
+        "mesh_draw": "0x1002a000"
       },
       "patches": {
         "XIUI": {

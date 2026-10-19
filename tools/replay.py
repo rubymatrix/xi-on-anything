@@ -331,7 +331,7 @@ class Shots:
 
 
 PASSES = ('sun maps', 'linz/zmip', 'ao', 'ao rays', 'blur', 'temporal', 'gi', 'bloom', 'rays', 'comp', 'fxaa',
-          'present')  # gfx_fx.c's k_pass_name, in its order
+          'present', 'world', 'chars')  # gfx_fx.c's k_pass_name, in its order (world, chars: the scene renderer's)
 PROF_SCENES = 'markets noon midnight'  # prof's scenes when --play isn't given: a city, and the sun up and down
 PROF_WINDOW = 2.05  # seconds between /fx prof calls: the client sums two-second windows (gfx_pass_tick)
 PROF_HEAD = re.compile(r'fx prof: GPU ms a frame over ([\d.]+) s \((\d+) frames\): frame ([\d.]+), '

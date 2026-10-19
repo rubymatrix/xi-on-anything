@@ -4541,6 +4541,11 @@ static int rt_init(void)
 
 int gfx_rt_supported(void) { return rt_init(); }
 
+/* the scene renderer is Metal's only so far: the game's own draws stay */
+int gfx_world_supported(void) { return 0; }
+int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
+void gfx_world_time(int begin) { (void)begin; }
+
 /* a buffer of at least need bytes in *b (made again, half as large again, when smaller; the old one let go
  * once the GPU is past it): the GPU's own, or one the CPU writes (host) */
 static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host)
