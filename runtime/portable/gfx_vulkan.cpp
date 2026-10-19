@@ -3409,6 +3409,10 @@ extern "C"
     {
         (void)pass;
     }
+    void gfx_shadow_begin(const GfxShadowFrame* f)
+    {
+        (void)f;
+    }
     int gfx_chars_draw(const GfxCharFrame* f)
     {
         (void)f;

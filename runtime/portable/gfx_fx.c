@@ -126,6 +126,16 @@ static const struct
      * the game's draws, 0 off (the game's draws, as before), 1 lit per vertex as the game lights it, 2 lit
      * per pixel; with or without the effects */
     { "scene", offsetof(GfxFxSettings, scene), 0.0f },
+    /* the scene renderer's sun and moon shadows (host/scene.c, gfx_shadow_begin): 0 off, else how much of the
+     * sun's or moon's light a shadow takes (1 all of it); with them on the game's own character shadows stand aside.
+     * Their maps' size in texels, how far from the camera they reach in world units (four cascades out to it), and the
+     * light's step in degrees: the sun's direction is held until it has turned this far, then all four are drawn again */
+    { "scene_shadows", offsetof(GfxFxSettings, scene_shadows), 0.0f },
+    { "scene_shadow_size", offsetof(GfxFxSettings, scene_shadow_size), 2048.0f },
+    { "scene_shadow_far", offsetof(GfxFxSettings, scene_shadow_far), 160.0f },
+    { "scene_shadow_step", offsetof(GfxFxSettings, scene_shadow_step), 0.25f },
+    /* 1: the zone shows the shadow alone, tinted by its cascade (red, green, blue, yellow from the camera out) */
+    { "scene_shadow_debug", offsetof(GfxFxSettings, scene_shadow_debug), 0.0f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
@@ -164,6 +174,8 @@ float gfx_fx_get(const char* key)
 /* the sun's shadows are on: the effects, a sun strength, and characters among the casters */
 int gfx_sun_shadows_on(void)
 {
+    if (g_fxs.scene >= 0.5f && g_fxs.scene_shadows > 0.0f && gfx_world_supported())
+        return 1; /* the scene renderer's own (host/scene.c), characters casting */
     return g_fxs.fx != 0.0f && g_fxs.sun > 0.0f && g_fxs.sun_casters != 2.0f;
 }
 
@@ -238,7 +250,7 @@ void fx_config(void)
 
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
-    "bloom", "rays", "comp", "fxaa", "present", "world", "chars" };
+    "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */

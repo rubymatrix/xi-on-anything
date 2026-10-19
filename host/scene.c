@@ -90,6 +90,7 @@ static Pick* g_picks;
 static uint32_t g_npicks, g_cappicks;
 static List g_opaque, g_blend, g_late; /* the walk's opaque submeshes, its blended ones, the deferred instances' */
 static int g_pending, g_flushing;
+static uint32_t g_frame_no;          /* frames since start (scene_frame) */
 static uint32_t g_scratch;           /* guest memory for the getters' results */
 /* the game's point-light slots as the walk leaves them (1017c9c0): handles last seen and lights enabled */
 static uint32_t g_slot_list, g_slot_handle[GFX_WORLD_LIGHTS], g_slot_light[GFX_WORLD_LIGHTS];
@@ -347,14 +348,292 @@ static int32_t frame_light(uint32_t entry, uint32_t* seen, uint32_t* nlights)
 }
 
 #if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_TEX_FIND)
-static void chars_flush(const uint32_t vp[6], const uint32_t gvp[6]);
+static int chars_frame_of(GfxCharFrame* f, const uint32_t vp[6], const uint32_t gvp[6]);
 static void chars_reset(void);
-#define CHARS_FLUSH(vp, gvp) chars_flush(vp, gvp)
+#define CHARS_FRAME(f, vp, gvp) chars_frame_of(f, vp, gvp)
 #define CHARS_RESET() chars_reset()
 #else
-#define CHARS_FLUSH(vp, gvp) ((void)0)
+#define CHARS_FRAME(f, vp, gvp) 0
 #define CHARS_RESET() ((void)0)
 #endif
+
+/* --- sun and moon shadows (doc phase 3; gfx_shadow_begin) ----------------------------------------------------------
+ * Four cascades round the camera, out to scene_shadow_far, each a square of fixed size in a light space built from
+ * the main light's direction alone (the environment's +0x14c: the sun while it is up, else the moon, eased 10% a
+ * frame by the game). That direction is held until it has turned scene_shadow_step degrees (or the sun and moon swap);
+ * then every cascade is drawn again. A cascade's centre is the camera's place snapped to whole texels, kept until the
+ * camera has gone a quarter of the cascade's reach from it: so its texels never slide under a still or turning camera,
+ * and the zone's layer is drawn only then - at most one cascade a frame, nearest first. The casters are the zone's
+ * instances from both slots' arrays (not the game's visible set: what stands behind the camera casts too), drawn as
+ * the game would pick their model at that distance; hidden ones (state 1), translucent ones, blended submeshes, the
+ * moving sub-map and morphing models don't cast. Characters cast every frame (gfx_metal.m's own layer). */
+enum
+{
+    ENV_MAIN_DIR = 0x14c, /* float3: the main light's direction (as D3D's: the way the light goes) */
+    ENV_RECORD = 0x18,    /* the blended weather record; bit 0 of its first byte: fixed directions (no sky) */
+    SLOT_BASE = 0x60,
+    SLOT_SIZE = 0x78,
+    SLOT_COUNT = 0x24,
+    SLOT_INSTS = 0x28,
+    INST_SIZE = 0x16c,
+    INST_STATE = 0x08,
+    INST_POS = 0x1c,
+    INST_LOD_NEAR = 0xc8,  /* distance² from the near model to the mid one, then to the far one */
+    INST_LOD_FAR = 0xcc,
+    INST_BOX = 0xf4,       /* 8 world corners */
+    MGR_CAM = 0x390f0,
+};
+static const float k_shadow_reach[GFX_SHADOW_CASCADES] = { 0.06f, 0.18f, 0.45f, 1.0f }; /* of scene_shadow_far */
+
+static struct
+{
+    float L[3];               /* toward the light, as held */
+    float R[3], U[3], F[3];   /* the light space: across, up, away from the light */
+    uint32_t stale;           /* cascades to draw again: the light stepped */
+    uint32_t zone_key, size;  /* what the cascades were drawn for */
+    float far;
+    float centre[GFX_SHADOW_CASCADES][3]; /* in light space */
+    GfxShadowCascade c[GFX_SHADOW_CASCADES];
+    uint32_t frame;           /* the frame the zone's layer was last drawn in (one a frame) */
+    int was_on;
+    float* world;
+    uint32_t nworld, capworld;
+    List items;
+    struct
+    {
+        uint32_t redraws, casters, items, steps;
+    } count;
+} g_sh;
+
+static float dot3(const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+static void cross3(float* o, const float* a, const float* b)
+{
+    float r[3] = { a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
+    memcpy(o, r, sizeof r);
+}
+
+static void norm3(float* v)
+{
+    float n = sqrtf(dot3(v, v));
+    if (n > 0.0f)
+        v[0] /= n, v[1] /= n, v[2] /= n;
+}
+
+/* the light space for toward-light L: F away from the light, R and U across it, from the world axis least along it */
+static void shadow_basis(const float* L)
+{
+    memcpy(g_sh.L, L, sizeof g_sh.L);
+    g_sh.F[0] = -L[0], g_sh.F[1] = -L[1], g_sh.F[2] = -L[2];
+    float ax[3] = { 0.0f, 0.0f, 0.0f };
+    float x = fabsf(L[0]), y = fabsf(L[1]), z = fabsf(L[2]);
+    ax[x <= y && x <= z ? 0 : y <= z ? 1 : 2] = 1.0f;
+    cross3(g_sh.R, ax, g_sh.F);
+    norm3(g_sh.R);
+    cross3(g_sh.U, g_sh.F, g_sh.R);
+}
+
+/* the zone the cascades were drawn for: both slots' instance arrays */
+static uint32_t shadow_zone_key(uint32_t mgr)
+{
+    uint32_t k = 0;
+    for (uint32_t s = 0; s < 2; ++s)
+    {
+        uint32_t slot = mgr + SLOT_BASE + s * SLOT_SIZE;
+        k = k * 31u + rd32(slot) * 7u + rd32(slot + SLOT_COUNT) * 131u + rd32(slot + SLOT_INSTS);
+    }
+    return k;
+}
+
+/* cascade i centred on the camera (light space lc) in the light space as held: its matrix and reach */
+static void shadow_fit(int i, const float* lc)
+{
+    float r = g_sh.far * k_shadow_reach[i], m = 0.25f * r;
+    float half = r + m, texel = 2.0f * half / (float)g_sh.size;
+    half += 4.0f * texel; /* the filter's and the normal offset's reach past the edge */
+    texel = 2.0f * half / (float)g_sh.size;
+    float cx = floorf(lc[0] / texel + 0.5f) * texel, cy = floorf(lc[1] / texel + 0.5f) * texel, cz = lc[2];
+    float D = half + 16.0f;
+    GfxShadowCascade* c = &g_sh.c[i];
+    float* M = c->lmat;
+    for (int k = 0; k < 3; ++k)
+        M[4 * k] = g_sh.R[k] / half, M[4 * k + 1] = g_sh.U[k] / half, M[4 * k + 2] = g_sh.F[k] / (2.0f * D), M[4 * k + 3] = 0.0f;
+    M[12] = -cx / half, M[13] = -cy / half, M[14] = (D - cz) / (2.0f * D), M[15] = 1.0f;
+    c->radius = r, c->texel = texel, c->depth = 2.0f * D, c->valid = 1;
+    g_sh.centre[i][0] = cx, g_sh.centre[i][1] = cy, g_sh.centre[i][2] = cz;
+}
+
+/* the zone's casters of cascade i, into g_sh.world and g_sh.items */
+static void shadow_gather(uint32_t mgr, int i, const float* cam)
+{
+    g_sh.nworld = 0, g_sh.items.n = 0;
+    const float* M = g_sh.c[i].lmat;
+    float edge = 1.0f + 16.0f / (float)g_sh.size; /* 8 texels past the side */
+    for (uint32_t s = 0; s < 2; ++s)
+    {
+        uint32_t slot = mgr + SLOT_BASE + s * SLOT_SIZE, state = rd32(slot), n = rd32(slot + SLOT_COUNT), arr = rd32(slot + SLOT_INSTS);
+        if (!state || state == 3 || !arr || n > 65536) /* empty, or the moving sub-map (a ship: no cached layer would hold it) */
+            continue;
+        for (uint32_t k = 0; k < n; ++k)
+        {
+            uint32_t inst = arr + k * INST_SIZE;
+            if (rd32(inst + INST_STATE) == 1 || rd8(inst + INST_DEFERRED))
+                continue;
+            /* its box in the map: across the square, and nearer the light than the farthest receiver */
+            float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+            for (int v = 0; v < 8; ++v)
+            {
+                float p[3] = { rdf32(inst + INST_BOX + 12u * v), rdf32(inst + INST_BOX + 12u * v + 4), rdf32(inst + INST_BOX + 12u * v + 8) };
+                for (int a = 0; a < 3; ++a)
+                {
+                    float q = p[0] * M[a] + p[1] * M[4 + a] + p[2] * M[8 + a] + M[12 + a];
+                    lo[a] = q < lo[a] ? q : lo[a], hi[a] = q > hi[a] ? q : hi[a];
+                }
+            }
+            if (lo[0] > edge || hi[0] < -edge || lo[1] > edge || hi[1] < -edge || lo[2] > 1.0f)
+                continue;
+            float dx = rdf32(inst + INST_POS) - cam[0], dy = rdf32(inst + INST_POS + 4) - cam[1], dz = rdf32(inst + INST_POS + 8) - cam[2];
+            float d2 = dx * dx + dy * dy + dz * dz;
+            uint32_t model = rd32(inst + (d2 >= rdf32(inst + INST_LOD_FAR) ? 0x10 : d2 >= rdf32(inst + INST_LOD_NEAR) ? 0x14 : 0x18));
+            if (!model)
+                continue;
+            uint32_t kind = rd32(model + MODEL_KIND), prim = rd32(model + MODEL_PRIM);
+            uint32_t ngroups = rd32(model + MODEL_NGROUPS), groups = rd32(model + MODEL_GROUPS);
+            if (kind == 2 || (prim != GFX_TRIANGLELIST && prim != GFX_TRIANGLESTRIP) || !groups || ngroups > 64)
+                continue;
+            int atest = rd16(inst + INST_MODE) == 1, added = 0;
+            for (uint32_t gi = 0; gi < ngroups; ++gi)
+            {
+                uint32_t g = groups + gi * 0x24, nsub = rd32(g), subs = rd32(g + 4);
+                for (uint32_t si = 0; si < nsub && subs && nsub < 4096; ++si)
+                {
+                    uint32_t sb = subs + si * 0xc0, vb = rd32(sb + SUB_VB), count = rd32(sb + SUB_PRIMS);
+                    if (!count || !vb || rd16(sb + SUB_BLEND))
+                        continue;
+                    uint32_t size = 0;
+                    GfxBuf* b = d3d8_world_vbuf(vb, &size);
+                    if (!b || size < (prim == GFX_TRIANGLESTRIP ? count + 2 : count * 3) * 36u)
+                        continue;
+                    GfxWorldItem it;
+                    memset(&it, 0, sizeof it);
+                    if (atest)
+                    {
+                        uint32_t texo = rd32(sb + SUB_TEX), iface = texo ? rd32(texo + 0x40) : 0;
+                        if (texo && !iface)
+                            iface = rd32(texo + 0x44);
+                        it.tex = iface ? d3d8_world_texture(iface) : NULL;
+                        it.flags = it.tex ? GFX_WORLD_ATEST : 0;
+                        it.samp.addr_u = it.samp.addr_v = it.samp.addr_w = 1, it.samp.mag = it.samp.min = 2;
+                    }
+                    it.vb = b, it.count = count, it.prim = prim, it.inst = g_sh.nworld;
+                    list_add(&g_sh.items, &it);
+                    added = 1;
+                }
+            }
+            if (!added)
+                continue;
+            if (g_sh.nworld == g_sh.capworld)
+            {
+                g_sh.capworld = g_sh.capworld ? g_sh.capworld * 2 : 4096;
+                g_sh.world = (float*)realloc(g_sh.world, (size_t)g_sh.capworld * 64);
+            }
+            read_mat(g_sh.world + 16 * (size_t)g_sh.nworld++, inst + INST_WORLD);
+        }
+    }
+    g_sh.count.casters += g_sh.nworld, g_sh.count.items += g_sh.items.n;
+}
+
+/* this batch's shadows: the light as held, the cascades, a zone layer to draw again; off when the setting is off, the
+ * build lacks the environment, or the light is a zone's fixed one (no sky: its "sun" would come through the roof) */
+static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
+{
+    memset(sf, 0, sizeof *sf);
+    sf->redraw = -1;
+    float want = gfx_fx_get("scene_shadows");
+#ifdef FFXI_SCENE_ENV
+    uint32_t env = rd32(FFXI_SCENE_ENV);
+#else
+    uint32_t env = 0;
+#endif
+    if (want <= 0.0f || !env)
+    {
+        g_sh.was_on = 0;
+        return;
+    }
+    uint32_t rec = rd32(env + ENV_RECORD);
+    if (rec && (rd8(rec) & 1))
+        want = 0.0f;
+    float d[3] = { rdf32(env + ENV_MAIN_DIR), rdf32(env + ENV_MAIN_DIR + 4), rdf32(env + ENV_MAIN_DIR + 8) };
+    float n = sqrtf(dot3(d, d));
+    if (!(n > 1e-6f) || want <= 0.0f)
+    {
+        g_sh.was_on = 0;
+        return;
+    }
+    float L[3] = { -d[0] / n, -d[1] / n, -d[2] / n };
+    uint32_t size = (uint32_t)gfx_fx_get("scene_shadow_size");
+    size = size < 512 ? 512 : size > 8192 ? 8192 : size;
+    float far = gfx_fx_get("scene_shadow_far");
+    far = far < 16.0f ? 16.0f : far;
+    uint32_t key = shadow_zone_key(mgr);
+    /* the step, smaller as the light nears the horizon: a shadow's length goes as 1 / tan(elevation), so at dawn a
+     * quarter degree moved long shadows by several percent at once; scaled by sin(elevation) / sin(30), at least a
+     * twentieth (the game's y is down: the light's height is |L.y|) */
+    float lift = fabsf(L[1]) / 0.5f;
+    float step = gfx_fx_get("scene_shadow_step") * 3.14159265f / 180.0f * (lift < 0.05f ? 0.05f : lift > 1.0f ? 1.0f : lift);
+    if (!g_sh.was_on || key != g_sh.zone_key || size != g_sh.size || far != g_sh.far)
+    {
+        /* everything again: none valid until drawn */
+        shadow_basis(L);
+        g_sh.zone_key = key, g_sh.size = size, g_sh.far = far;
+        memset(g_sh.c, 0, sizeof g_sh.c);
+        g_sh.stale = (1u << GFX_SHADOW_CASCADES) - 1;
+    }
+    else if (step < 0.0f || dot3(L, g_sh.L) < cosf(step)) /* (a step below 0: every frame, to time the zone's layer) */
+    {
+        shadow_basis(L); /* the light's step: the cascades drawn again one a frame, each keeping its old matrix till then */
+        g_sh.stale = (1u << GFX_SHADOW_CASCADES) - 1;
+        ++g_sh.count.steps;
+    }
+    g_sh.was_on = 1;
+    float iv[16];
+    mat_inv(iv, view);
+    float cam[3] = { iv[12], iv[13], iv[14] };
+    float lc[3] = { dot3(cam, g_sh.R), dot3(cam, g_sh.U), dot3(cam, g_sh.F) };
+    /* a cascade the camera has gone a quarter of its reach from (in the light space it was drawn in) wants drawing */
+    for (int i = 0; i < GFX_SHADOW_CASCADES; ++i)
+    {
+        const GfxShadowCascade* c = &g_sh.c[i];
+        if (!c->valid || (g_sh.stale >> i & 1))
+            continue;
+        const float* M = c->lmat;
+        float half = 1.0f / sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]);
+        float q[3];
+        for (int a = 0; a < 3; ++a)
+            q[a] = cam[0] * M[a] + cam[1] * M[4 + a] + cam[2] * M[8 + a] + M[12 + a];
+        float m = 0.25f * c->radius;
+        if (fabsf(q[0]) * half > m || fabsf(q[1]) * half > m || fabsf(q[2] - 0.5f) * c->depth > m)
+            g_sh.stale |= 1u << i;
+    }
+    if (g_sh.stale && g_sh.frame != g_frame_no)
+    {
+        int i = 0;
+        while (!(g_sh.stale >> i & 1))
+            ++i;
+        g_sh.stale &= ~(1u << i);
+        shadow_fit(i, lc);
+        shadow_gather(mgr, i, cam);
+        sf->redraw = i;
+        g_sh.frame = g_frame_no;
+        ++g_sh.count.redraws;
+    }
+    sf->size = size, sf->ncascades = GFX_SHADOW_CASCADES, sf->nchar = 3;
+    memcpy(sf->dir, g_sh.L, sizeof g_sh.L), sf->dir[3] = 1.0f;
+    memcpy(sf->cam, cam, sizeof cam), sf->cam[3] = gfx_fx_get("scene_shadow_debug") > 0.0f ? 2.0f : 1.0f;
+    sf->strength = want > 1.0f ? 1.0f : want;
+    memcpy(sf->c, g_sh.c, sizeof sf->c);
+    sf->world = g_sh.world, sf->nworld = g_sh.nworld, sf->item = g_sh.items.v, sf->nitem = sf->redraw >= 0 ? g_sh.items.n : 0;
+}
 
 static void flush(void)
 {
@@ -425,9 +704,16 @@ static void flush(void)
     f.alpha_ref = 96.0f; /* the walk's ALPHAREF 0x60, GREATER */
     f.zbias_opaque = (int32_t)rd32(FFXI_SCENE_ZBIAS_OPAQUE), f.zbias_blend = (int32_t)rd32(FFXI_SCENE_ZBIAS_BLEND);
     f.inst = g_inst, f.ninst = g_npicks, f.item = all.v, f.nitem = total, f.light = g_lights, f.nlight = nlights;
+    GfxCharFrame cf;
+    int have_chars = CHARS_FRAME(&cf, vp, gvp);
+    GfxShadowFrame sf;
+    shadow_frame(&sf, mgr, f_view);
+    sf.chars = have_chars ? &cf : NULL;
+    gfx_shadow_begin(sf.dir[3] > 0.0f ? &sf : NULL);
     if (total)
         gfx_world_draw(&f);
-    CHARS_FLUSH(vp, gvp); /* the characters after the zone, as the game draws them */
+    if (have_chars)
+        gfx_chars_draw(&cf); /* the characters after the zone, as the game draws them */
     ++g_count.flushes;
 done:
     /* the next batch (a second walk this frame: the game's reflections, a menu's model view) starts empty */
@@ -790,17 +1076,18 @@ static void mesh_draw(Guest* g)
 
 static void chars_reset(void) { g_ncitems = g_ncstates = g_npal = 0; }
 
-static void chars_flush(const uint32_t vp[6], const uint32_t gvp[6])
+static int chars_frame_of(GfxCharFrame* fp, const uint32_t vp[6], const uint32_t gvp[6])
 {
     if (!g_ncitems)
-        return;
+        return 0;
     GfxCharFrame f;
     memset(&f, 0, sizeof f);
     memcpy(f.vp, vp, sizeof f.vp);
     f.pixel[0] = gvp[2] ? 1.0f / (float)gvp[2] : 0.0f, f.pixel[1] = gvp[3] ? 1.0f / (float)gvp[3] : 0.0f;
     f.alpha_ref = 69.0f; /* the model state's ALPHAREF 0x45, GREATER */
     f.palette = g_pal, f.nbones = g_npal, f.state = g_cstates, f.nstate = g_ncstates, f.item = g_citems, f.nitem = g_ncitems;
-    gfx_chars_draw(&f);
+    *fp = f;
+    return 1;
 }
 
 /* this frame's windowed brightness factor per channel (1000be50 on a grey light), 0 when the game isn't windowed */
@@ -862,6 +1149,7 @@ void scene_frame(void)
     g_npicks = 0, g_opaque.n = g_blend.n = g_late.n = 0, g_pending = 0;
     CHARS_RESET();
     g_slot_list = 0;
+    ++g_frame_no;
     float s = gfx_fx_get("scene");
     int want = s >= 0.5f ? (s >= 1.5f ? 2 : 1) : 0;
 #if defined(FFXI_SCENE_ZONE_DRAW) && defined(FFXI_SCENE_ZONE_DRAW_END) && defined(FFXI_SCENE_CHAR_DRAW) && \
@@ -892,6 +1180,11 @@ void scene_frame(void)
             (double)g_count.items / g_count.frames, (double)g_count.flushes / g_count.frames,
             (double)g_count.fx_calls / g_count.frames);
         memset(&g_count, 0, sizeof g_count);
+        if (g_sh.was_on)
+            rt_log("[recomp] scene: shadows: %u light steps, %u cascades drawn again (%.0f casters, %.0f submeshes each)\n",
+                g_sh.count.steps, g_sh.count.redraws, g_sh.count.redraws ? (double)g_sh.count.casters / g_sh.count.redraws : 0.0,
+                g_sh.count.redraws ? (double)g_sh.count.items / g_sh.count.redraws : 0.0);
+        memset(&g_sh.count, 0, sizeof g_sh.count);
 #ifdef HAVE_CHARS
         rt_log("[recomp] scene: characters: %u mesh draws taken, %u left to the game (kind %u, buffers %u, state %u, stream %u, "
                "vb %u, uv %u, ib %u, palette %u), %u draw items, %u meshes built\n",

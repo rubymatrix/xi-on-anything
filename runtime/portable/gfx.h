@@ -438,6 +438,39 @@ int gfx_chars_draw(const GfxCharFrame* f);
  * comparison). */
 void gfx_world_time(int pass);
 
+/* The scene renderer's sun and moon shadows (host/scene.c, the scene_shadows setting): stabilised cascades, each a
+ * square of the same size round a centre that moves only in whole texels and only when the camera has gone a margin
+ * from it, in a light space that turns only in the light's steps. The zone's layer is kept from frame to frame and
+ * drawn again a cascade at a time (redraw); the characters' layer is drawn every frame from the batch's characters,
+ * into the first nchar cascades. gfx_world_draw and gfx_chars_draw then shade the directional light that points
+ * along dir (the sun's or the moon's term, nothing else) with it, until the next gfx_shadow_begin. */
+#define GFX_SHADOW_CASCADES 4
+typedef struct GfxShadowCascade
+{
+    float lmat[16];  /* world -> map: x, y -1..1 across it, z 0 (toward the light) .. 1 (D3D row vectors) */
+    float radius;    /* the camera's distance it serves (the next one's beyond) */
+    float texel;     /* world units a texel */
+    float depth;     /* world units over z 0..1 */
+    uint32_t valid;  /* drawn at least once */
+} GfxShadowCascade;
+typedef struct GfxShadowFrame
+{
+    uint32_t size;      /* texels across each map */
+    uint32_t ncascades, nchar; /* cascades in use; how many of the first take the characters */
+    float dir[4];       /* toward the light, world; w = 1 when shadows are on this frame */
+    float cam[4];       /* the camera, world (the cascades are chosen by the distance from it) */
+    float strength;     /* 0..1: how much of the light the shadow takes */
+    GfxShadowCascade c[GFX_SHADOW_CASCADES];
+    int32_t redraw;     /* the zone's layer of this cascade drawn again from the items below; -1 none */
+    const float* world; /* 16 floats an instance (the items' inst indexes it) */
+    uint32_t nworld;
+    const GfxWorldItem* item; /* GFX_WORLD_ATEST: alpha tested with tex; GFX_WORLD_BLEND ones are not given */
+    uint32_t nitem;
+    const GfxCharFrame* chars; /* this batch's characters, NULL none */
+} GfxShadowFrame;
+/* Before the batch's gfx_world_draw: the shadows' layers drawn as the frame says; f NULL or dir.w 0 ends them. */
+void gfx_shadow_begin(const GfxShadowFrame* f);
+
 /* Whether the scene effects can trace rays here (the rt setting: the GPU's ray queries, and on
  * Direct3D 12 the shaders built with dxc); the first call asks the device. */
 int gfx_rt_supported(void);

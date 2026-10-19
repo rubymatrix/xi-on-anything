@@ -4302,6 +4302,7 @@ int gfx_rt_supported(void) { return rt_init(); }
 int gfx_world_supported(void) { return 0; }
 int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
 void gfx_world_time(int pass) { (void)pass; }
+void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
 int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
 /* no time per pass here: the profile has the whole frame's GPU time */
 void gfx_pass_timing(int on) { (void)on; }
