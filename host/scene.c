@@ -461,9 +461,11 @@ void scene_frame(void)
     g_slot_list = 0;
     float s = gfx_fx_get("scene");
     int want = s >= 0.5f ? (s >= 1.5f ? 2 : 1) : 0;
-#ifdef FFXI_SCENE_ZONE_DRAW_RET
-    /* -1: the game draws its zone, its fixed-function zone draws timed as a pass of their own (to compare) */
-    d3d8_world_time(s <= -0.5f ? FFXI_SCENE_ZONE_DRAW_RET : 0);
+#if defined(FFXI_SCENE_ZONE_DRAW_RET) && defined(FFXI_SCENE_ZONE_DRAW_RET2) && defined(FFXI_SCENE_ZONE_DRAW_RET3)
+    /* the walk's own draws (what's left to the game) leave the batch be; -1: the game draws its zone, its zone draws
+     * timed as a pass of their own (to compare) */
+    static const uint32_t sites[3] = { FFXI_SCENE_ZONE_DRAW_RET, FFXI_SCENE_ZONE_DRAW_RET2, FFXI_SCENE_ZONE_DRAW_RET3 };
+    d3d8_world_sites(sites, (want || s <= -0.5f) ? 3 : 0, s <= -0.5f);
 #endif
     if (want && g_have && !gfx_world_supported())
         want = 0;

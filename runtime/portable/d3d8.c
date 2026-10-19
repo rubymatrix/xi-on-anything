@@ -1104,15 +1104,39 @@ void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
  * changes the targets, copies from them or shows them */
 static void (*g_world_flush)(void);
 void d3d8_set_world_flush(void (*fn)(void)) { g_world_flush = fn; }
-/* timing the game's own zone draws for comparison (scene = -1): the draws returning to site go into a timed pass
- * of their own (gfx_world_time), which the next other piece of work ends */
-static uint32_t g_world_time_site;
-static int g_world_timing, g_draw_zone;
-void d3d8_world_time(uint32_t site) { g_world_time_site = site; }
+/* the game's own draws inside its zone walk (models the scene renderer leaves to the game) don't send the batch
+ * out: told apart by where they return to in the walk (d3d8_world_sites). Timing the game's own zone draws for
+ * comparison (scene = -1): those draws go into a timed pass of their own (gfx_world_time), which the next other
+ * piece of work ends */
+static uint32_t g_world_sites[4], g_nworld_sites;
+static int g_world_time_on, g_world_timing, g_draw_zone;
+void d3d8_world_sites(const uint32_t* sites, uint32_t n, int time)
+{
+    g_nworld_sites = n < 4 ? n : 4;
+    memcpy(g_world_sites, sites, g_nworld_sites * sizeof *sites);
+    g_world_time_on = time && n;
+}
+
+/* the game's DrawPrimitive and DrawIndexedPrimitive wrappers (1000cb20, 1000cc00 in 2026-09-03) leave their caller's
+ * return 0x20 and 0x28 up the stack at the device's call */
+static int world_site(Guest* g)
+{
+    for (uint32_t k = 0; k < g_nworld_sites; ++k)
+        if (rd32(g->esp + 0x20) == g_world_sites[k] + RD || rd32(g->esp + 0x28) == g_world_sites[k] + RD)
+            return 1;
+    return 0;
+}
+
+static void world_draw_begin(Guest* g)
+{
+    g_draw_zone = g_nworld_sites && world_site(g);
+    if (g_draw_zone && g_world_time_on && !g_world_timing)
+        gfx_world_time(1), g_world_timing = 1;
+}
 #define WORLD_FLUSH() \
     do \
     { \
-        if (g_world_flush) \
+        if (g_world_flush && !g_draw_zone) \
             g_world_flush(); \
         if (g_world_timing && !g_draw_zone) \
             gfx_world_time(0), g_world_timing = 0; \
@@ -1962,10 +1986,7 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
 static void IDirect3DDevice8_DrawPrimitive(Guest* g)
 {
     g_cap_esp = g->esp;
-    /* (the game's DrawPrimitive wrapper, 1000cb20 in 2026-09-03, leaves its caller's return 0x2c up the stack) */
-    g_draw_zone = g_world_time_site && rd32(g->esp + 0x2c) == g_world_time_site;
-    if (g_draw_zone && !g_world_timing)
-        gfx_world_time(1), g_world_timing = 1;
+    world_draw_begin(g);
     draw(ARG(1), ARG(3), ARG(2), 0, 0, 0, 0);
     g_draw_zone = 0;
     RET(D3D_OK, 4);
@@ -1976,6 +1997,7 @@ static void IDirect3DDevice8_DrawPrimitive(Guest* g)
 static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
 {
     g_cap_esp = g->esp;
+    world_draw_begin(g);
     Obj* ib = obj(g_dev.cur.ib);
     if (ib && ib->mem)
     {
@@ -1984,6 +2006,7 @@ static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
     }
     else
         gfx_prof_skip(GFX_SKIP_NO_INDICES);
+    g_draw_zone = 0;
     RET(D3D_OK, 6);
 }
 
