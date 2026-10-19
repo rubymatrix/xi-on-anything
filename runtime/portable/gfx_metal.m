@@ -138,14 +138,15 @@ static _Atomic uint64_t g_completed;  /* the last frame the GPU finished */
 static int g_frame_open;              /* the semaphore was taken for g_serial */
 static uint32_t g_cmd_draws;          /* draws in the command buffer being recorded */
 static _Atomic uint64_t g_gpu_ns;      /* GPU time of the committed command buffers (profile) */
-/* GPU time per part of the frame (profile): timestamps at the boundaries of the sun maps' passes and
- * the effects' passes, read back when the frame completes. TS_AO1 ends the occlusion and shadow
- * passes (through the temporal one). */
-enum { TS_SUN0, TS_SUN1, TS_FX0, TS_AO1, TS_FX1, TS_N };
+/* GPU time per pass (gfx_pass_timing): each timed pass's encoder samples a timestamp at its start
+ * (start of vertex) and its end (end of fragment) into the frame's counter sample buffer, two samples
+ * a pass, read back when the frame completes. */
+enum { TS_MAX = 128 };                 /* timed passes a frame; past them the rest go untimed */
 static id<MTLCounterSampleBuffer> g_ts[FRAMES];
 static int g_ts_ok = -1;               /* -1 not looked at, 0 the GPU cannot, 1 g_ts[] are there */
-static uint8_t g_ts_started;           /* this frame: 1 << TS_SUN0, 1 << TS_FX0 once the first pass marked it */
-static _Atomic uint64_t g_ts_sun_ns, g_ts_fx_ns, g_ts_ao_ns;
+static uint8_t g_ts_pass[FRAMES][TS_MAX]; /* each frame's timed passes' GFX_PASS_* in order */
+static uint32_t g_ts_n;                /* this frame's so far */
+static int g_pass = GFX_PASS_COMP;     /* what the next fx_pass or rt_pass times as */
 static double g_ts_scale;              /* ns per GPU timestamp tick */
 
 static GfxTex* g_rt;
@@ -309,10 +310,6 @@ static void prof_frame(uint64_t present_start)
             fprintf(stderr, "%s%s %llu", any++ ? ", " : "[gfx]   skipped draws (2 s): ", WHY[i], (unsigned long long)g_prof.skips[i]);
     if (any)
         fprintf(stderr, "\n");
-    if (g_ts_ok > 0)
-        fprintf(stderr, "[gfx]   GPU per frame: sun maps %.2f ms, effects %.2f ms (occlusion and shadows %.2f)\n",
-            (double)atomic_exchange(&g_ts_sun_ns, 0) * ms, (double)atomic_exchange(&g_ts_fx_ns, 0) * ms,
-            (double)atomic_exchange(&g_ts_ao_ns, 0) * ms);
     memset(&g_prof, 0, sizeof g_prof);
     g_prof.since_ns = now;
 }
@@ -387,9 +384,11 @@ static void flush_pass(void)
 
 static void commit_cmd(int wait)
 {
-    if (gfx_profiling)
+    if (gfx_pass_timing_on())
         [g_cmd addCompletedHandler:^(id<MTLCommandBuffer> done) {
-            atomic_fetch_add(&g_gpu_ns, (uint64_t)((done.GPUEndTime - done.GPUStartTime) * 1e9));
+            uint64_t ns = (uint64_t)((done.GPUEndTime - done.GPUStartTime) * 1e9);
+            atomic_fetch_add(&g_gpu_ns, ns);
+            gfx_pass_gpu(ns);
         }];
     [g_cmd commit];
     if (wait)
@@ -2985,7 +2984,7 @@ static id<MTLTexture> fx_tex(id<MTLTexture>* t, MTLPixelFormat fmt, NSUInteger w
  * ticks to ns from pairs of CPU and GPU timestamps taken at least a second apart. */
 static id<MTLCounterSampleBuffer> ts_buffer(void)
 {
-    if (!gfx_profiling)
+    if (!gfx_pass_timing_on())
         return nil;
     static MTLTimestamp gpu0;
     static uint64_t ns0;
@@ -3001,7 +3000,7 @@ static id<MTLCounterSampleBuffer> ts_buffer(void)
             MTLCounterSampleBufferDescriptor* d = [[MTLCounterSampleBufferDescriptor alloc] init];
             d.counterSet = set;
             d.storageMode = MTLStorageModeShared;
-            d.sampleCount = TS_N;
+            d.sampleCount = 2 * TS_MAX;
             g_ts_ok = 1;
             for (int i = 0; i < FRAMES; ++i)
                 if (!(g_ts[i] = [g_dev newCounterSampleBufferWithDescriptor:d error:NULL]))
@@ -3026,55 +3025,61 @@ static id<MTLCounterSampleBuffer> ts_buffer(void)
     return g_ts_scale > 0.0 ? g_ts[g_frame] : nil;
 }
 
-/* a pass marks its start as `start` (the frame's first such pass only) and its end as `end` (the
- * last one's stands); -1 for neither */
-static void ts_mark(MTLRenderPassDescriptor* rp, int start, int end)
+/* a pass times itself as pass (GFX_PASS_*): its start and end into the frame's samples */
+static void ts_mark(MTLRenderPassDescriptor* rp, int pass)
 {
+    frame_begin(); /* (g_frame is the frame the pass goes into) */
+    if (g_ts_n >= TS_MAX)
+        return;
     id<MTLCounterSampleBuffer> b = ts_buffer();
     if (!b)
         return;
     MTLRenderPassSampleBufferAttachmentDescriptor* a = rp.sampleBufferAttachments[0];
     a.sampleBuffer = b;
-    a.startOfVertexSampleIndex = MTLCounterDontSample;
+    a.startOfVertexSampleIndex = 2 * g_ts_n;
     a.endOfVertexSampleIndex = MTLCounterDontSample;
     a.startOfFragmentSampleIndex = MTLCounterDontSample;
-    a.endOfFragmentSampleIndex = end >= 0 ? (NSUInteger)end : MTLCounterDontSample;
-    if (start >= 0 && !(g_ts_started & (1u << start)))
-        a.startOfVertexSampleIndex = (NSUInteger)start, g_ts_started |= (uint8_t)(1u << start);
-    if (end >= 0)
-        g_ts_started |= (uint8_t)(1u << end);
+    a.endOfFragmentSampleIndex = 2 * g_ts_n + 1;
+    g_ts_pass[g_frame][g_ts_n++] = (uint8_t)pass;
 }
 
-/* at the frame's end: when it completes, its marks into the profile's sums */
+/* at the frame's end: when it completes, its passes' times into the profile's sums. (The frame's
+ * g_ts_pass row stands until then: the next frame in its slot waits for this one on g_frames_sem, whose
+ * signal is in a handler added after this one.) */
 static void ts_frame_end(id<MTLCommandBuffer> c)
 {
-    if (!gfx_profiling || g_ts_ok <= 0 || !g_ts_started)
-    {
-        g_ts_started = 0;
+    uint32_t n = g_ts_n;
+    g_ts_n = 0;
+    if (g_ts_ok <= 0 || !n)
         return;
-    }
     id<MTLCounterSampleBuffer> b = g_ts[g_frame];
-    uint8_t got = g_ts_started;
+    const uint8_t* pass = g_ts_pass[g_frame];
     double scale = g_ts_scale;
-    g_ts_started = 0;
     [c addCompletedHandler:^(id<MTLCommandBuffer> done) {
         (void)done;
-        NSData* d = [b resolveCounterRange:NSMakeRange(0, TS_N)];
-        if (!d || d.length < TS_N * sizeof(MTLCounterResultTimestamp))
+        NSData* d = [b resolveCounterRange:NSMakeRange(0, 2 * n)];
+        if (!d || d.length < 2 * n * sizeof(MTLCounterResultTimestamp))
             return;
         const MTLCounterResultTimestamp* t = (const MTLCounterResultTimestamp*)d.bytes;
-#define TS_SPAN(a, z, sum) \
-    if ((got >> (a) & 1) && (got >> (z) & 1) && t[a].timestamp != MTLCounterErrorValue && t[z].timestamp != MTLCounterErrorValue && \
-        t[z].timestamp > t[a].timestamp) \
-        atomic_fetch_add(&(sum), (uint64_t)((double)(t[z].timestamp - t[a].timestamp) * scale));
-        TS_SPAN(TS_SUN0, TS_SUN1, g_ts_sun_ns)
-        TS_SPAN(TS_FX0, TS_FX1, g_ts_fx_ns)
-        TS_SPAN(TS_FX0, TS_AO1, g_ts_ao_ns)
-#undef TS_SPAN
+        /* a pass from its start, or from the last one's end where it started before that: Apple's GPUs
+         * begin a pass's vertices while the last pass's fragments still run, and a full-screen pass then
+         * waits for them (its time would count the wait) */
+        MTLTimestamp last = 0;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            MTLTimestamp a = t[2 * i].timestamp, z = t[2 * i + 1].timestamp;
+            if (a == MTLCounterErrorValue || z == MTLCounterErrorValue)
+                continue;
+            if (a < last)
+                a = last;
+            if (z > a)
+                gfx_pass_add(pass[i], (uint64_t)((double)(z - a) * scale));
+            if (z > last)
+                last = z;
+        }
+        gfx_pass_frame();
     }];
 }
-
-static int g_ts_fx_end = TS_FX1; /* the end mark the effects' passes set (TS_AO1 for the occlusion's) */
 
 /* one full-screen triangle into target, reading tex[0..n) */
 static void fx_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipelineState> p, MTLViewport vp, const FxU* u,
@@ -3084,7 +3089,7 @@ static void fx_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipel
     rp.colorAttachments[0].texture = target;
     rp.colorAttachments[0].loadAction = load;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    ts_mark(rp, TS_FX0, g_ts_fx_end);
+    ts_mark(rp, g_pass);
     id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
     [e setRenderPipelineState:p];
     [e setViewport:vp];
@@ -3628,7 +3633,7 @@ static uint32_t sun_draw(id<MTLTexture> target, id<MTLTexture> col, const float*
     rp.colorAttachments[0].loadAction = col ? MTLLoadActionClear : MTLLoadActionDontCare;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
     rp.colorAttachments[0].storeAction = col ? MTLStoreActionStore : MTLStoreActionDontCare;
-    ts_mark(rp, TS_SUN0, TS_SUN1);
+    ts_mark(rp, GFX_PASS_SUN);
     id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
     [e setViewport:(MTLViewport){ 0, 0, (double)k->size, (double)k->size, 0, 1 }];
     [e setDepthStencilState:g_fx.sdepth];
@@ -4222,7 +4227,7 @@ static void rt_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipel
     rp.colorAttachments[0].texture = target;
     rp.colorAttachments[0].loadAction = load;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    ts_mark(rp, TS_FX0, g_ts_fx_end);
+    ts_mark(rp, g_pass);
     id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
     [e setRenderPipelineState:p];
     [e setViewport:vp];
@@ -4365,6 +4370,7 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
         FxU u;
         memset(&u, 0, sizeof u);
         u.size[0] = (float)ct.width, u.size[1] = (float)ct.height;
+        g_pass = GFX_PASS_FXAA;
         fx_pass(ct, MTLLoadActionLoad, g_fx.aa_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, &g_fx.aa_src, 1, NULL);
         color->scene = 0; /* its mips are behind (scene_mips) */
         color->used = g_serial;
@@ -4618,8 +4624,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     id<MTLTexture> ao_out = g_fx.ao0;
                     if (u.ao[1] > 0.0f || u.shadow[0] > 0.0f || u.smap[0] > 0.0f)
                     {
-                        g_ts_fx_end = TS_AO1;
                         id<MTLTexture> lz = fx_lz(aw, ah);
+                        g_pass = GFX_PASS_LINZ;
                         if (lz)
                         {
                             fx_pass(g_fx.lzv[0], MTLLoadActionDontCare, g_fx.linz_pipe, q, &u, &depth, 1, NULL);
@@ -4630,15 +4636,18 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                             u.ao[1] = 0.0f;
                         id<MTLTexture> ao_in[4] = { depth, u.smap[0] > 0.0f ? g_fx.smap : g_fx.sdummy,
                             u.smap[0] > 0.0f && u.smapn2[1] > 0.0f ? g_fx.smapn : g_fx.sdummy, lz ? lz : g_fx.sdummy };
+                        g_pass = GFX_PASS_AO;
                         fx_pass(g_fx.ao0, MTLLoadActionDontCare, g_fx.ao_pipe, q, &u, ao_in, 4, NULL);
                         /* traced (rt): the occlusion from rays in the world, the sun's as fx_ao found it; ao1 then holds it */
                         id<MTLTexture> a = g_fx.ao0, bt = g_fx.ao1;
                         if (rt && u.ao[1] > 0.0f)
                         {
                             id<MTLTexture> r_in[2] = { g_fx.ao0, depth };
+                            g_pass = GFX_PASS_AO_RT;
                             rt_pass(g_fx.ao1, MTLLoadActionDontCare, g_ray.ao, q, &u, r_in, 2, NULL);
                             a = g_fx.ao1, bt = g_fx.ao0;
                         }
+                        g_pass = GFX_PASS_BLUR;
                         fx_pass(bt, MTLLoadActionDontCare, g_fx.blur_pipe, q, &u, &a, 1, across);
                         fx_pass(a, MTLLoadActionDontCare, g_fx.blur_pipe, q, &u, &bt, 1, down);
                         ao_out = a;
@@ -4647,17 +4656,18 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         {
                             int to = g_fx.hist_at ^ 1;
                             id<MTLTexture> t_in[2] = { a, g_fx.hist[g_fx.hist_at] };
+                            g_pass = GFX_PASS_TEMPORAL;
                             fx_pass(g_fx.hist[to], MTLLoadActionDontCare, g_fx.temporal_pipe, q, &u, t_in, 2, NULL);
                             ao_out = g_fx.hist[to];
                             g_fx.hist_at = to, g_fx.hist_serial = g_serial;
                         }
-                        g_ts_fx_end = TS_FX1;
                     }
                     /* the bounce light: gathered from its map at half the occlusion's size, then over frames */
                     id<MTLTexture> gi_out = nil;
                     if (gi)
                     {
                         MTLViewport qg = fx_full(g_fx.gi0);
+                        g_pass = GFX_PASS_GI;
                         if (rt)
                         {
                             /* traced (rt): rays from each texel into the world, the light they meet as the frame or the
@@ -4688,6 +4698,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     if (u.bloom[1] > 0.0f)
                     {
                         id<MTLTexture> b_in[2] = { g_fx.src, ao_out }; /* shaded as fx_comp shades */
+                        g_pass = GFX_PASS_BLOOM;
                         fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.bright_pipe, qb, &u, b_in, 2, NULL);
                         fx_pass(g_fx.b1b, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1a, 1, across2);
                         fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1b, 1, down2);
@@ -4698,12 +4709,14 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     if (u.rays[0] > 0.0f)
                     {
                         id<MTLTexture> mask_in[2] = { g_fx.src, depth };
+                        g_pass = GFX_PASS_RAYS;
                         fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.raymask_pipe, qb, &u, mask_in, 2, NULL);
                         fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.rays_pipe, qb, &u, &g_fx.ra, 1, NULL);
                         fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.rb, 1, across);
                         fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.ra, 1, down);
                     }
                     id<MTLTexture> comp_in[7] = { g_fx.src, ao_out, depth, g_fx.b1a, g_fx.b2a, g_fx.rb, gi_out ? gi_out : g_fx.rb };
+                    g_pass = GFX_PASS_COMP;
                     fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 7, NULL);
                     if (rt && (int)g_fxs.debug == 8)
                     {
@@ -4844,6 +4857,7 @@ void gfx_present(GfxTex* bb)
                 p.colorAttachments[0].texture = drawable.texture;
                 p.colorAttachments[0].loadAction = MTLLoadActionDontCare;
                 p.colorAttachments[0].storeAction = MTLStoreActionStore;
+                ts_mark(p, GFX_PASS_PRESENT);
                 id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:p];
                 float sharpen = g_fxs.fx != 0.0f ? g_fxs.sharpen : 0.0f;
                 [e setRenderPipelineState:sharpen > 0.0f && g_present_cas_pipe ? g_present_cas_pipe : g_present_pipe];
@@ -4862,6 +4876,7 @@ void gfx_present(GfxTex* bb)
         fx_reload();
         frame_end();
     }
+    gfx_pass_tick();
     if (gfx_profiling)
         prof_frame(present_start);
 }

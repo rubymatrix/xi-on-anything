@@ -22,8 +22,8 @@
  *     A8, A8L8); the 16-bit color ones are widened to BGRA8 on upload, as on Metal.
  *
  * The scene effects (gfx_scene_done), the sun's shadow maps and the water are gfx_metal.m's, ported:
- * the same passes in GLSL (FX_GLSL), the same CPU side (gfx_scene.c). Not here: the GPU timestamps
- * per part of the frame in the profile. */
+ * the same passes in GLSL (FX_GLSL), the same CPU side (gfx_scene.c). The GPU's time per pass
+ * (gfx_pass_timing) is timestamp queries around each pass, read when the frame's slot comes round. */
 #include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
 
 #include <SDL3/SDL.h>
@@ -213,6 +213,17 @@ static uint64_t g_serial = 1;  /* the frame being recorded */
 static uint64_t g_completed;   /* the last frame the GPU finished */
 static int g_frame_open;
 static VkCommandBuffer g_cb;   /* the frame's commands being recorded */
+/* GPU time per pass (gfx_pass_timing): a timestamp before and after each timed pass into the frame's
+ * query pool, two queries a pass, and two for the frame (its first command buffer's start, the
+ * present's end); read when its slot comes round again, the frame done (FRAMES - 1 frames late). */
+enum { TS_MAX = 128, TS_FRAME = 2 * TS_MAX, TS_QUERIES = TS_FRAME + 2 };
+static VkQueryPool g_ts_pool[FRAMES];
+static uint8_t g_ts_pass[FRAMES][TS_MAX]; /* each frame's timed passes' GFX_PASS_* in order */
+static uint32_t g_ts_n[FRAMES];           /* how many */
+static uint8_t g_ts_state[FRAMES];        /* 0 untimed, 1 the pool reset and the start written, 2 the end too */
+static uint64_t g_ts_mask;                /* the queue's valid timestamp bits; 0: no timestamps */
+static double g_ts_period;                /* ns a tick */
+static int g_pass = GFX_PASS_COMP;        /* what the next fx_pass or rt_pass times as */
 static VkCommandBuffer g_upcb; /* uploads to submit ahead of g_cb */
 static uint64_t g_cb_index = 1;
 static int g_in_pass, g_dirty;
@@ -483,6 +494,77 @@ static uint64_t completed(void)
     return g_completed;
 }
 
+/* a slot's timestamps, its frame done, into the profile's sums */
+static void ts_read(uint32_t slot)
+{
+    uint32_t n = g_ts_n[slot];
+    int state = g_ts_state[slot];
+    g_ts_n[slot] = 0, g_ts_state[slot] = 0;
+    if (!state)
+        return;
+    uint64_t t[TS_QUERIES];
+    if (n && vkGetQueryPoolResults(g_dev, g_ts_pool[slot], 0, 2 * n, 2 * n * sizeof(uint64_t), t, sizeof(uint64_t),
+                 VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+    {
+        uint64_t last = 0; /* as gfx_metal.m's: a pass from its start, or the last one's end if later */
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            uint64_t a = t[2 * i] & g_ts_mask, z = t[2 * i + 1] & g_ts_mask;
+            if (a < last)
+                a = last;
+            if (z > a)
+                gfx_pass_add(g_ts_pass[slot][i], (uint64_t)((double)(z - a) * g_ts_period));
+            if (z > last)
+                last = z;
+        }
+    }
+    if (state == 2 && vkGetQueryPoolResults(g_dev, g_ts_pool[slot], TS_FRAME, 2, 2 * sizeof(uint64_t), t, sizeof(uint64_t),
+                          VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+    {
+        uint64_t a = t[0] & g_ts_mask, z = t[1] & g_ts_mask;
+        if (z > a)
+            gfx_pass_gpu((uint64_t)((double)(z - a) * g_ts_period));
+    }
+    gfx_pass_frame();
+}
+
+/* the frame's first command buffer: its pool reset (outside a pass), and the frame's start */
+static void ts_frame_start(VkCommandBuffer cb)
+{
+    if (g_ts_state[g_frame] || !gfx_pass_timing_on())
+        return;
+    if (!g_ts_mask)
+    {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "[recomp] gfx: no GPU timestamps on this queue: no time per pass in the profile\n");
+        return;
+    }
+    vkCmdResetQueryPool(cb, g_ts_pool[g_frame], 0, TS_QUERIES);
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_ts_pool[g_frame], TS_FRAME);
+    g_ts_state[g_frame] = 1;
+}
+
+/* a timed pass's start, before it begins rendering (after gpu_sync's barrier: what came before is
+ * done): its index for ts_end, or -1 untimed */
+static int ts_begin(VkCommandBuffer cb, int pass)
+{
+    uint32_t i = g_ts_n[g_frame];
+    if (g_ts_state[g_frame] != 1 || i >= TS_MAX)
+        return -1;
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_ts_pool[g_frame], 2 * i);
+    g_ts_pass[g_frame][i] = (uint8_t)pass;
+    g_ts_n[g_frame] = i + 1;
+    return (int)i;
+}
+
+/* its end, after its rendering ended */
+static void ts_end(VkCommandBuffer cb, int i)
+{
+    if (i >= 0)
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ts_pool[g_frame], 2 * (uint32_t)i + 1);
+}
+
 static void frame_begin(void)
 {
     if (g_frame_open)
@@ -492,6 +574,7 @@ static void frame_begin(void)
     wait_value(f->value);
     if (gfx_profiling)
         g_prof.sem_ns += gfx_now_ns() - t0;
+    ts_read(g_frame);
     completed();
     empty_trash(f);
     if (f->cbs_used)
@@ -542,6 +625,7 @@ static VkCommandBuffer cmd(void)
         g_cb = new_cb();
         g_dirty = 1; /* the work submitted before it may still be writing */
         g_bound = VK_NULL_HANDLE;
+        ts_frame_start(g_cb);
     }
     return g_cb;
 }
@@ -3191,6 +3275,7 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &ca;
+    int ts = ts_begin(cb, g_pass);
     vkCmdBeginRendering(cb, &ri);
     VkViewport v = vp ? (VkViewport){ vp[0], vp[1], vp[2], vp[3], 0, 1 } : (VkViewport){ 0, 0, (float)tw, (float)th, 0, 1 };
     VkRect2D sc = { { 0, 0 }, { tw, th } };
@@ -3224,6 +3309,7 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
     vkCmdPushConstants(cb, g_fx_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8, d2);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
+    ts_end(cb, ts);
     g_dirty = 1;
     g_bound = VK_NULL_HANDLE;
     target->used = g_serial, target->rec = g_cb_index;
@@ -3735,6 +3821,7 @@ static uint32_t sun_draw(GfxTex* target, GfxTex* col, const float* invP, const f
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &ca;
     }
+    int ts = ts_begin(cb, GFX_PASS_SUN);
     vkCmdBeginRendering(cb, &ri);
     /* y up, as the draws' (set_viewport): the map's rows as sun_look reads them */
     VkViewport v = { 0, (float)k->size, (float)k->size, -(float)k->size, 0, 1 };
@@ -3896,6 +3983,7 @@ static uint32_t sun_draw(GfxTex* target, GfxTex* col, const float* invP, const f
         drawn++;
     }
     vkCmdEndRendering(cb);
+    ts_end(cb, ts);
     g_dirty = 1;
     g_bound = VK_NULL_HANDLE;
     target->used = g_serial, target->rec = g_cb_index;
@@ -3961,6 +4049,7 @@ static int sun_map(const GfxScene* s, const float* L, FxU* u)
             for (uint32_t lv = 1; lv < 4; ++lv)
             {
                 VkImageView prev = level_view(g_fx.gicol, lv - 1);
+                g_pass = GFX_PASS_SUN;
                 fx_pass(g_fx.gicol, lv, 0, g_fx.mip_pipe, NULL, &prev, 1, NULL, NULL);
             }
             float r = fmaxf(g_fxs.gi_radius, 0.5f);
@@ -4872,6 +4961,7 @@ static void rt_pass(GfxTex* target, int load, VkPipeline p, const float* vp, con
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &ca;
+    int ts = ts_begin(cb, g_pass);
     vkCmdBeginRendering(cb, &ri);
     VkViewport v = vp ? (VkViewport){ vp[0], vp[1], vp[2], vp[3], 0, 1 } : (VkViewport){ 0, 0, (float)tw, (float)th, 0, 1 };
     VkRect2D sc = { { 0, 0 }, { tw, th } };
@@ -4905,6 +4995,7 @@ static void rt_pass(GfxTex* target, int load, VkPipeline p, const float* vp, con
     vkCmdPushConstants(cb, g_ray.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
+    ts_end(cb, ts);
     g_dirty = 1;
     g_bound = VK_NULL_HANDLE;
     target->used = g_serial, target->rec = g_cb_index;
@@ -5040,6 +5131,7 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     memset(&u, 0, sizeof u);
     u.size[0] = (float)color->w, u.size[1] = (float)color->h;
     fx_uniforms(&u);
+    g_pass = GFX_PASS_FXAA;
     fx_pass(color, 0, 1, g_fx.aa_pipe, vp, &g_fx.aa_src->view, 1, NULL, NULL);
     color->scene = 0; /* its mips are behind (scene_mips) */
 }
@@ -5282,6 +5374,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     if (!lz)
                         u.ao[1] = 0.0f;
                     fx_uniforms(&u);
+                    g_pass = GFX_PASS_LINZ;
                     if (lz)
                     {
                         fx_pass(lz, 0, 0, g_fx.linz_pipe, NULL, &depth->view, 1, NULL, NULL);
@@ -5295,15 +5388,18 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     VkImageView ao_in[4] = { depth->view, far_on ? g_fx.smap->view : g_fx.sdummy->view,
                         near_on ? g_fx.smapn->view : g_fx.sdummy->view, lz ? lz->view : VK_NULL_HANDLE };
                     VkImageView sh[2] = { ao_in[1], ao_in[2] };
+                    g_pass = GFX_PASS_AO;
                     fx_pass(g_fx.ao0, 0, 0, g_fx.ao_pipe, NULL, ao_in, 4, sh, NULL);
                     /* traced (rt): the occlusion from rays in the world, the sun's as fx_ao found it; ao1 then holds it */
                     GfxTex *a = g_fx.ao0, *bt = g_fx.ao1;
                     if (rt && u.ao[1] > 0.0f)
                     {
                         VkImageView r_in[2] = { g_fx.ao0->view, depth->view };
+                        g_pass = GFX_PASS_AO_RT;
                         rt_pass(g_fx.ao1, 0, g_ray.ao, NULL, r_in, 2, NULL);
                         a = g_fx.ao1, bt = g_fx.ao0;
                     }
+                    g_pass = GFX_PASS_BLUR;
                     fx_pass(bt, 0, 0, g_fx.blur_pipe, NULL, &a->view, 1, NULL, across);
                     fx_pass(a, 0, 0, g_fx.blur_pipe, NULL, &bt->view, 1, NULL, down);
                     ao_out = a;
@@ -5312,6 +5408,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     {
                         int to = g_fx.hist_at ^ 1;
                         VkImageView t_in[2] = { a->view, g_fx.hist[g_fx.hist_at]->view };
+                        g_pass = GFX_PASS_TEMPORAL;
                         fx_pass(g_fx.hist[to], 0, 0, g_fx.temporal_pipe, NULL, t_in, 2, NULL, NULL);
                         ao_out = g_fx.hist[to];
                         g_fx.hist_at = to, g_fx.hist_serial = g_serial;
@@ -5323,6 +5420,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 GfxTex* gi_out = NULL;
                 if (gi)
                 {
+                    g_pass = GFX_PASS_GI;
                     if (rt)
                     {
                         /* traced (rt): rays from each texel into the world, the light they meet as the frame or the
@@ -5355,6 +5453,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 if (u.bloom[1] > 0.0f)
                 {
                     VkImageView b_in[2] = { g_fx.src->view, ao_out->view }; /* shaded as the composite shades */
+                    g_pass = GFX_PASS_BLOOM;
                     fx_pass(g_fx.b1a, 0, 0, g_fx.bright_pipe, NULL, b_in, 2, NULL, NULL);
                     fx_pass(g_fx.b1b, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.b1a->view, 1, NULL, across2);
                     fx_pass(g_fx.b1a, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.b1b->view, 1, NULL, down2);
@@ -5365,6 +5464,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 if (u.rays[0] > 0.0f)
                 {
                     VkImageView mask_in[2] = { g_fx.src->view, depth->view };
+                    g_pass = GFX_PASS_RAYS;
                     fx_pass(g_fx.ra, 0, 0, g_fx.raymask_pipe, NULL, mask_in, 2, NULL, NULL);
                     fx_pass(g_fx.rb, 0, 0, g_fx.rays_pipe, NULL, &g_fx.ra->view, 1, NULL, NULL);
                     fx_pass(g_fx.ra, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.rb->view, 1, NULL, across);
@@ -5373,6 +5473,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 VkImageView comp_in[7] = { g_fx.src->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view,
                     gi_out ? gi_out->view : VK_NULL_HANDLE };
                 float vp[4] = { vx, vy, vw, vh };
+                g_pass = GFX_PASS_COMP;
                 fx_pass(ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 7, NULL, NULL);
                 if (rt && (int)g_fxs.debug == 8)
                 {
@@ -5725,6 +5826,7 @@ static int present_to_window(GfxTex* bb)
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &ca;
+    int ts = ts_begin(cb, GFX_PASS_PRESENT);
     vkCmdBeginRendering(cb, &ri);
     VkViewport vp = { 0, 0, (float)g_swap_extent.width, (float)g_swap_extent.height, 0, 1 };
     VkRect2D sc = { { 0, 0 }, g_swap_extent };
@@ -5751,6 +5853,9 @@ static int present_to_window(GfxTex* bb)
     if (g_fxs.fps != 0.0f && g_overlay_pipe)
         draw_overlay(cb, g_swap_extent.width, g_swap_extent.height);
     vkCmdEndRendering(cb);
+    ts_end(cb, ts);
+    if (g_ts_state[g_frame] == 1)
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ts_pool[g_frame], TS_FRAME + 1), g_ts_state[g_frame] = 2;
     image_barrier(cb, g_swap_images[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
     bb->used = g_serial, bb->rec = g_cb_index;
@@ -5800,6 +5905,7 @@ void gfx_present(GfxTex* bb)
     fx_reload();
     frame_end();
     vk_cache_save();
+    gfx_pass_tick();
     if (gfx_profiling)
         prof_frame(present_start);
 }
@@ -6059,6 +6165,23 @@ int gfx_init(void* window, int vsync)
         VK_CHECK(vkCreateCommandPool(g_dev, &pci, NULL, &g_frames[i].pool));
         VkSemaphoreCreateInfo bsi = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         VK_CHECK(vkCreateSemaphore(g_dev, &bsi, NULL, &g_frames[i].acquired));
+    }
+    /* the timestamps per pass (gfx_pass_timing), where the queue has them */
+    {
+        uint32_t nq = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &nq, NULL);
+        VkQueueFamilyProperties* qp = (VkQueueFamilyProperties*)calloc(nq ? nq : 1, sizeof *qp);
+        vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &nq, qp);
+        uint32_t bits = g_qfam < nq ? qp[g_qfam].timestampValidBits : 0;
+        free(qp);
+        VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = TS_QUERIES;
+        int ok = bits > 0 && g_props.limits.timestampPeriod > 0.0f;
+        for (int i = 0; ok && i < FRAMES; ++i)
+            ok = vkCreateQueryPool(g_dev, &qi, NULL, &g_ts_pool[i]) == VK_SUCCESS;
+        if (ok)
+            g_ts_mask = bits >= 64 ? ~0ull : (1ull << bits) - 1, g_ts_period = (double)g_props.limits.timestampPeriod;
     }
 
     /* the draw functions' bindings (gfx_msl.h), pushed per draw */

@@ -1,4 +1,5 @@
 /* The scene effects' settings (gfx_fx.h). */
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -229,4 +230,91 @@ void fx_config(void)
         if (cache_dir(dir, sizeof dir))
             snprintf(g_fx_file, sizeof g_fx_file, "%s/fx.txt", dir);
     }
+}
+
+/* --- GPU time per pass ------------------------------------------------------------------------------------------- */
+static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
+    "bloom", "rays", "comp", "fxaa", "present" };
+static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
+static int g_pass_asked;                          /* /fx prof turned it on */
+static uint64_t g_pass_since;                     /* the window's start */
+static double g_pass_last[GFX_NPASSES], g_pass_last_gpu; /* the last window's ms a frame */
+static uint64_t g_pass_last_frames;
+static double g_pass_last_secs;
+
+int gfx_pass_timing_on(void) { return gfx_profiling || g_pass_asked; }
+
+void gfx_pass_add(int pass, uint64_t ns)
+{
+    if (pass >= 0 && pass < GFX_NPASSES)
+        atomic_fetch_add(&g_pass_ns[pass], ns);
+}
+
+void gfx_pass_gpu(uint64_t ns) { atomic_fetch_add(&g_pass_gpu_ns, ns); }
+
+void gfx_pass_frame(void) { atomic_fetch_add(&g_pass_frames, 1); }
+
+void gfx_pass_timing(int on)
+{
+    if (on && !g_pass_asked)
+        g_pass_since = 0; /* a fresh window */
+    g_pass_asked = on;
+}
+
+void gfx_pass_tick(void)
+{
+    if (!gfx_pass_timing_on())
+        return;
+    uint64_t now = gfx_now_ns();
+    if (!g_pass_since)
+    {
+        g_pass_since = now;
+        for (int i = 0; i < GFX_NPASSES; ++i)
+            atomic_store(&g_pass_ns[i], 0);
+        atomic_store(&g_pass_gpu_ns, 0), atomic_store(&g_pass_frames, 0);
+        return;
+    }
+    if (now - g_pass_since < 2000000000ull)
+        return;
+    uint64_t frames = atomic_exchange(&g_pass_frames, 0);
+    double per = frames ? 1e-6 / (double)frames : 0.0;
+    for (int i = 0; i < GFX_NPASSES; ++i)
+        g_pass_last[i] = (double)atomic_exchange(&g_pass_ns[i], 0) * per;
+    g_pass_last_gpu = (double)atomic_exchange(&g_pass_gpu_ns, 0) * per;
+    g_pass_last_frames = frames, g_pass_last_secs = (double)(now - g_pass_since) * 1e-9;
+    g_pass_since = now;
+    if (gfx_profiling && frames)
+    {
+        char lines[4][96];
+        int n = gfx_pass_report(lines, 4);
+        for (int i = 0; i < n; ++i)
+            fprintf(stderr, "[gfx]   %s\n", lines[i]);
+    }
+}
+
+int gfx_pass_report(char (*out)[96], int max)
+{
+    if (!g_pass_last_frames || max < 1)
+        return 0;
+    double fx = 0.0;
+    for (int i = GFX_PASS_LINZ; i <= GFX_PASS_FXAA; ++i)
+        fx += g_pass_last[i];
+    int n = 0;
+    snprintf(out[n++], 96, "GPU ms a frame over %.0f s (%llu frames): frame %.2f, sun maps %.2f, effects %.2f", g_pass_last_secs,
+        (unsigned long long)g_pass_last_frames, g_pass_last_gpu, g_pass_last[GFX_PASS_SUN], fx);
+    /* the passes that ran, four to a line */
+    int at = 0;
+    for (int i = GFX_PASS_LINZ; i < GFX_NPASSES && n < max; ++i)
+    {
+        if (g_pass_last[i] <= 0.0)
+            continue;
+        if (!at)
+            out[n][0] = 0;
+        at += snprintf(out[n] + at, at < 96 ? 96 - at : 0, "%s%s %.2f", at ? ", " : "  ", k_pass_name[i], g_pass_last[i]);
+        if (at > 60)
+            n++, at = 0;
+    }
+    if (at && n < max)
+        n++;
+    return n;
 }

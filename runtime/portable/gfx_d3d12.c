@@ -4297,6 +4297,9 @@ static int rt_init(void)
 }
 
 int gfx_rt_supported(void) { return rt_init(); }
+/* no time per pass here: the profile has the whole frame's GPU time */
+void gfx_pass_timing(int on) { (void)on; }
+int gfx_pass_report(char (*out)[96], int max) { return (void)out, (void)max, 0; }
 
 /* a buffer of the GPU's own of at least need bytes in *r (made again, half as large again, when it is
  * smaller), in state; uav: the acceleration structures' and scratch's */

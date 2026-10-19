@@ -3395,6 +3395,17 @@ extern "C"
     {
         return 0;
     }
+    // No GPU time per pass here.
+    void gfx_pass_timing(int on)
+    {
+        (void)on;
+    }
+    int gfx_pass_report(char (*out)[96], int max)
+    {
+        (void)out;
+        (void)max;
+        return 0;
+    }
     void gfx_set_sync_pipelines(int on)
     {
         (void)on;

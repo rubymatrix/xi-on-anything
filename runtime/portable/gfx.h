@@ -326,6 +326,13 @@ uint32_t gfx_failures(void);
 /* Frame profile (FFXI_PROFILE=1): the front end adds the time it spends turning a D3D call into
  * back-end work; the back end logs the breakdown every two seconds from Present. */
 extern int gfx_profiling;
+/* GPU time per scene-effects pass (sun maps, linz/zmip, ao, blur, temporal, gi, bloom, rays, comp,
+ * fxaa, present), from timestamps at each pass's start and end: on with FFXI_PROFILE=1 (the log, every
+ * two seconds) or gfx_pass_timing(1) (/fx prof). Back ends without timestamps time nothing.
+ * gfx_pass_report writes the last two seconds' averages, ms a frame, a line each into out (max lines
+ * at most): how many, 0 while nothing was timed. */
+void gfx_pass_timing(int on);
+int gfx_pass_report(char (*out)[96], int max);
 uint64_t gfx_now_ns(void);
 void gfx_prof_front(uint64_t ns);
 /* A draw dropped, and why (the profile line counts each reason). */
