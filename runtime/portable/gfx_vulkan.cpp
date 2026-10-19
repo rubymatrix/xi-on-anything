@@ -3409,6 +3409,11 @@ extern "C"
     {
         (void)begin;
     }
+    int gfx_chars_draw(const GfxCharFrame* f)
+    {
+        (void)f;
+        return 0;
+    }
     // No GPU time per pass here.
     void gfx_pass_timing(int on)
     {

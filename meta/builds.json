@@ -74,7 +74,21 @@
         "scene_zbias_opaque": "0x10632038",
         "scene_zone_draw_ret": "0x1017ddb0",
         "scene_zone_draw_ret2": "0x1017dd7a",
-        "scene_zone_draw_ret3": "0x1017dca5"
+        "scene_zone_draw_ret3": "0x1017dca5",
+        "scene_res_mgr": "0x1047d128",
+        "scene_res_get": "0x10072fb0",
+        "scene_palette": "0x1045ec20",
+        "scene_bones": "0x10462430",
+        "scene_actor_lights": "0x104572b8",
+        "scene_actor_ambient": "0x104571d8",
+        "scene_actor_material": "0x104571e0",
+        "scene_tint": "0x104574ac",
+        "scene_shine": "0x104570fc",
+        "scene_shadow_mode": "0x1045b77a",
+        "scene_env_tex": "0x1045745c",
+        "scene_tex_mgr": "0x1047b970",
+        "scene_tex_find": "0x1003af10",
+        "scene_skin_force": "0x10457460"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",

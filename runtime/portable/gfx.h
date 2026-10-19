@@ -375,6 +375,64 @@ typedef struct GfxWorldFrame
 int gfx_world_supported(void);
 /* Draws one batch into the current targets; 0 when it drew nothing (no target). */
 int gfx_world_draw(const GfxWorldFrame* f);
+/* Characters (the scene renderer, host/scene.c): skinned on the GPU from the game's bone palettes and its meshes'
+ * bone-space vertices (Os2), lit with the game's fixed function per vertex (its per-actor directional lights,
+ * ambient and material), then its two texture stages: 2 x texture x light, then 2 x that x the texture factor, alpha
+ * 4 x 2 x texture alpha x factor alpha twice, alpha tested GREATER the reference; no culling, table fog. */
+typedef struct GfxCharVertex
+{
+    float a[4], b[4];   /* position x, y, z, weight for the first and second bone (the weight pre-applied) */
+    float na[4], nb[4]; /* normal, likewise */
+    uint32_t bones;     /* first bone, second, first's mirror bone, second's mirror bone: a byte each */
+    uint32_t mirror;    /* the mirror's axis for each (0 none, 1 x, 2 y, 3 z): bits 0-1 and 2-3 */
+} GfxCharVertex;
+typedef struct GfxCharLight
+{
+    float pos[4];      /* point lights: world, w = range */
+    float dir[4];      /* toward the light (directional); w = 1 directional, 2 point, 0 off */
+    float diffuse[4];
+    float ambient[4];
+    float att[4];
+} GfxCharLight;
+typedef struct GfxCharState /* per mesh and material */
+{
+    float wvp[16];      /* (the game's WORLD, identity but in its cached-skin frames) x view x projection */
+    float world[16];
+    GfxCharLight light[4];
+    float ambient[4];   /* D3DRS_AMBIENT */
+    float mat_diffuse[4], mat_ambient[4], mat_emissive[4];
+    float tfactor[4];   /* D3DRS_TEXTUREFACTOR */
+    float fog[4];       /* start, end, on */
+    float fog_col[4];
+} GfxCharState;
+typedef struct GfxCharItem
+{
+    GfxBuf* vb;         /* GfxCharVertex, the order of the game's skinned buffers */
+    GfxBuf* uv;         /* float2 per vertex (the game's own buffer) */
+    GfxBuf* ib;         /* the game's index buffer */
+    uint32_t index_size;
+    uint32_t first, count, prim; /* first index, primitive count, GFX_TRIANGLELIST or GFX_TRIANGLESTRIP */
+    uint32_t palette;   /* first bone in GfxCharFrame.palette */
+    uint32_t state;     /* into GfxCharFrame.state */
+    uint32_t mirror;    /* the mirrored copy: mirror bones and axes */
+    GfxTex* tex;
+    GfxSampler samp;
+} GfxCharItem;
+typedef struct GfxCharFrame
+{
+    uint32_t vp[6];
+    float pixel[2];
+    float alpha_ref;    /* 0..255 */
+    const float* palette; /* 16 floats a bone (D3D row-major, world space) */
+    uint32_t nbones;
+    const GfxCharState* state;
+    uint32_t nstate;
+    const GfxCharItem* item;
+    uint32_t nitem;
+} GfxCharFrame;
+/* Draws a batch of characters into the current targets; 0 when it drew nothing. */
+int gfx_chars_draw(const GfxCharFrame* f);
+
 /* While the GPU's passes are timed: 1 the draws from here on are a timed pass of their own (as the scene renderer's
  * zone, GFX_PASS_WORLD), 0 that pass ends here (the game's own zone draws, timed for comparison). */
 void gfx_world_time(int begin);

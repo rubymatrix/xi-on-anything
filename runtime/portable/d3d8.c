@@ -4536,6 +4536,28 @@ GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size)
     return static_buffer(b);
 }
 
+uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size)
+{
+    Obj* b = obj(iface);
+    if (!b || (b->kind != O_VB && b->kind != O_IB) || !b->mem)
+        return 0;
+    if (size)
+        *size = b->size;
+    return b->mem;
+}
+
+GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size)
+{
+    Obj* b = obj(iface);
+    if (!b || b->kind != O_IB)
+        return NULL;
+    if (size)
+        *size = b->size;
+    if (index_size)
+        *index_size = b->format == FMT_INDEX32 ? 4 : 2;
+    return static_buffer(b);
+}
+
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
 {
     if (!g_dev.rt)

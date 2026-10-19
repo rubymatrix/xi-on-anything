@@ -63,4 +63,7 @@ GfxTex* d3d8_world_texture(uint32_t iface);
 typedef struct GfxSampler GfxSampler;
 int d3d8_world_sampler(uint32_t iface, GfxSampler* out);
 GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size);
+GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size);
+/* a vertex or index buffer's guest memory (what the game wrote into it), 0 before its first lock */
+uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size);
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6]);
