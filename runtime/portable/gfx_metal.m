@@ -4355,12 +4355,15 @@ static void water_bind(void)
  * vertex (mode 1, to match what the game's draws gave) or per pixel (mode 2). Pipelines: the per-pixel switch and
  * the alpha test are function constants, blending is the pipeline's; built in place the first time (a handful). */
 /* The sun's or moon's shadow at a point, from the cascades gfx_shadow_begin drew (zone layer, and the characters'
- * in the first info.y): the cascade by the distance from the camera, the last sixth of each one's reach blended into
- * the next (the last fades out), the point pushed a texel and a half along its normal and toward the light, four
- * compares a texel apart, each the hardware's 2x2 filter. 1 lit, 0 in shadow (strength applied). */
+ * in the first info.y, only inside their box): the cascade by the distance from the camera, the last tenth of each
+ * one's reach blended into the next (the last fades out), the point pushed a texel toward the light and one to five
+ * along its normal, the more the surface turns from the light (else long, grazing faces shade themselves in stripes);
+ * in the two near cascades four compares a texel apart, beyond one, each the hardware's 2x2 filter. 1 lit, 0 in
+ * shadow (strength applied). */
 #define SHADOW_MSL                                                                                                  \
     "struct SH { float4x4 m[4]; float4 cas[4]; float4 cbox[4]; float4 dir; float4 cam; float4 info; };\n"           \
     "static float sh_pcf(depth2d_array<float> t, sampler s, float2 uv, uint c, float z, float tx) {\n"           \
+    "  if (c >= 2u) return t.sample_compare(s, uv, c, z);\n" /* far: the hardware's 2x2 alone */                 \
     "  return 0.25 * (t.sample_compare(s, uv + float2(-0.5, -0.5) * tx, c, z) +\n"                               \
     "                 t.sample_compare(s, uv + float2(0.5, -0.5) * tx, c, z) +\n"                                \
     "                 t.sample_compare(s, uv + float2(-0.5, 0.5) * tx, c, z) +\n"                                \
@@ -4387,7 +4390,7 @@ static void water_bind(void)
     "    if (S.cas[c].w == 0.0 || d > S.cas[c].x) continue;\n"                                                   \
     "    float v = sh_at(S, zm, cm, cs, c, wp, n);\n"                                                            \
     "    if (v < 0.0) continue;\n"                                                                               \
-    "    float r = S.cas[c].x, f = saturate((d - 0.84 * r) / (0.16 * r));\n"                                     \
+    "    float r = S.cas[c].x, f = saturate((d - 0.9 * r) / (0.1 * r));\n"                                       \
     "    if (f > 0.0) {\n"                                                                                       \
     "      float w = c + 1 < nc && S.cas[c + 1].w != 0.0 ? sh_at(S, zm, cm, cs, c + 1, wp, n) : 1.0;\n"          \
     "      v = mix(v, w < 0.0 ? 1.0 : w, f);\n"                                                                  \
