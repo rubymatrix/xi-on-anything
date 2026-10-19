@@ -201,3 +201,19 @@ addon, the frame log, and the report.
 `--game` (or `FFXI_GAME`), `--huffman` (or `FFXI_HUFFMAN`), `--client` (default `build/host64`),
 `--data-dir` (default host64's); arguments after `--` go to host64. The game's own frame cap and
 display settings are what it measures under.
+
+### GPU time per effects pass
+
+`prof` plays scenes (by default `markets noon midnight`) with the scene effects on (`FFXI_FX=1` unless
+set) and, at each scene's READY, asks `/fx prof` for three two-second windows (`--windows`), then
+takes a frame capture. Each scene gets `NN-<scene>.png` and `NN-<scene>.prof.json` (the windows and
+their frame-weighted mean); the run gets `prof.json` and `prof.txt`, passes down and scenes across.
+Read the passes, not `frame`: it sums the command buffers' GPU time, which overcounts on Apple GPUs.
+
+    FFXI_FX_FILE=<fx.txt> python3 tools/replay.py prof tools/replay/default.txt --control-port 54390 \
+        --auth-port 56231 --data-port 56230 --view-port 56001 --zone-port 56232 \
+        -- --reg-final <settings.reg> --fps-limit 120
+
+The port flags move the replay server and the control port off ones already taken (a LandSandBoat
+server, a static server, a WorldSim map server's xi_agents bridge on 54300). A `--data-dir` of its
+own gets the default data folder's Ashita libs copied in.
