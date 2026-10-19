@@ -3405,9 +3405,9 @@ extern "C"
         (void)f;
         return 0;
     }
-    void gfx_world_time(int begin)
+    void gfx_world_time(int pass)
     {
-        (void)begin;
+        (void)pass;
     }
     int gfx_chars_draw(const GfxCharFrame* f)
     {

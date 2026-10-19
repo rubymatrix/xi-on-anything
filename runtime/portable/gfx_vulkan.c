@@ -4544,7 +4544,7 @@ int gfx_rt_supported(void) { return rt_init(); }
 /* the scene renderer is Metal's only so far: the game's own draws stay */
 int gfx_world_supported(void) { return 0; }
 int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
-void gfx_world_time(int begin) { (void)begin; }
+void gfx_world_time(int pass) { (void)pass; }
 int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
 
 /* a buffer of at least need bytes in *b (made again, half as large again, when smaller; the old one let go

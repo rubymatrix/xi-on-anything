@@ -864,11 +864,14 @@ void scene_frame(void)
     g_slot_list = 0;
     float s = gfx_fx_get("scene");
     int want = s >= 0.5f ? (s >= 1.5f ? 2 : 1) : 0;
-#if defined(FFXI_SCENE_ZONE_DRAW_RET) && defined(FFXI_SCENE_ZONE_DRAW_RET2) && defined(FFXI_SCENE_ZONE_DRAW_RET3)
-    /* the walk's own draws (what's left to the game) leave the batch be; -1: the game draws its zone, its zone draws
-     * timed as a pass of their own (to compare) */
-    static const uint32_t sites[3] = { FFXI_SCENE_ZONE_DRAW_RET, FFXI_SCENE_ZONE_DRAW_RET2, FFXI_SCENE_ZONE_DRAW_RET3 };
-    d3d8_world_sites(sites, (want || s <= -0.5f) ? 3 : 0, s <= -0.5f);
+#if defined(FFXI_SCENE_ZONE_DRAW) && defined(FFXI_SCENE_ZONE_DRAW_END) && defined(FFXI_SCENE_CHAR_DRAW) && \
+    defined(FFXI_SCENE_CHAR_DRAW_END)
+    /* the game's own zone and character draws (what's left to the game) leave the batch be; -1: the game draws its zone
+     * and characters, each run of their draws timed as a pass of its own (to compare) */
+    if (want || s <= -0.5f)
+        d3d8_world_ranges(FFXI_SCENE_ZONE_DRAW, FFXI_SCENE_ZONE_DRAW_END, FFXI_SCENE_CHAR_DRAW, FFXI_SCENE_CHAR_DRAW_END, s <= -0.5f);
+    else
+        d3d8_world_ranges(0, 0, 0, 0, 0);
 #endif
     if (want && g_have && !gfx_world_supported())
         want = 0;

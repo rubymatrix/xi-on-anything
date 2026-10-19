@@ -1104,34 +1104,41 @@ void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
  * changes the targets, copies from them or shows them */
 static void (*g_world_flush)(void);
 void d3d8_set_world_flush(void (*fn)(void)) { g_world_flush = fn; }
-/* the game's own draws inside its zone walk (models the scene renderer leaves to the game) don't send the batch
- * out: told apart by where they return to in the walk (d3d8_world_sites). Timing the game's own zone draws for
- * comparison (scene = -1): those draws go into a timed pass of their own (gfx_world_time), which the next other
- * piece of work ends */
-static uint32_t g_world_sites[4], g_nworld_sites;
-static int g_world_time_on, g_world_timing, g_draw_zone;
-void d3d8_world_sites(const uint32_t* sites, uint32_t n, int time)
+/* the game's own draws inside its zone walk and its character mesh draws (what the scene renderer leaves to the game)
+ * don't send the batch out: told apart by where they return to (d3d8_world_ranges: the drawing functions' code).
+ * Timing the game's own draws of those for comparison (scene = -1): each run of them goes into a timed pass of its own
+ * (gfx_world_time), which the next other piece of work ends */
+static uint32_t g_world_range[2][2];
+static int g_world_time_on, g_world_timing, g_draw_zone; /* 0 other, 1 the zone's, 2 a character's */
+void d3d8_world_ranges(uint32_t zone_lo, uint32_t zone_hi, uint32_t char_lo, uint32_t char_hi, int time)
 {
-    g_nworld_sites = n < 4 ? n : 4;
-    memcpy(g_world_sites, sites, g_nworld_sites * sizeof *sites);
-    g_world_time_on = time && n;
+    g_world_range[0][0] = zone_lo, g_world_range[0][1] = zone_hi, g_world_range[1][0] = char_lo, g_world_range[1][1] = char_hi;
+    g_world_time_on = time && (zone_lo || char_lo);
 }
 
 /* the game's DrawPrimitive and DrawIndexedPrimitive wrappers (1000cb20, 1000cc00 in 2026-09-03) leave their caller's
  * return 0x20 and 0x28 up the stack at the device's call */
 static int world_site(Guest* g)
 {
-    for (uint32_t k = 0; k < g_nworld_sites; ++k)
-        if (rd32(g->esp + 0x20) == g_world_sites[k] + RD || rd32(g->esp + 0x28) == g_world_sites[k] + RD)
-            return 1;
+    for (int k = 0; k < 2; ++k)
+    {
+        uint32_t lo = g_world_range[k][0] + RD, hi = g_world_range[k][1] + RD;
+        if (!g_world_range[k][0])
+            continue;
+        uint32_t a = rd32(g->esp + 0x20), b = rd32(g->esp + 0x28);
+        if ((a >= lo && a < hi) || (b >= lo && b < hi))
+            return k + 1;
+    }
     return 0;
 }
 
 static void world_draw_begin(Guest* g)
 {
-    g_draw_zone = g_nworld_sites && world_site(g);
+    g_draw_zone = world_site(g);
+    if (g_world_timing && g_draw_zone != g_world_timing)
+        gfx_world_time(0), g_world_timing = 0;
     if (g_draw_zone && g_world_time_on && !g_world_timing)
-        gfx_world_time(1), g_world_timing = 1;
+        gfx_world_time(g_draw_zone), g_world_timing = g_draw_zone;
 }
 #define WORLD_FLUSH() \
     do \

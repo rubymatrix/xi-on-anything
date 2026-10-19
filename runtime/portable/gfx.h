@@ -433,9 +433,10 @@ typedef struct GfxCharFrame
 /* Draws a batch of characters into the current targets; 0 when it drew nothing. */
 int gfx_chars_draw(const GfxCharFrame* f);
 
-/* While the GPU's passes are timed: 1 the draws from here on are a timed pass of their own (as the scene renderer's
- * zone, GFX_PASS_WORLD), 0 that pass ends here (the game's own zone draws, timed for comparison). */
-void gfx_world_time(int begin);
+/* While the GPU's passes are timed: the draws from here on are a timed pass of their own, 1 as the scene renderer's
+ * zone (GFX_PASS_WORLD), 2 its characters (GFX_PASS_CHARS); 0 that pass ends here (the game's own draws, timed for
+ * comparison). */
+void gfx_world_time(int pass);
 
 /* Whether the scene effects can trace rays here (the rt setting: the GPU's ray queries, and on
  * Direct3D 12 the shaders built with dxc); the first call asks the device. */

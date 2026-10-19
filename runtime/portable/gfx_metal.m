@@ -4433,7 +4433,7 @@ static struct
 
 int gfx_world_supported(void) { return g_dev != nil; }
 
-void gfx_world_time(int begin)
+void gfx_world_time(int pass)
 {
     if (!g_dev || !gfx_pass_timing_on())
         return;
@@ -4441,7 +4441,7 @@ void gfx_world_time(int begin)
     {
         end_pass();
     }
-    g_pass_next = begin ? GFX_PASS_WORLD : -1;
+    g_pass_next = pass == 1 ? GFX_PASS_WORLD : pass == 2 ? GFX_PASS_CHARS : -1;
 }
 
 static int world_init(void)

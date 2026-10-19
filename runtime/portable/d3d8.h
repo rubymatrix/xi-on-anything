@@ -56,9 +56,10 @@ int d3d8_occlusion(void);
  * is none). */
 typedef struct GfxBuf GfxBuf;
 void d3d8_set_world_flush(void (*fn)(void));
-/* The game's zone draws (DrawPrimitive and DrawIndexedPrimitive returning to these sites in its walk): they don't send
- * the scene renderer's batch out, and with time they are timed as a pass of their own (for comparison). */
-void d3d8_world_sites(const uint32_t* sites, uint32_t n, int time);
+/* The game's zone and character draws (DrawPrimitive and DrawIndexedPrimitive returning into these code ranges): they
+ * don't send the scene renderer's batch out, and with time each run of them is timed as a pass of its own (for
+ * comparison). 0 ranges: none. */
+void d3d8_world_ranges(uint32_t zone_lo, uint32_t zone_hi, uint32_t char_lo, uint32_t char_hi, int time);
 GfxTex* d3d8_world_texture(uint32_t iface);
 typedef struct GfxSampler GfxSampler;
 int d3d8_world_sampler(uint32_t iface, GfxSampler* out);
