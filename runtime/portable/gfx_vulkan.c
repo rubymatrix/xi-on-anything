@@ -3241,7 +3241,7 @@ static const char FX_GLSL[] =
     "  vec2 uv = (u.vp.xy + vuv * u.vp.zw) / u.size.xy, t = 1.0 / u.size.xy;\n"
     "  vec3 c = 0.25 * (texture(t0, uv + t * vec2(-1, -1)).rgb + texture(t0, uv + t * vec2(1, -1)).rgb +\n"
     "                   texture(t0, uv + t * vec2(-1, 1)).rgb + texture(t0, uv + t * vec2(1, 1)).rgb);\n"
-    /* as the composite will shade it: the scene is copied before the occlusion and the sun's shadows,
+    /* as the composite will shade it: the scene is read as it was before the occlusion and the sun's shadows,
      * and a character in a cliff's shadow, drawn dark, still glowed as bright as in the open */
     "  if (u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0) {\n"
     "    vec4 os = textureLod(t1, vuv, 0.0);\n"
@@ -3436,7 +3436,7 @@ static struct
         linz_pipe, zmip_pipe, gi_pipe, gitemp_pipe, mip_pipe;
     GfxTex* lz;     /* the occlusion's depth: view z at its size and three levels below (FX_LINZ, FX_ZMIP) */
     GfxTex* aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
-    GfxTex *src, *ao0, *ao1, *b1a, *b1b, *b2a, *b2b, *ra, *rb;
+    GfxTex *src, *ao0, *ao1, *b1a, *b1b, *b2a, *b2b, *ra, *rb; /* src: the composite's spare (or the scene copied) */
     GfxTex* hist[2];      /* the occlusion and shadows after the temporal pass: this frame's and the one before */
     int hist_at;          /* which of hist[] the frame before wrote */
     uint64_t hist_serial; /* the frame it was written (0: none) */
@@ -3676,6 +3676,32 @@ static GfxTex* fx_tex(GfxTex** t, VkFormat fmt, uint32_t w, uint32_t h, int use,
     gfx_tex_destroy(*t);
     *t = tex_create(GFX_TEX_2D, use == GFX_USE_DEPTH ? F_D16 : F_A8R8G8B8, w, h, levels, use, fmt, 1);
     return *t;
+}
+
+/* *t made like `like`, mip chain and all, for the two to trade images (swap_images); NULL if it can't be */
+static GfxTex* fx_tex_like(GfxTex** t, const GfxTex* like)
+{
+    if (!*t || (*t)->w != like->w || (*t)->h != like->h || (*t)->vf != like->vf || (*t)->mips != like->mips ||
+        (*t)->fmt != like->fmt)
+    {
+        gfx_tex_destroy(*t);
+        *t = tex_create(GFX_TEX_2D, like->fmt, like->w, like->h, like->levels, GFX_USE_RT, like->vf, 0);
+    }
+    return *t && (*t)->mips == like->mips && (*t)->vf == like->vf ? *t : NULL;
+}
+
+/* a and b (made alike: fx_tex_like) trade their images and the views of them; each keeps what it is to the
+ * rest - the game's render target, its depths, its readbacks */
+static void swap_images(GfxTex* a, GfxTex* b)
+{
+    VkImage img = a->img;
+    VmaAllocation mem = a->mem;
+    VkImageView view = a->view, mipview = a->mipview, *rtv = a->rtv, *levelv = a->levelv;
+    a->img = b->img, a->mem = b->mem, a->view = b->view, a->mipview = b->mipview, a->rtv = b->rtv, a->levelv = b->levelv;
+    b->img = img, b->mem = mem, b->view = view, b->mipview = mipview, b->rtv = rtv, b->levelv = levelv;
+    uint64_t used = a->used > b->used ? a->used : b->used, rec = a->rec > b->rec ? a->rec : b->rec;
+    a->used = b->used = used, a->rec = b->rec = rec; /* either image may be in this frame's commands */
+    a->scene = b->scene = 0;
 }
 
 /* a view of one level of t, to read it while another level is drawn */
@@ -10394,7 +10420,12 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
         if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
             u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
-        if (fx_tex(&g_fx.src, ct->vf, ct->w, ct->h, GFX_USE_RT, 1) && fx_tex(&g_fx.ao0, F16, aw, ah, GFX_USE_RT, 1) &&
+        /* where the composite covers the whole target it is drawn into a spare image made alike, which then takes
+         * the target's place (swap_images): the passes read the scene as it is, with no copy (0.7 ms a frame of
+         * a 4096x4096 background on a Radeon 8060S). Elsewhere the scene is copied and composited over itself. */
+        int whole = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[2] == ct->w && s->vp[3] == ct->h && !ct->conv && !ct->x8 &&
+            !(rt && (int)g_fxs.debug == 8) && fx_tex_like(&g_fx.src, ct);
+        if ((whole || fx_tex(&g_fx.src, ct->vf, ct->w, ct->h, GFX_USE_RT, 1)) && fx_tex(&g_fx.ao0, F16, aw, ah, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.ao1, F16, aw, ah, GFX_USE_RT, 1) && fx_tex(&g_fx.b1a, F16, bw, bh, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.b1b, F16, bw, bh, GFX_USE_RT, 1) && fx_tex(&g_fx.b2a, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.b2b, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) && fx_tex(&g_fx.ra, F16, bw, bh, GFX_USE_RT, 1) &&
@@ -10403,11 +10434,16 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.comp_pipe = fmt_pipe(ct->vf, FP_FX_COMP);
             if (g_fx.comp_pipe)
             {
-                if (g_gt_on > 0)
-                    gt_mark(GT_COPY);
-                gpu_sync();
-                image_copy(ct, g_fx.src, VK_IMAGE_ASPECT_COLOR_BIT);
-                g_dirty = 1;
+                GfxTex* scene = whole ? ct : g_fx.src; /* what the passes read */
+                g_dirty = 1; /* the scene's draws done before they read it */
+                if (!whole)
+                {
+                    if (g_gt_on > 0)
+                        gt_mark(GT_COPY);
+                    gpu_sync();
+                    image_copy(ct, g_fx.src, VK_IMAGE_ASPECT_COLOR_BIT);
+                    g_dirty = 1;
+                }
                 static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 }, across2[2] = { 2, 0 }, down2[2] = { 0, 2 };
                 GfxTex* ao_out = g_fx.ao0;
                 if (u.ao[1] > 0.0f || u.shadow[0] > 0.0f || u.smap[0] > 0.0f)
@@ -10468,7 +10504,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         /* traced (rt): rays from each texel into the world, the light they meet as the frame or the
                          * sun saw it; smoothed four times (one texel apart, two, four, one) before the temporal pass */
                         static const int32_t s1[2] = { 1, 1 }, s2[2] = { 2, 2 }, s4[2] = { 4, 4 };
-                        VkImageView r_in[5] = { depth->view, g_fx.src->view, ao_out->view, g_fx.gimap->view, g_fx.gicol->view };
+                        VkImageView r_in[5] = { depth->view, scene->view, ao_out->view, g_fx.gimap->view, g_fx.gicol->view };
                         rt_pass(g_fx.gi0, 0, g_ray.gi, NULL, r_in, 5, NULL);
                         rt_pass(g_fx.gi1, 0, g_ray.giblur, NULL, &g_fx.gi0->view, 1, s1);
                         rt_pass(g_fx.gi0, 0, g_ray.giblur, NULL, &g_fx.gi1->view, 1, s2);
@@ -10494,7 +10530,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 }
                 if (u.bloom[1] > 0.0f)
                 {
-                    VkImageView b_in[2] = { g_fx.src->view, ao_out->view }; /* shaded as the composite shades */
+                    VkImageView b_in[2] = { scene->view, ao_out->view }; /* shaded as the composite shades */
                     g_pass = GFX_PASS_BLOOM;
                     fx_pass(g_fx.b1a, 0, 0, g_fx.bright_pipe, NULL, b_in, 2, NULL, NULL);
                     fx_pass(g_fx.b1b, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.b1a->view, 1, NULL, across2);
@@ -10505,18 +10541,20 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 }
                 if (u.rays[0] > 0.0f)
                 {
-                    VkImageView mask_in[2] = { g_fx.src->view, depth->view };
+                    VkImageView mask_in[2] = { scene->view, depth->view };
                     g_pass = GFX_PASS_RAYS;
                     fx_pass(g_fx.ra, 0, 0, g_fx.raymask_pipe, NULL, mask_in, 2, NULL, NULL);
                     fx_pass(g_fx.rb, 0, 0, g_fx.rays_pipe, NULL, &g_fx.ra->view, 1, NULL, NULL);
                     fx_pass(g_fx.ra, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.rb->view, 1, NULL, across);
                     fx_pass(g_fx.rb, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.ra->view, 1, NULL, down);
                 }
-                VkImageView comp_in[7] = { g_fx.src->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view,
+                VkImageView comp_in[7] = { scene->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view,
                     gi_out ? gi_out->view : VK_NULL_HANDLE };
                 float vp[4] = { vx, vy, vw, vh };
                 g_pass = GFX_PASS_COMP;
-                fx_pass(ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 7, NULL, NULL);
+                fx_pass(whole ? g_fx.src : ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 7, NULL, NULL);
+                if (whole)
+                    swap_images(ct, g_fx.src);
                 if (rt && (int)g_fxs.debug == 8)
                 {
                     if (!g_ray.clay || g_ray.clay_fmt != ct->vf)
