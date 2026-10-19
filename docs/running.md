@@ -102,6 +102,7 @@ the log reports each one: `[recomp] dats: era-dats, 163 files`.
 | `FFXI_DISCORD_APP_ID` | The Discord application the presence is shown as, in place of the built-in one. |
 | `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU. By default it answers "visible" at once, which saves 7–8 ms a frame. |
 | `FFXI_PROBE_DRAW=1` | Draw the characters' occlusion probes even though nothing reads them (with the default answer above). By default they are skipped on the 2025-11-12 build: up to 3 ms of GPU time a frame in crowds. |
+| `FFXI_FADE_SCISSOR=0` | Composite a fading character's scratch target over the whole scene, not just the part it was drawn in. |
 | `FFXI_DRAWLOG=<file>` | While `<file>.go` exists, write the next frame's draws to `<file>` (return addresses on the guest stack, texture, vertex box), then remove `.go`. For finding which game code draws what. |
 | `FFXI_GPU_TIMES=<file>` | Vulkan: GPU timestamps around each run of draws from one call site of the game and around each of the effects' passes, the sun maps and present. Each second, `<file>` gets the GPU time and draws per site (`t <epoch> frames <n> gpu_ms <ms>`, then `<site> <ns> <draws> <runs>`; a site is the draw's return address, with the next return address up the stack above it). |
 | `FFXI_ASYNC_READBACK=1` | Small read-only surface locks take the newest finished copy instead of waiting for the GPU. |
