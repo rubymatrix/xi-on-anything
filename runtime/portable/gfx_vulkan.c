@@ -628,7 +628,7 @@ static void ts_end(VkCommandBuffer cb, int i)
  * the draws changes (GfxDraw.site) and around the back end's own passes; each second, <path> gets the time and
  * draws per site since the last. A probe for the census of the game's draws; off, it costs a test per draw. */
 #define GT_MAX 4096
-enum { GT_FRAME = 1, GT_FX, GT_SUN, GT_MIPS, GT_PRESENT, GT_END };
+enum { GT_FRAME = 1, GT_FX, GT_SUN, GT_MIPS, GT_PRESENT, GT_END, GT_COPY, GT_WATER, GT_FXP = 16 };
 typedef struct { VkQueryPool pool; uint32_t n; uint64_t tag[GT_MAX]; uint32_t draws[GT_MAX]; } GtFrame;
 typedef struct { uint64_t tag, ns; uint32_t draws, segs, used; } GtSum;
 static int g_gt_on = -1;
@@ -3759,6 +3759,17 @@ static void pass_close(int ts)
 static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, const float* vp, const VkImageView* in, int n,
     const VkImageView* sh, const int32_t* dir)
 {
+    if (g_gt_on > 0)
+    {
+        /* each kind of pass its own tag: GT_FXP + its index here */
+        const VkPipeline k[] = { g_fx.linz_pipe, g_fx.zmip_pipe, g_fx.ao_pipe, g_fx.blur_pipe, g_fx.temporal_pipe, g_fx.gi_pipe,
+            g_fx.gitemp_pipe, g_fx.bright_pipe, g_fx.gauss_pipe, g_fx.down_pipe, g_fx.raymask_pipe, g_fx.rays_pipe,
+            g_fx.comp_pipe, g_fx.aa_pipe, g_fx.mip_pipe };
+        uint32_t i = 0;
+        while (i < sizeof k / sizeof k[0] && k[i] != p)
+            ++i;
+        gt_mark(GT_FXP + i);
+    }
     VkViewport v = vp ? (VkViewport){ vp[0], vp[1], vp[2], vp[3], 0, 1 } : (VkViewport){ 0 };
     int ts = pass_open(target, 0, level, load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE, vp ? &v : NULL, g_pass);
     VkCommandBuffer cb = g_cb;
@@ -10360,7 +10371,13 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.bloom, u.bloom[2] = 0.25f;
         u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
         if (g_fxs.water > 0.0f && have_v)
+        {
+            if (g_gt_on > 0)
+                gt_mark(GT_WATER);
             water_scene(s, vinv, &u, ct);
+            if (g_gt_on > 0)
+                gt_mark(GT_FX);
+        }
         const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
         /* the world for rays, before the passes that trace them */
         int rt = 0;
@@ -10386,6 +10403,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.comp_pipe = fmt_pipe(ct->vf, FP_FX_COMP);
             if (g_fx.comp_pipe)
             {
+                if (g_gt_on > 0)
+                    gt_mark(GT_COPY);
                 gpu_sync();
                 image_copy(ct, g_fx.src, VK_IMAGE_ASPECT_COLOR_BIT);
                 g_dirty = 1;
