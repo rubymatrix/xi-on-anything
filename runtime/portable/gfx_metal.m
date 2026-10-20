@@ -4902,6 +4902,35 @@ static void mat_mul(float* out, const float* a, const float* b) /* D3D order: ou
     memcpy(out, r, sizeof r);
 }
 
+/* A camera cut (the view jumping: first person and back, a cutscene, a warp): the camera moved more than two units or
+ * turned more than 25 degrees since the last frame that had a view. Effects that carry results over frames (the scene
+ * renderer's occlusion, the sun shafts) start afresh and the depth of field's focus is taken at once, so none of them
+ * shows the last view's results for a frame. Noted once a frame from the view (cam_cut_note), read as g_cam_cut. */
+static uint64_t g_cam_cut;          /* the last frame found to be a cut */
+static uint64_t g_cam_seen;         /* the last frame a view was noted */
+static float g_cam_last[16];        /* its view matrix */
+static void cam_cut_note(const float* view)
+{
+    if (g_cam_seen == g_serial)
+        return;
+    int cut = !g_cam_seen || g_cam_seen + 1 < g_serial;
+    if (!cut)
+    {
+        float a[16], b[16];
+        if (gfx_mat_inverse(a, view) && gfx_mat_inverse(b, g_cam_last))
+        {
+            float dx = a[12] - b[12], dy = a[13] - b[13], dz = a[14] - b[14];
+            float f = a[8] * b[8] + a[9] * b[9] + a[10] * b[10]; /* the view's z axes' cosine */
+            cut = dx * dx + dy * dy + dz * dz > 4.0f || f < 0.906f;
+        }
+    }
+    if (cut)
+        g_cam_cut = g_serial;
+    memcpy(g_cam_last, view, 64);
+    g_cam_seen = g_serial;
+}
+static int cam_cut(void) { return g_cam_cut == g_serial; }
+
 #include "gfx_ao_metal.inc"
 
 int gfx_world_draw(const GfxWorldFrame* f)
@@ -5782,7 +5811,8 @@ static const char POST_MSL[] =
     "  float gb = max(g.r, max(g.g, g.b)), gs = clamp(gb - 0.1, 0.0, 0.2);\n"
     "  gs = gs * gs / 0.4;\n"
     "  float gw = max(gs, gb - 0.2) / max(gb, 1e-4);\n"
-    "  return c * (w * sky * u.aux.y) + g * (gw * u.bloom.z); // each by its emissive weight: past 1, the chain is float\n"
+    "  float3 r = c * (w * sky * u.aux.y) + g * (gw * u.bloom.z); // each by its emissive weight: past 1, the chain is float\n"
+    "  return select(float3(0.0), clamp(r, 0.0, 64.0), isfinite(r)); // (no NaN or infinity into the chain: it would spread)\n"
     "}\n"
     "// the first level: four bilinear taps (each the 2x2 under it, a 4x4 footprint), each weighted by 1 / (1 + its luma) - a\n"
     "// Karis average, so a lone bright texel cannot flicker as the camera moves\n"
@@ -5949,7 +5979,8 @@ static const char POST_MSL[] =
     "    T *= exp(-a);\n"
     "  }\n"
     "  if (u.hist.z < 0.0) return float4(ls / float(n), lin / float(n), 0.0, dist); // shafts_debug < 0: lit fraction, in-map fraction\n"
-    "  return float4(u.sunc.rgb * (L * ph), dist);\n"
+    "  float3 o = u.sunc.rgb * (L * ph);\n"
+    "  return float4(select(float3(0.0), o, isfinite(o)), dist);\n"
     "}\n"
     "// over frames: this frame's march and last frame's result where this texel's point was then, clamped to this frame's\n"
     "// neighbours (no trails where the scene moved)\n"
@@ -6187,7 +6218,7 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     u.lo[0] = (float)lw, u.lo[1] = (float)lh, u.lo[2] = 1.0f / (float)lw, u.lo[3] = 1.0f / (float)lh;
     /* last frame's, when it was the frame before at this size and the camera didn't jump */
     float jx = u.cam[0] - g_post.sh_pcam[0], jy = u.cam[1] - g_post.sh_pcam[1], jz = u.cam[2] - g_post.sh_pcam[2];
-    int have = g_post.sh_serial && g_post.sh_serial + 1 == g_serial && jx * jx + jy * jy + jz * jz < 25.0f;
+    int have = g_post.sh_serial && g_post.sh_serial + 1 == g_serial && jx * jx + jy * jy + jz * jz < 25.0f && !cam_cut();
     memcpy(u.pvp, g_post.sh_pvp, 64), memcpy(u.pcam, g_post.sh_pcam, 12);
     u.hist[0] = have && g_fxs.shafts_debug >= 0.0f ? 1.0f : 0.0f, u.hist[1] = fminf(fmaxf(g_fxs.shafts_temporal, 0.0f), 0.97f), u.hist[2] = g_fxs.shafts_debug;
     id<MTLTexture> prev = g_post.shist[g_post.shist_at], out = g_post.shist[g_post.shist_at ^ 1];
@@ -6275,6 +6306,7 @@ static void post_effects(GfxTex* color, const GfxScene* s)
     @autoreleasepool
     {
         flush_pass();
+        cam_cut_note(s->view);
         id<MTLTexture> ct = color->tex, depth = color->depth_world ? color->depth_world : color->depth_seen;
         if (!post_init(ct.pixelFormat))
             return;
@@ -6308,12 +6340,13 @@ static void post_effects(GfxTex* color, const GfxScene* s)
                 const float* p = g_fx.focus;
                 want = fabsf(p[0] * V[2] + p[1] * V[6] + p[2] * V[10] + V[14]);
             }
-            if (want <= 0.0f)
-                want = 10.0f;
+            if (!(want > 0.5f) || !isfinite(want)) /* (no player, or the camera in its head: first person) */
+                want = g_post.focus > 0.5f && isfinite(g_post.focus) ? g_post.focus : 10.0f;
             uint64_t now = gfx_now_ns();
             double dt = g_post.focus_ns ? (double)(now - g_post.focus_ns) * 1e-9 : 1.0;
             g_post.focus_ns = now;
-            if (g_post.focus <= 0.0f || dt > 0.5 || fabsf(want - g_post.focus) > 0.5f * fmaxf(want, g_post.focus))
+            if (!(g_post.focus > 0.0f) || !isfinite(g_post.focus) || dt > 0.5 || cam_cut() ||
+                fabsf(want - g_post.focus) > 0.5f * fmaxf(want, g_post.focus))
                 g_post.focus = want;
             else
                 g_post.focus += (want - g_post.focus) * (float)(1.0 - exp(-dt / 0.2));

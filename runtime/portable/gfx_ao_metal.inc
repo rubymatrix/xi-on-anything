@@ -334,7 +334,8 @@ static void ao_make(GfxTex* color)
         u.prm[1] = q == 1 ? 4.0f : 6.0f;
         u.prm[2] = q == 1 ? 2.0f : q == 2 ? 3.0f : q == 3 ? 1.0f : 2.0f;
         u.prm[3] = 0.06f * (float)hw;
-        int same = !fresh && g_ao.made + 1 >= g_serial && !memcmp(g_ao.made_view, g_ao.vp, sizeof g_ao.vp);
+        cam_cut_note(g_ao.view);
+        int same = !fresh && g_ao.made + 1 >= g_serial && !memcmp(g_ao.made_view, g_ao.vp, sizeof g_ao.vp) && !cam_cut();
         u.tp[0] = 0.08f, u.tp[1] = same ? 1.0f : 0.0f, u.tp[2] = (float)(g_ao.frame++ & 63), u.tp[3] = 16.0f;
         memcpy(u.iv, iv, 64);
         memcpy(u.pvp, g_ao.made_vp, 64);
