@@ -168,6 +168,18 @@ static const struct
     { "dof_near", offsetof(GfxFxSettings, dof_near), 0.0f },
     /* the game's water models raised this far (units) over the zone surfaces laid at their level (d3d8.c water_lift) */
     { "water_lift", offsetof(GfxFxSettings, water_lift), 0.15f },
+    /* the scene renderer's bounce light (gfx_gi_metal.inc): 0 off, else how much of it the zone and characters take;
+     * needs scene 1 or 2 and ray queries */
+    { "scene_gi", offsetof(GfxFxSettings, scene_gi), 0.0f },
+    /* its quality: 1 low (24x8x24 probes 4 apart, 32 rays, 1 in 16 a frame), 2 high (32x12x32 3 apart, 64 rays, 1 in 12),
+     * both looked up per vertex; 3 high looked up per pixel (with scene 2) */
+    { "scene_gi_q", offsetof(GfxFxSettings, scene_gi_q), 2.0f },
+    /* how far the share of the sky the probes see darkens the game's ambient (0 not at all, 1 fully) */
+    { "scene_gi_sky", offsetof(GfxFxSettings, scene_gi_sky), 0.0f },
+    /* the earlier bounces' weight in each ray's hit (0: one bounce) */
+    { "scene_gi_bounce", offsetof(GfxFxSettings, scene_gi_bounce), 1.0f },
+    /* 1: the zone shows the bounce light alone (on its vertex colour), 2 the ambient's factor, 3 the bounce light x 8 */
+    { "scene_gi_debug", offsetof(GfxFxSettings, scene_gi_debug), 0.0f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line

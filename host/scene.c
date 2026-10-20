@@ -641,6 +641,8 @@ static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
     sf->world = g_sh.world, sf->nworld = g_sh.nworld, sf->item = g_sh.items.v, sf->nitem = sf->redraw >= 0 ? g_sh.items.n : 0;
 }
 
+#include "scene_gi.inc"
+
 static void flush(void)
 {
     if (!g_pending || g_flushing)
@@ -719,6 +721,7 @@ static void flush(void)
         CHARS_SHADOW_FRAME(&scf, &cf); /* the frame's characters so far cast, not only this batch's */
     sf.chars = have_chars && sf.dir[3] > 0.0f ? &scf : NULL;
     gfx_shadow_begin(sf.dir[3] > 0.0f ? &sf : NULL);
+    gi_frame(mgr, g_npicks ? &g_inst[0] : NULL);
     if (total)
         gfx_world_draw(&f);
     if (have_chars && cf.nitem)

@@ -471,6 +471,37 @@ typedef struct GfxShadowFrame
 /* Before the batch's gfx_world_draw: the shadows' layers drawn as the frame says; f NULL or dir.w 0 ends them. */
 void gfx_shadow_begin(const GfxShadowFrame* f);
 
+/* The scene renderer's bounce light (host/scene.c, the scene_gi setting; gfx_gi_metal.inc): a grid of light probes
+ * round the camera, traced against the zone's static geometry. gfx_gi_zone gives the zone once it is loaded (NULL
+ * drops it): every static instance's world matrix and its inverse (D3D row-major, 16 floats each) and the submeshes to
+ * trace (GfxWorldItem, opaque ones, tex for their colour). gfx_gi_frame, before each batch's gfx_world_draw, traces a
+ * share of the probes (once a frame) and has the batch's zone and characters lit by them; NULL or strength 0 ends it. */
+typedef struct GfxGiZone
+{
+    const float* world;
+    const float* world_inv;
+    uint32_t nworld;
+    const GfxWorldItem* item;
+    uint32_t nitem;
+} GfxGiZone;
+typedef struct GfxGiFrame
+{
+    float cam[4];                       /* world */
+    float sun_dir[4], sun_col[4];       /* toward the light, w = 1 when there is one (as GfxWorldInst) */
+    float sun2_dir[4], sun2_col[4];
+    float ambient[4];
+    const GfxWorldLight* light;         /* the lamps lit now (the light pool's) */
+    uint32_t nlight;
+    float strength;                     /* how much of the bounce light the surfaces take */
+    float sky;                          /* how far the share of the sky a probe sees darkens the ambient (0 not) */
+    float bounce;                       /* the earlier bounces' weight in a ray's hit (0 one bounce) */
+    float ambient_bounce;               /* the ambient's weight at a ray's hit */
+    float debug;                        /* 1 the bounce light alone, 2 the ambient's factor */
+    uint32_t quality;                   /* 1 low, 2 high (both sampled per vertex), 3 high sampled per pixel in scene 2 */
+} GfxGiFrame;
+void gfx_gi_zone(const GfxGiZone* z);
+void gfx_gi_frame(const GfxGiFrame* f);
+
 /* Whether the scene effects can trace rays here (the rt setting: the GPU's ray queries, and on
  * Direct3D 12 the shaders built with dxc); the first call asks the device. */
 int gfx_rt_supported(void);

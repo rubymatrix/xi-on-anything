@@ -145,6 +145,8 @@ int gfx_world_supported(void) { return 0; }
 int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
 void gfx_world_time(int pass) { (void)pass; }
 void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
+void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
+void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
 int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
 void gfx_pass_timing(int on) { (void)on; }
 int gfx_pass_report(char (*out)[96], int max) { return (void)out, (void)max, 0; }

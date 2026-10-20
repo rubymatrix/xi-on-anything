@@ -90,7 +90,8 @@
         "scene_zone_draw_end": "0x1017de20",
         "scene_char_draw": "0x1002dc10",
         "scene_char_draw_end": "0x1002f0d3",
-        "scene_env": "0x1065cb04"
+        "scene_env": "0x1065cb04",
+        "scene_light_pool": "0x10632040"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
