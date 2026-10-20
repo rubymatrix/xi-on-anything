@@ -161,6 +161,8 @@ static const struct
     { "dof_range", offsetof(GfxFxSettings, dof_range), 10.0f },
     { "dof_ramp", offsetof(GfxFxSettings, dof_ramp), 100.0f },
     { "dof_near", offsetof(GfxFxSettings, dof_near), 0.0f },
+    /* the game's water models raised this far (units) over the zone surfaces laid at their level (d3d8.c water_lift) */
+    { "water_lift", offsetof(GfxFxSettings, water_lift), 0.15f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line

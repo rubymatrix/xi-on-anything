@@ -2588,6 +2588,28 @@ static int merge_streams(GfxDraw* d, uint32_t first, uint32_t count)
 }
 
 /* The keys and uniforms for the current state; 0 when the state cannot be drawn. */
+/* The game's water models lifted water_lift units up their own vertical (y up the model is down the world), in front of
+ * the zone surfaces laid at the water's level. Bastok Markets' harbour has untextured zone tiles at y 8.00 and the sea's
+ * model at 8.10, ten centimetres under them; the game draws the water with its near plane 0.3% out (D3DTS_PROJECTION
+ * [14] -0.1003 for -0.1), which puts it in front only from some 33 units away: nearer, the tiles hid it and the sea
+ * was a flat grey wherever the camera came close to it. */
+static void water_lift(GfxDraw* d, const State* s)
+{
+    float lift = gfx_fx_get("water_lift");
+    if (lift <= 0.0f)
+        return;
+    const float* W = s->xf[24];
+    float n = sqrtf(W[4] * W[4] + W[5] * W[5] + W[6] * W[6]);
+    if (n <= 0.0f)
+        return;
+    float o[4] = { -lift * W[4] / n, -lift * W[5] / n, -lift * W[6] / n, 0.0f }, vp[16], r[4];
+    mat_mul(vp, s->xf[2], s->xf[3]);
+    for (int j = 0; j < 4; ++j)
+        r[j] = o[0] * vp[j] + o[1] * vp[4 + j] + o[2] * vp[8 + j];
+    for (int j = 0; j < 4; ++j)
+        d->u.wvp[12 + j] += r[j];
+}
+
 static int build_draw(GfxDraw* d)
 {
     State* s = &g_dev.cur;
@@ -2815,6 +2837,8 @@ static int build_draw(GfxDraw* d)
     {
         Obj* vb = obj(s->stream[0]);
         d->water = vb && vb->water;
+        if (d->water && !d->vs.prog)
+            water_lift(d, s);
     }
     return 1;
 }
