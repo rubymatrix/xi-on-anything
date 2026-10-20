@@ -137,8 +137,7 @@ static uint64_t g_serial = 1;         /* the frame being recorded */
 static _Atomic uint64_t g_completed;  /* the last frame the GPU finished */
 static int g_frame_open;              /* the semaphore was taken for g_serial */
 static uint32_t g_cmd_draws;          /* draws in the command buffer being recorded */
-static int g_shd_read;                /* the command buffer being recorded samples the scene renderer's shadow maps */
-static uint32_t g_shd_submits;        /* times it was committed early so a later batch's shadows could be drawn */
+static uint32_t g_shd_drawn[2];       /* character draws into the cascades and the fitted map since the last log line */
 static _Atomic uint64_t g_gpu_ns;      /* GPU time of the committed command buffers (profile) */
 /* GPU time per pass (gfx_pass_timing): each timed pass's encoder samples a timestamp at its start
  * (start of vertex) and its end (end of fragment) into the frame's counter sample buffer, two samples
@@ -393,7 +392,6 @@ static void commit_cmd(int wait)
             gfx_pass_gpu(ns);
         }];
     [g_cmd commit];
-    g_shd_read = 0;
     if (wait)
         [g_cmd waitUntilCompleted];
     [g_cmd release];
@@ -4364,7 +4362,8 @@ static void water_bind(void)
  * in the two near cascades four compares a texel apart, beyond one, each the hardware's 2x2 filter. 1 lit, 0 in
  * shadow (strength applied). */
 #define SHADOW_MSL                                                                                                  \
-    "struct SH { float4x4 m[4]; float4 cas[4]; float4 cbox[4]; float4 dir; float4 cam; float4 info; };\n"           \
+    "struct SH { float4x4 m[4]; float4 cas[4]; float4 cbox[4]; float4 dir; float4 cam; float4 info; float4x4 cm[4];\n" \
+    "            float4 ctx; };\n"                                                                                \
     "static float sh_pcf(depth2d_array<float> t, sampler s, float2 uv, uint c, float z, float tx) {\n"           \
     "  if (c >= 2u) return t.sample_compare(s, uv, c, z);\n" /* far: the hardware's 2x2 alone */                 \
     "  return 0.25 * (t.sample_compare(s, uv + float2(-0.5, -0.5) * tx, c, z) +\n"                               \
@@ -4372,30 +4371,54 @@ static void water_bind(void)
     "                 t.sample_compare(s, uv + float2(-0.5, 0.5) * tx, c, z) +\n"                                \
     "                 t.sample_compare(s, uv + float2(0.5, 0.5) * tx, c, z));\n"                                 \
     "}\n"                                                                                                        \
-    "static float sh_at(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, sampler cs, uint c,\n"  \
+    /* the characters' layers: the fitted one when the point is in it (round the characters near the camera, a   \
+     * texel some millimetres), else the cascade's own; nine of the hardware's 2x2 compares a texel apart (a 4x4    \
+     * footprint, smooth edges), the normal offset scaled to the layer's texel */                                  \
+    "static float sh_cpcf(depth2d_array<float> t, sampler s, float2 uv, uint l, float z, float tx) {\n"         \
+    "  float v = 0.0;\n"                                                                                         \
+    "  for (int y = -1; y <= 1; ++y)\n"                                                                          \
+    "    for (int x = -1; x <= 1; ++x) v += t.sample_compare(s, uv + float2(x, y) * tx, l, z);\n"                \
+    "  return v * (1.0 / 9.0);\n"                                                                                \
+    "}\n"                                                                                                        \
+    "static float sh_char(constant SH& S, depth2d_array<float> cm, depth2d_array<float> ct, sampler cs, uint c, float3 wp,\n" \
+    "                     float3 n, float nl) {\n"                                                                  \
+    "  float off = 1.0 + 4.0 * sqrt(1.0 - nl * nl);\n"                                                           \
+    "  float t = S.ctx.x;\n" /* the fitted layer, when there is one and the point is in it */                     \
+    "  if (t > 0.0) {\n"                                                                                          \
+    "    float4 h = S.cm[0] * float4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                 \
+    "    if (all(abs(h.xy) < 0.995)) return sh_cpcf(ct, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), 0u, h.z, S.ctx.y);\n" \
+    "  }\n"                                                                                                       \
+    "  if (c >= uint(S.info.y)) return 1.0;\n" /* the cascade's characters' layer, half size, only round them */      \
+    "  t = 2.0 * S.cas[c].y;\n"                                                                                   \
+    "  float4 h = S.cm[1u + c] * float4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                               \
+    "  float4 b = S.cbox[c];\n"                                                                                   \
+    "  if (any(abs(h.xy) > 0.995) || any(h.xy < b.xy) || any(h.xy > b.zw)) return 1.0;\n"                         \
+    "  return sh_cpcf(cm, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), c, h.z, 2.0 * S.info.w);\n"                \
+    "}\n"                                                                                                        \
+    "static float sh_at(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, depth2d_array<float> ct,\n" \
+    "                   sampler cs, uint c,\n"                                                                  \
     "                   float3 wp, float3 n) {\n"                                                               \
     "  float nl = saturate(dot(n, S.dir.xyz)), t = S.cas[c].y;\n" /* more the more the surface turns from it */ \
     "  float4 h = S.m[c] * float4(wp + n * (t * (1.0 + 4.0 * sqrt(1.0 - nl * nl))) + S.dir.xyz * t, 1.0);\n"  \
     "  if (abs(h.x) > 0.995 || abs(h.y) > 0.995) return -1.0;\n"                                                \
     "  float2 uv = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                 \
     "  float v = sh_pcf(zm, cs, uv, c, h.z, S.info.w);\n"                                                        \
-    "  float4 b = S.cbox[c];\n" /* the characters' layer only round them (their box in the map, x0 y0 x1 y1) */   \
-    "  if (v > 0.0 && c < uint(S.info.y) && all(h.xy >= b.xy) && all(h.xy <= b.zw))\n"                          \
-    "    v = min(v, sh_pcf(cm, cs, uv, c, h.z, 2.0 * S.info.w));\n"                                               \
+    "  if (v > 0.0 && S.info.y > 0.0) v = min(v, sh_char(S, cm, ct, cs, c, wp, n, nl));\n"                      \
     "  return v;\n"                                                                                              \
     "}\n"                                                                                                        \
-    "static float shadow(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, sampler cs, float3 wp,\n" \
+    "static float shadow(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, depth2d_array<float> ct,\n" \
+    "                    sampler cs, float3 wp,\n"                                                              \
     "                    float3 n) {\n"                                                                          \
     "  float3 e = wp - S.cam.xyz;\n"                                                                             \
     "  float d = length(e);\n"                                                                                   \
     "  uint nc = uint(S.info.x);\n"                                                                              \
     "  for (uint c = 0; c < nc; ++c) {\n"                                                                        \
     "    if (S.cas[c].w == 0.0 || d > S.cas[c].x) continue;\n"                                                   \
-    "    float v = sh_at(S, zm, cm, cs, c, wp, n);\n"                                                            \
+    "    float v = sh_at(S, zm, cm, ct, cs, c, wp, n);\n"                                                            \
     "    if (v < 0.0) continue;\n"                                                                               \
     "    float r = S.cas[c].x, f = saturate((d - 0.9 * r) / (0.1 * r));\n"                                       \
     "    if (f > 0.0) {\n"                                                                                       \
-    "      float w = c + 1 < nc && S.cas[c + 1].w != 0.0 ? sh_at(S, zm, cm, cs, c + 1, wp, n) : 1.0;\n"          \
+    "      float w = c + 1 < nc && S.cas[c + 1].w != 0.0 ? sh_at(S, zm, cm, ct, cs, c + 1, wp, n) : 1.0;\n"          \
     "      v = mix(v, w < 0.0 ? 1.0 : w, f);\n"                                                                  \
     "    }\n"                                                                                                    \
     "    return mix(1.0, v, S.info.z);\n"                                                                        \
@@ -4477,6 +4500,7 @@ static const char WORLD_MSL[] =
     "                         constant SH& S [[buffer(6), function_constant(k_shadow)]],\n"
     "                         depth2d_array<float> zm [[texture(1), function_constant(k_shadow)]],\n"
     "                         depth2d_array<float> cm [[texture(2), function_constant(k_shadow)]],\n"
+    "                         depth2d_array<float> ct [[texture(3), function_constant(k_shadow)]],\n"
     "                         sampler cs [[sampler(1), function_constant(k_shadow)]]) {\n"
     "  float3 c = i.col.rgb, sun = i.sun;\n"
     "  float3 N = (D.flags & 32u) ? normalize(i.nrm) : i.nrm;\n"
@@ -4487,10 +4511,10 @@ static const char WORLD_MSL[] =
     "    while (k < 3 && d > S.cas[k].x) ++k;\n"
     "    float3 tint = k == 0 ? float3(1.0, 0.55, 0.55) : k == 1 ? float3(0.55, 1.0, 0.55) : k == 2 ? float3(0.55, 0.55, 1.0) : float3(1.0, 1.0, 0.55);\n"
     "    float nl = dot(normalize(N), S.dir.xyz);\n"
-    "    return float4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(S, zm, cm, cs, i.wpos, normalize(N))) : float3(0.05), 1.0);\n"
+    "    return float4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(S, zm, cm, ct, cs, i.wpos, normalize(N))) : float3(0.05), 1.0);\n"
     "  }\n"
     "  if (k_shadow) {\n"
-    "    if (any(sun > 0.0)) sun *= shadow(S, zm, cm, cs, i.wpos, normalize(N));\n"
+    "    if (any(sun > 0.0)) sun *= shadow(S, zm, cm, ct, cs, i.wpos, normalize(N));\n"
     "    c = saturate(c + sun);\n"
     "  } else if (k_pixel) c = saturate(c + sun);\n"
     "  float4 tx = t.sample(s, i.uv);\n"
@@ -4535,25 +4559,132 @@ typedef struct ShU
     float cbox[GFX_SHADOW_CASCADES][4]; /* the characters in the map (x0, y0, x1, y1), with a margin */
     float dir[4], cam[4];
     float info[4]; /* cascades, of them the characters', strength, 1 / size */
+    float cm[GFX_SHADOW_CASCADES][16]; /* the characters' layers (last frame's): 0 fitted round those near the camera, 1
+                                        * and on the first cascades' */
+    float ctx[4];  /* world units a texel in the fitted layer (0: none), 1 / its size */
 } ShU;
 static struct
 {
     int on;                        /* this batch's draws are shadowed */
     ShU u;
-    id<MTLTexture> zmap, cmap;     /* the zone's layers (kept), the characters' (every frame) */
+    /* the zone's layers (kept); the characters' (drawn at a frame's end, read by the next): in the first cascades, and
+     * fitted round those near the camera */
+    id<MTLTexture> zmap, cmap, cmt;
     uint32_t size;
     id<MTLSamplerState> cmp;
     id<MTLDepthStencilState> ds;
     id<MTLRenderPipelineState> zone[2], chars; /* depth alone, alpha tested; the characters' */
     int tried;
+    uint32_t fsize;      /* the fitted layer's texels across */
+    float freach;        /* the fitted layer's reach from the camera */
+    uint64_t cframe;     /* the frame of the last batch */
+    uint32_t cdone;      /* of the frame's characters (the host's list grows batch by batch), those taken so far */
+    float near_lo[2], near_hi[2]; /* the frame's near characters in cascade 0's map */
+    float cbox[GFX_SHADOW_CASCADES][4]; /* the frame's characters in each cascade's map */
+    /* the frame's characters for the layers drawn at its end: its last batch (the host's palette and states hold until
+     * the next frame) and every batch's items, with their buffers and textures held (the game may let them go first) */
+    GfxShadowFrame lf;
+    GfxCharFrame lc;
+    struct ShItem* items;
+    uint32_t nitems, capitems;
+    uint32_t lnch;
+    uint64_t lserial;
+    /* the layers drawn at a frame's end, read by the next frame */
+    struct
+    {
+        uint64_t serial;  /* the frame they hold */
+        uint32_t n;       /* cascade layers */
+        float cm[2][16];  /* their matrices */
+        float cbox[2][4]; /* their characters' boxes, with a margin */
+        float tm[16], ttx, chs; /* the fitted layer's matrix, texel (0 none), half size */
+        /* where each character's part (its vertex buffer and mirror) was: open addressing, cap a power of two */
+        uintptr_t* key;
+        float (*at)[3];
+        uint32_t cap;
+    } lag;
 } g_shd;
+/* a character's draw as the shadow passes take it, its buffers and texture held */
+typedef struct ShItem
+{
+    id<MTLBuffer> vb, uv, ib;
+    id<MTLTexture> tex;
+    id<MTLSamplerState> samp;
+    uint32_t index_size, first, count, prim, palette, state, mirror;
+    float at[3]; /* its place, world: its first bone through its state's WORLD (a cached skin's bones are the model's) */
+    uintptr_t key;
+} ShItem;
+
+static void char_at(const GfxCharFrame* cf, const GfxCharItem* it, float at[3])
+{
+    const float* r = cf->palette + 16 * (size_t)it->palette + 12;
+    const float* W = cf->state[it->state].world;
+    for (int a = 0; a < 3; ++a)
+        at[a] = r[0] * W[a] + r[1] * W[4 + a] + r[2] * W[8 + a] + W[12 + a];
+}
+
+static uint32_t char_hash(uintptr_t k) { return (uint32_t)((k >> 4) * 0x9E3779B97F4A7C15ull >> 32); }
+static uintptr_t char_key(const GfxCharItem* it) { return (uintptr_t)it->vb ^ (uintptr_t)(it->mirror != 0); }
+
+/* how far a character's part moved since last frame's layers were drawn (where it was, less where it is): its shadow
+ * lookups go back by it, so it is shadowed as it stood then; 0 when it wasn't there (or jumped) */
+static void char_lag(const GfxCharFrame* cf, const GfxCharItem* it, float d[4])
+{
+    d[0] = d[1] = d[2] = d[3] = 0.0f;
+    if (!g_shd.lag.cap || g_shd.lag.serial + 1 != g_serial)
+        return;
+    uintptr_t k = char_key(it);
+    for (uint32_t h = char_hash(k) & (g_shd.lag.cap - 1);; h = (h + 1) & (g_shd.lag.cap - 1))
+    {
+        if (!g_shd.lag.key[h])
+            return;
+        if (g_shd.lag.key[h] == k)
+        {
+            float now[3];
+            char_at(cf, it, now);
+            float dx = g_shd.lag.at[h][0] - now[0], dy = g_shd.lag.at[h][1] - now[1], dz = g_shd.lag.at[h][2] - now[2];
+            if (dx * dx + dy * dy + dz * dz < 1.0f)
+                d[0] = dx, d[1] = dy, d[2] = dz;
+            return;
+        }
+    }
+}
+
+static void shadow_items_clear(void)
+{
+    for (uint32_t i = 0; i < g_shd.nitems; ++i)
+        [g_shd.items[i].vb release], [g_shd.items[i].uv release], [g_shd.items[i].ib release], [g_shd.items[i].tex release];
+    g_shd.nitems = 0;
+}
+
+/* the host's items [from, nitem) taken (marked used this frame, so a later update renames rather than overwrites) */
+static void shadow_items_add(const GfxCharFrame* cf, uint32_t from)
+{
+    if (g_shd.nitems + (cf->nitem - from) > g_shd.capitems)
+        g_shd.capitems = (g_shd.nitems + (cf->nitem - from)) * 2,
+        g_shd.items = (ShItem*)realloc(g_shd.items, g_shd.capitems * sizeof *g_shd.items);
+    for (uint32_t i = from; i < cf->nitem; ++i)
+    {
+        const GfxCharItem* it = &cf->item[i];
+        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count)
+            continue;
+        it->vb->used = it->uv->used = it->ib->used = it->tex->used = g_serial;
+        ShItem* o = &g_shd.items[g_shd.nitems++];
+        o->vb = [it->vb->b retain], o->uv = [it->uv->b retain], o->ib = [it->ib->b retain], o->tex = [it->tex->view retain];
+        o->samp = sampler(&it->samp);
+        o->index_size = it->index_size, o->first = it->first, o->count = it->count, o->prim = it->prim;
+        o->palette = it->palette, o->state = it->state, o->mirror = it->mirror;
+        char_at(cf, it, o->at);
+        o->key = char_key(it);
+    }
+}
+
 static void shadow_bind(id<MTLRenderCommandEncoder> e)
 {
-    g_shd_read = 1;
     [e setVertexBytes:&g_shd.u length:sizeof g_shd.u atIndex:6];
     [e setFragmentBytes:&g_shd.u length:sizeof g_shd.u atIndex:6];
     [e setFragmentTexture:g_shd.zmap atIndex:1];
     [e setFragmentTexture:g_shd.cmap atIndex:2];
+    [e setFragmentTexture:g_shd.cmt atIndex:3];
     [e setFragmentSamplerState:g_shd.cmp atIndex:1];
 }
 
@@ -4835,12 +4966,14 @@ static const char CHARS_MSL[] =
     "                        sampler sm [[sampler(0)]], constant SH& H [[buffer(6), function_constant(k_shadow)]],\n"
     "                        depth2d_array<float> zm [[texture(1), function_constant(k_shadow)]],\n"
     "                        depth2d_array<float> cm [[texture(2), function_constant(k_shadow)]],\n"
-    "                        sampler cs [[sampler(1), function_constant(k_shadow)]]) {\n"
+    "                         depth2d_array<float> ct [[texture(3), function_constant(k_shadow)]],\n"
+    "                        sampler cs [[sampler(1), function_constant(k_shadow)]],\n"
+    "                        constant float4& LG [[buffer(7), function_constant(k_shadow)]]) {\n"
     "  float4 tx = t.sample(sm, i.uv);\n"
     "  float3 col = i.col.rgb;\n"
     "  if (k_shadow) {\n"
     "    float3 sun = i.sun;\n"
-    "    if (any(sun > 0.0)) sun *= shadow(H, zm, cm, cs, i.wp, normalize(i.wn));\n"
+    "    if (any(sun > 0.0)) sun *= shadow(H, zm, cm, ct, cs, i.wp + LG.xyz, normalize(i.wn));\n"
     "    col = saturate(col + sun);\n"
     "  }\n"
     "  float3 c = saturate(2.0 * saturate(2.0 * tx.rgb * col) * i.tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
@@ -4852,11 +4985,12 @@ static const char CHARS_MSL[] =
     /* the characters into the first cascades at once (one layer an instance), alpha tested as they are drawn */
     "struct CSO { float4 pos [[position]]; float2 uv; float4 tf [[flat]]; uint layer [[render_target_array_index]]; };\n"
     "vertex CSO cshadow_vs(CVI v [[stage_in]], const device float4x4* P [[buffer(3)]], constant CS* S [[buffer(4)]],\n"
-    "                      constant CD& D [[buffer(5)]], constant SH& H [[buffer(6)]], uint li [[instance_id]]) {\n"
+    "                      constant CD& D [[buffer(5)]], constant float4x4* LM [[buffer(7)]],\n"
+    "                      uint li [[instance_id]]) {\n"
     "  constant CS& s = S[D.state];\n"
     "  float3 n, p = skin(v, D, P, n);\n"
     "  CSO o;\n"
-    "  o.pos = H.m[li] * (s.world * float4(p, 1.0));\n"
+    "  o.pos = LM[li] * (s.world * float4(p, 1.0));\n"
     "  o.uv = v.uv;\n"
     "  o.tf = s.tf;\n"
     "  o.layer = li;\n"
@@ -5003,6 +5137,12 @@ int gfx_chars_draw(const GfxCharFrame* f)
             it->vb->used = it->uv->used = it->ib->used = g_serial;
             uint32_t dc[4] = { it->palette, it->state, it->mirror, 0 };
             [g_enc setVertexBytes:dc length:sizeof dc atIndex:5];
+            if (g_shd.on)
+            {
+                float lg[4];
+                char_lag(f, it, lg);
+                [g_enc setFragmentBytes:lg length:sizeof lg atIndex:7];
+            }
             [g_enc setFragmentTexture:it->tex->view atIndex:0];
             [g_enc setFragmentSamplerState:sampler(&it->samp) atIndex:0];
             it->tex->used = g_serial;
@@ -5081,24 +5221,31 @@ static int shadow_init(uint32_t size)
     }
     if (!g_shd.zone[0] || !g_shd.zone[1] || !g_shd.chars || !g_shd.cmp)
         return 0;
-    if (g_shd.size != size || !g_shd.zmap || !g_shd.cmap)
+    uint32_t fsz = (uint32_t)g_fxs.scene_shadow_fit_size;
+    fsz = fsz < 256 ? 256 : fsz > 4096 ? 4096 : fsz;
+    if (g_shd.size != size || g_shd.fsize != fsz || !g_shd.zmap || !g_shd.cmap || !g_shd.cmt)
     {
-        [g_shd.zmap release], [g_shd.cmap release];
-        g_shd.zmap = g_shd.cmap = nil;
-        for (int k = 0; k < 2; ++k)
+        int zone = g_shd.size != size || !g_shd.zmap; /* the zone's layers are kept: only a new size draws them anew */
+        if (zone)
+            [g_shd.zmap release], g_shd.zmap = nil;
+        [g_shd.cmap release], [g_shd.cmt release];
+        g_shd.cmap = g_shd.cmt = nil;
+        for (int k = zone ? 0 : 1; k < 3; ++k) /* the zone's; the characters' in the cascades, half size; the fitted one */
         {
             MTLTextureDescriptor* td = [MTLTextureDescriptor
                 texture2DDescriptorWithPixelFormat:k ? MTLPixelFormatDepth16Unorm : MTLPixelFormatDepth32Float
-                                             width:k ? size / 2 : size height:k ? size / 2 : size mipmapped:NO];
+                                             width:k == 1 ? size / 2 : k == 2 ? fsz : size
+                                            height:k == 1 ? size / 2 : k == 2 ? fsz : size mipmapped:NO];
             td.textureType = MTLTextureType2DArray;
-            td.arrayLength = GFX_SHADOW_CASCADES;
+            td.arrayLength = k == 2 ? 1 : GFX_SHADOW_CASCADES;
             td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
             td.storageMode = MTLStorageModePrivate;
-            *(k ? &g_shd.cmap : &g_shd.zmap) = [g_dev newTextureWithDescriptor:td];
+            *(k == 2 ? &g_shd.cmt : k ? &g_shd.cmap : &g_shd.zmap) = [g_dev newTextureWithDescriptor:td];
         }
-        g_shd.size = size;
+        g_shd.size = size, g_shd.fsize = fsz;
+        g_shd.cframe = 0, g_shd.lag.serial = 0, g_shd.lserial = 0;
     }
-    return g_shd.zmap && g_shd.cmap;
+    return g_shd.zmap && g_shd.cmap && g_shd.cmt;
 }
 
 /* one cascade of the zone's layer drawn again */
@@ -5154,19 +5301,22 @@ static uint32_t shadow_zone(id<MTLCommandBuffer> cb, const GfxShadowFrame* f)
     return drawn;
 }
 
-/* the characters into the first n cascades: one pass, a layer an instance */
-static uint32_t shadow_chars(id<MTLCommandBuffer> cb, const GfxShadowFrame* f, uint32_t n)
+/* characters into a characters' map (tex, side texels across): the frame's taken items from from, each into the layers of mats, one an
+ * instance. reach NULL: the one layer, the characters whose place is within two units of its square; else a layer each cascade, a character
+ * into the one its place (its first bone) from the camera falls in and the next (the cascades blend over their last
+ * tenth), none beyond scene_shadow_char_far */
+static void shadow_chars_pass(id<MTLCommandBuffer> cb, const GfxCharFrame* cf, const float* cam, id<MTLTexture> tex, double side,
+    int clear, const float (*mats)[16], uint32_t nmat, const float* reach, uint32_t from)
 {
-    const GfxCharFrame* cf = f->chars;
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    rp.depthAttachment.texture = g_shd.cmap;
-    rp.depthAttachment.loadAction = MTLLoadActionClear;
+    rp.depthAttachment.texture = tex;
+    rp.depthAttachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
     rp.depthAttachment.clearDepth = 1.0;
     rp.depthAttachment.storeAction = MTLStoreActionStore;
-    rp.renderTargetArrayLength = n;
+    rp.renderTargetArrayLength = nmat;
     ts_mark(rp, GFX_PASS_SHADOW_CHARS);
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-    [e setViewport:(MTLViewport){ 0, 0, (double)(f->size / 2), (double)(f->size / 2), 0, 1 }];
+    [e setViewport:(MTLViewport){ 0, 0, side, side, 0, 1 }];
     [e setRenderPipelineState:g_shd.chars];
     [e setDepthStencilState:g_shd.ds];
     [e setCullMode:MTLCullModeNone];
@@ -5180,30 +5330,125 @@ static uint32_t shadow_chars(id<MTLCommandBuffer> cb, const GfxShadowFrame* f, u
     [e setFragmentBytes:cu length:sizeof cu atIndex:2];
     [e setVertexBuffer:pb offset:po atIndex:3];
     [e setVertexBuffer:sb offset:so atIndex:4];
-    [e setVertexBytes:&g_shd.u length:sizeof g_shd.u atIndex:6];
-    uint32_t drawn = 0;
-    for (uint32_t i = 0; i < cf->nitem; ++i)
+    [e setVertexBytes:mats length:64 * (NSUInteger)nmat atIndex:7];
+    const float* M = mats[0];
+    float lim = 1.0f + 2.0f * sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]); /* the square and two units, in the layer */
+    float far2 = g_fxs.scene_shadow_char_far * g_fxs.scene_shadow_char_far;
+    for (uint32_t i = from; i < g_shd.nitems; ++i)
     {
-        const GfxCharItem* it = &cf->item[i];
-        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count)
-            continue;
-        [e setVertexBuffer:it->vb->b offset:0 atIndex:0];
-        [e setVertexBuffer:it->uv->b offset:0 atIndex:1];
-        it->vb->used = it->uv->used = it->ib->used = it->tex->used = g_serial;
+        const ShItem* it = &g_shd.items[i];
+        const float* r = it->at;
+        float dx = r[0] - cam[0], dy = r[1] - cam[1], dz = r[2] - cam[2], d2 = dx * dx + dy * dy + dz * dz;
+        uint32_t base = 0, count = 1;
+        if (!reach)
+        {
+            if (fabsf(r[0] * M[0] + r[1] * M[4] + r[2] * M[8] + M[12]) > lim || fabsf(r[0] * M[1] + r[1] * M[5] + r[2] * M[9] + M[13]) > lim)
+                continue;
+        }
+        else
+        {
+            if (d2 > far2)
+                continue;
+            while (base < nmat && d2 > (reach[base] + 3.0f) * (reach[base] + 3.0f))
+                ++base;
+            if (base >= nmat)
+                continue;
+            count = base + 1 < nmat ? 2 : 1;
+        }
+        g_shd_drawn[!reach] += count;
+        [e setVertexBuffer:it->vb offset:0 atIndex:0];
+        [e setVertexBuffer:it->uv offset:0 atIndex:1];
         uint32_t dc[4] = { it->palette, it->state, it->mirror, 0 };
         [e setVertexBytes:dc length:sizeof dc atIndex:5];
-        [e setFragmentTexture:it->tex->view atIndex:0];
-        [e setFragmentSamplerState:sampler(&it->samp) atIndex:0];
+        [e setFragmentTexture:it->tex atIndex:0];
+        [e setFragmentSamplerState:it->samp atIndex:0];
         [e drawIndexedPrimitives:it->prim == GFX_TRIANGLESTRIP ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle
                       indexCount:vertex_count(it->prim, it->count)
                        indexType:it->index_size == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
-                     indexBuffer:it->ib->b
+                     indexBuffer:it->ib
                indexBufferOffset:(NSUInteger)it->first * it->index_size
-                   instanceCount:n];
-        ++drawn;
+                   instanceCount:count
+                      baseVertex:0
+                    baseInstance:base];
     }
     [e endEncoding];
-    return drawn;
+}
+
+/* a fitted layer round the near characters (their extent lo..hi in cascade 0's map, M): its square rounded up to a power
+ * of two (kept in *hs until they outgrow it or fit in a third of it), its centre on whole texels, so it holds still while
+ * the characters do; 0 when there are none */
+static int shadow_fit(const float* M, const float lo[2], const float hi[2], float* hs_kept, float tm[16], float* ttx)
+{
+    if (!(lo[0] <= hi[0] && lo[1] <= hi[1]))
+        return 0;
+    float half0 = 1.0f / sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]); /* cascade 0's half size, world */
+    float m = 1.5f / half0, minhs = 2.0f / half0; /* a unit and a half's margin (the places are hips and feet), two at least */
+    float e = 0.5f * fmaxf(hi[0] - lo[0], hi[1] - lo[1]) + m;
+    float hs = *hs_kept > 0.0f ? *hs_kept : 1.0f;
+    if (e > hs || e < hs * (1.0f / 3.0f))
+        hs = exp2f(ceilf(log2f(fmaxf(e, minhs))));
+    hs = hs > 1.0f ? 1.0f : hs < minhs ? minhs : hs;
+    *hs_kept = hs;
+    float tq = 2.0f * hs / (float)g_shd.fsize; /* a texel, in cascade 0's map */
+    float cx = roundf(0.5f * (lo[0] + hi[0]) / tq) * tq, cy = roundf(0.5f * (lo[1] + hi[1]) / tq) * tq;
+    memcpy(tm, M, 64);
+    for (int r = 0; r < 4; ++r)
+        tm[4 * r] = M[4 * r] / hs, tm[4 * r + 1] = M[4 * r + 1] / hs;
+    tm[12] = (M[12] - cx) / hs, tm[13] = (M[13] - cy) / hs;
+    *ttx = 2.0f * hs * half0 / (float)g_shd.fsize;
+    return 1;
+}
+
+/* The characters' layers drawn at the frame's end, after all its draws (into the frame's last command buffer), from all
+ * of the frame's characters: the first cascades' (half size) and a fitted one round those near the camera. The next
+ * frame's zone reads them (its draws come before any character is known), and so do its characters beyond the near
+ * ones, a frame late. */
+static void shadow_frame_end(void)
+{
+    if (g_shd.lserial != g_serial || !g_shd.cmap || !g_shd.lnch)
+        return;
+    const GfxShadowFrame* f = &g_shd.lf;
+    uint32_t n = g_shd.lnch < 2 ? g_shd.lnch : 2;
+    float reach[2];
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* C = f->c[i].lmat;
+        memcpy(g_shd.lag.cm[i], C, 64);
+        reach[i] = f->c[i].radius;
+        float mi = 2.5f * sqrtf(C[0] * C[0] + C[4] * C[4] + C[8] * C[8]); /* two and a half units */
+        g_shd.lag.cbox[i][0] = g_shd.cbox[i][0] - mi, g_shd.lag.cbox[i][1] = g_shd.cbox[i][1] - mi;
+        g_shd.lag.cbox[i][2] = g_shd.cbox[i][2] + mi, g_shd.lag.cbox[i][3] = g_shd.cbox[i][3] + mi;
+    }
+    g_shd.lag.n = n, g_shd.lag.ttx = 0.0f;
+    if (g_fxs.scene_shadow_fit > 0.0f)
+        shadow_fit(f->c[0].lmat, g_shd.near_lo, g_shd.near_hi, &g_shd.lag.chs, g_shd.lag.tm, &g_shd.lag.ttx);
+    /* where each part is, for the next frame's lookups */
+    uint32_t cap = 64;
+    while (cap < 2 * g_shd.nitems)
+        cap *= 2;
+    if (cap > g_shd.lag.cap)
+    {
+        free(g_shd.lag.key), free(g_shd.lag.at);
+        g_shd.lag.key = (uintptr_t*)malloc(cap * sizeof *g_shd.lag.key), g_shd.lag.at = (float (*)[3])malloc(cap * sizeof *g_shd.lag.at);
+        g_shd.lag.cap = cap;
+    }
+    memset(g_shd.lag.key, 0, g_shd.lag.cap * sizeof *g_shd.lag.key);
+    for (uint32_t i = 0; i < g_shd.nitems; ++i)
+    {
+        uintptr_t k = g_shd.items[i].key;
+        uint32_t h = char_hash(k) & (g_shd.lag.cap - 1);
+        while (g_shd.lag.key[h] && g_shd.lag.key[h] != k)
+            h = (h + 1) & (g_shd.lag.cap - 1);
+        g_shd.lag.key[h] = k, memcpy(g_shd.lag.at[h], g_shd.items[i].at, 12);
+    }
+    flush_pass();
+    id<MTLCommandBuffer> cb = cmd();
+    shadow_chars_pass(cb, &g_shd.lc, f->cam, g_shd.cmap, (double)(f->size / 2), 1, (const float (*)[16])g_shd.lag.cm, n, reach, 0);
+    if (g_shd.lag.ttx > 0.0f)
+        shadow_chars_pass(cb, &g_shd.lc, f->cam, g_shd.cmt, (double)g_shd.fsize, 1, (const float (*)[16])g_shd.lag.tm, 1, NULL, 0);
+    g_shd.lag.serial = g_serial;
+    g_shd.lserial = 0;
+    shadow_items_clear(); /* (the command buffer holds what it draws) */
 }
 
 void gfx_shadow_begin(const GfxShadowFrame* f)
@@ -5226,44 +5471,58 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
             u->cas[i][3] = f->c[i].valid ? 1.0f : 0.0f;
         }
         memcpy(u->dir, f->dir, 16), memcpy(u->cam, f->cam, 16);
-        uint32_t nch = f->chars && f->chars->nitem && f->chars->nbones ? (f->nchar < nc ? f->nchar : nc) : 0;
-        /* the characters' box in each of their cascades: the bones' places (the palette's translations; the states'
-         * world is the identity but in the game's cached-skin frames, taken as it is) and two units round them */
-        for (uint32_t i = 0; i < nch; ++i)
+        uint32_t nch = f->chars && f->chars->nitem && f->chars->nbones && f->c[0].valid ? (f->nchar < nc ? f->nchar : nc) : 0;
+        /* The characters' shadows. A frame has a batch for each run of the game's draws between the scene renderer's (a
+         * crowd: several), and the zone's come before any character is known: the characters' layers are drawn at the
+         * frame's end from all of them (shadow_frame_end) and read by the next frame - the zone a frame late, the
+         * characters each as it stood then (char_lag). Here each batch's new characters are taken. */
+        int first = g_shd.cframe != g_serial;
+        if (first || (f->chars && f->chars->nitem < g_shd.cdone))
         {
-            const float* M = f->c[i].lmat;
-            float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
-            for (uint32_t b = 0; b < f->chars->nbones; ++b)
+            g_shd.near_lo[0] = g_shd.near_lo[1] = 1e30f, g_shd.near_hi[0] = g_shd.near_hi[1] = -1e30f;
+            for (int i = 0; i < GFX_SHADOW_CASCADES; ++i)
+                g_shd.cbox[i][0] = g_shd.cbox[i][1] = 1e30f, g_shd.cbox[i][2] = g_shd.cbox[i][3] = -1e30f;
+            g_shd.cdone = 0;
+            shadow_items_clear();
+        }
+        g_shd.cframe = g_serial;
+        g_shd.freach = fminf(f->c[0].radius, fmaxf(g_fxs.scene_shadow_fit_reach, 0.0f));
+        uint32_t from = g_shd.nitems;
+        if (nch)
+        {
+            float reach2 = g_shd.freach * g_shd.freach;
+            /* this batch's characters into the boxes: the near ones' extent, each cascade's box (by their places; the
+             * margins take the rest of them) */
+            shadow_items_add(f->chars, g_shd.cdone);
+            for (uint32_t k = from; k < g_shd.nitems; ++k)
             {
-                const float* p = f->chars->palette + 16 * (size_t)b + 12;
-                for (int a = 0; a < 2; ++a)
+                const float* p = g_shd.items[k].at;
+                float dx = p[0] - f->cam[0], dy = p[1] - f->cam[1], dz = p[2] - f->cam[2];
+                int near = dx * dx + dy * dy + dz * dz <= reach2;
+                for (uint32_t i = 0; i < nch; ++i)
                 {
-                    float q = p[0] * M[a] + p[1] * M[4 + a] + p[2] * M[8 + a] + M[12 + a];
-                    lo[a] = q < lo[a] ? q : lo[a], hi[a] = q > hi[a] ? q : hi[a];
+                    const float* C = f->c[i].lmat;
+                    for (int a = 0; a < 2; ++a)
+                    {
+                        float q = p[0] * C[a] + p[1] * C[4 + a] + p[2] * C[8 + a] + C[12 + a];
+                        g_shd.cbox[i][a] = q < g_shd.cbox[i][a] ? q : g_shd.cbox[i][a];
+                        g_shd.cbox[i][2 + a] = q > g_shd.cbox[i][2 + a] ? q : g_shd.cbox[i][2 + a];
+                        if (i == 0 && near)
+                            g_shd.near_lo[a] = q < g_shd.near_lo[a] ? q : g_shd.near_lo[a],
+                            g_shd.near_hi[a] = q > g_shd.near_hi[a] ? q : g_shd.near_hi[a];
+                    }
                 }
             }
-            float m = 2.0f * sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]); /* two units in the map */
-            u->cbox[i][0] = lo[0] - m, u->cbox[i][1] = lo[1] - m, u->cbox[i][2] = hi[0] + m, u->cbox[i][3] = hi[1] + m;
+            g_shd.cdone = f->chars->nitem;
+            g_shd.lf = *f, g_shd.lc = *f->chars, g_shd.lf.chars = &g_shd.lc, g_shd.lnch = nch, g_shd.lserial = g_serial;
         }
-        u->info[0] = (float)nc, u->info[1] = (float)nch, u->info[2] = f->strength, u->info[3] = 1.0f / (float)f->size;
-        if (f->redraw >= 0 || nch)
+        if (f->redraw >= 0 && f->redraw < (int32_t)nc)
         {
-            /* a command buffer of their own, committed now: the GPU runs it before the frame's (not yet committed)
-             * rest, and the game's render pass is not broken off and taken up again round them. But a frame has a batch
-             * for each run of the game's draws between the scene renderer's (a crowd: several), each drawing the maps
-             * again: when an earlier batch's draws, still in the uncommitted rest, sample them, that rest goes first, or
-             * the GPU would run every batch's redraw before any batch's draws and they would all read the last one's */
-            if (g_shd_read && g_cmd)
-            {
-                submit(0);
-                ++g_shd_submits;
-            }
+            /* a command buffer of its own, committed now: the GPU runs it before the frame's (not yet committed) rest,
+             * and the game's render pass is not broken off and taken up again round it */
             frame_begin();
             id<MTLCommandBuffer> cb = [g_queue commandBuffer];
-            if (f->redraw >= 0 && f->redraw < (int32_t)nc)
-                shadow_zone(cb, f);
-            if (nch)
-                shadow_chars(cb, f, nch);
+            shadow_zone(cb, f);
             if (gfx_pass_timing_on())
                 [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
                     uint64_t ns = (uint64_t)((done.GPUEndTime - done.GPUStartTime) * 1e9);
@@ -5272,6 +5531,16 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
                 }];
             [cb commit];
         }
+        /* the characters' layers they read: last frame's, when it drew them */
+        if (g_shd.lag.serial && g_shd.lag.serial + 1 == g_serial)
+        {
+            memcpy(u->cm[0], g_shd.lag.tm, 64);
+            for (uint32_t i = 0; i < g_shd.lag.n; ++i)
+                memcpy(u->cm[1 + i], g_shd.lag.cm[i], 64), memcpy(u->cbox[i], g_shd.lag.cbox[i], 16);
+            u->info[1] = (float)g_shd.lag.n, u->ctx[0] = g_shd.lag.ttx;
+        }
+        u->ctx[1] = 1.0f / (float)g_shd.fsize;
+        u->info[0] = (float)nc, u->info[2] = f->strength, u->info[3] = 1.0f / (float)f->size;
         g_shd.on = 1;
     }
     if (gfx_profiling)
@@ -5285,9 +5554,9 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
             last = now;
         if (now - last > 2000000000ull)
         {
-            fprintf(stderr, "[recomp] gfx: scene shadows: %u batches, %u times the frame's draws went first\n", calls,
-                g_shd_submits);
-            last = now, calls = 0, g_shd_submits = 0;
+            fprintf(stderr, "[recomp] gfx: scene shadows: %u batches, %.1f/%.1f character draws a batch into the cascades/fitted layer\n",
+                calls, calls ? (double)g_shd_drawn[0] / calls : 0.0, calls ? (double)g_shd_drawn[1] / calls : 0.0);
+            last = now, calls = 0, g_shd_drawn[0] = g_shd_drawn[1] = 0;
         }
     }
 }
@@ -5720,9 +5989,11 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
 }
 
 /* --- frames ---------------------------------------------------------------------------------------------------- */
+static void shadow_frame_end(void);
 static void frame_end(void)
 {
     casters_clear();
+    shadow_frame_end();
     id<MTLCommandBuffer> c = cmd();
     uint64_t serial = g_serial;
     dispatch_semaphore_t sem = g_frames_sem;

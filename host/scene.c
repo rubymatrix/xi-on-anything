@@ -633,7 +633,7 @@ static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
         g_sh.frame = g_frame_no;
         ++g_sh.count.redraws;
     }
-    sf->size = size, sf->ncascades = GFX_SHADOW_CASCADES, sf->nchar = 3;
+    sf->size = size, sf->ncascades = GFX_SHADOW_CASCADES, sf->nchar = 2;
     memcpy(sf->dir, g_sh.L, sizeof g_sh.L), sf->dir[3] = 1.0f;
     memcpy(sf->cam, cam, sizeof cam), sf->cam[3] = gfx_fx_get("scene_shadow_debug") > 0.0f ? 2.0f : 1.0f;
     sf->strength = want > 1.0f ? 1.0f : want;

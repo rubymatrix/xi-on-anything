@@ -136,6 +136,15 @@ static const struct
     { "scene_shadow_step", offsetof(GfxFxSettings, scene_shadow_step), 0.25f },
     /* 1: the zone shows the shadow alone, tinted by its cascade (red, green, blue, yellow from the camera out) */
     { "scene_shadow_debug", offsetof(GfxFxSettings, scene_shadow_debug), 0.0f },
+    /* the characters' first shadow layer fitted round the characters near the camera (1), or cascade 0's square (0) */
+    { "scene_shadow_fit", offsetof(GfxFxSettings, scene_shadow_fit), 1.0f },
+    /* that layer's texels across (256 to 4096) */
+    { "scene_shadow_fit_size", offsetof(GfxFxSettings, scene_shadow_fit_size), 1024.0f },
+    /* the characters the fitted layer is fitted round: those within this of the camera (units; the camera is some six
+     * behind the player) */
+    { "scene_shadow_fit_reach", offsetof(GfxFxSettings, scene_shadow_fit_reach), 8.0f },
+    /* how far from the camera characters cast (units) */
+    { "scene_shadow_char_far", offsetof(GfxFxSettings, scene_shadow_char_far), 1000.0f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
