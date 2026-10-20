@@ -5743,7 +5743,7 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
 
 /* --- post effects: bloom and depth of field (post_bloom, post_dof) ----------------------------------------------
  * On the finished scene, before the interface and the nameplates go over it, with or without the effects (FFXI_FX) and
- * the scene renderer. The depth of field first: circles of confusion from the scene's depth at half size, a disc gather,
+ * the scene renderer. The sun shafts first (post_shafts), then the depth of field: circles of confusion from the scene's depth at half size, a disc gather,
  * blended back by each pixel's own circle. Then the bloom: its source the glow (the scene's additive draws, drawn
  * again: glow_new) and the sky over a soft threshold, at half size through four bilinear taps Karis-weighted, five
  * levels more by a 13-tap downsample, a tent upsample back up adding each level onto the one above, and the
@@ -5887,6 +5887,114 @@ static const char POST_MSL[] =
     "  float3 b = (t0.sample(s, uv + float2(-t.x, -t.y)).rgb + t0.sample(s, uv + float2(t.x, -t.y)).rgb +\n"
     "              t0.sample(s, uv + float2(-t.x, t.y)).rgb + t0.sample(s, uv + float2(t.x, t.y)).rgb) * 0.25;\n"
     "  return float4(b, a);\n"
+    "}\n"
+    "// --- sun shafts: the sun's (or moon's) light scattered toward the eye along each view ray, where the scene renderer's\n"
+    "// shadow cascades say it reaches; at half or quarter size, over frames, then onto the scene by depth\n"
+    "constant float SU_BAYER[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };\n"
+    "struct SU {\n"
+    "  float4x4 ivp;  // the scene's clip space to the world round the camera (the view's turn alone: no translation)\n"
+    "  float4x4 pvp;  // the world round last frame's camera to last frame's clip space\n"
+    "  float4x4 m[4]; // the zone's shadow cascades (world to the light's clip space)\n"
+    "  float4 cas[4]; // their reach from the camera, texel, depth range, valid\n"
+    "  float4 cam;    // the camera, world; w: how far the rays go\n"
+    "  float4 sun;    // toward the light, world; w: 1 when it shines\n"
+    "  float4 sunc;   // its colour times the shafts' strength; w: the phase's g\n"
+    "  float4 p;      // density at the camera's height, its falloff with height, steps, this frame's jitter\n"
+    "  float4 vp;     // the scene's viewport in its target\n"
+    "  float4 lo;     // the small textures' size, 1 / size\n"
+    "  float4 hist;   // x: last frame's history is there and lines up; y: its weight\n"
+    "  float4 pcam;   // last frame's camera, world\n"
+    "};\n"
+    "static float3 su_dir(constant SU& u, float2 fp, float d, thread float& dist) {\n"
+    "  float2 n = float2((fp.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (fp.y - u.vp.y) / u.vp.w * 2.0);\n"
+    "  bool sky = d >= 0.99999;\n"
+    "  float4 w = u.ivp * float4(n, sky ? 0.5 : d, 1.0);\n"
+    "  float3 v = w.xyz / w.w;\n"
+    "  float l = length(v);\n"
+    "  dist = sky ? u.cam.w : min(l, u.cam.w);\n"
+    "  return v / max(l, 1e-4);\n"
+    "}\n"
+    "// the ray to the surface (or as far as the rays go): steps spread as the square of their order, the first by this pixel's jitter (a 4x4 Bayer\n"
+    "// order turned a golden ratio each frame); the light in-scattered, each step lit where the cascades see the sun\n"
+    "fragment float4 shaft_march(PV in [[stage_in]], constant SU& u [[buffer(0)]], depth2d<float> dt [[texture(0)]],\n"
+    "                            depth2d_array<float> sm [[texture(1)]]) {\n"
+    "  constexpr sampler cmp(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);\n"
+    "  float2 lp = floor(in.pos.xy);\n"
+    "  float2 fp = u.vp.xy + (lp + 0.5) * (u.vp.zw * u.lo.zw);\n"
+    "  uint2 q = uint2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0));\n"
+    "  float dist;\n"
+    "  float3 dir = su_dir(u, fp, dt.read(q), dist);\n"
+    "  uint bi = (uint(lp.y) & 3u) * 4u + (uint(lp.x) & 3u);\n"
+    "  float j = fract((SU_BAYER[bi] + 0.5) / 16.0 + u.p.w);\n"
+    "  int n = int(u.p.z);\n"
+    "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
+    "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0;\n"
+    "  for (int i = 0; i < n; ++i) {\n"
+    "    // steps closer together near the camera (t grows as the square): beams through trunks and arches are near\n"
+    "    float f = (float(i) + j) / float(n), t = dist * f * f, seg = 2.0 * dist * f / float(n);\n"
+    "    float3 x = u.cam.xyz + dir * t;\n"
+    "    float rho = u.p.x * exp(clamp(u.p.y * (x.y - u.cam.y), -10.0, 3.0)); // y down: above the camera thinner\n"
+    "    float lit = 1.0, inr = 0.0;\n"
+    "    for (int c = 0; c < 4; ++c) {\n"
+    "      if (u.cas[c].w == 0.0 || t > u.cas[c].x) continue;\n"
+    "      float4 h = u.m[c] * float4(x, 1.0);\n"
+    "      if (all(abs(h.xy) < 0.995) && h.z > 0.0 && h.z < 1.0)\n"
+    "        lit = sm.sample_compare(cmp, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), uint(c), h.z - 2e-4), inr = 1.0;\n"
+    "      break;\n"
+    "    }\n"
+    "    ls += lit, lin += inr;\n"
+    "    float a = rho * seg;\n"
+    "    L += T * a * lit;\n"
+    "    T *= exp(-a);\n"
+    "  }\n"
+    "  if (u.hist.z < 0.0) return float4(ls / float(n), lin / float(n), 0.0, dist); // shafts_debug < 0: lit fraction, in-map fraction\n"
+    "  return float4(u.sunc.rgb * (L * ph), dist);\n"
+    "}\n"
+    "// over frames: this frame's march and last frame's result where this texel's point was then, clamped to this frame's\n"
+    "// neighbours (no trails where the scene moved)\n"
+    "fragment float4 shaft_resolve(PV in [[stage_in]], constant SU& u [[buffer(0)]], texture2d<float> cur [[texture(0)]],\n"
+    "                              texture2d<float> hist [[texture(1)]], depth2d<float> dt [[texture(2)]], sampler s [[sampler(0)]]) {\n"
+    "  int2 p = int2(in.pos.xy), hi = int2(u.lo.xy) - 1;\n"
+    "  float4 c = cur.read(uint2(p));\n"
+    "  if (u.hist.x <= 0.0) return c;\n"
+    "  float3 mn = c.rgb, mx = c.rgb;\n"
+    "  for (int k = 0; k < 9; ++k) {\n"
+    "    if (k == 4) continue;\n"
+    "    float3 v = cur.read(uint2(clamp(p + int2(k % 3 - 1, k / 3 - 1), int2(0), hi))).rgb;\n"
+    "    mn = min(mn, v), mx = max(mx, v);\n"
+    "  }\n"
+    "  float2 fp = u.vp.xy + (float2(p) + 0.5) * (u.vp.zw * u.lo.zw);\n"
+    "  float dist;\n"
+    "  float3 dir = su_dir(u, fp, dt.read(uint2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0))), dist);\n"
+    "  float4 pc = u.pvp * float4(u.cam.xyz + dir * c.a - u.pcam.xyz, 1.0);\n"
+    "  if (pc.w <= 1e-4) return c;\n"
+    "  float2 uv = float2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"
+    "  if (any(uv < 0.0) || any(uv > 1.0)) return c;\n"
+    "  float3 h = clamp(hist.sample(s, uv).rgb, mn, mx);\n"
+    "  return float4(mix(c.rgb, h, u.hist.y), c.a);\n"
+    "}\n"
+    "// onto the scene (screen-blended): the four small texels round each pixel, weighted by how near they are and how alike\n"
+    "// in distance - a wall's edge takes the wall's shafts, the sky beside it the sky's\n"
+    "fragment float4 shaft_comp(PV in [[stage_in]], constant SU& u [[buffer(0)]], texture2d<float> ft [[texture(0)]],\n"
+    "                           depth2d<float> dt [[texture(1)]]) {\n"
+    "  float2 fp = in.pos.xy;\n"
+    "  float dist;\n"
+    "  su_dir(u, fp, dt.read(uint2(fp)), dist);\n"
+    "  float2 h = (fp - u.vp.xy) * (u.lo.xy / u.vp.zw) - 0.5;\n"
+    "  int2 b = int2(floor(h)), hi = int2(u.lo.xy) - 1;\n"
+    "  float2 fr = h - float2(b);\n"
+    "  float3 sum = 0.0; float ws = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    int2 o = int2(k & 1, k >> 1);\n"
+    "    float4 t = ft.read(uint2(clamp(b + o, int2(0), hi)));\n"
+    "    float w = (o.x ? fr.x : 1.0 - fr.x) * (o.y ? fr.y : 1.0 - fr.y) + 1e-3;\n"
+    "    w *= exp(-abs(t.a - dist) / (0.05 * dist + 0.5));\n"
+    "    sum += t.rgb * w, ws += w;\n"
+    "  }\n"
+    "  float3 c = ws > 1e-6 ? sum / ws : float3(0.0);\n"
+    "  if (u.hist.z != 0.0) return float4(saturate(c * abs(u.hist.z)), 1.0); // shafts_debug: the term alone, scaled (no blend)\n"
+    "  return float4(1.0 - exp(-max(c, 0.0)), 1.0);\n"
     "}\n";
 
 typedef struct PostU
@@ -5894,13 +6002,24 @@ typedef struct PostU
     float vp[4], src[4], bloom[4], dof[4], dof2[4], zp[4], aux[4];
 } PostU;
 
+/* the sun shafts' uniforms: SU in POST_MSL */
+typedef struct ShaftU
+{
+    float ivp[16], pvp[16], m[4][16], cas[4][4], cam[4], sun[4], sunc[4], p[4], vp[4], lo[4], hist[4], pcam[4];
+} ShaftU;
+
 enum { POST_LEVELS = 6 };
 static struct
 {
     int tried;
     id<MTLLibrary> lib;
     id<MTLRenderPipelineState> pre, down, up, coc, gather;
-    id<MTLRenderPipelineState> comp, dcomp; /* onto the scene, built for its format */
+    id<MTLRenderPipelineState> comp, dcomp, scomp, sdbg; /* onto the scene, built for its format */
+    id<MTLRenderPipelineState> smarch, sresolve; /* the sun shafts' march and their resolve over frames */
+    id<MTLTexture> sh, shist[2];     /* the shafts at half or quarter size: this frame's march, the resolved two */
+    int shist_at;                    /* which of shist[] the last frame wrote */
+    uint64_t sh_serial;              /* that frame (0: none) */
+    float sh_pvp[16], sh_pcam[3];    /* its view's turn times projection, its camera */
     MTLPixelFormat comp_fmt;
     id<MTLSamplerState> lin;
     id<MTLTexture> lvl[POST_LEVELS]; /* the bloom's levels, from half the scene's size */
@@ -5950,6 +6069,8 @@ static int post_init(MTLPixelFormat scene_fmt)
         g_post.up = post_pipeline(@"bloom_up", MTLPixelFormatRG11B10Float, 1);
         g_post.coc = post_pipeline(@"dof_coc", MTLPixelFormatRGBA16Float, 0);
         g_post.gather = post_pipeline(@"dof_gather", MTLPixelFormatRGBA16Float, 0);
+        g_post.smarch = post_pipeline(@"shaft_march", MTLPixelFormatRGBA16Float, 0);
+        g_post.sresolve = post_pipeline(@"shaft_resolve", MTLPixelFormatRGBA16Float, 0);
         MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
         sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
         sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
@@ -5961,16 +6082,18 @@ static int post_init(MTLPixelFormat scene_fmt)
         uint32_t zero = 0;
         [g_post.black replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&zero bytesPerRow:4];
     }
-    if (!g_post.lib || !g_post.pre || !g_post.down || !g_post.up || !g_post.coc || !g_post.gather)
+    if (!g_post.lib || !g_post.pre || !g_post.down || !g_post.up || !g_post.coc || !g_post.gather || !g_post.smarch || !g_post.sresolve)
         return 0;
-    if (g_post.comp_fmt != scene_fmt || !g_post.comp || !g_post.dcomp)
+    if (g_post.comp_fmt != scene_fmt || !g_post.comp || !g_post.dcomp || !g_post.scomp)
     {
-        [g_post.comp release], [g_post.dcomp release];
+        [g_post.comp release], [g_post.dcomp release], [g_post.scomp release], [g_post.sdbg release];
         g_post.comp = post_pipeline(@"bloom_comp", scene_fmt, 2);
         g_post.dcomp = post_pipeline(@"dof_comp", scene_fmt, 3);
+        g_post.scomp = post_pipeline(@"shaft_comp", scene_fmt, 2);
+        g_post.sdbg = post_pipeline(@"shaft_comp", scene_fmt, 0);
         g_post.comp_fmt = scene_fmt;
     }
-    return g_post.comp && g_post.dcomp;
+    return g_post.comp && g_post.dcomp && g_post.scomp;
 }
 
 /* a texture kept at this size and format (made again when either changes) */
@@ -5984,8 +6107,8 @@ static id<MTLTexture> post_tex(id<MTLTexture>* t, NSUInteger w, NSUInteger h, MT
     return *t = [g_dev newTextureWithDescriptor:d];
 }
 
-static void post_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipelineState> p, MTLViewport vp, const PostU* u,
-    id<MTLTexture> t0, id<MTLTexture> t1, id<MTLTexture> t2, int pass)
+static void post_pass_n(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipelineState> p, MTLViewport vp, const void* u,
+    size_t un, id<MTLTexture> t0, id<MTLTexture> t1, id<MTLTexture> t2, int pass)
 {
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = target;
@@ -5995,7 +6118,7 @@ static void post_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPip
     id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
     [e setRenderPipelineState:p];
     [e setViewport:vp];
-    [e setFragmentBytes:u length:sizeof *u atIndex:0];
+    [e setFragmentBytes:u length:un atIndex:0];
     [e setFragmentTexture:t0 atIndex:0];
     if (t1)
         [e setFragmentTexture:t1 atIndex:1];
@@ -6004,6 +6127,77 @@ static void post_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPip
     [e setFragmentSamplerState:g_post.lin atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [e endEncoding];
+}
+
+static void post_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipelineState> p, MTLViewport vp, const PostU* u,
+    id<MTLTexture> t0, id<MTLTexture> t1, id<MTLTexture> t2, int pass)
+{
+    post_pass_n(target, load, p, vp, u, sizeof *u, t0, t1, t2, pass);
+}
+
+/* The sun shafts (post_shafts): the sun's or moon's light scattered toward the eye along each pixel's ray, through haze
+ * as thick as the game's own fog says (thinning with height), where the scene renderer's zone shadow cascades see the
+ * light - beams through trees, arches and gaps, and a glow round the sun by the scattering's forward lobe. Marched at
+ * a third of the scene's size (shafts_q 2: 16 steps) or a fifth (1: 10), each texel's steps jittered and the result carried over frames
+ * by where its point was, clamped to its neighbours; screen-blended onto the scene through a depth-aware upsample. Needs
+ * the scene renderer's shadows (scene 1 or 2, scene_shadows): without them there is nothing to shade the beams by and the
+ * pass stays off; indoors (no sun shadows) likewise, so nothing leaks through a roof. */
+static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, float vx, float vy, float vw, float vh)
+{
+    if (!g_shd.zmap || g_shd.cframe != g_serial || g_shd.u.dir[3] <= 0.0f || g_shd.u.info[0] <= 0.0f || g_shd.u.info[2] <= 0.0f)
+    {
+        g_post.sh_serial = 0;
+        return;
+    }
+    float Vr[16], VP[16];
+    memcpy(Vr, s->view, 64);
+    Vr[12] = Vr[13] = Vr[14] = 0.0f;
+    gfx_mat_mul(VP, Vr, s->proj);
+    ShaftU u;
+    memset(&u, 0, sizeof u);
+    if (!gfx_mat_inverse(u.ivp, VP))
+        return;
+    int q = g_fxs.shafts_q >= 1.5f ? 2 : 1, div = q == 2 ? 3 : 5; /* (of the 2048 scene: some 0.47 M and 0.17 M texels) */
+    NSUInteger lw = (NSUInteger)(vw / div), lh = (NSUInteger)(vh / div);
+    lw = lw ? lw : 1, lh = lh ? lh : 1;
+    if (!post_tex(&g_post.sh, lw, lh, MTLPixelFormatRGBA16Float) || !post_tex(&g_post.shist[0], lw, lh, MTLPixelFormatRGBA16Float) ||
+        !post_tex(&g_post.shist[1], lw, lh, MTLPixelFormatRGBA16Float))
+        return;
+    memcpy(u.m, g_shd.u.m, sizeof u.m), memcpy(u.cas, g_shd.u.cas, sizeof u.cas);
+    /* the haze: as thick as the game's fog, the nearer its end the thicker */
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 1000.0f;
+    fog_end = fminf(fmaxf(fog_end, 30.0f), 3000.0f);
+    memcpy(u.cam, g_shd.u.cam, 12);
+    u.cam[3] = fminf(fmaxf(g_fxs.shafts_dist, 10.0f), fog_end * 1.5f);
+    memcpy(u.sun, g_shd.u.dir, 12), u.sun[3] = 1.0f;
+    /* the light: this frame's sun (or moon) colour, as strong as the shadows are drawn */
+    float sc[3] = { 1.0f, 0.95f, 0.85f };
+    if (s->sun_dir[3] != 0.0f)
+        sc[0] = s->sun_color[0], sc[1] = s->sun_color[1], sc[2] = s->sun_color[2];
+    /* strongest with the light low (long paths through the haze, the look of dawn and dusk), about a quarter of that
+     * overhead: clear midday air shows little */
+    float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
+    float k = g_fxs.post_shafts * g_shd.u.info[2] * 1.5f * (0.25f + 0.75f * low * low);
+    for (int c = 0; c < 3; ++c)
+        u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
+    u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
+    u.p[0] = fmaxf(g_fxs.shafts_density, 0.0f) * 2.0f / fog_end, u.p[1] = 0.02f, u.p[2] = q == 2 ? 16.0f : 10.0f;
+    u.p[3] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
+    u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+    u.lo[0] = (float)lw, u.lo[1] = (float)lh, u.lo[2] = 1.0f / (float)lw, u.lo[3] = 1.0f / (float)lh;
+    /* last frame's, when it was the frame before at this size and the camera didn't jump */
+    float jx = u.cam[0] - g_post.sh_pcam[0], jy = u.cam[1] - g_post.sh_pcam[1], jz = u.cam[2] - g_post.sh_pcam[2];
+    int have = g_post.sh_serial && g_post.sh_serial + 1 == g_serial && jx * jx + jy * jy + jz * jz < 25.0f;
+    memcpy(u.pvp, g_post.sh_pvp, 64), memcpy(u.pcam, g_post.sh_pcam, 12);
+    u.hist[0] = have && g_fxs.shafts_debug >= 0.0f ? 1.0f : 0.0f, u.hist[1] = fminf(fmaxf(g_fxs.shafts_temporal, 0.0f), 0.97f), u.hist[2] = g_fxs.shafts_debug;
+    id<MTLTexture> prev = g_post.shist[g_post.shist_at], out = g_post.shist[g_post.shist_at ^ 1];
+    MTLViewport lv = { 0, 0, (double)lw, (double)lh, 0, 1 };
+    post_pass_n(g_post.sh, MTLLoadActionDontCare, g_post.smarch, lv, &u, sizeof u, depth, g_shd.zmap, nil, GFX_PASS_POST_SHAFTS);
+    post_pass_n(out, MTLLoadActionDontCare, g_post.sresolve, lv, &u, sizeof u, g_post.sh, prev, depth, GFX_PASS_POST_SHAFTS);
+    post_pass_n(color->tex, MTLLoadActionLoad, u.hist[2] != 0.0f ? g_post.sdbg : g_post.scomp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, sizeof u, out, depth, nil,
+        GFX_PASS_POST_SHAFTS);
+    g_post.shist_at ^= 1, g_post.sh_serial = g_serial;
+    memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
 }
 
 /* the glow's draws again, onto black over the scene's depth; 0 when there were none */
@@ -6072,9 +6266,12 @@ static int post_glow(GfxTex* color)
 
 static void post_effects(GfxTex* color, const GfxScene* s)
 {
-    int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f;
-    if (!bloom && !dof)
+    int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f, shafts = g_fxs.post_shafts > 0.0f;
+    if (!bloom && !dof && !shafts)
+    {
+        g_post.sh_serial = 0;
         return;
+    }
     @autoreleasepool
     {
         flush_pass();
@@ -6096,6 +6293,10 @@ static void post_effects(GfxTex* color, const GfxScene* s)
             { aspect * vh / vw, 0, 0, 0 } };
         u.dof2[1] = s->proj[11] < 0.0f ? -1.0f : 1.0f, u.dof2[2] = POST_LEVELS, u.dof2[3] = fmaxf(g_fxs.bloom_radius, 0.0f);
         NSUInteger hw = (NSUInteger)(vw + 1) / 2, hh = (NSUInteger)(vh + 1) / 2;
+        if (shafts && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
+            post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it) */
+        else
+            g_post.sh_serial = 0;
         if (dof && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
         {
             /* the focus: the player's distance along the view (or dof_focus), eased over some 0.2 s; a jump (a new

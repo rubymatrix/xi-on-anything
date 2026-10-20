@@ -577,6 +577,31 @@ static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
         return;
     }
     float L[3] = { -d[0] / n, -d[1] / n, -d[2] / n };
+    float tsun = gfx_fx_get("scene_sun_test");
+    if (tsun > 0.0f)
+    {
+        /* testing (scene_sun_test, degrees above the horizon): the light low ahead of the camera, held where it was set
+         * (scene_sun_test_turn, degrees round from the camera's facing when it was turned on), so shadows and sun shafts
+         * point at the camera wherever a replay looks */
+        static float held[3];
+        static float held_at = -1.0f, held_turn;
+        float turn = gfx_fx_get("scene_sun_test_turn");
+        if (held_at != tsun || held_turn != turn)
+        {
+            float iv[16];
+            mat_inv(iv, view);
+            float f[3] = { -iv[8], 0.0f, -iv[10] }, fl = sqrtf(f[0] * f[0] + f[2] * f[2]); /* (the view looks down -z) */
+            if (fl > 1e-4f)
+            {
+                float a = turn * 3.14159265f / 180.0f, c = cosf(a), sn = sinf(a), e = tsun * 3.14159265f / 180.0f;
+                float fx = (f[0] * c - f[2] * sn) / fl, fz = (f[0] * sn + f[2] * c) / fl;
+                held[0] = fx * cosf(e), held[1] = -sinf(e), held[2] = fz * cosf(e); /* y down: up is -y */
+                held_at = tsun, held_turn = turn;
+            }
+        }
+        if (held_at == tsun)
+            memcpy(L, held, sizeof L);
+    }
     uint32_t size = (uint32_t)gfx_fx_get("scene_shadow_size");
     size = size < 512 ? 512 : size > 8192 ? 8192 : size;
     float far = gfx_fx_get("scene_shadow_far");

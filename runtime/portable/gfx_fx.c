@@ -166,6 +166,22 @@ static const struct
     { "dof_range", offsetof(GfxFxSettings, dof_range), 50.0f },
     { "dof_ramp", offsetof(GfxFxSettings, dof_ramp), 150.0f },
     { "dof_near", offsetof(GfxFxSettings, dof_near), 0.0f },
+    /* the sun shafts (gfx_metal.m post_shafts; with the scene renderer's shadows): strength, 0 off (1 tuned); the haze's
+     * density against the game's fog (1: as its fog end says); 2 a third of the scene's size and 16 steps, 1 a fifth and 10; the
+     * scattering's forward lobe (0.6); how far the rays go (units) */
+    { "post_shafts", offsetof(GfxFxSettings, post_shafts), 0.0f },
+    { "shafts_density", offsetof(GfxFxSettings, shafts_density), 1.0f },
+    { "shafts_q", offsetof(GfxFxSettings, shafts_q), 2.0f },
+    { "shafts_g", offsetof(GfxFxSettings, shafts_g), 0.6f },
+    { "shafts_dist", offsetof(GfxFxSettings, shafts_dist), 120.0f },
+    /* how much of last frame's shafts each frame keeps (0 none) */
+    { "shafts_temporal", offsetof(GfxFxSettings, shafts_temporal), 0.9f },
+    /* the shafts alone in place of the scene, times this (0 off) */
+    { "shafts_debug", offsetof(GfxFxSettings, shafts_debug), 0.0f },
+    /* testing: the scene renderer's sun held this many degrees above the horizon ahead of the camera (0 off), turned
+     * scene_sun_test_turn degrees round from it (host/scene.c) */
+    { "scene_sun_test", offsetof(GfxFxSettings, scene_sun_test), 0.0f },
+    { "scene_sun_test_turn", offsetof(GfxFxSettings, scene_sun_test_turn), 0.0f },
     /* the game's water models raised this far (units) over the zone surfaces laid at their level (d3d8.c water_lift) */
     { "water_lift", offsetof(GfxFxSettings, water_lift), 0.15f },
     /* the scene renderer's bounce light (gfx_gi_metal.inc): 0 off, else how much of it the zone and characters take;
@@ -308,7 +324,7 @@ void fx_config(void)
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
     "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof",
-    "scene ao", "scene ao trace" };
+    "scene ao", "scene ao trace", "post shafts" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */
