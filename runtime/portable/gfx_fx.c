@@ -143,6 +143,8 @@ static const struct
     /* the characters the fitted layer is fitted round: those within this of the camera (units; the camera is some six
      * behind the player) */
     { "scene_shadow_fit_reach", offsetof(GfxFxSettings, scene_shadow_fit_reach), 8.0f },
+    /* environment-mapped character meshes (shiny armour), which the game draws, cast in the scene renderer's shadows */
+    { "scene_shadow_envmap", offsetof(GfxFxSettings, scene_shadow_envmap), 1.0f },
     /* how far from the camera characters cast (units) */
     { "scene_shadow_char_far", offsetof(GfxFxSettings, scene_shadow_char_far), 1000.0f },
     /* the post bloom (gfx_metal.m post_bloom), with or without the effects and the scene renderer: its strength, 0 off

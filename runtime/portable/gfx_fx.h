@@ -13,7 +13,7 @@ typedef struct GfxFxSettings
         gi_distance, rt, contact_steps, scene, scene_shadows, scene_shadow_size, scene_shadow_far, scene_shadow_step, scene_shadow_debug,
         scene_shadow_fit, scene_shadow_fit_size, scene_shadow_char_far, scene_shadow_fit_reach,
         post_bloom, bloom_threshold, bloom_knee, bloom_glow, bloom_radius,
-        post_dof, dof_focus, dof_range, dof_ramp, dof_near, water_lift;
+        post_dof, dof_focus, dof_range, dof_ramp, dof_near, water_lift, scene_shadow_envmap;
 } GfxFxSettings;
 
 extern GfxFxSettings g_fxs;

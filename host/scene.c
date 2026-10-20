@@ -721,7 +721,7 @@ static void flush(void)
     gfx_shadow_begin(sf.dir[3] > 0.0f ? &sf : NULL);
     if (total)
         gfx_world_draw(&f);
-    if (have_chars)
+    if (have_chars && cf.nitem)
         gfx_chars_draw(&cf); /* the characters after the zone, as the game draws them */
     ++g_count.flushes;
 done:
@@ -740,7 +740,8 @@ done:
  * and both mirror bones a vertex, in the order of the game's skinned buffers, duplicates included), the palette and the
  * per-actor state of this draw are copied, and the command stream becomes draw items that gfx_chars_draw skins and lights.
  * Meshes with an environment map, the shine pass, the silhouette shadows or a fading actor (drawn into its own target)
- * stay the game's. */
+ * stay the game's; those with an environment map (shiny plate armour) are still recorded, to cast in the scene
+ * renderer's shadows (g_soitems), or the shadow had their pieces missing. */
 #if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_RES_GET) && defined(FFXI_SCENE_PALETTE) && \
     defined(FFXI_SCENE_BONES) && defined(FFXI_SCENE_ACTOR_LIGHTS) && defined(FFXI_SCENE_ACTOR_AMBIENT) && \
     defined(FFXI_SCENE_ACTOR_MATERIAL) && defined(FFXI_SCENE_TINT) && defined(FFXI_SCENE_SHINE) && defined(FFXI_SCENE_SHADOW_MODE) && \
@@ -760,6 +761,8 @@ enum
 };
 static Mesh g_meshes[MESH_SLOTS];
 static GfxCharItem* g_citems;
+static GfxCharItem* g_soitems; /* casting only: meshes the game draws (environment-mapped), their shadows ours */
+static uint32_t g_nsoitems, g_capsoitems;
 static GfxCharState* g_cstates;
 static float* g_pal;
 static uint32_t g_ncitems, g_capcitems, g_ncstates, g_capcstates, g_npal, g_cappal; /* g_npal in bones */
@@ -879,7 +882,8 @@ static void state_light(GfxCharLight* o, uint32_t l, float scale)
     }
 }
 
-/* one mesh draw taken (1 and the draw items recorded) or left to the game (0) */
+/* one mesh draw taken (1 and the draw items recorded) or left to the game (0; an environment-mapped one's items recorded
+ * to cast only) */
 static int chars_take(Guest* g, uint32_t res, uint32_t model)
 {
     if (!res || rd8(res + 0x30) > 1 || (rd8(res + 0x32) & 0x7f) != 0)
@@ -892,7 +896,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         return ++g_ccount.why[2], 0; /* a fading actor (its own target), the shine pass, the silhouette shadows */
     uint32_t total = rd16(counts) + rd16(counts + 2) + rd32(vbuf + 0x60);
     /* the command stream once without drawing: no environment maps, a texture before every draw, nothing unknown */
-    int have_tex = 0;
+    int have_tex = 0, envmap = 0;
     for (uint32_t p = cmd, guard = 0; guard < 100000; ++guard)
     {
         uint16_t op = rd16(p);
@@ -904,7 +908,11 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
             if (k == 1)
             {
                 if (rd16(p + 2 + 0xe) || rdf32(p + 2 + 0x28) != 0.0f)
-                    return ++g_ccount.why[3], 0; /* environment-mapped */
+                {
+                    if (gfx_fx_get("scene_shadow_envmap") <= 0.0f)
+                        return ++g_ccount.why[3], 0;
+                    envmap = 1; /* environment-mapped: the game draws it, it casts */
+                }
                 p += 0x2e;
             }
             else if (k == 0)
@@ -916,7 +924,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         uint32_t n = rd16(p + 2);
         if (op == 0x54 || op == 0x5453)
         {
-            if (!have_tex)
+            if (!have_tex && !envmap)
                 return ++g_ccount.why[3], 0;
             p += op == 0x54 ? 4 + n * 30 : 0x18 + n * 10;
         }
@@ -927,6 +935,8 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         else
             return ++g_ccount.why[3], 0;
     }
+    if (envmap)
+        ++g_ccount.why[3];
     GfxBuf* uv = NULL;
     GfxBuf* vb = mesh_vb(res, vbuf, total, &uv);
     uint32_t uvsize = total * 8, ibsize = 0, isize = 2;
@@ -1055,12 +1065,14 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
             if (!hidden && tex && cur_state != ~0u && idx + nidx <= ibsize / isize)
                 for (int m = 0; m <= mirror; ++m)
                 {
-                    if (g_ncitems == g_capcitems)
+                    GfxCharItem** list = envmap ? &g_soitems : &g_citems;
+                    uint32_t *nl = envmap ? &g_nsoitems : &g_ncitems, *cap = envmap ? &g_capsoitems : &g_capcitems;
+                    if (*nl == *cap)
                     {
-                        g_capcitems = g_capcitems ? g_capcitems * 2 : 1024;
-                        g_citems = (GfxCharItem*)realloc(g_citems, g_capcitems * sizeof *g_citems);
+                        *cap = *cap ? *cap * 2 : 1024;
+                        *list = (GfxCharItem*)realloc(*list, *cap * sizeof **list);
                     }
-                    GfxCharItem* it = &g_citems[g_ncitems++];
+                    GfxCharItem* it = &(*list)[(*nl)++];
                     it->vb = vb, it->uv = uv, it->ib = ib, it->index_size = isize;
                     it->first = idx, it->count = n, it->prim = op == 0x54 ? GFX_TRIANGLELIST : GFX_TRIANGLESTRIP;
                     it->palette = palbase, it->state = cur_state, it->mirror = (uint32_t)m, it->tex = tex;
@@ -1075,6 +1087,8 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         else
             p += 0xc + n * 2;
     }
+    if (envmap)
+        return g_pending = 1, 0; /* the game draws it (a batch to hand its shadow on) */
     /* what 1002dc10 leaves behind: the model skinned this frame, the index count in its fifth argument */
     wr8(model + 0xb8, 1);
     uint32_t a5 = rt_arg(g, 4), a6 = rt_arg(g, 5);
@@ -1108,7 +1122,7 @@ static void mesh_draw(Guest* g)
     rt_return(g, 0, 0x18);
 }
 
-static void chars_reset(void) { g_ncitems = g_ncstates = g_npal = 0; }
+static void chars_reset(void) { g_ncitems = g_nsoitems = g_ncstates = g_npal = 0; }
 
 /* every character taken so far this frame, for the shadows: a frame has a batch for each run of the game's draws between
  * the scene renderer's (several in a crowd), and each batch's shadow layer is drawn from all of them, so a character
@@ -1123,8 +1137,9 @@ static void chars_shadow_reset(void) { g_nshitems = g_nshstates = g_nshpal = 0; 
 /* this batch's characters added to the frame's, and the frame's so far as one character frame (f's viewport) */
 static void chars_shadow_frame(GfxCharFrame* out, const GfxCharFrame* f)
 {
-    if (g_nshitems + f->nitem > g_capshitems)
-        g_capshitems = (g_nshitems + f->nitem) * 2, g_shitems = (GfxCharItem*)realloc(g_shitems, g_capshitems * sizeof *g_shitems);
+    if (g_nshitems + f->nitem + g_nsoitems > g_capshitems)
+        g_capshitems = (g_nshitems + f->nitem + g_nsoitems) * 2,
+        g_shitems = (GfxCharItem*)realloc(g_shitems, g_capshitems * sizeof *g_shitems);
     if (g_nshstates + f->nstate > g_capshstates)
         g_capshstates = (g_nshstates + f->nstate) * 2,
         g_shstates = (GfxCharState*)realloc(g_shstates, g_capshstates * sizeof *g_shstates);
@@ -1132,13 +1147,13 @@ static void chars_shadow_frame(GfxCharFrame* out, const GfxCharFrame* f)
         g_capshpal = (g_nshpal + f->nbones) * 2, g_shpal = (float*)realloc(g_shpal, (size_t)g_capshpal * 64);
     memcpy(g_shpal + 16 * (size_t)g_nshpal, f->palette, (size_t)f->nbones * 64);
     memcpy(g_shstates + g_nshstates, f->state, f->nstate * sizeof *f->state);
-    for (uint32_t i = 0; i < f->nitem; ++i)
+    for (uint32_t i = 0; i < f->nitem + g_nsoitems; ++i) /* (and those that only cast) */
     {
-        GfxCharItem it = f->item[i];
+        GfxCharItem it = i < f->nitem ? f->item[i] : g_soitems[i - f->nitem];
         it.palette += g_nshpal, it.state += g_nshstates;
         g_shitems[g_nshitems + i] = it;
     }
-    g_nshitems += f->nitem, g_nshstates += f->nstate, g_nshpal += f->nbones;
+    g_nshitems += f->nitem + g_nsoitems, g_nshstates += f->nstate, g_nshpal += f->nbones;
     *out = *f;
     out->palette = g_shpal, out->nbones = g_nshpal, out->state = g_shstates, out->nstate = g_nshstates;
     out->item = g_shitems, out->nitem = g_nshitems;
@@ -1146,7 +1161,7 @@ static void chars_shadow_frame(GfxCharFrame* out, const GfxCharFrame* f)
 
 static int chars_frame_of(GfxCharFrame* fp, const uint32_t vp[6], const uint32_t gvp[6])
 {
-    if (!g_ncitems)
+    if (!g_ncitems && !g_nsoitems)
         return 0;
     GfxCharFrame f;
     memset(&f, 0, sizeof f);
