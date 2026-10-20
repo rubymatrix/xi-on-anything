@@ -4436,6 +4436,32 @@ static void water_bind(void)
  * its instances and lights in two arrays for the whole batch, lit with the game's fixed-function equation per
  * vertex (mode 1, to match what the game's draws gave) or per pixel (mode 2). Pipelines: the per-pixel switch and
  * the alpha test are function constants, blending is the pipeline's; built in place the first time (a handful). */
+/* Specular highlights (scene_spec): GGX with Schlick's Fresnel and Smith-Schlick visibility, energy kept by the
+ * microfacet terms. FFXI has no specular or roughness maps, so a surface's are guessed: the zone is dielectric
+ * stone, rough (a sheen at grazing sun, more when wet: scene_spec_wet); a character's texel bright and grey reads
+ * as metal (armour): sharper, its Fresnel tinted by the texel, while skin and cloth (saturated or dark) stay low. The
+ * roughness widened by how fast the normal turns across the pixel (specular anti-aliasing): no sparkle on coarse
+ * meshes. SP: k (strength, lamps' share, wetness, anti-aliasing), unused. */
+#define SPEC_MSL                                                                                                    \
+    "struct SP { float4 k; float4 pad; };\n"                                                                      \
+    "static float spec_ggx(float3 N, float3 V, float3 L, float a2, float f0) {\n"                                \
+    "  float3 H = normalize(V + L);\n"                                                                           \
+    "  float nl = saturate(dot(N, L)), nv = max(dot(N, V), 1e-3), nh = saturate(dot(N, H)), vh = saturate(dot(V, H));\n" \
+    "  float d = nh * nh * (a2 - 1.0) + 1.0;\n"                                                                  \
+    "  float D = a2 / (3.14159265 * d * d);\n"                                                                   \
+    "  float k = 0.5 * sqrt(a2);\n"                                                                              \
+    "  float vis = 0.25 / ((nl * (1.0 - k) + k) * (nv * (1.0 - k) + k));\n"                                      \
+    "  float F = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);\n"                                                        \
+    "  return min(D * vis * F * nl, 16.0);\n"                                                                    \
+    "}\n"                                                                                                        \
+    /* a roughness to a2, widened by the normal's variance across the pixel (Kaplanyan's filter) */                 \
+    "static float spec_a2(float rough, float3 N, float aa) {\n"                                                  \
+    "  float3 dx = dfdx(N), dy = dfdy(N);\n"                                                                     \
+    "  float var = 0.5 * (dot(dx, dx) + dot(dy, dy)) * aa;\n"                                                    \
+    "  float a = rough * rough;\n"                                                                               \
+    "  return clamp(a * a + min(2.0 * var, 0.18), 0.002, 1.0);\n"                                                \
+    "}\n"
+
 /* The sun's or moon's shadow at a point, from the cascades gfx_shadow_begin drew (zone layer, and the characters'
  * in the first info.y, only inside their box): the cascade by the distance from the camera, the last tenth of each
  * one's reach blended into the next (the last fades out), the point pushed a texel toward the light and one to five
@@ -4515,7 +4541,9 @@ static const char WORLD_MSL[] =
     "constant bool k_shadow [[function_constant(2)]];\n"
     "constant bool k_gi [[function_constant(3)]];\n"
     "constant bool k_ao [[function_constant(4)]];\n"
+    "constant bool k_spec [[function_constant(5)]];\n"
     SHADOW_MSL
+    SPEC_MSL
     GI_MSL
     AO_MSL
     "struct WF { float4x4 vp; float4 params; };\n" /* params: alpha reference 0..255, the pixel-centre fixup */
@@ -4604,8 +4632,10 @@ static const char WORLD_MSL[] =
     "                         texture2d<float> gir [[texture(4), function_constant(k_gi)]],\n"
     "                         texture2d<float> gid [[texture(5), function_constant(k_gi)]],\n"
     "                         constant AU& A [[buffer(10), function_constant(k_ao)]],\n"
-    "                         texture2d<float> aot [[texture(6), function_constant(k_ao)]]) {\n"
+    "                         texture2d<float> aot [[texture(6), function_constant(k_ao)]],\n"
+    "                         constant SP& SPc [[buffer(11), function_constant(k_spec)]]) {\n"
     "  float3 c = i.col.rgb, sun = i.sun, amb = i.amb;\n"
+    "  float shv = 1.0;\n"
     "  float3 N = (D.flags & 32u) ? normalize(i.nrm) : i.nrm;\n"
     "  float4 g = i.gi;\n"
     "  if (k_gi && k_pixel && G.org.x > 0.5) { g = gi_at(G, PS, gir, gid, i.wpos, normalize(N)); g.rgb *= G.k.x; }\n"
@@ -4626,12 +4656,34 @@ static const char WORLD_MSL[] =
     "    return float4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(S, zm, cm, ct, cs, i.wpos, normalize(N))) : float3(0.05), 1.0);\n"
     "  }\n"
     "  if (k_shadow) {\n"
-    "    if (any(sun > 0.0)) sun *= shadow(S, zm, cm, ct, cs, i.wpos, normalize(N));\n"
+    "    if (any(sun > 0.0)) { shv = shadow(S, zm, cm, ct, cs, i.wpos, normalize(N)); sun *= shv; }\n"
     "    c = saturate(c + sun);\n"
     "  } else if (k_pixel || k_ao) c = saturate(c + sun);\n"
     "  float4 tx = t.sample(s, i.uv);\n"
     "  float4 o = float4(saturate(2.0 * tx.rgb * c), saturate(4.0 * tx.a * i.col.a));\n" /* MODULATE2X, MODULATE4X */
     "  if (k_atest && !(o.a * 255.0 > F.params.x)) discard_fragment();\n"
+    "  if (k_spec && k_shadow) {\n" /* the sun's (or moon's) highlight, where it reaches, and the lamps' */
+    "    constant WI& in = I[i.inst];\n"
+    "    float3 Nn = normalize(N), V = normalize(S.cam.xyz - i.wpos);\n"
+    "    float wet = SPc.k.z, lum = dot(tx.rgb, float3(0.299, 0.587, 0.114));\n"
+    "    float a2 = spec_a2(mix(0.8, 0.5, wet), Nn, SPc.k.w);\n"
+    "    float f0 = mix(0.03, 0.05, wet) * (0.5 + lum);\n"
+    "    float occ = saturate(2.0 * dot(i.col.rgb, float3(0.333)));\n" /* the vertex colour's darkness: corners and crevices */
+    "    float3 sp = float3(0.0);\n"
+    "    float3 scol = in.sun2_dir.w > 0.0 && dot(in.sun2_dir.xyz, S.dir.xyz) > dot(in.sun_dir.xyz, S.dir.xyz) ? in.sun2_col.rgb : in.sun_col.rgb;\n"
+    "    if (in.sun_dir.w > 0.0 || in.sun2_dir.w > 0.0) sp += scol * spec_ggx(Nn, V, S.dir.xyz, a2, f0) * shv;\n" /* (the light the shadows are drawn from) */
+    "    for (int k = 0; k < 4 && SPc.k.y > 0.0; ++k) {\n"
+    "      int li = in.light[k];\n"
+    "      if (li < 0) continue;\n"
+    "      WL l = L[li];\n"
+    "      float3 v = l.pos.xyz - i.wpos;\n"
+    "      float dist = length(v);\n"
+    "      if (dist > l.pos.w) continue;\n"
+    "      float at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
+    "      sp += l.diffuse.rgb * at * SPc.k.y * spec_ggx(Nn, V, v / max(dist, 1e-6), a2, f0);\n"
+    "    }\n"
+    "    o.rgb = 1.0 - (1.0 - o.rgb) * exp(-sp * (SPc.k.x * occ));\n" /* (a soft shoulder: toward white, never flat white) */
+    "  }\n"
     "  if (i.fog.z > 0.0) o.rgb = mix(i.fog_col, o.rgb, saturate((i.fog.y - i.z) / max(i.fog.y - i.fog.x, 1e-6)));\n"
     "  return o;\n"
     "}\n"
@@ -4841,11 +4893,24 @@ static int world_init(void)
     return 1;
 }
 
-static id<MTLRenderPipelineState> world_pipeline(int pixel, int atest, int blend, int shadow, int gi, int ao, MTLPixelFormat color,
-    MTLPixelFormat depth, MTLPixelFormat stencil)
+/* the highlights' settings for a batch's draws (buffer 11, fragment); 0 off (scene_spec 0, or no sun shadows to place
+ * them by) */
+static int spec_bind(id<MTLRenderCommandEncoder> e, int can)
+{
+    if (!can || g_fxs.scene_spec <= 0.0f)
+        return 0;
+    float k[8] = { g_fxs.scene_spec, fmaxf(g_fxs.scene_spec_lamps, 0.0f), fminf(fmaxf(g_fxs.scene_spec_wet, 0.0f), 1.0f),
+        fmaxf(g_fxs.scene_spec_aa, 0.0f), 0, 0, 0, 0 };
+    [e setFragmentBytes:k length:sizeof k atIndex:11];
+    return 1;
+}
+
+static id<MTLRenderPipelineState> world_pipeline(int pixel, int atest, int blend, int shadow, int gi, int ao, int spec,
+    MTLPixelFormat color, MTLPixelFormat depth, MTLPixelFormat stencil)
 {
     uint32_t key = (uint32_t)pixel | (uint32_t)atest << 1 | (uint32_t)blend << 2 | (uint32_t)color << 3 | (uint32_t)depth << 13 |
-        (uint32_t)(stencil != MTLPixelFormatInvalid) << 23 | (uint32_t)shadow << 24 | (uint32_t)gi << 25 | (uint32_t)ao << 26;
+        (uint32_t)(stencil != MTLPixelFormatInvalid) << 23 | (uint32_t)shadow << 24 | (uint32_t)gi << 25 | (uint32_t)ao << 26 |
+        (uint32_t)spec << 27;
     for (uint32_t i = 0; i < g_world.npipe; ++i)
         if (g_world.pipe[i].key == key)
             return g_world.pipe[i].p;
@@ -4855,12 +4920,13 @@ static id<MTLRenderPipelineState> world_pipeline(int pixel, int atest, int blend
     @autoreleasepool
     {
         MTLFunctionConstantValues* fc = [[MTLFunctionConstantValues alloc] init];
-        bool bp = pixel != 0, ba = atest != 0, bs = shadow != 0, bg = gi != 0, bo = ao != 0;
+        bool bp = pixel != 0, ba = atest != 0, bs = shadow != 0, bg = gi != 0, bo = ao != 0, bsp = spec != 0;
         [fc setConstantValue:&bp type:MTLDataTypeBool atIndex:0];
         [fc setConstantValue:&ba type:MTLDataTypeBool atIndex:1];
         [fc setConstantValue:&bs type:MTLDataTypeBool atIndex:2];
         [fc setConstantValue:&bg type:MTLDataTypeBool atIndex:3];
         [fc setConstantValue:&bo type:MTLDataTypeBool atIndex:4];
+        [fc setConstantValue:&bsp type:MTLDataTypeBool atIndex:5];
         NSError* err = nil;
         id<MTLFunction> vf = [g_world.lib newFunctionWithName:@"world_vs" constantValues:fc error:&err];
         id<MTLFunction> ff = [g_world.lib newFunctionWithName:@"world_fs" constantValues:fc error:&err];
@@ -4986,6 +5052,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
         int gi = gi_bind(g_enc);
         ao_note(f, depth);
         int ao = ao_bind(g_enc);
+        int spec = spec_bind(g_enc, shadow && pixel);
         id<MTLRenderPipelineState> cur = nil;
         id<MTLDepthStencilState> curds = nil;
         int cull = -1, bias = INT_MIN;
@@ -4995,7 +5062,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
             if (!it->vb || !it->tex || !it->count)
                 continue;
             int blend = (it->flags & GFX_WORLD_BLEND) != 0;
-            id<MTLRenderPipelineState> p = world_pipeline(pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, shadow, gi, ao, cf, df, sf);
+            id<MTLRenderPipelineState> p = world_pipeline(pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, shadow, gi, ao, spec, cf, df, sf);
             if (!p)
                 continue;
             if (p != cur)
@@ -5051,7 +5118,9 @@ static const char CHARS_MSL[] =
     "constant bool k_shadow [[function_constant(0)]];\n"
     "constant bool k_gi [[function_constant(1)]];\n"
     "constant bool k_ao [[function_constant(2)]];\n"
+    "constant bool k_spec [[function_constant(3)]];\n"
     SHADOW_MSL
+    SPEC_MSL
     GI_MSL
     AO_MSL
     "struct CF { float4 params; };\n" /* alpha reference 0..255, the pixel-centre fixup */
@@ -5132,9 +5201,11 @@ static const char CHARS_MSL[] =
     "                        sampler cs [[sampler(1), function_constant(k_shadow)]],\n"
     "                        constant float4& LG [[buffer(7), function_constant(k_shadow)]],\n"
     "                        constant AU& A [[buffer(10), function_constant(k_ao)]],\n"
-    "                        texture2d<float> aot [[texture(6), function_constant(k_ao)]]) {\n"
+    "                        texture2d<float> aot [[texture(6), function_constant(k_ao)]],\n"
+    "                        constant SP& SPc [[buffer(11), function_constant(k_spec)]]) {\n"
     "  float4 tx = t.sample(sm, i.uv);\n"
     "  float3 col = i.col.rgb;\n"
+    "  float shv = 1.0;\n"
     "  if (k_ao) {\n"
     "    float ao = pow(ao_at(A, aot, i.aop), A.k.y);\n"
     "    if (A.k.z > 0.5) return float4(float3(ao), 1.0);\n"
@@ -5143,12 +5214,27 @@ static const char CHARS_MSL[] =
     "  }\n"
     "  if (k_shadow) {\n"
     "    float3 sun = i.sun;\n"
-    "    if (any(sun > 0.0)) sun *= shadow(H, zm, cm, ct, cs, i.wp + LG.xyz, normalize(i.wn));\n"
+    "    if (any(sun > 0.0)) { shv = shadow(H, zm, cm, ct, cs, i.wp + LG.xyz, normalize(i.wn)); sun *= shv; }\n"
     "    col = saturate(col + sun);\n"
     "  }\n"
     "  float3 c = saturate(2.0 * saturate(2.0 * tx.rgb * col) * i.tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
     "  float a = saturate(4.0 * saturate(2.0 * tx.a * i.tf.a) * i.tf.a);\n"            /* MODULATE2X, then MODULATE4X */
     "  if (!(a * 255.0 > F.params.x)) discard_fragment();\n"
+    "  if (k_spec && k_shadow) {\n" /* the sun's highlight: its colour from what it lit here (its diffuse over N.L) */
+    "    float3 Nn = normalize(i.wn), V = normalize(H.cam.xyz - i.wp), Ls = H.dir.xyz;\n"
+    "    float3 tc = saturate(2.0 * tx.rgb * i.tf.rgb);\n"
+    "    float lum = dot(tc, float3(0.299, 0.587, 0.114));\n"
+    "    float sat = max(tc.r, max(tc.g, tc.b)) - min(tc.r, min(tc.g, tc.b));\n"
+    "    float m = smoothstep(0.25, 0.6, lum) * (1.0 - smoothstep(0.08, 0.3, sat));\n" /* bright and grey: metal */
+    "    float a2 = spec_a2(mix(0.7, 0.3, m), Nn, SPc.k.w);\n"
+    "    float3 sc = i.sun / max(saturate(dot(Nn, Ls)), 0.2);\n"
+    "    float3 f = mix(float3(0.03), tc * 0.6, m);\n"
+    "    float g = spec_ggx(Nn, V, Ls, a2, 1.0);\n" /* (Fresnel's own, tinted below) */
+    "    float3 H_ = normalize(V + Ls);\n"
+    "    float fr = pow(1.0 - saturate(dot(V, H_)), 5.0);\n"
+    "    float3 F_ = f + (1.0 - f) * fr;\n"
+    "    c = 1.0 - (1.0 - c) * exp(-sc * g * F_ * (SPc.k.x * shv));\n"
+    "  }\n"
     "  if (i.fog.z > 0.0) c = mix(i.fog_col, c, saturate((i.fog.y - i.z) / max(i.fog.y - i.fog.x, 1e-6)));\n"
     "  return float4(c, a);\n"
     "}\n"
@@ -5211,11 +5297,11 @@ static int chars_init(void)
     return 1;
 }
 
-static id<MTLRenderPipelineState> chars_pipeline(int shadow, int gi, int ao, MTLPixelFormat color, MTLPixelFormat depth,
+static id<MTLRenderPipelineState> chars_pipeline(int shadow, int gi, int ao, int spec, MTLPixelFormat color, MTLPixelFormat depth,
     MTLPixelFormat stencil)
 {
     uint32_t key = (uint32_t)color | (uint32_t)depth << 10 | (uint32_t)(stencil != MTLPixelFormatInvalid) << 20 | (uint32_t)shadow << 21 |
-        (uint32_t)gi << 22 | (uint32_t)ao << 23;
+        (uint32_t)gi << 22 | (uint32_t)ao << 23 | (uint32_t)spec << 24;
     for (uint32_t i = 0; i < g_chars.npipe; ++i)
         if (g_chars.pipe[i].key == key)
             return g_chars.pipe[i].p;
@@ -5225,10 +5311,11 @@ static id<MTLRenderPipelineState> chars_pipeline(int shadow, int gi, int ao, MTL
     @autoreleasepool
     {
         MTLFunctionConstantValues* fc = [[MTLFunctionConstantValues alloc] init];
-        bool bs = shadow != 0, bg = gi != 0, bo = ao != 0;
+        bool bs = shadow != 0, bg = gi != 0, bo = ao != 0, bsp = spec != 0;
         [fc setConstantValue:&bs type:MTLDataTypeBool atIndex:0];
         [fc setConstantValue:&bg type:MTLDataTypeBool atIndex:1];
         [fc setConstantValue:&bo type:MTLDataTypeBool atIndex:2];
+        [fc setConstantValue:&bsp type:MTLDataTypeBool atIndex:3];
         NSError* err = nil;
         id<MTLFunction> vf = [g_chars.lib newFunctionWithName:@"char_vs" constantValues:fc error:&err];
         id<MTLFunction> ff = [g_chars.lib newFunctionWithName:@"char_fs" constantValues:fc error:&err];
@@ -5274,7 +5361,8 @@ int gfx_chars_draw(const GfxCharFrame* f)
         id<MTLTexture> depth = depth_attachment();
         MTLPixelFormat df = depth ? depth.pixelFormat : MTLPixelFormatInvalid;
         int ao = ao_bind(g_enc);
-        id<MTLRenderPipelineState> p = chars_pipeline(g_shd.on, g_gi.on, ao, g_rt->tex.pixelFormat, df,
+        int spec = spec_bind(g_enc, g_shd.on);
+        id<MTLRenderPipelineState> p = chars_pipeline(g_shd.on, g_gi.on, ao, spec, g_rt->tex.pixelFormat, df,
             depth && g_ds->has_stencil ? df : MTLPixelFormatInvalid);
         if (!p)
         {

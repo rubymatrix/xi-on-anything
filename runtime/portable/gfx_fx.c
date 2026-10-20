@@ -174,6 +174,12 @@ static const struct
     { "shafts_q", offsetof(GfxFxSettings, shafts_q), 2.0f },
     { "shafts_g", offsetof(GfxFxSettings, shafts_g), 0.6f },
     { "shafts_dist", offsetof(GfxFxSettings, shafts_dist), 120.0f },
+    /* specular highlights on the scene renderer's zone (scene 2) and characters, with its shadows (gfx_metal.m
+     * SPEC_MSL): strength, 0 off (1 tuned); the lamps' share; wetness 0 to 1 (rain); the anti-aliasing's width */
+    { "scene_spec", offsetof(GfxFxSettings, scene_spec), 0.0f },
+    { "scene_spec_lamps", offsetof(GfxFxSettings, scene_spec_lamps), 1.0f },
+    { "scene_spec_wet", offsetof(GfxFxSettings, scene_spec_wet), 0.0f },
+    { "scene_spec_aa", offsetof(GfxFxSettings, scene_spec_aa), 1.0f },
     /* how much of last frame's shafts each frame keeps (0 none) */
     { "shafts_temporal", offsetof(GfxFxSettings, shafts_temporal), 0.9f },
     /* the shafts alone in place of the scene, times this (0 off) */
