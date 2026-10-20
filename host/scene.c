@@ -668,6 +668,41 @@ static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
 
 #include "scene_gi.inc"
 
+/* the lamps lit now, every one (the light pool's point lights with a colour, as the game's SetLight wrapper takes them),
+ * once a frame for the back end's clustered lamps (gfx_lamps, scene_lamps) */
+static void lamps_frame(void)
+{
+    static uint32_t done;
+    if (done == g_frame_no)
+        return;
+    done = g_frame_no;
+    static GfxWorldLight lamps[256];
+    uint32_t n = 0;
+#ifdef FFXI_SCENE_LIGHT_POOL
+    if (gfx_fx_get("scene_lamps") > 0.0f)
+    {
+        uint32_t l = g_scratch + 0x180;
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            uint32_t e = FFXI_SCENE_LIGHT_POOL + i * 0x70u + 8u;
+            if (rd32(e) != 1 || rdf32(e + 0x4c) <= 0.0f || rdf32(e + 0x5c) <= 0.0f)
+                continue;
+            if (rdf32(e + 4) <= 0.0f && rdf32(e + 8) <= 0.0f && rdf32(e + 12) <= 0.0f)
+                continue;
+            memcpy(GUEST_PTR(l), GUEST_PTR(e), 0x68);
+            light_factor(l);
+            GfxWorldLight* w = &lamps[n++];
+            memset(w, 0, sizeof *w);
+            w->diffuse[0] = rdf32(l + 4), w->diffuse[1] = rdf32(l + 8), w->diffuse[2] = rdf32(l + 12);
+            w->ambient[0] = rdf32(l + 0x24), w->ambient[1] = rdf32(l + 0x28), w->ambient[2] = rdf32(l + 0x2c);
+            w->pos[0] = rdf32(l + 0x34), w->pos[1] = rdf32(l + 0x38), w->pos[2] = rdf32(l + 0x3c), w->pos[3] = rdf32(l + 0x4c);
+            w->att[0] = rdf32(l + 0x54), w->att[1] = rdf32(l + 0x58), w->att[2] = rdf32(l + 0x5c);
+        }
+    }
+#endif
+    gfx_lamps(lamps, n);
+}
+
 static void flush(void)
 {
     if (!g_pending || g_flushing)
@@ -747,6 +782,7 @@ static void flush(void)
     sf.chars = have_chars && sf.dir[3] > 0.0f ? &scf : NULL;
     gfx_shadow_begin(sf.dir[3] > 0.0f ? &sf : NULL);
     gi_frame(mgr, g_npicks ? &g_inst[0] : NULL);
+    lamps_frame();
     if (total)
         gfx_world_draw(&f);
     if (have_chars && cf.nitem)

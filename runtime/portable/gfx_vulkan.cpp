@@ -3418,6 +3418,10 @@ extern "C"
         (void)f;
         return 0;
     }
+    void gfx_lamps(const GfxWorldLight* l, uint32_t n)
+    {
+        (void)l, (void)n;
+    }
     // No GPU time per pass here.
     void gfx_pass_timing(int on)
     {

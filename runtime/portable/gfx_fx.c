@@ -180,6 +180,14 @@ static const struct
     { "scene_spec_lamps", offsetof(GfxFxSettings, scene_spec_lamps), 1.0f },
     { "scene_spec_wet", offsetof(GfxFxSettings, scene_spec_wet), 0.0f },
     { "scene_spec_aa", offsetof(GfxFxSettings, scene_spec_aa), 1.0f },
+    /* the lamps (gfx_metal.m lamps_bin; scene 2): every lit lamp of the light pool per pixel on the zone and characters,
+     * faded at its range; strength (1: the game's own), 0 off; how far from the camera they light; a sprite glow at each
+     * light's place (0 none: the game's light sits below its lantern, where it lights the ground, so the sprite floats
+     * under it; the lantern's own flame glows through the bloom) and its size (units) */
+    { "scene_lamps", offsetof(GfxFxSettings, scene_lamps), 0.0f },
+    { "scene_lamp_far", offsetof(GfxFxSettings, scene_lamp_far), 120.0f },
+    { "scene_lamp_glow", offsetof(GfxFxSettings, scene_lamp_glow), 0.0f },
+    { "scene_lamp_glow_size", offsetof(GfxFxSettings, scene_lamp_glow_size), 0.6f },
     /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;
      * tonemap 0 neutral (today's image), 1 a highlight shoulder (today's image below tone_knee, past it rolled off toward
      * tone_white), 2 ACES fit; the exposure; the white point; the knee */
@@ -338,7 +346,7 @@ void fx_config(void)
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
     "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof",
-    "scene ao", "scene ao trace", "post shafts", "hdr" };
+    "scene ao", "scene ao trace", "post shafts", "hdr", "lamps" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */

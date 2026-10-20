@@ -432,6 +432,9 @@ typedef struct GfxCharFrame
 } GfxCharFrame;
 /* Draws a batch of characters into the current targets; 0 when it drew nothing. */
 int gfx_chars_draw(const GfxCharFrame* f);
+/* The lamps lit this frame (the light pool's point lights, world space), for the clustered lamps (scene_lamps): set
+ * once a frame before its batches; n 0 none. */
+void gfx_lamps(const GfxWorldLight* l, uint32_t n);
 
 /* While the GPU's passes are timed: the draws from here on are a timed pass of their own, 1 as the scene renderer's
  * zone (GFX_PASS_WORLD), 2 its characters (GFX_PASS_CHARS); 0 that pass ends here (the game's own draws, timed for

@@ -4549,6 +4549,7 @@ void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
 void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
 void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
 int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
+void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
 
 /* a buffer of at least need bytes in *b (made again, half as large again, when smaller; the old one let go
  * once the GPU is past it): the GPU's own, or one the CPU writes (host) */

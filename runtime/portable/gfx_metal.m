@@ -4439,6 +4439,30 @@ static void water_bind(void)
  * its instances and lights in two arrays for the whole batch, lit with the game's fixed-function equation per
  * vertex (mode 1, to match what the game's draws gave) or per pixel (mode 2). Pipelines: the per-pixel switch and
  * the alpha test are function constants, blending is the pipeline's; built in place the first time (a handful). */
+/* The lamps (scene_lamps): every lit point light of the pool, binned into 64-pixel screen tiles once a frame
+ * (lamps_bin); a pixel takes its tile's. Each the game's own colour and attenuation, but faded to nothing at its range
+ * (1 - (d/r)^4)^2 rather than cut off there - no circles on the ground. LU: viewport, tiles across and down, strength. */
+#define LAMP_MSL                                                                                                    \
+    "struct LL { float4 pos, col, att, amb; };\n"                                                                 \
+    "struct LU { float4 vp; float4 t; };\n"                                                                       \
+    "static void lamp_light(constant LU& U, const device LL* LS, const device ushort* TL, float2 fp, float3 P, float3 N,\n" \
+    "                       thread float3& dif, thread float3& amb) {\n"                                          \
+    "  int2 t = int2((fp - U.vp.xy) / 64.0);\n"                                                                   \
+    "  if (any(t < 0) || t.x >= int(U.t.x) || t.y >= int(U.t.y)) return;\n"                                       \
+    "  const device ushort* L = TL + (uint(t.y) * uint(U.t.x) + uint(t.x)) * 32u;\n"                              \
+    "  uint n = L[0];\n"                                                                                          \
+    "  for (uint k = 0; k < n; ++k) {\n"                                                                          \
+    "    LL l = LS[L[1 + k]];\n"                                                                                  \
+    "    float3 v = l.pos.xyz - P;\n"                                                                             \
+    "    float d = length(v), q = d / l.pos.w;\n"                                                                 \
+    "    if (q >= 1.0) continue;\n"                                                                               \
+    "    float w = saturate(1.0 - q * q * q * q);\n"                                                              \
+    "    float at = w * w / max(l.att.x + l.att.y * d + l.att.z * d * d, 1e-3);\n"                                \
+    "    amb += l.amb.rgb * at;\n"                                                                                \
+    "    dif += l.col.rgb * at * max(dot(N, v / max(d, 1e-4)), 0.0);\n"                                           \
+    "  }\n"                                                                                                       \
+    "}\n"
+
 /* Specular highlights (scene_spec): GGX with Schlick's Fresnel and Smith-Schlick visibility, energy kept by the
  * microfacet terms. FFXI has no specular or roughness maps, so a surface's are guessed: the zone is dielectric
  * stone, rough (a sheen at grazing sun, more when wet: scene_spec_wet); a character's texel bright and grey reads
@@ -4545,8 +4569,10 @@ static const char WORLD_MSL[] =
     "constant bool k_gi [[function_constant(3)]];\n"
     "constant bool k_ao [[function_constant(4)]];\n"
     "constant bool k_spec [[function_constant(5)]];\n"
+    "constant bool k_lamps [[function_constant(6)]];\n"
     SHADOW_MSL
     SPEC_MSL
+    LAMP_MSL
     GI_MSL
     AO_MSL
     "struct WF { float4x4 vp; float4 params; };\n" /* params: alpha reference 0..255, the pixel-centre fixup */
@@ -4574,7 +4600,7 @@ static const char WORLD_MSL[] =
     "    float3 t = I.sun2_col.rgb * max(dot(N, I.sun2_dir.xyz), 0.0);\n"
     "    if (dot(I.sun2_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
     "  }\n"
-    "  for (int k = 0; k < 4; ++k) {\n"
+    "  for (int k = 0; k < 4 && !k_lamps; ++k) {\n" /* (the lamps, every one, per pixel instead: world_fs) */
     "    int li = I.light[k];\n"
     "    if (li < 0) continue;\n"
     "    WL l = L[li];\n"
@@ -4636,13 +4662,22 @@ static const char WORLD_MSL[] =
     "                         texture2d<float> gid [[texture(5), function_constant(k_gi)]],\n"
     "                         constant AU& A [[buffer(10), function_constant(k_ao)]],\n"
     "                         texture2d<float> aot [[texture(6), function_constant(k_ao)]],\n"
-    "                         constant SP& SPc [[buffer(11), function_constant(k_spec)]]) {\n"
+    "                         constant SP& SPc [[buffer(11), function_constant(k_spec)]],\n"
+    "                         const device LL* LS [[buffer(12), function_constant(k_lamps)]],\n"
+    "                         const device ushort* TL [[buffer(13), function_constant(k_lamps)]],\n"
+    "                         constant LU& LUc [[buffer(14), function_constant(k_lamps)]]) {\n"
     "  float3 c = i.col.rgb, sun = i.sun, amb = i.amb;\n"
     "  float shv = 1.0;\n"
     "  float3 N = (D.flags & 32u) ? normalize(i.nrm) : i.nrm;\n"
     "  float4 g = i.gi;\n"
     "  if (k_gi && k_pixel && G.org.x > 0.5) { g = gi_at(G, PS, gir, gid, i.wpos, normalize(N)); g.rgb *= G.k.x; }\n"
     "  if (k_pixel) c = lit(i.wpos, N, i.col.rgb, I[i.inst], L, k_shadow ? S.dir.xyz : float3(0.0), g, sun, amb);\n"
+    "  if (k_lamps && k_pixel) {\n"
+    "    float3 ld = float3(0.0), la = float3(0.0);\n"
+    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wpos, normalize(N), ld, la);\n"
+    "    c += i.col.rgb * (ld + la);\n" /* (on the vertex colour, as lit() lights) */
+    "    amb += i.col.rgb * la;\n"
+    "  }\n"
     "  if (k_ao) {\n" /* the occlusion takes from the ambient alone; scene_ao_debug 1 shows it */
     "    float ao = pow(ao_at(A, aot, i.aop), A.k.x);\n"
     "    if (A.k.z > 0.5) return float4(float3(ao), 1.0);\n"
@@ -4897,6 +4932,119 @@ static int world_init(void)
     return 1;
 }
 
+/* --- the lamps (scene_lamps): gfx_lamps hands the frame's; binned into 64-pixel tiles of the scene's viewport at the
+ * frame's first zone batch (its camera), the list and the tiles in the frame's ring, bound at 12-14 for both passes */
+static struct
+{
+    GfxWorldLight l[256];
+    uint32_t n;
+    uint64_t set, binned;            /* the frames they were set, binned */
+    id<MTLBuffer> lb, tb;            /* the lamps (LL), the tiles (32 ushort each: count, indices) */
+    NSUInteger lo, to;
+    float lu[8];                     /* LU: viewport, tiles across, down */
+    float vp[16];                    /* the camera's view x projection, for the glows */
+    float cam[3];
+} g_lamps;
+
+void gfx_lamps(const GfxWorldLight* l, uint32_t n)
+{
+    n = n > 256 ? 256 : n;
+    if (n)
+        memcpy(g_lamps.l, l, n * sizeof *l);
+    g_lamps.n = n, g_lamps.set = g_serial;
+}
+
+static void lamps_bin(const float* view, const float* proj, const uint32_t vp[6])
+{
+    float VP[16], iv[16];
+    gfx_mat_mul(VP, view, proj);
+    memcpy(g_lamps.vp, VP, 64);
+    if (gfx_mat_inverse(iv, view))
+        memcpy(g_lamps.cam, iv + 12, 12);
+    float x0 = (float)vp[0], y0 = (float)vp[1], w = (float)vp[2], h = (float)vp[3];
+    uint32_t tx = ((uint32_t)w + 63) / 64, ty = ((uint32_t)h + 63) / 64;
+    if (!tx || !ty || tx * ty > 4096)
+        return;
+    float k = fmaxf(g_fxs.scene_lamps, 0.0f), far2 = g_fxs.scene_lamp_far * g_fxs.scene_lamp_far;
+    float* L = (float*)ring((size_t)g_lamps.n * 64 + 64, 256, &g_lamps.lb, &g_lamps.lo);
+    uint16_t* T = (uint16_t*)ring((size_t)tx * ty * 64, 256, &g_lamps.tb, &g_lamps.to);
+    memset(T, 0, (size_t)tx * ty * 64);
+    for (uint32_t i = 0; i < g_lamps.n; ++i)
+    {
+        const GfxWorldLight* l = &g_lamps.l[i];
+        float* o = L + 16 * i;
+        memcpy(o, l->pos, 16);
+        for (int c = 0; c < 3; ++c)
+            o[4 + c] = l->diffuse[c] * k, o[12 + c] = l->ambient[c] * k;
+        memcpy(o + 8, l->att, 16);
+        float r = l->pos[3];
+        float dx = l->pos[0] - g_lamps.cam[0], dy = l->pos[1] - g_lamps.cam[1], dz = l->pos[2] - g_lamps.cam[2];
+        if (dx * dx + dy * dy + dz * dz > far2 + r * r + 2.0f * r * sqrtf(far2))
+            continue;
+        /* its box's corners on screen: the rectangle it can light (all of it when a corner is behind the camera) */
+        float sx0 = 1e30f, sy0 = 1e30f, sx1 = -1e30f, sy1 = -1e30f;
+        int behind = 0;
+        /* the lamp's sphere wholly behind the camera: none */
+        {
+            float vz = l->pos[0] * view[2] + l->pos[1] * view[6] + l->pos[2] * view[10] + view[14];
+            float depth = proj[11] < 0.0f ? -vz : vz; /* along the view, toward what is seen */
+            if (depth < -r)
+                continue;
+        }
+        for (int c = 0; c < 8; ++c)
+        {
+            float p[3] = { l->pos[0] + ((c & 1) ? r : -r), l->pos[1] + ((c & 2) ? r : -r), l->pos[2] + ((c & 4) ? r : -r) };
+            float q[4];
+            for (int j = 0; j < 4; ++j)
+                q[j] = p[0] * VP[j] + p[1] * VP[4 + j] + p[2] * VP[8 + j] + VP[12 + j];
+            if (q[3] <= 0.05f)
+            {
+                behind = 1;
+                continue;
+            }
+            float sx = x0 + (q[0] / q[3] * 0.5f + 0.5f) * w, sy = y0 + (0.5f - q[1] / q[3] * 0.5f) * h;
+            sx0 = fminf(sx0, sx), sy0 = fminf(sy0, sy), sx1 = fmaxf(sx1, sx), sy1 = fmaxf(sy1, sy);
+        }
+        int ax = 0, ay = 0, bx = (int)tx - 1, by = (int)ty - 1;
+        if (!behind)
+        {
+            if (sx1 < x0 || sy1 < y0 || sx0 > x0 + w || sy0 > y0 + h)
+                continue;
+            ax = (int)fmaxf((sx0 - x0) / 64.0f, 0.0f), ay = (int)fmaxf((sy0 - y0) / 64.0f, 0.0f);
+            bx = (int)fminf((sx1 - x0) / 64.0f, (float)(tx - 1)), by = (int)fminf((sy1 - y0) / 64.0f, (float)(ty - 1));
+        }
+        for (int y = ay; y <= by; ++y)
+            for (int x = ax; x <= bx; ++x)
+            {
+                uint16_t* t = T + 32 * ((size_t)y * tx + x);
+                if (t[0] < 31)
+                    t[1 + t[0]++] = (uint16_t)i;
+            }
+    }
+    float lu[8] = { x0, y0, w, h, (float)tx, (float)ty, 0, 0 };
+    memcpy(g_lamps.lu, lu, sizeof lu);
+    g_lamps.binned = g_serial;
+}
+
+/* the lamps for a batch's draws: binned at the frame's first zone batch (view etc. given), then bound; 0 none */
+static int lamps_bind(id<MTLRenderCommandEncoder> e, const float* view, const float* proj, const uint32_t* vp)
+{
+    if (g_fxs.scene_lamps <= 0.0f || !g_lamps.n || g_lamps.set != g_serial)
+        return 0;
+    if (g_lamps.binned != g_serial)
+    {
+        if (!view)
+            return 0;
+        lamps_bin(view, proj, vp);
+        if (g_lamps.binned != g_serial)
+            return 0;
+    }
+    [e setFragmentBuffer:g_lamps.lb offset:g_lamps.lo atIndex:12];
+    [e setFragmentBuffer:g_lamps.tb offset:g_lamps.to atIndex:13];
+    [e setFragmentBytes:g_lamps.lu length:sizeof g_lamps.lu atIndex:14];
+    return 1;
+}
+
 /* the highlights' settings for a batch's draws (buffer 11, fragment); 0 off (scene_spec 0, or no sun shadows to place
  * them by) */
 static int spec_bind(id<MTLRenderCommandEncoder> e, int can)
@@ -4909,12 +5057,12 @@ static int spec_bind(id<MTLRenderCommandEncoder> e, int can)
     return 1;
 }
 
-static id<MTLRenderPipelineState> world_pipeline(int pixel, int atest, int blend, int shadow, int gi, int ao, int spec,
+static id<MTLRenderPipelineState> world_pipeline(int pixel, int atest, int blend, int shadow, int gi, int ao, int spec, int lamps,
     MTLPixelFormat color, MTLPixelFormat depth, MTLPixelFormat stencil)
 {
     uint32_t key = (uint32_t)pixel | (uint32_t)atest << 1 | (uint32_t)blend << 2 | (uint32_t)color << 3 | (uint32_t)depth << 13 |
         (uint32_t)(stencil != MTLPixelFormatInvalid) << 23 | (uint32_t)shadow << 24 | (uint32_t)gi << 25 | (uint32_t)ao << 26 |
-        (uint32_t)spec << 27;
+        (uint32_t)spec << 27 | (uint32_t)lamps << 28;
     for (uint32_t i = 0; i < g_world.npipe; ++i)
         if (g_world.pipe[i].key == key)
             return g_world.pipe[i].p;
@@ -4924,13 +5072,14 @@ static id<MTLRenderPipelineState> world_pipeline(int pixel, int atest, int blend
     @autoreleasepool
     {
         MTLFunctionConstantValues* fc = [[MTLFunctionConstantValues alloc] init];
-        bool bp = pixel != 0, ba = atest != 0, bs = shadow != 0, bg = gi != 0, bo = ao != 0, bsp = spec != 0;
+        bool bp = pixel != 0, ba = atest != 0, bs = shadow != 0, bg = gi != 0, bo = ao != 0, bsp = spec != 0, bl = lamps != 0;
         [fc setConstantValue:&bp type:MTLDataTypeBool atIndex:0];
         [fc setConstantValue:&ba type:MTLDataTypeBool atIndex:1];
         [fc setConstantValue:&bs type:MTLDataTypeBool atIndex:2];
         [fc setConstantValue:&bg type:MTLDataTypeBool atIndex:3];
         [fc setConstantValue:&bo type:MTLDataTypeBool atIndex:4];
         [fc setConstantValue:&bsp type:MTLDataTypeBool atIndex:5];
+        [fc setConstantValue:&bl type:MTLDataTypeBool atIndex:6];
         NSError* err = nil;
         id<MTLFunction> vf = [g_world.lib newFunctionWithName:@"world_vs" constantValues:fc error:&err];
         id<MTLFunction> ff = [g_world.lib newFunctionWithName:@"world_fs" constantValues:fc error:&err];
@@ -5057,6 +5206,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
         ao_note(f, depth);
         int ao = ao_bind(g_enc);
         int spec = spec_bind(g_enc, shadow && pixel);
+        int lamps = pixel && lamps_bind(g_enc, f->view, f->proj, f->vp);
         id<MTLRenderPipelineState> cur = nil;
         id<MTLDepthStencilState> curds = nil;
         int cull = -1, bias = INT_MIN;
@@ -5066,7 +5216,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
             if (!it->vb || !it->tex || !it->count)
                 continue;
             int blend = (it->flags & GFX_WORLD_BLEND) != 0;
-            id<MTLRenderPipelineState> p = world_pipeline(pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, shadow, gi, ao, spec, cf, df, sf);
+            id<MTLRenderPipelineState> p = world_pipeline(pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, shadow, gi, ao, spec, lamps, cf, df, sf);
             if (!p)
                 continue;
             if (p != cur)
@@ -5123,8 +5273,10 @@ static const char CHARS_MSL[] =
     "constant bool k_gi [[function_constant(1)]];\n"
     "constant bool k_ao [[function_constant(2)]];\n"
     "constant bool k_spec [[function_constant(3)]];\n"
+    "constant bool k_lamps [[function_constant(4)]];\n"
     SHADOW_MSL
     SPEC_MSL
+    LAMP_MSL
     GI_MSL
     AO_MSL
     "struct CF { float4 params; };\n" /* alpha reference 0..255, the pixel-centre fixup */
@@ -5172,7 +5324,7 @@ static const char CHARS_MSL[] =
     "  if (k_gi) { float4 g = gi_at(G, PS, gir, gid, wp, wn); amb = amb * g.a + g.rgb * G.k.x; }\n" /* the bounce light */
     "  for (int k = 0; k < 4; ++k) {\n"
     "    CL l = s.light[k];\n"
-    "    if (l.dir.w == 0.0) continue;\n"
+    "    if (l.dir.w == 0.0 || (k_lamps && l.dir.w > 1.5)) continue;\n" /* (point lights: the lamps, per pixel: char_fs) */
     "    float at = 1.0;\n"
     "    float3 L = l.dir.xyz;\n"
     "    if (l.dir.w > 1.5) {\n"
@@ -5206,9 +5358,17 @@ static const char CHARS_MSL[] =
     "                        constant float4& LG [[buffer(7), function_constant(k_shadow)]],\n"
     "                        constant AU& A [[buffer(10), function_constant(k_ao)]],\n"
     "                        texture2d<float> aot [[texture(6), function_constant(k_ao)]],\n"
-    "                        constant SP& SPc [[buffer(11), function_constant(k_spec)]]) {\n"
+    "                        constant SP& SPc [[buffer(11), function_constant(k_spec)]],\n"
+    "                        const device LL* LS [[buffer(12), function_constant(k_lamps)]],\n"
+    "                        const device ushort* TL [[buffer(13), function_constant(k_lamps)]],\n"
+    "                        constant LU& LUc [[buffer(14), function_constant(k_lamps)]]) {\n"
     "  float4 tx = t.sample(sm, i.uv);\n"
     "  float3 col = i.col.rgb;\n"
+    "  if (k_lamps) {\n"
+    "    float3 ld = float3(0.0), la = float3(0.0);\n"
+    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wp, normalize(i.wn), ld, la);\n"
+    "    col += ld + la;\n"
+    "  }\n"
     "  float shv = 1.0;\n"
     "  if (k_ao) {\n"
     "    float ao = pow(ao_at(A, aot, i.aop), A.k.y);\n"
@@ -5302,11 +5462,11 @@ static int chars_init(void)
     return 1;
 }
 
-static id<MTLRenderPipelineState> chars_pipeline(int shadow, int gi, int ao, int spec, MTLPixelFormat color, MTLPixelFormat depth,
-    MTLPixelFormat stencil)
+static id<MTLRenderPipelineState> chars_pipeline(int shadow, int gi, int ao, int spec, int lamps, MTLPixelFormat color,
+    MTLPixelFormat depth, MTLPixelFormat stencil)
 {
     uint32_t key = (uint32_t)color | (uint32_t)depth << 10 | (uint32_t)(stencil != MTLPixelFormatInvalid) << 20 | (uint32_t)shadow << 21 |
-        (uint32_t)gi << 22 | (uint32_t)ao << 23 | (uint32_t)spec << 24;
+        (uint32_t)gi << 22 | (uint32_t)ao << 23 | (uint32_t)spec << 24 | (uint32_t)lamps << 25;
     for (uint32_t i = 0; i < g_chars.npipe; ++i)
         if (g_chars.pipe[i].key == key)
             return g_chars.pipe[i].p;
@@ -5316,11 +5476,12 @@ static id<MTLRenderPipelineState> chars_pipeline(int shadow, int gi, int ao, int
     @autoreleasepool
     {
         MTLFunctionConstantValues* fc = [[MTLFunctionConstantValues alloc] init];
-        bool bs = shadow != 0, bg = gi != 0, bo = ao != 0, bsp = spec != 0;
+        bool bs = shadow != 0, bg = gi != 0, bo = ao != 0, bsp = spec != 0, bl = lamps != 0;
         [fc setConstantValue:&bs type:MTLDataTypeBool atIndex:0];
         [fc setConstantValue:&bg type:MTLDataTypeBool atIndex:1];
         [fc setConstantValue:&bo type:MTLDataTypeBool atIndex:2];
         [fc setConstantValue:&bsp type:MTLDataTypeBool atIndex:3];
+        [fc setConstantValue:&bl type:MTLDataTypeBool atIndex:4];
         NSError* err = nil;
         id<MTLFunction> vf = [g_chars.lib newFunctionWithName:@"char_vs" constantValues:fc error:&err];
         id<MTLFunction> ff = [g_chars.lib newFunctionWithName:@"char_fs" constantValues:fc error:&err];
@@ -5367,7 +5528,8 @@ int gfx_chars_draw(const GfxCharFrame* f)
         MTLPixelFormat df = depth ? depth.pixelFormat : MTLPixelFormatInvalid;
         int ao = ao_bind(g_enc);
         int spec = spec_bind(g_enc, g_shd.on);
-        id<MTLRenderPipelineState> p = chars_pipeline(g_shd.on, g_gi.on, ao, spec, g_rt->tex.pixelFormat, df,
+        int lamps = lamps_bind(g_enc, NULL, NULL, NULL);
+        id<MTLRenderPipelineState> p = chars_pipeline(g_shd.on, g_gi.on, ao, spec, lamps, g_rt->tex.pixelFormat, df,
             depth && g_ds->has_stencil ? df : MTLPixelFormatInvalid);
         if (!p)
         {
@@ -6149,6 +6311,37 @@ static const char POST_MSL[] =
     "  float3 l = pow(v, 2.2) * u.k.y;\n"
     "  float3 t = aces(l) / aces(float3(u.k.z));\n"
     "  return float4(pow(saturate(t), 1.0 / 2.2), c.a);\n"
+    "}\n"
+    "// --- the lamps' glows (scene_lamp_glow): a soft sprite at each lamp, its own colour, hidden by what stands in front of\n"
+    "// it (the scene's depth, softly), faded with distance; added to the scene before the bloom takes it\n"
+    "struct GLL { float4 pos, col, att, amb; };\n"
+    "struct GLU { float4x4 vp; float4 p; float4 cam; float4 zp; float4 vpr; float4 pr; };\n"
+    "struct GV { float4 pos [[position]]; float2 c; float3 col [[flat]]; float lz [[flat]]; };\n"
+    "vertex GV lamp_glow_vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant GLU& G [[buffer(0)]],\n"
+    "                       const device GLL* LS [[buffer(1)]]) {\n"
+    "  GLL l = LS[iid];\n"
+    "  float2 c = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);\n"
+    "  float4 q = G.vp * float4(l.pos.xyz, 1.0);\n"
+    "  float dist = length(l.pos.xyz - G.cam.xyz);\n"
+    "  float fade = saturate(1.0 - dist / G.p.z) * step(0.3, q.w);\n"
+    "  float size = G.p.x * clamp(l.pos.w / 8.0, 0.5, 2.0);\n"
+    "  GV o;\n"
+    "  o.pos = q + float4(c * size * G.pr.xy, 0.0, 0.0);\n"
+    "  if (fade <= 0.0) o.pos = float4(2.0, 2.0, 2.0, 1.0); // (off screen)\n"
+    "  o.c = c;\n"
+    "  o.col = l.col.rgb * (G.p.y * fade);\n"
+    "  o.lz = q.w;\n"
+    "  return o;\n"
+    "}\n"
+    "fragment float4 lamp_glow_fs(GV in [[stage_in]], constant GLU& G [[buffer(0)]], depth2d<float> dt [[texture(0)]]) {\n"
+    "  float r2 = dot(in.c, in.c);\n"
+    "  if (r2 >= 1.0) discard_fragment();\n"
+    "  float d = dt.read(uint2(in.pos.xy));\n"
+    "  float dn = (d - G.zp.z) / max(G.zp.w - G.zp.z, 1e-6);\n"
+    "  float sz = dn >= 0.999999 ? 1e6 : abs(G.zp.y / (dn * G.pr.z - G.zp.x)); // the scene's view depth here\n"
+    "  float vis = saturate((sz - in.lz) / max(G.p.x, 0.1) + 1.0);\n"
+    "  float f = exp(-r2 * 5.0) - 0.0067;\n"
+    "  return float4(in.col * (f * vis), 1.0);\n"
     "}\n";
 
 typedef struct PostU
@@ -6359,6 +6552,60 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
 }
 
+/* the lamps' glows: a sprite each, added to the scene (scene_lamp_glow) */
+static void post_lamp_glows(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, float vx, float vy, float vw, float vh)
+{
+    if (g_fxs.scene_lamps <= 0.0f || g_fxs.scene_lamp_glow <= 0.0f || g_lamps.binned != g_serial || !g_lamps.n || !g_lamps.lb)
+        return;
+    static id<MTLRenderPipelineState> pipe[2];
+    int hdr = color->tex.pixelFormat == MTLPixelFormatRGBA16Float;
+    if (!pipe[hdr])
+    {
+        MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+        id<MTLFunction> vf = [g_post.lib newFunctionWithName:@"lamp_glow_vs"], ff = [g_post.lib newFunctionWithName:@"lamp_glow_fs"];
+        pd.vertexFunction = vf, pd.fragmentFunction = ff;
+        MTLRenderPipelineColorAttachmentDescriptor* ca = pd.colorAttachments[0];
+        ca.pixelFormat = color->tex.pixelFormat;
+        ca.blendingEnabled = YES;
+        ca.rgbBlendOperation = ca.alphaBlendOperation = MTLBlendOperationAdd;
+        ca.sourceRGBBlendFactor = MTLBlendFactorOne, ca.destinationRGBBlendFactor = MTLBlendFactorOne;
+        ca.sourceAlphaBlendFactor = MTLBlendFactorZero, ca.destinationAlphaBlendFactor = MTLBlendFactorOne;
+        NSError* err = nil;
+        pipe[hdr] = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (!pipe[hdr])
+            fprintf(stderr, "[recomp] gfx: lamp glows failed: %s\n", err ? [[err localizedDescription] UTF8String] : "?");
+        [vf release], [ff release], [pd release];
+        if (!pipe[hdr])
+            return;
+    }
+    float minz, maxz;
+    memcpy(&minz, &s->vp[4], 4);
+    memcpy(&maxz, &s->vp[5], 4);
+    if (maxz <= minz)
+        minz = 0, maxz = 1;
+    struct { float vp[16], p[4], cam[4], zp[4], vpr[4], pr[4]; } u = { { 0 } };
+    memcpy(u.vp, g_lamps.vp, 64);
+    u.p[0] = fmaxf(g_fxs.scene_lamp_glow_size, 0.05f), u.p[1] = g_fxs.scene_lamp_glow, u.p[2] = fmaxf(g_fxs.scene_lamp_far, 1.0f);
+    memcpy(u.cam, g_lamps.cam, 12);
+    u.zp[0] = s->proj[10], u.zp[1] = s->proj[14], u.zp[2] = minz, u.zp[3] = maxz;
+    u.vpr[0] = vx, u.vpr[1] = vy, u.vpr[2] = vw, u.vpr[3] = vh;
+    u.pr[0] = s->proj[0], u.pr[1] = s->proj[5], u.pr[2] = s->proj[11] < 0.0f ? -1.0f : 1.0f;
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = color->tex;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    ts_mark(rp, GFX_PASS_LAMPS);
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:pipe[hdr]];
+    [e setViewport:(MTLViewport){ vx, vy, vw, vh, 0, 1 }];
+    [e setVertexBytes:&u length:sizeof u atIndex:0];
+    [e setFragmentBytes:&u length:sizeof u atIndex:0];
+    [e setVertexBuffer:g_lamps.lb offset:g_lamps.lo atIndex:1];
+    [e setFragmentTexture:depth atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:g_lamps.n];
+    [e endEncoding];
+}
+
 /* the glow's draws again, onto black over the scene's depth; 0 when there were none */
 static int post_glow(GfxTex* color)
 {
@@ -6426,7 +6673,8 @@ static int post_glow(GfxTex* color)
 static void post_effects(GfxTex* color, const GfxScene* s)
 {
     int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f, shafts = g_fxs.post_shafts > 0.0f;
-    if (!bloom && !dof && !shafts)
+    int glows = g_fxs.scene_lamps > 0.0f && g_fxs.scene_lamp_glow > 0.0f && g_lamps.binned == g_serial;
+    if (!bloom && !dof && !shafts && !glows)
     {
         g_post.sh_serial = 0;
         return;
@@ -6453,6 +6701,8 @@ static void post_effects(GfxTex* color, const GfxScene* s)
             { aspect * vh / vw, 0, 0, 0 } };
         u.dof2[1] = s->proj[11] < 0.0f ? -1.0f : 1.0f, u.dof2[2] = POST_LEVELS, u.dof2[3] = fmaxf(g_fxs.bloom_radius, 0.0f);
         NSUInteger hw = (NSUInteger)(vw + 1) / 2, hh = (NSUInteger)(vh + 1) / 2;
+        if (glows && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
+            post_lamp_glows(color, s, depth, vx, vy, vw, vh);
         if (shafts && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
             post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it) */
         else
