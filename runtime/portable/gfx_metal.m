@@ -609,10 +609,12 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
     }
 }
 
+static void hdr_forget(GfxTex* t);
 void gfx_tex_destroy(GfxTex* t)
 {
     if (!t)
         return;
+    hdr_forget(t);
     if (g_rt == t)
         end_pass(), g_rt = NULL;
     if (g_ds == t)
@@ -1366,6 +1368,7 @@ static Caster* caster_new(const GfxDraw* d)
 typedef struct Glow
 {
     GfxTex* rt;
+    MTLPixelFormat fmt;              /* the target's format its pipeline was built for */
     id<MTLTexture> depth;            /* the depth it was tested against; retained, like everything below */
     id<MTLRenderPipelineState> pipe;
     id<MTLDepthStencilState> ds;
@@ -1412,7 +1415,7 @@ static Glow* glow_new(const GfxDraw* d, id<MTLRenderPipelineState> p, id<MTLDept
         g_glows_cap = g_glows_cap ? g_glows_cap * 2 : 256, g_glows = (Glow*)realloc(g_glows, g_glows_cap * sizeof(Glow));
     Glow* g = &g_glows[g_nglows++];
     memset(g, 0, sizeof *g);
-    g->rt = g_rt, g->depth = [depth_attachment() retain], g->pipe = [p retain], g->ds = [ds retain], g->zbias = d->zbias;
+    g->rt = g_rt, g->fmt = g_rt->tex.pixelFormat, g->depth = [depth_attachment() retain], g->pipe = [p retain], g->ds = [ds retain], g->zbias = d->zbias;
     g->cull = d->cull == 3 ? 2 : d->cull == 2 ? 1 : 0;
     g->vp = g_bound.vp, g->sc = g_bound.sc;
     return g;
@@ -4682,7 +4685,8 @@ static const char WORLD_MSL[] =
     "      float at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
     "      sp += l.diffuse.rgb * at * SPc.k.y * spec_ggx(Nn, V, v / max(dist, 1e-6), a2, f0);\n"
     "    }\n"
-    "    o.rgb = 1.0 - (1.0 - o.rgb) * exp(-sp * (SPc.k.x * occ));\n" /* (a soft shoulder: toward white, never flat white) */
+    "    if (SPc.pad.x > 0.0) o.rgb += sp * (SPc.k.x * occ);\n" /* an HDR scene: past white, the tonemap's to roll off */
+    "    else o.rgb = 1.0 - (1.0 - o.rgb) * exp(-sp * (SPc.k.x * occ));\n" /* (a soft shoulder: toward white, never flat white) */
     "  }\n"
     "  if (i.fog.z > 0.0) o.rgb = mix(i.fog_col, o.rgb, saturate((i.fog.y - i.z) / max(i.fog.y - i.fog.x, 1e-6)));\n"
     "  return o;\n"
@@ -4900,7 +4904,7 @@ static int spec_bind(id<MTLRenderCommandEncoder> e, int can)
     if (!can || g_fxs.scene_spec <= 0.0f)
         return 0;
     float k[8] = { g_fxs.scene_spec, fmaxf(g_fxs.scene_spec_lamps, 0.0f), fminf(fmaxf(g_fxs.scene_spec_wet, 0.0f), 1.0f),
-        fmaxf(g_fxs.scene_spec_aa, 0.0f), 0, 0, 0, 0 };
+        fmaxf(g_fxs.scene_spec_aa, 0.0f), g_rt && g_rt->tex.pixelFormat == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f, 0, 0, 0 };
     [e setFragmentBytes:k length:sizeof k atIndex:11];
     return 1;
 }
@@ -5233,7 +5237,8 @@ static const char CHARS_MSL[] =
     "    float3 H_ = normalize(V + Ls);\n"
     "    float fr = pow(1.0 - saturate(dot(V, H_)), 5.0);\n"
     "    float3 F_ = f + (1.0 - f) * fr;\n"
-    "    c = 1.0 - (1.0 - c) * exp(-sc * g * F_ * (SPc.k.x * shv));\n"
+    "    if (SPc.pad.x > 0.0) c += sc * g * F_ * (SPc.k.x * shv);\n"
+    "    else c = 1.0 - (1.0 - c) * exp(-sc * g * F_ * (SPc.k.x * shv));\n"
     "  }\n"
     "  if (i.fog.z > 0.0) c = mix(i.fog_col, c, saturate((i.fog.y - i.z) / max(i.fog.y - i.fog.x, 1e-6)));\n"
     "  return float4(c, a);\n"
@@ -5944,6 +5949,7 @@ static const char POST_MSL[] =
     "fragment float4 bloom_comp(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
     "                           sampler s [[sampler(0)]]) {\n"
     "  float3 b = t0.sample(s, in.uv).rgb * (u.bloom.w * 1.5 / u.dof2.z);\n"
+    "  if (u.aux.w > 0.0) return float4(max(b, 0.0), 1.0); // an HDR scene: added as it is (the tonemap rolls it off)\n"
     "  return float4(1.0 - exp(-max(b, 0.0)), 1.0);\n"
     "}\n"
     "// --- depth of field\n"
@@ -6113,7 +6119,36 @@ static const char POST_MSL[] =
     "  }\n"
     "  float3 c = ws > 1e-6 ? sum / ws : float3(0.0);\n"
     "  if (u.hist.z != 0.0) return float4(saturate(c * abs(u.hist.z)), 1.0); // shafts_debug: the term alone, scaled (no blend)\n"
+    "  if (u.hist.w > 0.0) return float4(max(c, 0.0), 1.0); // an HDR scene: added as it is\n"
     "  return float4(1.0 - exp(-max(c, 0.0)), 1.0);\n"
+    "}\n"
+    "// --- the HDR scene (scene_hdr): a target's first level copied into its float replacement, texel for texel\n"
+    "fragment float4 hdr_copy(PV in [[stage_in]], texture2d<float> t0 [[texture(0)]]) {\n"
+    "  return t0.read(uint2(in.pos.xy));\n"
+    "}\n"
+    "// the tonemap, in place (the pixel as it is, read back): 0 neutral (clamped, today's image), 1 filmic (ACES fit\n"
+    "// on the linear light, exposure, normalised to the white point), back to the display's encoding\n"
+    "struct TU { float4 k; }; // mode, exposure, white point, unused\n"
+    "static float3 aces(float3 x) { return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14); }\n"
+    "fragment float4 hdr_tone(PV in [[stage_in]], constant TU& u [[buffer(0)]], float4 c [[color(0)]]) {\n"
+    "  float3 v = max(c.rgb, 0.0);\n"
+    "  if (u.k.x < 0.5) return float4(min(v, 1.0), c.a);\n"
+    "  if (u.k.x < 1.5) {\n"
+    "    // 1: a shoulder - the image as it was below the knee (k.w), what is past it (highlights, glows, glints) rolled\n"
+    "    // off toward white by its brightest channel, the hue kept; the exposure first\n"
+    "    v *= u.k.y;\n"
+    "    float m = max(v.r, max(v.g, v.b)), kn = u.k.w;\n"
+    "    if (m > kn) {\n"
+    "      float r = kn + (1.0 - kn) * (1.0 - exp(-(m - kn) / (1.0 - kn)));\n"
+    "      float3 h = v * (r / m);\n"
+    "      v = mix(h, float3(r), saturate((m - 1.0) / (u.k.z - 1.0)) * 0.5); // the brightest toward white\n"
+    "    }\n"
+    "    return float4(saturate(v), c.a);\n"
+    "  }\n"
+    "  // 2: ACES fit on the linear light, normalised to the white point\n"
+    "  float3 l = pow(v, 2.2) * u.k.y;\n"
+    "  float3 t = aces(l) / aces(float3(u.k.z));\n"
+    "  return float4(pow(saturate(t), 1.0 / 2.2), c.a);\n"
     "}\n";
 
 typedef struct PostU
@@ -6134,6 +6169,7 @@ static struct
     id<MTLLibrary> lib;
     id<MTLRenderPipelineState> pre, down, up, coc, gather;
     id<MTLRenderPipelineState> comp, dcomp, scomp, sdbg; /* onto the scene, built for its format */
+    id<MTLRenderPipelineState> comp_add, scomp_add;      /* the same added (an HDR scene: no screen blend) */
     id<MTLRenderPipelineState> smarch, sresolve; /* the sun shafts' march and their resolve over frames */
     id<MTLTexture> sh, shist[2];     /* the shafts at half or quarter size: this frame's march, the resolved two */
     int shist_at;                    /* which of shist[] the last frame wrote */
@@ -6206,13 +6242,16 @@ static int post_init(MTLPixelFormat scene_fmt)
     if (g_post.comp_fmt != scene_fmt || !g_post.comp || !g_post.dcomp || !g_post.scomp)
     {
         [g_post.comp release], [g_post.dcomp release], [g_post.scomp release], [g_post.sdbg release];
+        [g_post.comp_add release], [g_post.scomp_add release];
         g_post.comp = post_pipeline(@"bloom_comp", scene_fmt, 2);
         g_post.dcomp = post_pipeline(@"dof_comp", scene_fmt, 3);
         g_post.scomp = post_pipeline(@"shaft_comp", scene_fmt, 2);
         g_post.sdbg = post_pipeline(@"shaft_comp", scene_fmt, 0);
+        g_post.comp_add = post_pipeline(@"bloom_comp", scene_fmt, 1);
+        g_post.scomp_add = post_pipeline(@"shaft_comp", scene_fmt, 1);
         g_post.comp_fmt = scene_fmt;
     }
-    return g_post.comp && g_post.dcomp && g_post.scomp;
+    return g_post.comp && g_post.dcomp && g_post.scomp && g_post.comp_add && g_post.scomp_add;
 }
 
 /* a texture kept at this size and format (made again when either changes) */
@@ -6313,7 +6352,8 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     MTLViewport lv = { 0, 0, (double)lw, (double)lh, 0, 1 };
     post_pass_n(g_post.sh, MTLLoadActionDontCare, g_post.smarch, lv, &u, sizeof u, depth, g_shd.zmap, nil, GFX_PASS_POST_SHAFTS);
     post_pass_n(out, MTLLoadActionDontCare, g_post.sresolve, lv, &u, sizeof u, g_post.sh, prev, depth, GFX_PASS_POST_SHAFTS);
-    post_pass_n(color->tex, MTLLoadActionLoad, u.hist[2] != 0.0f ? g_post.sdbg : g_post.scomp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, sizeof u, out, depth, nil,
+    u.hist[3] = color->tex.pixelFormat == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f;
+    post_pass_n(color->tex, MTLLoadActionLoad, u.hist[2] != 0.0f ? g_post.sdbg : u.hist[3] > 0.0f ? g_post.scomp_add : g_post.scomp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, sizeof u, out, depth, nil,
         GFX_PASS_POST_SHAFTS);
     g_post.shist_at ^= 1, g_post.sh_serial = g_serial;
     memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
@@ -6324,7 +6364,7 @@ static int post_glow(GfxTex* color)
 {
     uint32_t n = 0;
     for (uint32_t i = 0; i < g_nglows; ++i)
-        n += g_glows[i].rt == color;
+        n += g_glows[i].rt == color && g_glows[i].fmt == color->tex.pixelFormat; /* (not those from before a format change) */
     if (!n)
         return 0;
     id<MTLTexture> ct = color->tex;
@@ -6337,7 +6377,7 @@ static int post_glow(GfxTex* color)
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLTexture> depth = nil;
     for (uint32_t i = 0; i < g_nglows && !depth; ++i)
-        if (g_glows[i].rt == color)
+        if (g_glows[i].rt == color && g_glows[i].fmt == ct.pixelFormat)
             depth = g_glows[i].depth;
     if (depth)
     {
@@ -6357,7 +6397,7 @@ static int post_glow(GfxTex* color)
     for (uint32_t i = 0; i < g_nglows; ++i)
     {
         Glow* g = &g_glows[i];
-        if (g->rt != color || (g->depth != depth))
+        if (g->rt != color || g->depth != depth || g->fmt != ct.pixelFormat)
             continue;
         [e setRenderPipelineState:g->pipe];
         [e setDepthStencilState:g->ds];
@@ -6482,7 +6522,8 @@ static void post_effects(GfxTex* color, const GfxScene* s)
                     post_pass(g_post.lvl[i], MTLLoadActionLoad, g_post.up, (MTLViewport){ 0, 0, (double)w[i], (double)h[i], 0, 1 }, &u,
                         g_post.lvl[i + 1], nil, nil, GFX_PASS_POST_BLOOM);
                 }
-                post_pass(ct, MTLLoadActionLoad, g_post.comp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, g_post.lvl[0], nil,
+                u.aux[3] = ct.pixelFormat == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f;
+                post_pass(ct, MTLLoadActionLoad, u.aux[3] > 0.0f ? g_post.comp_add : g_post.comp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, g_post.lvl[0], nil,
                     nil, GFX_PASS_POST_BLOOM);
             }
         }
@@ -6491,16 +6532,133 @@ static void post_effects(GfxTex* color, const GfxScene* s)
     }
 }
 
+/* --- the HDR scene (scene_hdr) ------------------------------------------------------------------------------------
+ * The game's world target (its 2048 background) made RGBA16F in place: a new texture of the same size and levels, the
+ * old one's first level drawn into it, so the frame goes on with what was drawn. Every draw after renders linear light
+ * past 1 where it has it (the scene renderer's specular, the sun shafts, the bloom, the game's additive effects summed
+ * without clipping), and one tonemap pass at the scene's end (hdr_tone) brings it back to the display's range before
+ * the nameplates and the interface go over it: tonemap 0 neutral (today's image: clamped), 1 a highlight shoulder
+ * (today's image below its knee, what is past it rolled off), 2 ACES. The game's own
+ * draws go in unchanged (their pipelines are built for the target's format); its copy of the scene onto the back buffer
+ * and the water's screen copy read the float target. scene_hdr 0 turns it back. */
+static struct
+{
+    GfxTex* t;                              /* the target made float */
+    id<MTLRenderPipelineState> copy[2];     /* hdr_copy into RGBA16F, into BGRA8 */
+    id<MTLRenderPipelineState> tone;        /* hdr_tone on RGBA16F */
+} g_hdr;
+
+static void hdr_swap(GfxTex* t, MTLPixelFormat pf)
+{
+    id<MTLTexture> old = t->tex;
+    if (old.pixelFormat == pf || !post_init(old.pixelFormat))
+        return;
+    id<MTLRenderPipelineState>* cp = &g_hdr.copy[pf == MTLPixelFormatRGBA16Float ? 0 : 1];
+    if (!*cp)
+        *cp = post_pipeline(@"hdr_copy", pf, 0);
+    if (!*cp)
+        return;
+    MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:old.width height:old.height mipmapped:NO];
+    d.mipmapLevelCount = old.mipmapLevelCount;
+    d.storageMode = MTLStorageModePrivate;
+    d.usage = old.usage;
+    id<MTLTexture> nt = [g_dev newTextureWithDescriptor:d];
+    if (!nt)
+        return;
+    end_pass();
+    flush_pass();
+    PostU u;
+    memset(&u, 0, sizeof u);
+    MTLTextureDescriptor* vd = nil;
+    (void)vd;
+    id<MTLTexture> src = [old newTextureViewWithPixelFormat:old.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
+    post_pass(nt, MTLLoadActionDontCare, *cp, (MTLViewport){ 0, 0, (double)old.width, (double)old.height, 0, 1 }, &u, src, nil, nil,
+        GFX_PASS_HDR);
+    [src release];
+    /* the views as gfx_tex_create made them: the first level (or all of it), the alpha forced to one for X8 */
+    int mipped = t->mipview != nil;
+    [t->view release], [t->mipview release], t->view = t->mipview = nil;
+    t->tex = nt;
+    if (t->x8)
+        t->view = [nt newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)
+                                            swizzle:MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen,
+                                                        MTLTextureSwizzleBlue, MTLTextureSwizzleOne)];
+    else if (mipped)
+        t->view = [nt newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
+    else
+        t->view = [nt retain];
+    if (mipped)
+        t->mipview = [nt retain];
+    [old release]; /* (the command buffers that used it hold their own) */
+    t->scene = 0, t->used = g_serial;
+    bound_forget();
+}
+
+/* the scene's target float while scene_hdr is on (and back once it is off) */
+static void hdr_update(GfxTex* color)
+{
+    int want = g_fxs.scene_hdr > 0.0f && color->use == GFX_USE_RT && color->tex.mipmapLevelCount > 1 && !color->block;
+    if (g_hdr.t && g_hdr.t != color && g_hdr.t->tex.pixelFormat == MTLPixelFormatRGBA16Float)
+        hdr_swap(g_hdr.t, MTLPixelFormatBGRA8Unorm), g_hdr.t = NULL; /* (another target is the world now) */
+    if (want && color->tex.pixelFormat == MTLPixelFormatBGRA8Unorm)
+        hdr_swap(color, MTLPixelFormatRGBA16Float), g_hdr.t = color;
+    else if (!want && g_hdr.t == color && color->tex.pixelFormat == MTLPixelFormatRGBA16Float)
+        hdr_swap(color, MTLPixelFormatBGRA8Unorm), g_hdr.t = NULL;
+}
+
+/* the tonemap over the scene's viewport, in place (the GPU reads each pixel back as it shades it) */
+static void hdr_tone(GfxTex* color, const GfxScene* s)
+{
+    if (g_hdr.t != color || color->tex.pixelFormat != MTLPixelFormatRGBA16Float)
+        return;
+    @autoreleasepool
+    {
+        if (!g_hdr.tone)
+            g_hdr.tone = post_pipeline(@"hdr_tone", MTLPixelFormatRGBA16Float, 0);
+        if (!g_hdr.tone)
+            return;
+        flush_pass();
+        id<MTLTexture> ct = color->tex;
+        float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+        if (vw < 16 || vh < 16 || vx + vw > ct.width || vy + vh > ct.height)
+            vx = vy = 0, vw = (float)ct.width, vh = (float)ct.height;
+        float k[4] = { g_fxs.tonemap, fmaxf(g_fxs.exposure, 0.01f), fmaxf(g_fxs.tone_white, 1.01f), fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f) };
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = ct;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        ts_mark(rp, GFX_PASS_HDR);
+        id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+        [e setRenderPipelineState:g_hdr.tone];
+        [e setViewport:(MTLViewport){ vx, vy, vw, vh, 0, 1 }];
+        [e setFragmentBytes:k length:sizeof k atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        color->scene = 0, color->used = g_serial;
+    }
+}
+
+static void hdr_forget(GfxTex* t)
+{
+    if (g_hdr.t == t)
+        g_hdr.t = NULL;
+}
+
 static void scene_fx(GfxTex* color, const GfxScene* s);
 
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D)
         return;
+    @autoreleasepool
+    {
+        hdr_update(color);
+    }
     ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
     post_effects(color, s);
+    hdr_tone(color, s);
     scene_aa(color, s);
 }
 

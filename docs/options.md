@@ -95,6 +95,7 @@ the Lighting and Atmosphere pages.
 | Sun shafts (scene renderer with `scene_shadows`, Metal) | | `post_shafts` | 0 off (1 tuned) |
 | Shafts haze density / quality (2 a third of the scene, 16 steps; 1 a fifth, 10) / forward lobe / reach / over frames | | `shafts_density`, `shafts_q`, `shafts_g`, `shafts_dist`, `shafts_temporal` | 1 / 2 / 0.6 / 120 / 0.9 |
 | Specular highlights (scene 2 with `scene_shadows`, Metal): strength / lamps' share / wetness / anti-aliasing width | | `scene_spec`, `scene_spec_lamps`, `scene_spec_wet`, `scene_spec_aa` | 0 off (1 tuned) / 1 / 0 (0–1) / 1 |
+| HDR scene target (Metal): on / tonemap (0 neutral, 1 highlight shoulder, 2 ACES) / exposure / white point / knee | | `scene_hdr`, `tonemap`, `exposure`, `tone_white`, `tone_knee` | 0 / 0 / 1 / 4 / 0.8 |
 | Testing: the sun held low ahead of the camera (degrees up, degrees turned); the shafts alone | | `scene_sun_test`, `scene_sun_test_turn`, `shafts_debug` | 0 / 0 / 0 |
 
 ## 6. Water

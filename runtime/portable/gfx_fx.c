@@ -180,6 +180,14 @@ static const struct
     { "scene_spec_lamps", offsetof(GfxFxSettings, scene_spec_lamps), 1.0f },
     { "scene_spec_wet", offsetof(GfxFxSettings, scene_spec_wet), 0.0f },
     { "scene_spec_aa", offsetof(GfxFxSettings, scene_spec_aa), 1.0f },
+    /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;
+     * tonemap 0 neutral (today's image), 1 a highlight shoulder (today's image below tone_knee, past it rolled off toward
+     * tone_white), 2 ACES fit; the exposure; the white point; the knee */
+    { "scene_hdr", offsetof(GfxFxSettings, scene_hdr), 0.0f },
+    { "tonemap", offsetof(GfxFxSettings, tonemap), 0.0f },
+    { "exposure", offsetof(GfxFxSettings, exposure), 1.0f },
+    { "tone_white", offsetof(GfxFxSettings, tone_white), 4.0f },
+    { "tone_knee", offsetof(GfxFxSettings, tone_knee), 0.8f },
     /* how much of last frame's shafts each frame keeps (0 none) */
     { "shafts_temporal", offsetof(GfxFxSettings, shafts_temporal), 0.9f },
     /* the shafts alone in place of the scene, times this (0 off) */
@@ -330,7 +338,7 @@ void fx_config(void)
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
     "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof",
-    "scene ao", "scene ao trace", "post shafts" };
+    "scene ao", "scene ao trace", "post shafts", "hdr" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */
