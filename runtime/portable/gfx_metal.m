@@ -1401,7 +1401,7 @@ static void glows_clear(void)
 /* a record for this draw when it glows: post bloom on, an additive 3D draw into the target's first level */
 static Glow* glow_new(const GfxDraw* d, id<MTLRenderPipelineState> p, id<MTLDepthStencilState> ds, int water)
 {
-    if (g_fxs.post_bloom <= 0.0f || g_fxs.bloom_glow <= 0.0f || water || d->vs.rhw || !d->pipe.blend || d->pipe.dst != 2 ||
+    if (g_fxs.post_bloom <= 0.0f || g_fxs.bloom_emissive_fx <= 0.0f || water || d->vs.rhw || !d->pipe.blend || d->pipe.dst != 2 ||
         d->depth.stencil || g_rt_face || g_rt_level || !g_rt || g_nglows >= 4096)
         return NULL;
     /* not the sky's own layers (drawn round the camera: no translation in world x view), which would haze all of it;
@@ -5694,7 +5694,8 @@ static const char POST_MSL[] =
     "  float4 dof;   // focus (view z), sharp range behind it, ramp, largest radius (half-size pixels)\n"
     "  float4 dof2;  // near strength, hand, levels, radius scale (up)\n"
     "  float4 zp;    // projection [10], [14], viewport min z, max z\n"
-    "  float4 aux;   // x: a texel step down the target per step across (the target's square drawn onto a wide screen)\n"
+    "  float4 aux;   // x: a texel step down the target per step across (the target's square drawn onto a wide screen);\n"
+    "                // y: the sky's (sun, moon) emissive weight\n"
     "};\n"
     "static float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }\n"
     "// the bloom's source at a point of the scene: the glow, and where nothing was drawn with depth (the sky, the sun)\n"
@@ -5712,7 +5713,7 @@ static const char POST_MSL[] =
     "  float gb = max(g.r, max(g.g, g.b)), gs = clamp(gb - 0.1, 0.0, 0.2);\n"
     "  gs = gs * gs / 0.4;\n"
     "  float gw = max(gs, gb - 0.2) / max(gb, 1e-4);\n"
-    "  return c * (w * sky) + g * (gw * u.bloom.z);\n"
+    "  return c * (w * sky * u.aux.y) + g * (gw * u.bloom.z); // each by its emissive weight: past 1, the chain is float\n"
     "}\n"
     "// the first level: four bilinear taps (each the 2x2 under it, a 4x4 footprint), each weighted by 1 / (1 + its luma) - a\n"
     "// Karis average, so a lone bright texel cannot flicker as the camera moves\n"
@@ -5751,11 +5752,12 @@ static const char POST_MSL[] =
     "       t0.sample(s, uv + t * float2(-1, 1)).rgb + t0.sample(s, uv + t * float2(1, 1)).rgb;\n"
     "  return float4(o * (1.0 / 16.0), 1.0);\n"
     "}\n"
-    "// onto the scene, screen-blended by the pipeline (src x (1 - dst) + dst): it brightens toward white, never past it\n"
+    "// onto the scene, screen-blended by the pipeline (src x (1 - dst) + dst): it brightens toward white, never past it; the\n"
+    "// sum's highlights eased toward 1 (1 - e^-b), so a strong emissive glows wide rather than clipping to a white disc\n"
     "fragment float4 bloom_comp(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
     "                           sampler s [[sampler(0)]]) {\n"
     "  float3 b = t0.sample(s, in.uv).rgb * (u.bloom.w * 3.0 / u.dof2.z);\n"
-    "  return float4(saturate(b), 1.0);\n"
+    "  return float4(1.0 - exp(-max(b, 0.0)), 1.0);\n"
     "}\n"
     "// --- depth of field\n"
     "static float view_z(constant PU& u, float d) {\n"
@@ -6060,7 +6062,8 @@ static void post_effects(GfxTex* color, const GfxScene* s)
         }
         if (bloom && depth && depth.width == ct.width && depth.height == ct.height)
         {
-            u.bloom[0] = g_fxs.bloom_threshold, u.bloom[1] = g_fxs.bloom_knee, u.bloom[2] = g_fxs.bloom_glow;
+            u.bloom[0] = g_fxs.bloom_threshold, u.bloom[1] = g_fxs.bloom_knee, u.bloom[2] = g_fxs.bloom_emissive_fx;
+            u.aux[1] = fmaxf(g_fxs.bloom_emissive_lights, 0.0f);
             u.bloom[3] = g_fxs.post_bloom;
             id<MTLTexture> glow = post_glow(color) ? g_post.glow : g_post.black;
             NSUInteger w[POST_LEVELS], h[POST_LEVELS];

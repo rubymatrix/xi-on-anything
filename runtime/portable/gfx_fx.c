@@ -149,11 +149,14 @@ static const struct
     { "scene_shadow_char_far", offsetof(GfxFxSettings, scene_shadow_char_far), 1000.0f },
     /* the post bloom (gfx_metal.m post_bloom), with or without the effects and the scene renderer: its strength, 0 off
      * (1 is the tuned look); what glows is the world's additive draws (lamps, spell effects; not the sky's own layers) and
-     * where the sky is brighter than the threshold (with a soft knee: the sun); the glow's weight and how far it spreads */
+     * where the sky is brighter than the threshold (with a soft knee: the sun); how far it spreads */
     { "post_bloom", offsetof(GfxFxSettings, post_bloom), 0.0f },
     { "bloom_threshold", offsetof(GfxFxSettings, bloom_threshold), 0.95f },
     { "bloom_knee", offsetof(GfxFxSettings, bloom_knee), 0.05f },
-    { "bloom_glow", offsetof(GfxFxSettings, bloom_glow), 1.0f },
+    /* emissive weights, past 1 in the bloom's float chain: the world's additive draws (spells, abilities, weather
+     * particles, lamp and torch glows - one effect system, not told apart), and the sun, moon and bright sky */
+    { "bloom_emissive_fx", offsetof(GfxFxSettings, bloom_emissive_fx), 2.0f },
+    { "bloom_emissive_lights", offsetof(GfxFxSettings, bloom_emissive_lights), 1.5f },
     { "bloom_radius", offsetof(GfxFxSettings, bloom_radius), 1.0f },
     /* the depth of field (post_dof): its strength, 0 off (1: the background's blur up to some 12 pixels of a 2048 scene);
      * focus at the player (eased), or dof_focus units out when above 0; sharp to dof_range units behind the focus,
