@@ -120,6 +120,8 @@ static void gi_lamps(void)
 static void gi_frame(uint32_t mgr, const GfxWorldInst* env)
 {
     float want = gfx_fx_get("scene_gi");
+    /* the occlusion's rays (scene_ao_q 3, 4) trace the same structure */
+    int rays = gfx_fx_get("scene_ao") > 0.0f && gfx_fx_get("scene_ao_q") >= 2.5f;
     uint32_t key = shadow_zone_key(mgr);
     if (key != g_gi.seen)
     {
@@ -129,7 +131,7 @@ static void gi_frame(uint32_t mgr, const GfxWorldInst* env)
     }
     else if (g_gi.stable < 1000000)
         ++g_gi.stable;
-    if (want <= 0.0f)
+    if (want <= 0.0f && !rays)
     {
         gfx_gi_frame(NULL);
         return;
@@ -152,6 +154,11 @@ static void gi_frame(uint32_t mgr, const GfxWorldInst* env)
         gfx_gi_zone(&z);
         g_gi.given = key;
         ++g_gi.zones;
+    }
+    if (want <= 0.0f)
+    {
+        gfx_gi_frame(NULL);
+        return;
     }
     if (g_gi.frame != g_frame_no)
     {

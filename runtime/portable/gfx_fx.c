@@ -180,6 +180,19 @@ static const struct
     { "scene_gi_bounce", offsetof(GfxFxSettings, scene_gi_bounce), 1.0f },
     /* 1: the zone shows the bounce light alone (on its vertex colour), 2 the ambient's factor, 3 the bounce light x 8 */
     { "scene_gi_debug", offsetof(GfxFxSettings, scene_gi_debug), 0.0f },
+    /* the scene renderer's ambient occlusion (gfx_ao_metal.inc): 0 off, else the power the occlusion is
+     * raised to (1 as made, 2 darker) before it scales the ambient;
+     * needs scene 1 or 2 */
+    { "scene_ao", offsetof(GfxFxSettings, scene_ao), 0.0f },
+    /* its quality: 1 GTAO low (2 slices of 4 steps), 2 GTAO high (3 of 6), both from the depth at half the window's size;
+     * 3 rays low (1 a pixel), 4 rays high (2), against the zone's structure (built while scene_gi or these are on) */
+    { "scene_ao_q", offsetof(GfxFxSettings, scene_ao_q), 1.0f },
+    /* its reach in world units */
+    { "scene_ao_radius", offsetof(GfxFxSettings, scene_ao_radius), 1.0f },
+    /* how much of it the characters take (times scene_ao) */
+    { "scene_ao_chars", offsetof(GfxFxSettings, scene_ao_chars), 1.0f },
+    /* 1: the zone and characters show the occlusion alone */
+    { "scene_ao_debug", offsetof(GfxFxSettings, scene_ao_debug), 0.0f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
@@ -294,7 +307,8 @@ void fx_config(void)
 
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
-    "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof" };
+    "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof",
+    "scene ao", "scene ao trace" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */
