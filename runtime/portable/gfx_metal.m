@@ -1359,6 +1359,65 @@ static Caster* caster_new(const GfxDraw* d)
 
 
 
+/* --- the glow: the scene's additive draws, drawn again for the post bloom (post_bloom) --------------------------
+ * The world's lamps, spell effects and the sun's halo are additive draws (the destination blended by ONE). Each one into
+ * a 3D scene's target is recorded as it is encoded - the very pipeline, depth state and everything bound - and when the
+ * scene is done they are drawn again onto black over the scene's depth: what glows, as bright as it was added. */
+typedef struct Glow
+{
+    GfxTex* rt;
+    id<MTLTexture> depth;            /* the depth it was tested against; retained, like everything below */
+    id<MTLRenderPipelineState> pipe;
+    id<MTLDepthStencilState> ds;
+    id<MTLBuffer> vb[GFX_NSTREAMS], ub, ib;
+    NSUInteger voff[GFX_NSTREAMS], uoff, ioff;
+    id<MTLTexture> tex[8];
+    id<MTLSamplerState> samp[8];
+    MTLViewport vp;
+    MTLScissorRect sc;
+    MTLPrimitiveType prim;
+    uint32_t n, vstart;
+    uint8_t itype, cull, ntex;
+    int32_t zbias;
+} Glow;
+
+static Glow* g_glows;
+static uint32_t g_nglows, g_glows_cap;
+
+static void glows_clear(void)
+{
+    for (uint32_t i = 0; i < g_nglows; ++i)
+    {
+        Glow* g = &g_glows[i];
+        [g->depth release], [g->pipe release], [g->ds release], [g->ub release], [g->ib release];
+        for (int s = 0; s < GFX_NSTREAMS; ++s)
+            [g->vb[s] release];
+        for (int t = 0; t < 8; ++t)
+            [g->tex[t] release];
+    }
+    g_nglows = 0;
+}
+
+/* a record for this draw when it glows: post bloom on, an additive 3D draw into the target's first level */
+static Glow* glow_new(const GfxDraw* d, id<MTLRenderPipelineState> p, id<MTLDepthStencilState> ds, int water)
+{
+    if (g_fxs.post_bloom <= 0.0f || g_fxs.bloom_glow <= 0.0f || water || d->vs.rhw || !d->pipe.blend || d->pipe.dst != 2 ||
+        d->depth.stencil || g_rt_face || g_rt_level || !g_rt || g_nglows >= 4096)
+        return NULL;
+    /* not the sky's own layers (drawn round the camera: no translation in world x view), which would haze all of it;
+     * the sun and a bright sky glow by the threshold instead */
+    if (!d->vs.prog && fabsf(d->u.wv[12]) + fabsf(d->u.wv[13]) + fabsf(d->u.wv[14]) < 1e-3f)
+        return NULL;
+    if (g_nglows == g_glows_cap)
+        g_glows_cap = g_glows_cap ? g_glows_cap * 2 : 256, g_glows = (Glow*)realloc(g_glows, g_glows_cap * sizeof(Glow));
+    Glow* g = &g_glows[g_nglows++];
+    memset(g, 0, sizeof *g);
+    g->rt = g_rt, g->depth = [depth_attachment() retain], g->pipe = [p retain], g->ds = [ds retain], g->zbias = d->zbias;
+    g->cull = d->cull == 3 ? 2 : d->cull == 2 ? 1 : 0;
+    g->vp = g_bound.vp, g->sc = g_bound.sc;
+    return g;
+}
+
 static MTLCompareFunction compare(uint32_t f)
 {
     switch (f)
@@ -1663,12 +1722,17 @@ static void draw_encode(const GfxDraw* d)
         Caster* rec = d->caster && g_fxs.fx != 0.0f && g_fxs.sun > 0.0f ? caster_new(d) : NULL;
         if (rec)
             rec->ub = [buf retain], rec->uoff = off;
+        Glow* gl = glow_new(d, p, ds, water);
+        if (gl)
+            gl->ub = [buf retain], gl->uoff = off;
         for (int s = 0; s < GFX_NSTREAMS; ++s)
         {
             if (d->buf[s])
             {
                 bind_vb(d->buf[s]->b, d->buf_off[s], s);
                 d->buf[s]->used = g_serial;
+                if (gl)
+                    gl->vb[s] = [d->buf[s]->b retain], gl->voff[s] = d->buf_off[s];
                 if (rec)
                 {
                     rec->vb[s] = [d->buf[s]->b retain], rec->voff[s] = d->buf_off[s];
@@ -1683,12 +1747,16 @@ static void draw_encode(const GfxDraw* d)
                 bind_vb(buf, off, s);
                 if (rec)
                     rec->vb[s] = [buf retain], rec->voff[s] = off, rec->fixed = 0;
+                if (gl)
+                    gl->vb[s] = [buf retain], gl->voff[s] = off;
             }
             else
             {
                 bind_vb(g_dummy, 0, s);
                 if (rec)
                     rec->vb[s] = [g_dummy retain];
+                if (gl)
+                    gl->vb[s] = [g_dummy retain];
             }
         }
         for (int i = 0; i < 8; ++i)
@@ -1722,6 +1790,8 @@ static void draw_encode(const GfxDraw* d)
             t->used = g_serial;
             if (rec) /* (an alpha test's, and the bounce light's map, which draws in colour) */
                 rec->tex[i] = [view retain], rec->samp[i] = sk;
+            if (gl)
+                gl->tex[i] = [view retain], gl->samp[i] = ss, gl->ntex = (uint8_t)(i + 1);
         }
 
         if (water)
@@ -1730,6 +1800,8 @@ static void draw_encode(const GfxDraw* d)
         MTLPrimitiveType mp = metal_prim(d->prim);
         if (rec)
             rec->prim = mp, rec->n = n, rec->vstart = d->vertex_start;
+        if (gl)
+            gl->prim = mp, gl->n = n, gl->vstart = d->vertex_start;
         if (d->prim == GFX_TRIANGLEFAN)
         {
             /* no fans in Metal: a list with the same vertices */
@@ -1750,10 +1822,14 @@ static void draw_encode(const GfxDraw* d)
             [g_enc drawIndexedPrimitives:mp indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:buf indexBufferOffset:off];
             if (rec)
                 rec->ib = [buf retain], rec->ioff = off, rec->itype = 4;
+            if (gl)
+                gl->ib = [buf retain], gl->ioff = off, gl->itype = 4;
         }
         else if (d->ibuf)
         {
             d->ibuf->used = g_serial;
+            if (gl)
+                gl->ib = [d->ibuf->b retain], gl->ioff = d->ibuf_off, gl->itype = (uint8_t)(d->index_size == 2 ? 2 : 4);
             if (rec)
             {
                 rec->ib = [d->ibuf->b retain], rec->ioff = d->ibuf_off, rec->itype = (uint8_t)(d->index_size == 2 ? 2 : 4);
@@ -1771,6 +1847,8 @@ static void draw_encode(const GfxDraw* d)
                              indexBuffer:buf indexBufferOffset:off];
             if (rec)
                 rec->ib = [buf retain], rec->ioff = off, rec->itype = (uint8_t)(d->index_size == 2 ? 2 : 4);
+            if (gl)
+                gl->ib = [buf retain], gl->ioff = off, gl->itype = (uint8_t)(d->index_size == 2 ? 2 : 4);
         }
         else
             [g_enc drawPrimitives:mp vertexStart:d->vertex_start vertexCount:n];
@@ -5594,6 +5672,431 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     }
 }
 
+/* --- post effects: bloom and depth of field (post_bloom, post_dof) ----------------------------------------------
+ * On the finished scene, before the interface and the nameplates go over it, with or without the effects (FFXI_FX) and
+ * the scene renderer. The depth of field first: circles of confusion from the scene's depth at half size, a disc gather,
+ * blended back by each pixel's own circle. Then the bloom: its source the glow (the scene's additive draws, drawn
+ * again: glow_new) and the sky over a soft threshold, at half size through four bilinear taps Karis-weighted, five
+ * levels more by a 13-tap downsample, a tent upsample back up adding each level onto the one above, and the
+ * sum screen-blended onto the scene. All in the frame's command buffer; each pass timed. */
+static const char POST_MSL[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct PV { float4 pos [[position]]; float2 uv; };\n"
+    "vertex PV post_vs(uint vid [[vertex_id]]) {\n"
+    "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
+    "  PV o; o.pos = float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0); o.uv = p; return o;\n"
+    "}\n"
+    "struct PU {\n"
+    "  float4 vp;    // the scene's viewport in its target, pixels\n"
+    "  float4 src;   // the texture read: width, height, 1 / width, 1 / height\n"
+    "  float4 bloom; // threshold, knee, glow weight, strength\n"
+    "  float4 dof;   // focus (view z), sharp range behind it, ramp, largest radius (half-size pixels)\n"
+    "  float4 dof2;  // near strength, hand, levels, radius scale (up)\n"
+    "  float4 zp;    // projection [10], [14], viewport min z, max z\n"
+    "  float4 aux;   // x: a texel step down the target per step across (the target's square drawn onto a wide screen)\n"
+    "};\n"
+    "static float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }\n"
+    "// the bloom's source at a point of the scene: the glow, and where nothing was drawn with depth (the sky, the sun)\n"
+    "// what is over the threshold (a soft knee) - lit ground and walls, however bright, do not glow\n"
+    "static float3 bright(constant PU& u, texture2d<float> sc, texture2d<float> gl, depth2d<float> dt, sampler s, float2 uv) {\n"
+    "  float3 c = sc.sample(s, uv).rgb;\n"
+    "  uint2 q = uint2(clamp(uv * u.src.xy, float2(0.0), u.src.xy - 1.0));\n"
+    "  float sky = dt.read(q) >= u.zp.w - 1e-6 ? 1.0 : 0.0;\n"
+    "  float br = max(c.r, max(c.g, c.b)), k = max(u.bloom.y, 1e-4);\n"
+    "  float soft = clamp(br - u.bloom.x + k, 0.0, 2.0 * k);\n"
+    "  soft = soft * soft / (4.0 * k);\n"
+    "  float w = max(soft, br - u.bloom.x) / max(br, 1e-4);\n"
+    "  // the glow past a little (faint, wide additive layers - a sea's shimmer - stay as they are)\n"
+    "  float3 g = gl.sample(s, uv).rgb;\n"
+    "  float gb = max(g.r, max(g.g, g.b)), gs = clamp(gb - 0.1, 0.0, 0.2);\n"
+    "  gs = gs * gs / 0.4;\n"
+    "  float gw = max(gs, gb - 0.2) / max(gb, 1e-4);\n"
+    "  return c * (w * sky) + g * (gw * u.bloom.z);\n"
+    "}\n"
+    "// the first level: four bilinear taps (each the 2x2 under it, a 4x4 footprint), each weighted by 1 / (1 + its luma) - a\n"
+    "// Karis average, so a lone bright texel cannot flicker as the camera moves\n"
+    "fragment float4 bloom_pre(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> sc [[texture(0)]],\n"
+    "                          texture2d<float> gl [[texture(1)]], depth2d<float> dt [[texture(2)]],\n"
+    "                          sampler s [[sampler(0)]]) {\n"
+    "  float2 uv = (u.vp.xy + in.uv * u.vp.zw) * u.src.zw, t = u.src.zw * float2(1.0, u.aux.x);\n"
+    "  float3 a = bright(u, sc, gl, dt, s, uv + t * float2(-1, -1)), b = bright(u, sc, gl, dt, s, uv + t * float2(1, -1));\n"
+    "  float3 c = bright(u, sc, gl, dt, s, uv + t * float2(-1, 1)), d = bright(u, sc, gl, dt, s, uv + t * float2(1, 1));\n"
+    "  float wa = 1.0 / (1.0 + luma(a)), wb = 1.0 / (1.0 + luma(b)), wc = 1.0 / (1.0 + luma(c)), wd = 1.0 / (1.0 + luma(d));\n"
+    "  return float4((a * wa + b * wb + c * wc + d * wd) / (wa + wb + wc + wd), 1.0);\n"
+    "}\n"
+    "// the 13 taps a texel apart (Jimenez, \"Next Generation Post Processing in Call of Duty: AW\"): a centre box and four\n"
+    "// corner boxes, weighted half and an eighth each\n"
+    "fragment float4 bloom_down(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
+    "                           sampler s [[sampler(0)]]) {\n"
+    "  float2 uv = in.uv, t = u.src.zw * float2(1.0, u.aux.x);\n"
+    "  float3 a = t0.sample(s, uv + t * float2(-2, -2)).rgb, b = t0.sample(s, uv + t * float2(0, -2)).rgb;\n"
+    "  float3 c = t0.sample(s, uv + t * float2(2, -2)).rgb, d = t0.sample(s, uv + t * float2(-1, -1)).rgb;\n"
+    "  float3 e = t0.sample(s, uv + t * float2(1, -1)).rgb, f = t0.sample(s, uv + t * float2(-2, 0)).rgb;\n"
+    "  float3 g = t0.sample(s, uv).rgb, h = t0.sample(s, uv + t * float2(2, 0)).rgb;\n"
+    "  float3 i = t0.sample(s, uv + t * float2(-1, 1)).rgb, j = t0.sample(s, uv + t * float2(1, 1)).rgb;\n"
+    "  float3 k = t0.sample(s, uv + t * float2(-2, 2)).rgb, l = t0.sample(s, uv + t * float2(0, 2)).rgb;\n"
+    "  float3 m = t0.sample(s, uv + t * float2(2, 2)).rgb;\n"
+    "  float3 o = (d + e + i + j) * 0.125 + (a + c + k + m) * 0.03125 + (b + f + h + l) * 0.0625 + g * 0.125;\n"
+    "  return float4(o, 1.0);\n"
+    "}\n"
+    "// a 3x3 tent of the level below, added onto this one (blended): each level the sum of those under it\n"
+    "fragment float4 bloom_up(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
+    "                         sampler s [[sampler(0)]]) {\n"
+    "  float2 uv = in.uv, t = u.src.zw * float2(1.0, u.aux.x) * u.dof2.w;\n"
+    "  float3 o = t0.sample(s, uv).rgb * 4.0;\n"
+    "  o += (t0.sample(s, uv + t * float2(-1, 0)).rgb + t0.sample(s, uv + t * float2(1, 0)).rgb +\n"
+    "        t0.sample(s, uv + t * float2(0, -1)).rgb + t0.sample(s, uv + t * float2(0, 1)).rgb) * 2.0;\n"
+    "  o += t0.sample(s, uv + t * float2(-1, -1)).rgb + t0.sample(s, uv + t * float2(1, -1)).rgb +\n"
+    "       t0.sample(s, uv + t * float2(-1, 1)).rgb + t0.sample(s, uv + t * float2(1, 1)).rgb;\n"
+    "  return float4(o * (1.0 / 16.0), 1.0);\n"
+    "}\n"
+    "// onto the scene, screen-blended by the pipeline (src x (1 - dst) + dst): it brightens toward white, never past it\n"
+    "fragment float4 bloom_comp(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
+    "                           sampler s [[sampler(0)]]) {\n"
+    "  float3 b = t0.sample(s, in.uv).rgb * (u.bloom.w * 3.0 / u.dof2.z);\n"
+    "  return float4(saturate(b), 1.0);\n"
+    "}\n"
+    "// --- depth of field\n"
+    "static float view_z(constant PU& u, float d) {\n"
+    "  d = (d - u.zp.z) / max(u.zp.w - u.zp.z, 1e-6);\n"
+    "  float z = u.zp.y / (d * u.dof2.y - u.zp.x);\n"
+    "  return d >= 0.999999 || !(z * u.dof2.y > 0.0) ? 1e6 : abs(z); // the sky: as far as can be\n"
+    "}\n"
+    "// the circle of confusion, 0 sharp to 1 the largest: behind the focus past its range, and (dof_near) well before it\n"
+    "static float coc(constant PU& u, float z) {\n"
+    "  float far = saturate((z - u.dof.x - u.dof.y) / max(u.dof.z, 1e-3));\n"
+    "  float nr = u.dof.x * 0.5;\n"
+    "  float near = u.dof2.x * saturate((nr - z) / max(nr, 1e-3));\n"
+    "  return max(far, near);\n"
+    "}\n"
+    "// half size: each texel the 2x2 under it, their colours weighted toward the blurred ones (so a sharp edge's colour\n"
+    "// does not spread into the blur behind it), and the largest of their circles\n"
+    "fragment float4 dof_coc(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> sc [[texture(0)]],\n"
+    "                        depth2d<float> dt [[texture(1)]]) {\n"
+    "  float2 p = floor(u.vp.xy + in.pos.xy * 2.0 - 1.0);\n"
+    "  float3 c = 0.0; float w = 0.0, m = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    uint2 q = uint2(clamp(p + float2(k & 1, k >> 1), u.vp.xy, u.vp.xy + u.vp.zw - 1.0));\n"
+    "    float r = coc(u, view_z(u, dt.read(q)));\n"
+    "    float wk = r + 0.02;\n"
+    "    c += sc.read(q).rgb * wk, w += wk, m = max(m, r);\n"
+    "  }\n"
+    "  return float4(c / w, m);\n"
+    "}\n"
+    "// the gather: a disc of taps as wide as this texel's circle; a tap counts where its own circle (no wider than this\n"
+    "// one's) reaches here - a sharp foreground spreads nothing into the blur behind it, the blur nothing onto it; bright\n"
+    "// taps count a little more, for bokeh\n"
+    "constant int NT = 16;\n"
+    "fragment float4 dof_gather(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
+    "                           sampler s [[sampler(0)]]) {\n"
+    "  float4 c0 = t0.sample(s, in.uv);\n"
+    "  float R = c0.a * u.dof.w;\n"
+    "  if (R < 0.5) return c0;\n"
+    "  int n = R < 2.5 ? 8 : NT; // (the composite's tent fills between the taps)\n"
+    "  float3 acc = 0.0; float wsum = 0.0;\n"
+    "  for (int i = 0; i < n; ++i) {\n"
+    "    float r = sqrt((float(i) + 0.5) / float(n)) * R, a = float(i) * 2.39996323;\n"
+    "    float2 o = float2(cos(a), sin(a)) * r;\n"
+    "    float4 t = t0.sample(s, in.uv + o * float2(1.0, u.aux.x) * u.src.zw);\n"
+    "    float w = saturate(min(t.a, c0.a) * u.dof.w - r + 1.0);\n"
+    "    w *= 1.0 + 3.0 * saturate(luma(t.rgb) - 0.75);\n"
+    "    acc += t.rgb * w, wsum += w;\n"
+    "  }\n"
+    "  return float4(wsum > 0.0 ? acc / wsum : c0.rgb, c0.a);\n"
+    "}\n"
+    "// onto the scene by its own circle at full size (alpha-blended by the pipeline): sharp where it is in focus\n"
+    "fragment float4 dof_comp(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
+    "                         depth2d<float> dt [[texture(1)]], sampler s [[sampler(0)]]) {\n"
+    "  float2 px = in.pos.xy;\n"
+    "  float r = coc(u, view_z(u, dt.read(uint2(px)))) * u.dof.w;\n"
+    "  float a = smoothstep(0.25, 1.5, r);\n"
+    "  if (a <= 0.0) return float4(0.0);\n"
+    "  float2 uv = (px - u.vp.xy) / u.vp.zw, t = u.src.zw * float2(0.75, 0.75 * u.aux.x);\n"
+    "  float3 b = (t0.sample(s, uv + float2(-t.x, -t.y)).rgb + t0.sample(s, uv + float2(t.x, -t.y)).rgb +\n"
+    "              t0.sample(s, uv + float2(-t.x, t.y)).rgb + t0.sample(s, uv + float2(t.x, t.y)).rgb) * 0.25;\n"
+    "  return float4(b, a);\n"
+    "}\n";
+
+typedef struct PostU
+{
+    float vp[4], src[4], bloom[4], dof[4], dof2[4], zp[4], aux[4];
+} PostU;
+
+enum { POST_LEVELS = 6 };
+static struct
+{
+    int tried;
+    id<MTLLibrary> lib;
+    id<MTLRenderPipelineState> pre, down, up, coc, gather;
+    id<MTLRenderPipelineState> comp, dcomp; /* onto the scene, built for its format */
+    MTLPixelFormat comp_fmt;
+    id<MTLSamplerState> lin;
+    id<MTLTexture> lvl[POST_LEVELS]; /* the bloom's levels, from half the scene's size */
+    id<MTLTexture> glow;             /* the glow's draws, as the scene's target */
+    id<MTLTexture> h0, h1;           /* the depth of field at half size: colour and circle; gathered */
+    id<MTLTexture> black;
+    float focus;                     /* the focus distance (view z), eased */
+    uint64_t focus_ns;
+} g_post;
+
+static id<MTLRenderPipelineState> post_pipeline(NSString* frag, MTLPixelFormat fmt, int blend)
+{
+    MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+    id<MTLFunction> vf = [g_post.lib newFunctionWithName:@"post_vs"], ff = [g_post.lib newFunctionWithName:frag];
+    pd.vertexFunction = vf, pd.fragmentFunction = ff;
+    MTLRenderPipelineColorAttachmentDescriptor* ca = pd.colorAttachments[0];
+    ca.pixelFormat = fmt;
+    if (blend)
+    {
+        ca.blendingEnabled = YES;
+        ca.rgbBlendOperation = ca.alphaBlendOperation = MTLBlendOperationAdd;
+        /* 1: added; 2: screen (src (1 - dst) + dst); 3: over, by the source's alpha (the colour only) */
+        ca.sourceRGBBlendFactor = blend == 1 ? MTLBlendFactorOne : blend == 2 ? MTLBlendFactorOneMinusDestinationColor
+                                                                             : MTLBlendFactorSourceAlpha;
+        ca.destinationRGBBlendFactor = blend == 3 ? MTLBlendFactorOneMinusSourceAlpha : MTLBlendFactorOne;
+        ca.sourceAlphaBlendFactor = MTLBlendFactorZero, ca.destinationAlphaBlendFactor = MTLBlendFactorOne;
+    }
+    NSError* err = nil;
+    id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    if (!p)
+        __atomic_fetch_add(&g_failures, 1, __ATOMIC_RELAXED),
+            fprintf(stderr, "[recomp] gfx: post effect %s failed: %s\n", [frag UTF8String], err ? [[err localizedDescription] UTF8String] : "?");
+    [vf release], [ff release], [pd release];
+    return p;
+}
+
+static int post_init(MTLPixelFormat scene_fmt)
+{
+    if (!g_post.tried)
+    {
+        g_post.tried = 1;
+        g_post.lib = compile(POST_MSL);
+        if (!g_post.lib)
+            return 0;
+        g_post.pre = post_pipeline(@"bloom_pre", MTLPixelFormatRG11B10Float, 0);
+        g_post.down = post_pipeline(@"bloom_down", MTLPixelFormatRG11B10Float, 0);
+        g_post.up = post_pipeline(@"bloom_up", MTLPixelFormatRG11B10Float, 1);
+        g_post.coc = post_pipeline(@"dof_coc", MTLPixelFormatRGBA16Float, 0);
+        g_post.gather = post_pipeline(@"dof_gather", MTLPixelFormatRGBA16Float, 0);
+        MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+        sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        g_post.lin = [g_dev newSamplerStateWithDescriptor:sd];
+        [sd release];
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead, td.storageMode = MTLStorageModeShared;
+        g_post.black = [g_dev newTextureWithDescriptor:td];
+        uint32_t zero = 0;
+        [g_post.black replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&zero bytesPerRow:4];
+    }
+    if (!g_post.lib || !g_post.pre || !g_post.down || !g_post.up || !g_post.coc || !g_post.gather)
+        return 0;
+    if (g_post.comp_fmt != scene_fmt || !g_post.comp || !g_post.dcomp)
+    {
+        [g_post.comp release], [g_post.dcomp release];
+        g_post.comp = post_pipeline(@"bloom_comp", scene_fmt, 2);
+        g_post.dcomp = post_pipeline(@"dof_comp", scene_fmt, 3);
+        g_post.comp_fmt = scene_fmt;
+    }
+    return g_post.comp && g_post.dcomp;
+}
+
+/* a texture kept at this size and format (made again when either changes) */
+static id<MTLTexture> post_tex(id<MTLTexture>* t, NSUInteger w, NSUInteger h, MTLPixelFormat fmt)
+{
+    if (*t && (*t).width == w && (*t).height == h && (*t).pixelFormat == fmt)
+        return *t;
+    [*t release];
+    MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt width:w height:h mipmapped:NO];
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget, d.storageMode = MTLStorageModePrivate;
+    return *t = [g_dev newTextureWithDescriptor:d];
+}
+
+static void post_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPipelineState> p, MTLViewport vp, const PostU* u,
+    id<MTLTexture> t0, id<MTLTexture> t1, id<MTLTexture> t2, int pass)
+{
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = target;
+    rp.colorAttachments[0].loadAction = load;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    ts_mark(rp, pass);
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:p];
+    [e setViewport:vp];
+    [e setFragmentBytes:u length:sizeof *u atIndex:0];
+    [e setFragmentTexture:t0 atIndex:0];
+    if (t1)
+        [e setFragmentTexture:t1 atIndex:1];
+    if (t2)
+        [e setFragmentTexture:t2 atIndex:2];
+    [e setFragmentSamplerState:g_post.lin atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+}
+
+/* the glow's draws again, onto black over the scene's depth; 0 when there were none */
+static int post_glow(GfxTex* color)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g_nglows; ++i)
+        n += g_glows[i].rt == color;
+    if (!n)
+        return 0;
+    id<MTLTexture> ct = color->tex;
+    if (!post_tex(&g_post.glow, ct.width, ct.height, ct.pixelFormat))
+        return 0;
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = g_post.glow;
+    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLTexture> depth = nil;
+    for (uint32_t i = 0; i < g_nglows && !depth; ++i)
+        if (g_glows[i].rt == color)
+            depth = g_glows[i].depth;
+    if (depth)
+    {
+        rp.depthAttachment.texture = depth;
+        rp.depthAttachment.loadAction = MTLLoadActionLoad;
+        rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+        MTLPixelFormat df = depth.pixelFormat;
+        if (df == MTLPixelFormatDepth32Float_Stencil8 || df == MTLPixelFormatDepth24Unorm_Stencil8 || df == MTLPixelFormatX32_Stencil8)
+        {
+            rp.stencilAttachment.texture = depth;
+            rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+            rp.stencilAttachment.storeAction = MTLStoreActionDontCare;
+        }
+    }
+    ts_mark(rp, GFX_PASS_POST_BLOOM);
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    for (uint32_t i = 0; i < g_nglows; ++i)
+    {
+        Glow* g = &g_glows[i];
+        if (g->rt != color || (g->depth != depth))
+            continue;
+        [e setRenderPipelineState:g->pipe];
+        [e setDepthStencilState:g->ds];
+        [e setCullMode:g->cull == 2 ? MTLCullModeBack : g->cull == 1 ? MTLCullModeFront : MTLCullModeNone];
+        [e setDepthBias:-(float)g->zbias slopeScale:-(float)g->zbias * 0.5f clamp:0];
+        [e setViewport:g->vp];
+        [e setScissorRect:g->sc];
+        for (int s = 0; s < GFX_NSTREAMS; ++s)
+            if (g->vb[s])
+                [e setVertexBuffer:g->vb[s] offset:g->voff[s] atIndex:(NSUInteger)s];
+        [e setVertexBuffer:g->ub offset:g->uoff atIndex:4];
+        [e setFragmentBuffer:g->ub offset:g->uoff atIndex:4];
+        for (int t = 0; t < g->ntex; ++t)
+            if (g->tex[t])
+                [e setFragmentTexture:g->tex[t] atIndex:(NSUInteger)t], [e setFragmentSamplerState:g->samp[t] atIndex:(NSUInteger)t];
+        if (g->ib)
+            [e drawIndexedPrimitives:g->prim indexCount:g->n indexType:g->itype == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
+                         indexBuffer:g->ib indexBufferOffset:g->ioff];
+        else
+            [e drawPrimitives:g->prim vertexStart:g->vstart vertexCount:g->n];
+    }
+    [e endEncoding];
+    return 1;
+}
+
+static void post_effects(GfxTex* color, const GfxScene* s)
+{
+    int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f;
+    if (!bloom && !dof)
+        return;
+    @autoreleasepool
+    {
+        flush_pass();
+        id<MTLTexture> ct = color->tex, depth = color->depth_world ? color->depth_world : color->depth_seen;
+        if (!post_init(ct.pixelFormat))
+            return;
+        float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+        if (vw < 16 || vh < 16 || vx + vw > ct.width || vy + vh > ct.height)
+            vx = vy = 0, vw = (float)ct.width, vh = (float)ct.height;
+        float minz, maxz;
+        memcpy(&minz, &s->vp[4], 4);
+        memcpy(&maxz, &s->vp[5], 4);
+        if (maxz <= minz)
+            minz = 0, maxz = 1;
+        /* a texel step down the target per step across: the scene's square stretched to the screen's shape (the
+         * projection's aspect), so a blur is round on screen */
+        float aspect = s->proj[0] != 0.0f ? fabsf(s->proj[5] / s->proj[0]) : 1.0f;
+        PostU u = { { vx, vy, vw, vh }, { 0 }, { 0 }, { 0 }, { 0 }, { s->proj[10], s->proj[14], minz, maxz },
+            { aspect * vh / vw, 0, 0, 0 } };
+        u.dof2[1] = s->proj[11] < 0.0f ? -1.0f : 1.0f, u.dof2[2] = POST_LEVELS, u.dof2[3] = fmaxf(g_fxs.bloom_radius, 0.0f);
+        NSUInteger hw = (NSUInteger)(vw + 1) / 2, hh = (NSUInteger)(vh + 1) / 2;
+        if (dof && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
+        {
+            /* the focus: the player's distance along the view (or dof_focus), eased over some 0.2 s; a jump (a new
+             * place, the camera cut) taken at once */
+            float want = g_fxs.dof_focus > 0.0f ? g_fxs.dof_focus : 0.0f;
+            if (want <= 0.0f && g_fx.has_focus)
+            {
+                const float* V = s->view;
+                const float* p = g_fx.focus;
+                want = fabsf(p[0] * V[2] + p[1] * V[6] + p[2] * V[10] + V[14]);
+            }
+            if (want <= 0.0f)
+                want = 10.0f;
+            uint64_t now = gfx_now_ns();
+            double dt = g_post.focus_ns ? (double)(now - g_post.focus_ns) * 1e-9 : 1.0;
+            g_post.focus_ns = now;
+            if (g_post.focus <= 0.0f || dt > 0.5 || fabsf(want - g_post.focus) > 0.5f * fmaxf(want, g_post.focus))
+                g_post.focus = want;
+            else
+                g_post.focus += (want - g_post.focus) * (float)(1.0 - exp(-dt / 0.2));
+            u.dof[0] = g_post.focus, u.dof[1] = fmaxf(g_fxs.dof_range, 0.0f), u.dof[2] = fmaxf(g_fxs.dof_ramp, 1e-3f);
+            u.dof[3] = g_fxs.post_dof * 6.0f * vw / 2048.0f; /* at 1: some 12 pixels of a 2048 scene */
+            u.dof2[0] = fminf(fmaxf(g_fxs.dof_near, 0.0f), 1.0f);
+            if (post_tex(&g_post.h0, hw, hh, MTLPixelFormatRGBA16Float) && post_tex(&g_post.h1, hw, hh, MTLPixelFormatRGBA16Float))
+            {
+                MTLViewport hv = { 0, 0, (double)hw, (double)hh, 0, 1 };
+                u.src[0] = (float)hw, u.src[1] = (float)hh, u.src[2] = 1.0f / (float)hw, u.src[3] = 1.0f / (float)hh;
+                post_pass(g_post.h0, MTLLoadActionDontCare, g_post.coc, hv, &u, ct, depth, nil, GFX_PASS_POST_DOF);
+                post_pass(g_post.h1, MTLLoadActionDontCare, g_post.gather, hv, &u, g_post.h0, nil, nil, GFX_PASS_POST_DOF);
+                post_pass(ct, MTLLoadActionLoad, g_post.dcomp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, g_post.h1, depth,
+                    nil, GFX_PASS_POST_DOF);
+            }
+        }
+        if (bloom && depth && depth.width == ct.width && depth.height == ct.height)
+        {
+            u.bloom[0] = g_fxs.bloom_threshold, u.bloom[1] = g_fxs.bloom_knee, u.bloom[2] = g_fxs.bloom_glow;
+            u.bloom[3] = g_fxs.post_bloom;
+            id<MTLTexture> glow = post_glow(color) ? g_post.glow : g_post.black;
+            NSUInteger w[POST_LEVELS], h[POST_LEVELS];
+            int ok = 1;
+            for (int i = 0; i < POST_LEVELS; ++i)
+            {
+                w[i] = (NSUInteger)(vw / (float)(2 << i)), h[i] = (NSUInteger)(vh / (float)(2 << i));
+                w[i] = w[i] ? w[i] : 1, h[i] = h[i] ? h[i] : 1;
+                ok = ok && post_tex(&g_post.lvl[i], w[i], h[i], MTLPixelFormatRG11B10Float);
+            }
+            if (ok)
+            {
+                u.src[0] = (float)ct.width, u.src[1] = (float)ct.height, u.src[2] = 1.0f / (float)ct.width, u.src[3] = 1.0f / (float)ct.height;
+                post_pass(g_post.lvl[0], MTLLoadActionDontCare, g_post.pre, (MTLViewport){ 0, 0, (double)w[0], (double)h[0], 0, 1 }, &u, ct,
+                    glow, depth, GFX_PASS_POST_BLOOM);
+                for (int i = 1; i < POST_LEVELS; ++i)
+                {
+                    u.src[0] = (float)w[i - 1], u.src[1] = (float)h[i - 1], u.src[2] = 1.0f / (float)w[i - 1], u.src[3] = 1.0f / (float)h[i - 1];
+                    post_pass(g_post.lvl[i], MTLLoadActionDontCare, g_post.down, (MTLViewport){ 0, 0, (double)w[i], (double)h[i], 0, 1 }, &u,
+                        g_post.lvl[i - 1], nil, nil, GFX_PASS_POST_BLOOM);
+                }
+                for (int i = POST_LEVELS - 2; i >= 0; --i)
+                {
+                    u.src[0] = (float)w[i + 1], u.src[1] = (float)h[i + 1], u.src[2] = 1.0f / (float)w[i + 1], u.src[3] = 1.0f / (float)h[i + 1];
+                    post_pass(g_post.lvl[i], MTLLoadActionLoad, g_post.up, (MTLViewport){ 0, 0, (double)w[i], (double)h[i], 0, 1 }, &u,
+                        g_post.lvl[i + 1], nil, nil, GFX_PASS_POST_BLOOM);
+                }
+                post_pass(ct, MTLLoadActionLoad, g_post.comp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, g_post.lvl[0], nil,
+                    nil, GFX_PASS_POST_BLOOM);
+            }
+        }
+        color->scene = 0; /* its mips are behind (scene_mips) */
+        color->used = g_serial;
+    }
+}
+
 static void scene_fx(GfxTex* color, const GfxScene* s);
 
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
@@ -5602,6 +6105,7 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
         return;
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
+    post_effects(color, s);
     scene_aa(color, s);
 }
 
@@ -5797,7 +6301,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 if (gfx_mat_inverse(vinv2, s->view))
                     memcpy(g_fx.prev_cam, vinv2 + 12, 12);
             }
-            u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.bloom, u.bloom[2] = 0.25f;
+            u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.post_bloom > 0.0f ? 0.0f : g_fxs.bloom, u.bloom[2] = 0.25f;
             u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
             if (g_fxs.water > 0.0f && have_v)
                 water_scene(s, vinv, &u, ct);
@@ -5993,6 +6497,7 @@ static void shadow_frame_end(void);
 static void frame_end(void)
 {
     casters_clear();
+    glows_clear();
     shadow_frame_end();
     id<MTLCommandBuffer> c = cmd();
     uint64_t serial = g_serial;

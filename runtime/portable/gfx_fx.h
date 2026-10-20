@@ -11,7 +11,9 @@ typedef struct GfxFxSettings
         draw_entities, fps, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple, water_scale,
         water_reflect, water_spec, lod, aa, ao_quality, sun_detail, sun_dusk, gameshadows, moghouse, sun_prime, gi, gi_radius,
         gi_distance, rt, contact_steps, scene, scene_shadows, scene_shadow_size, scene_shadow_far, scene_shadow_step, scene_shadow_debug,
-        scene_shadow_fit, scene_shadow_fit_size, scene_shadow_char_far, scene_shadow_fit_reach;
+        scene_shadow_fit, scene_shadow_fit_size, scene_shadow_char_far, scene_shadow_fit_reach,
+        post_bloom, bloom_threshold, bloom_knee, bloom_glow, bloom_radius,
+        post_dof, dof_focus, dof_range, dof_ramp, dof_near;
 } GfxFxSettings;
 
 extern GfxFxSettings g_fxs;
@@ -41,6 +43,8 @@ enum
     GFX_PASS_CHARS,    /* the scene renderer's characters */
     GFX_PASS_SHADOW_ZONE,  /* the scene renderer's shadows: the zone's layer, a cascade drawn again (gfx_shadow_begin) */
     GFX_PASS_SHADOW_CHARS, /* the characters' layer, every frame */
+    GFX_PASS_POST_BLOOM,   /* post_bloom: the glow's draws again, the mip chain down and up, onto the scene */
+    GFX_PASS_POST_DOF,     /* post_dof: circles of confusion at half size, the gather, onto the scene */
     GFX_NPASSES
 };
 /* timing is on: FFXI_PROFILE=1, or /fx prof */

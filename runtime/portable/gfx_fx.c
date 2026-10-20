@@ -145,6 +145,22 @@ static const struct
     { "scene_shadow_fit_reach", offsetof(GfxFxSettings, scene_shadow_fit_reach), 8.0f },
     /* how far from the camera characters cast (units) */
     { "scene_shadow_char_far", offsetof(GfxFxSettings, scene_shadow_char_far), 1000.0f },
+    /* the post bloom (gfx_metal.m post_bloom), with or without the effects and the scene renderer: its strength, 0 off
+     * (1 is the tuned look); what glows is the world's additive draws (lamps, spell effects; not the sky's own layers) and
+     * where the sky is brighter than the threshold (with a soft knee: the sun); the glow's weight and how far it spreads */
+    { "post_bloom", offsetof(GfxFxSettings, post_bloom), 0.0f },
+    { "bloom_threshold", offsetof(GfxFxSettings, bloom_threshold), 0.95f },
+    { "bloom_knee", offsetof(GfxFxSettings, bloom_knee), 0.05f },
+    { "bloom_glow", offsetof(GfxFxSettings, bloom_glow), 1.0f },
+    { "bloom_radius", offsetof(GfxFxSettings, bloom_radius), 1.0f },
+    /* the depth of field (post_dof): its strength, 0 off (1: the background's blur up to some 12 pixels of a 2048 scene);
+     * focus at the player (eased), or dof_focus units out when above 0; sharp to dof_range units behind the focus,
+     * fully blurred dof_ramp beyond; dof_near, 0 to 1, blurs what stands well before the focus */
+    { "post_dof", offsetof(GfxFxSettings, post_dof), 0.0f },
+    { "dof_focus", offsetof(GfxFxSettings, dof_focus), 0.0f },
+    { "dof_range", offsetof(GfxFxSettings, dof_range), 10.0f },
+    { "dof_ramp", offsetof(GfxFxSettings, dof_ramp), 100.0f },
+    { "dof_near", offsetof(GfxFxSettings, dof_near), 0.0f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
@@ -259,7 +275,7 @@ void fx_config(void)
 
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
-    "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars" };
+    "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */

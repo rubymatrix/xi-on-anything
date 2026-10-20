@@ -87,6 +87,10 @@ the Lighting and Atmosphere pages.
 | Ray decay / length | | `rays_decay`, `rays_length` | 0.965 / 0.85 |
 | Bloom | Atmosphere › [Bloom] Strength | `bloom` | 0.3 (0–2) |
 | Bloom threshold | Atmosphere › [Bloom] Threshold | `threshold` | 0.75 (0.3–1) |
+| Post bloom (lamps, spells, sun; with or without `FFXI_FX`, Metal) | | `post_bloom` | 0 off (1 tuned) |
+| Post bloom sky threshold / knee / glow weight / spread | | `bloom_threshold`, `bloom_knee`, `bloom_glow`, `bloom_radius` | 0.95 / 0.05 / 1 / 1 |
+| Depth of field (Metal) | | `post_dof` | 0 off (1 tuned) |
+| DOF focus (0 follows the player) / sharp range / ramp / near blur | | `dof_focus`, `dof_range`, `dof_ramp`, `dof_near` | 0 / 10 / 100 / 0 (0–1) |
 
 ## 6. Water
 
