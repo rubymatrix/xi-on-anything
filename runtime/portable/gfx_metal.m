@@ -137,6 +137,8 @@ static uint64_t g_serial = 1;         /* the frame being recorded */
 static _Atomic uint64_t g_completed;  /* the last frame the GPU finished */
 static int g_frame_open;              /* the semaphore was taken for g_serial */
 static uint32_t g_cmd_draws;          /* draws in the command buffer being recorded */
+static int g_shd_read;                /* the command buffer being recorded samples the scene renderer's shadow maps */
+static uint32_t g_shd_submits;        /* times it was committed early so a later batch's shadows could be drawn */
 static _Atomic uint64_t g_gpu_ns;      /* GPU time of the committed command buffers (profile) */
 /* GPU time per pass (gfx_pass_timing): each timed pass's encoder samples a timestamp at its start
  * (start of vertex) and its end (end of fragment) into the frame's counter sample buffer, two samples
@@ -391,6 +393,7 @@ static void commit_cmd(int wait)
             gfx_pass_gpu(ns);
         }];
     [g_cmd commit];
+    g_shd_read = 0;
     if (wait)
         [g_cmd waitUntilCompleted];
     [g_cmd release];
@@ -4546,6 +4549,7 @@ static struct
 } g_shd;
 static void shadow_bind(id<MTLRenderCommandEncoder> e)
 {
+    g_shd_read = 1;
     [e setVertexBytes:&g_shd.u length:sizeof g_shd.u atIndex:6];
     [e setFragmentBytes:&g_shd.u length:sizeof g_shd.u atIndex:6];
     [e setFragmentTexture:g_shd.zmap atIndex:1];
@@ -5245,7 +5249,15 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
         if (f->redraw >= 0 || nch)
         {
             /* a command buffer of their own, committed now: the GPU runs it before the frame's (not yet committed)
-             * rest, and the game's render pass is not broken off and taken up again round them */
+             * rest, and the game's render pass is not broken off and taken up again round them. But a frame has a batch
+             * for each run of the game's draws between the scene renderer's (a crowd: several), each drawing the maps
+             * again: when an earlier batch's draws, still in the uncommitted rest, sample them, that rest goes first, or
+             * the GPU would run every batch's redraw before any batch's draws and they would all read the last one's */
+            if (g_shd_read && g_cmd)
+            {
+                submit(0);
+                ++g_shd_submits;
+            }
             frame_begin();
             id<MTLCommandBuffer> cb = [g_queue commandBuffer];
             if (f->redraw >= 0 && f->redraw < (int32_t)nc)
@@ -5263,7 +5275,21 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
         g_shd.on = 1;
     }
     if (gfx_profiling)
+    {
         g_prof.draw_ns += gfx_now_ns() - t0;
+        static uint64_t last;
+        static uint32_t calls;
+        ++calls;
+        uint64_t now = gfx_now_ns();
+        if (!last)
+            last = now;
+        if (now - last > 2000000000ull)
+        {
+            fprintf(stderr, "[recomp] gfx: scene shadows: %u batches, %u times the frame's draws went first\n", calls,
+                g_shd_submits);
+            last = now, calls = 0, g_shd_submits = 0;
+        }
+    }
 }
 
 static void scene_aa(GfxTex* color, const GfxScene* s)

@@ -350,10 +350,16 @@ static int32_t frame_light(uint32_t entry, uint32_t* seen, uint32_t* nlights)
 #if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_TEX_FIND)
 static int chars_frame_of(GfxCharFrame* f, const uint32_t vp[6], const uint32_t gvp[6]);
 static void chars_reset(void);
+static void chars_shadow_reset(void);
+static void chars_shadow_frame(GfxCharFrame* out, const GfxCharFrame* f);
 #define CHARS_FRAME(f, vp, gvp) chars_frame_of(f, vp, gvp)
 #define CHARS_RESET() chars_reset()
+#define CHARS_SHADOW_RESET() chars_shadow_reset()
+#define CHARS_SHADOW_FRAME(out, f) chars_shadow_frame(out, f)
 #else
 #define CHARS_FRAME(f, vp, gvp) 0
+#define CHARS_SHADOW_RESET() ((void)0)
+#define CHARS_SHADOW_FRAME(out, f) (*(out) = *(f))
 #define CHARS_RESET() ((void)0)
 #endif
 
@@ -708,7 +714,10 @@ static void flush(void)
     int have_chars = CHARS_FRAME(&cf, vp, gvp);
     GfxShadowFrame sf;
     shadow_frame(&sf, mgr, f_view);
-    sf.chars = have_chars ? &cf : NULL;
+    GfxCharFrame scf;
+    if (have_chars && sf.dir[3] > 0.0f)
+        CHARS_SHADOW_FRAME(&scf, &cf); /* the frame's characters so far cast, not only this batch's */
+    sf.chars = have_chars && sf.dir[3] > 0.0f ? &scf : NULL;
     gfx_shadow_begin(sf.dir[3] > 0.0f ? &sf : NULL);
     if (total)
         gfx_world_draw(&f);
@@ -758,6 +767,7 @@ static float g_wf[3];  /* the windowed brightness factor per channel this frame 
 static struct
 {
     uint32_t meshes, left, items, built, why[8]; /* why left: not kind 0, buffers, state, stream, vb, uv, ib, palette */
+    uint32_t stale; /* draws where the game's current palette was another actor's (theirs used) */
 } g_ccount;
 
 /* the hide flags a mesh's header byte (+0x33) sets on its model (CYyModel +0xa8 + class), as 1002dc10's jump table */
@@ -921,7 +931,23 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     GfxBuf* vb = mesh_vb(res, vbuf, total, &uv);
     uint32_t uvsize = total * 8, ibsize = 0, isize = 2;
     GfxBuf* ib = d3d8_world_ibuf(rd32(vbuf + 0x40), &ibsize, &isize);
-    uint32_t pal = rd32(FFXI_SCENE_PALETTE), nb = rd32(FFXI_SCENE_BONES) & 0xff;
+    /* the mesh's own skeleton: the part of its model whose mesh list holds it (CYyModel +0x44 -> CYyModelBase, next +4;
+     * meshes at +0x20, next +4; the CYySkl at +8: Sk2 handle +0xc, palette +0x14). The game's current palette
+     * ([0x1045ec20]) is the last actor it posed: in a crowd its animation level of detail skips posing some actors
+     * a frame (it draws their skinned buffers from before), and that palette is then another actor's. */
+    uint32_t pal = 0, nb = 0;
+    for (uint32_t part = rd32(model + 0x44), k = 0; part && k < 16 && !pal; part = rd32(part + 4), ++k)
+        for (uint32_t m = rd32(part + 0x20), j = 0; m && j < 256; m = rd32(m + 4), ++j)
+            if (m == g->ecx)
+            {
+                uint32_t h = rd32(part + 0xc), sk2 = h ? rd32(h) : 0;
+                pal = rd32(part + 0x14), nb = sk2 ? rd16(sk2 + 0x32) : 0;
+                break;
+            }
+    if (!pal || !nb)
+        pal = rd32(FFXI_SCENE_PALETTE), nb = rd32(FFXI_SCENE_BONES) & 0xff;
+    else if (pal != rd32(FFXI_SCENE_PALETTE))
+        ++g_ccount.stale;
     if (!vb || !uv || !ib || uvsize < total * 8 || !pal || !nb || nb > 128)
     {
         static int told;
@@ -932,14 +958,22 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     }
     /* taken: the per-actor state of this draw */
     hide_set(model, rd8(res + 0x33));
-    if (g_npal + nb > g_cappal)
+    static uint32_t last_pal, last_base, last_nb, last_npal; /* an actor's meshes share its palette: copied once */
+    uint32_t palbase;
+    if (pal == last_pal && nb == last_nb && g_npal == last_npal && g_npal >= nb)
+        palbase = last_base;
+    else
     {
-        g_cappal = (g_npal + nb) * 2 + 1024;
-        g_pal = (float*)realloc(g_pal, (size_t)g_cappal * 64);
+        if (g_npal + nb > g_cappal)
+        {
+            g_cappal = (g_npal + nb) * 2 + 1024;
+            g_pal = (float*)realloc(g_pal, (size_t)g_cappal * 64);
+        }
+        palbase = g_npal;
+        memcpy(g_pal + 16 * (size_t)g_npal, GUEST_PTR(pal), (size_t)nb * 64);
+        g_npal += nb;
+        last_pal = pal, last_base = palbase, last_nb = nb, last_npal = g_npal;
     }
-    uint32_t palbase = g_npal;
-    memcpy(g_pal + 16 * (size_t)g_npal, GUEST_PTR(pal), (size_t)nb * 64);
-    g_npal += nb;
     float W[16], V[16], P[16], WV[16];
     if (!d3d8_get_transform(256, W) || !d3d8_get_transform(2, V) || !d3d8_get_transform(3, P))
         return 0;
@@ -1076,6 +1110,40 @@ static void mesh_draw(Guest* g)
 
 static void chars_reset(void) { g_ncitems = g_ncstates = g_npal = 0; }
 
+/* every character taken so far this frame, for the shadows: a frame has a batch for each run of the game's draws between
+ * the scene renderer's (several in a crowd), and each batch's shadow layer is drawn from all of them, so a character
+ * casts on those drawn in later batches and receives from earlier ones, the same every frame */
+static GfxCharItem* g_shitems;
+static GfxCharState* g_shstates;
+static float* g_shpal;
+static uint32_t g_nshitems, g_capshitems, g_nshstates, g_capshstates, g_nshpal, g_capshpal;
+
+static void chars_shadow_reset(void) { g_nshitems = g_nshstates = g_nshpal = 0; }
+
+/* this batch's characters added to the frame's, and the frame's so far as one character frame (f's viewport) */
+static void chars_shadow_frame(GfxCharFrame* out, const GfxCharFrame* f)
+{
+    if (g_nshitems + f->nitem > g_capshitems)
+        g_capshitems = (g_nshitems + f->nitem) * 2, g_shitems = (GfxCharItem*)realloc(g_shitems, g_capshitems * sizeof *g_shitems);
+    if (g_nshstates + f->nstate > g_capshstates)
+        g_capshstates = (g_nshstates + f->nstate) * 2,
+        g_shstates = (GfxCharState*)realloc(g_shstates, g_capshstates * sizeof *g_shstates);
+    if (g_nshpal + f->nbones > g_capshpal)
+        g_capshpal = (g_nshpal + f->nbones) * 2, g_shpal = (float*)realloc(g_shpal, (size_t)g_capshpal * 64);
+    memcpy(g_shpal + 16 * (size_t)g_nshpal, f->palette, (size_t)f->nbones * 64);
+    memcpy(g_shstates + g_nshstates, f->state, f->nstate * sizeof *f->state);
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        GfxCharItem it = f->item[i];
+        it.palette += g_nshpal, it.state += g_nshstates;
+        g_shitems[g_nshitems + i] = it;
+    }
+    g_nshitems += f->nitem, g_nshstates += f->nstate, g_nshpal += f->nbones;
+    *out = *f;
+    out->palette = g_shpal, out->nbones = g_nshpal, out->state = g_shstates, out->nstate = g_nshstates;
+    out->item = g_shitems, out->nitem = g_nshitems;
+}
+
 static int chars_frame_of(GfxCharFrame* fp, const uint32_t vp[6], const uint32_t gvp[6])
 {
     if (!g_ncitems)
@@ -1148,6 +1216,7 @@ void scene_frame(void)
         flush(); /* (d3d8 flushes before Present; a frame that never drew after its walk) */
     g_npicks = 0, g_opaque.n = g_blend.n = g_late.n = 0, g_pending = 0;
     CHARS_RESET();
+    CHARS_SHADOW_RESET();
     g_slot_list = 0;
     ++g_frame_no;
     float s = gfx_fx_get("scene");
@@ -1187,9 +1256,10 @@ void scene_frame(void)
         memset(&g_sh.count, 0, sizeof g_sh.count);
 #ifdef HAVE_CHARS
         rt_log("[recomp] scene: characters: %u mesh draws taken, %u left to the game (kind %u, buffers %u, state %u, stream %u, "
-               "vb %u, uv %u, ib %u, palette %u), %u draw items, %u meshes built\n",
+               "vb %u, uv %u, ib %u, palette %u), %u draw items, %u meshes built, %u drawn with their own palette where the "
+               "game's current one was another actor's\n",
             g_ccount.meshes - g_ccount.left, g_ccount.left, g_ccount.why[0], g_ccount.why[1], g_ccount.why[2], g_ccount.why[3],
-            g_ccount.why[4], g_ccount.why[5], g_ccount.why[6], g_ccount.why[7], g_ccount.items, g_ccount.built);
+            g_ccount.why[4], g_ccount.why[5], g_ccount.why[6], g_ccount.why[7], g_ccount.items, g_ccount.built, g_ccount.stale);
         memset(&g_ccount, 0, sizeof g_ccount);
 #endif
     }
