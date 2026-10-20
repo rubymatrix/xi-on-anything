@@ -155,16 +155,16 @@ static const struct
     { "bloom_knee", offsetof(GfxFxSettings, bloom_knee), 0.05f },
     /* emissive weights, past 1 in the bloom's float chain: the world's additive draws (spells, abilities, weather
      * particles, lamp and torch glows - one effect system, not told apart), and the sun, moon and bright sky */
-    { "bloom_emissive_fx", offsetof(GfxFxSettings, bloom_emissive_fx), 2.0f },
+    { "bloom_emissive_fx", offsetof(GfxFxSettings, bloom_emissive_fx), 1.2f },
     { "bloom_emissive_lights", offsetof(GfxFxSettings, bloom_emissive_lights), 1.5f },
     { "bloom_radius", offsetof(GfxFxSettings, bloom_radius), 1.0f },
-    /* the depth of field (post_dof): its strength, 0 off (1: the background's blur up to some 12 pixels of a 2048 scene);
+    /* the depth of field (post_dof): its strength, 0 off (1: the backdrop's blur up to some 8 pixels of a 2048 scene);
      * focus at the player (eased), or dof_focus units out when above 0; sharp to dof_range units behind the focus,
      * fully blurred dof_ramp beyond; dof_near, 0 to 1, blurs what stands well before the focus */
     { "post_dof", offsetof(GfxFxSettings, post_dof), 0.0f },
     { "dof_focus", offsetof(GfxFxSettings, dof_focus), 0.0f },
-    { "dof_range", offsetof(GfxFxSettings, dof_range), 10.0f },
-    { "dof_ramp", offsetof(GfxFxSettings, dof_ramp), 100.0f },
+    { "dof_range", offsetof(GfxFxSettings, dof_range), 50.0f },
+    { "dof_ramp", offsetof(GfxFxSettings, dof_ramp), 150.0f },
     { "dof_near", offsetof(GfxFxSettings, dof_near), 0.0f },
     /* the game's water models raised this far (units) over the zone surfaces laid at their level (d3d8.c water_lift) */
     { "water_lift", offsetof(GfxFxSettings, water_lift), 0.15f },

@@ -5825,7 +5825,7 @@ static const char POST_MSL[] =
     "// sum's highlights eased toward 1 (1 - e^-b), so a strong emissive glows wide rather than clipping to a white disc\n"
     "fragment float4 bloom_comp(PV in [[stage_in]], constant PU& u [[buffer(0)]], texture2d<float> t0 [[texture(0)]],\n"
     "                           sampler s [[sampler(0)]]) {\n"
-    "  float3 b = t0.sample(s, in.uv).rgb * (u.bloom.w * 3.0 / u.dof2.z);\n"
+    "  float3 b = t0.sample(s, in.uv).rgb * (u.bloom.w * 1.5 / u.dof2.z);\n"
     "  return float4(1.0 - exp(-max(b, 0.0)), 1.0);\n"
     "}\n"
     "// --- depth of field\n"
@@ -6117,7 +6117,7 @@ static void post_effects(GfxTex* color, const GfxScene* s)
             else
                 g_post.focus += (want - g_post.focus) * (float)(1.0 - exp(-dt / 0.2));
             u.dof[0] = g_post.focus, u.dof[1] = fmaxf(g_fxs.dof_range, 0.0f), u.dof[2] = fmaxf(g_fxs.dof_ramp, 1e-3f);
-            u.dof[3] = g_fxs.post_dof * 6.0f * vw / 2048.0f; /* at 1: some 12 pixels of a 2048 scene */
+            u.dof[3] = g_fxs.post_dof * 4.0f * vw / 2048.0f; /* at 1: some 8 pixels of a 2048 scene */
             u.dof2[0] = fminf(fmaxf(g_fxs.dof_near, 0.0f), 1.0f);
             if (post_tex(&g_post.h0, hw, hh, MTLPixelFormatRGBA16Float) && post_tex(&g_post.h1, hw, hh, MTLPixelFormatRGBA16Float))
             {
