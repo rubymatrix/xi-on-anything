@@ -26,7 +26,8 @@
  * (gfx_pass_timing) is timestamp queries around each pass, read when the frame's slot comes round.
  * The scene renderer's zone and characters (gfx_world_draw, gfx_chars_draw; host/scene.c) are
  * gfx_metal.m's WORLD_MSL and CHARS_MSL as GLSL (WORLD_GLSL, CHARS_GLSL), drawn into the game's
- * targets in its pass. */
+ * targets in its pass, and its sun and moon shadows (gfx_shadow_begin) Metal's too: the casters'
+ * passes between the game's and at the frame's end (CAST_GLSL), the receivers' SHADOW_GLSL. */
 #include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
 
 #include <SDL3/SDL.h>
@@ -147,6 +148,7 @@ struct GfxTex
     uint32_t rb_face[GFX_READBACKS], rb_level[GFX_READBACKS], rb_index[GFX_READBACKS];
     uint64_t rb_frame;
     uint32_t rb_count;
+    uint32_t nlayers; /* a 2D array's layers (the scene renderer's shadow maps, tex_array), else 0 */
 };
 
 struct GfxBuf
@@ -203,6 +205,7 @@ static uint32_t g_qfam;
 static VmaAllocator g_vma;
 static VkPhysicalDeviceProperties g_props;
 static int g_has_bc, g_has_aniso, g_has_lines, g_has_mirror_once, g_has_large_points;
+static int g_has_clamp; /* depth clamped rather than clipped (the scene renderer's shadow casters) */
 static int g_has_rt; /* ray queries and acceleration structures, and what rt_capture needs besides (gfx_init) */
 static float g_max_aniso;
 static VkFormat g_depth_format; /* D24S8 and D24X8: D32_SFLOAT_S8_UINT where the device has it */
@@ -909,7 +912,7 @@ static void level_size(const GfxTex* t, uint32_t level, uint32_t* w, uint32_t* h
         *h = 1;
 }
 
-static uint32_t layers(const GfxTex* t) { return t->type == GFX_TEX_CUBE ? 6 : 1; }
+static uint32_t layers(const GfxTex* t) { return t->nlayers ? t->nlayers : t->type == GFX_TEX_CUBE ? 6 : 1; }
 
 static VkImageView make_view(const GfxTex* t, VkImageViewType type, uint32_t level0, uint32_t nlevels, uint32_t layer0,
     uint32_t nlayers, const VkComponentMapping* sw, VkImageAspectFlags aspect)
@@ -1524,6 +1527,8 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
     VkFormat color, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill, const VkDynamicState* dyn,
     uint32_t ndyn, int discard)
 {
+    /* discard: 1 the rasterizer discards (ray tracing's capture: the vertex function's writes alone), 2 the depth
+     * clamped rather than clipped where the device can (the scene renderer's shadow casters) */
     VkPipelineShaderStageCreateInfo st[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT, st[0].module = vs, st[0].pName = "main";
@@ -1535,7 +1540,8 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
     vp.viewportCount = vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     rs.polygonMode = fill;
-    rs.rasterizerDiscardEnable = discard ? VK_TRUE : VK_FALSE; /* (ray tracing's capture: the vertex function's writes alone) */
+    rs.rasterizerDiscardEnable = (discard & 1) ? VK_TRUE : VK_FALSE;
+    rs.depthClampEnable = (discard & 2) && g_has_clamp ? VK_TRUE : VK_FALSE;
     rs.cullMode = VK_CULL_MODE_NONE;
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rs.lineWidth = 1.0f;
@@ -4550,14 +4556,147 @@ static int rt_init(void)
 
 int gfx_rt_supported(void) { return rt_init(); }
 
+/* --- the scene renderer's sun and moon shadows, the receivers' side (gfx_metal.m's SHADOW_MSL) ----------------------
+ * SH is ShU: the cascades' matrices and ranges, the characters' layers (last frame's), the light, the camera, the
+ * filters. The maps are depth arrays a cascade a layer, compared through cs (LESS_OR_EQUAL, linear) and gathered
+ * through ps (nearest); their rows run down from the map's +y, as the casters' viewport draws them. */
+#define SHADOW_GLSL                                                                                                   \
+    "layout(std140, set = 0, binding = 6) uniform SHB { mat4 m[4]; vec4 cas[4]; vec4 cbox[4]; vec4 dir; vec4 cam; vec4 info;\n" \
+    "  mat4 cm[4]; vec4 ctx; vec4 pk; } S;\n"                                                                        \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "layout(set = 0, binding = 7) uniform texture2DArray zm;\n"                                                       \
+    "layout(set = 0, binding = 8) uniform texture2DArray cm;\n"                                                       \
+    "layout(set = 0, binding = 9) uniform texture2DArray ct;\n"                                                       \
+    "layout(set = 0, binding = 10) uniform samplerShadow cs;\n"                                                       \
+    "layout(set = 0, binding = 11) uniform sampler ps;\n"                                                             \
+    "float sh_cmp(texture2DArray t, vec2 uv, uint l, float z) { return texture(sampler2DArrayShadow(t, cs), vec4(uv, float(l), z)); }\n" \
+    "float sh_pcf(texture2DArray t, vec2 uv, uint c, float z, float tx) {\n"                                         \
+    "  if (c >= 2u) return sh_cmp(t, uv, c, z);\n" /* far: the hardware's 2x2 alone */                                \
+    "  return 0.25 * (sh_cmp(t, uv + vec2(-0.5, -0.5) * tx, c, z) + sh_cmp(t, uv + vec2(0.5, -0.5) * tx, c, z) +\n"  \
+    "                 sh_cmp(t, uv + vec2(-0.5, 0.5) * tx, c, z) + sh_cmp(t, uv + vec2(0.5, 0.5) * tx, c, z));\n"     \
+    "}\n"                                                                                                             \
+    /* the characters' layers: nine of the hardware's 2x2 compares a texel apart (a 4x4 footprint, smooth edges) */   \
+    "float sh_cpcf(texture2DArray t, vec2 uv, uint l, float z, float tx) {\n"                                        \
+    "  float v = 0.0;\n"                                                                                              \
+    "  for (int y = -1; y <= 1; ++y)\n"                                                                               \
+    "    for (int x = -1; x <= 1; ++x) v += sh_cmp(t, uv + vec2(x, y) * tx, l, z);\n"                                 \
+    "  return v * (1.0 / 9.0);\n"                                                                                     \
+    "}\n"                                                                                                             \
+    /* contact-hardening soft shadows (shadow_softness), as gfx_metal.m's sh_pcss: the blockers' mean depth round the \
+     * point (gathers on a disc turned by a hash of the place), then that far from them times the light's size wide */ \
+    "vec2 sh_turn(vec3 p) {\n"                                                                                        \
+    "  float a = 6.2831853 * fract(52.9829189 * fract(dot(floor(p * 40.0), vec3(0.06711056, 0.00583715, 0.1234567))));\n" \
+    "  return vec2(cos(a), sin(a));\n"                                                                                \
+    "}\n"                                                                                                             \
+    "const vec2 sh_disc[16] = vec2[16](vec2(0.1768, 0.0000), vec2(-0.2258, 0.2068), vec2(0.0346, -0.3938), vec2(0.2846, 0.3712),\n" \
+    "  vec2(-0.5222, -0.0924), vec2(0.4947, -0.3147), vec2(-0.1655, 0.6155), vec2(-0.3156, -0.6076),\n"               \
+    "  vec2(0.6846, 0.2500), vec2(-0.7123, 0.2940), vec2(0.3434, -0.7337), vec2(0.2537, 0.8089),\n"                   \
+    "  vec2(-0.7647, -0.4432), vec2(0.8971, -0.1972), vec2(-0.5475, 0.7788), vec2(-0.1265, -0.9761));\n"              \
+    "vec2 sh_vogel(int i, int n, vec2 r) {\n"                                                                         \
+    "  vec2 q = sh_disc[i * (16 / n) + (16 / n - 1)];\n"                                                              \
+    "  return vec2(q.x * r.x - q.y * r.y, q.x * r.y + q.y * r.x);\n"                                                  \
+    "}\n"                                                                                                             \
+    "float sh_pcss(texture2DArray t, mat4 M, uint l, vec2 uv, float z, float tx, float tl, int nb, int nf, vec2 rot, float nl) {\n" \
+    "  float wpt = 2.0 * tx / length(vec3(M[0][0], M[1][0], M[2][0]));\n"                                            \
+    "  float wpd = 1.0 / length(vec3(M[0][2], M[1][2], M[2][2]));\n"                                                 \
+    "  float rs = clamp(tl * 6.0 / wpt, 1.0, 12.0);\n"                                                                \
+    "  float sl = sqrt(1.0 - nl * nl) / max(nl, 0.2), zs = z - min(rs * wpt * sl, 1.0) / wpd;\n"                      \
+    "  float sum = 0.0, n = 0.0;\n"                                                                                   \
+    "  for (int i = 0; i < nb; ++i) {\n"                                                                              \
+    "    vec4 d = textureGather(sampler2DArray(t, ps), vec3(uv + sh_vogel(i, 4, rot) * (rs * tx), float(l)));\n"      \
+    "    vec4 b = vec4(lessThan(d, vec4(zs)));\n"                                                                     \
+    "    sum += dot(d, b), n += b.x + b.y + b.z + b.w;\n"                                                             \
+    "  }\n"                                                                                                           \
+    "  if (n == 0.0) return 1.0;\n"                                                                                   \
+    "  float pen = clamp((z - sum / n) * wpd * tl / wpt, 0.5, 12.0);\n"                                               \
+    "  float zb = z - min(pen * wpt * sl, 0.5) / wpd;\n"                                                              \
+    "  if (n == 4.0 * float(nb) && pen < 1.5) return sh_cmp(t, uv, l, zb);\n"                                         \
+    "  float v = 0.0;\n"                                                                                              \
+    "  for (int i = 0; i < nf; ++i) v += sh_cmp(t, uv + sh_vogel(i, nf, rot) * (pen * tx), l, zb);\n"                 \
+    "  return v / float(nf);\n"                                                                                       \
+    "}\n"                                                                                                             \
+    "float sh_char(uint c, vec3 wp, vec3 n, float nl, bool soft) {\n"                                                 \
+    "  float off = 1.0 + 4.0 * sqrt(1.0 - nl * nl);\n"                                                                \
+    "  float t = S.ctx.x;\n" /* the fitted layer, when there is one and the point is in it */                         \
+    "  if (t > 0.0) {\n"                                                                                              \
+    "    vec4 h = S.cm[0] * vec4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                         \
+    "    vec2 u0 = vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                         \
+    "    if (all(lessThan(abs(h.xy), vec2(0.995))))\n"                                                                \
+    "      return soft && S.pk.x > 0.0 ? sh_pcss(ct, S.cm[0], 0u, u0, h.z, S.ctx.y, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl)\n" \
+    "                                  : sh_cpcf(ct, u0, 0u, h.z, S.ctx.y * (soft ? max(S.ctx.z, 1.0) : 1.0));\n"    \
+    "  }\n"                                                                                                           \
+    "  if (c >= uint(S.info.y)) return 1.0;\n" /* the cascade's characters' layer, half size, only round them */       \
+    "  t = 2.0 * S.cas[c].y;\n"                                                                                       \
+    "  vec4 h = S.cm[1u + c] * vec4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                      \
+    "  vec4 b = S.cbox[c];\n"                                                                                         \
+    "  if (any(greaterThan(abs(h.xy), vec2(0.995))) || any(lessThan(h.xy, b.xy)) || any(greaterThan(h.xy, b.zw))) return 1.0;\n" \
+    "  vec2 u1 = vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                           \
+    "  if (soft && S.pk.x > 0.0) return sh_pcss(cm, S.cm[1u + c], c, u1, h.z, 2.0 * S.info.w, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl);\n" \
+    "  return sh_cpcf(cm, u1, c, h.z, 2.0 * S.info.w * (soft ? max(S.ctx.z, 1.0) : 1.0));\n"                         \
+    "}\n"                                                                                                             \
+    "float sh_at(uint c, vec3 wp, vec3 n, bool soft) {\n"                                                             \
+    "  float nl = sat(dot(n, S.dir.xyz)), t = S.cas[c].y;\n" /* more the more the surface turns from it */            \
+    "  vec4 h = S.m[c] * vec4(wp + n * (t * (1.0 + 4.0 * sqrt(1.0 - nl * nl))) + S.dir.xyz * t, 1.0);\n"              \
+    "  if (abs(h.x) > 0.995 || abs(h.y) > 0.995) return -1.0;\n"                                                      \
+    "  vec2 uv = vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                           \
+    "  float v;\n"                                                                                                    \
+    "  if (soft && S.pk.x > 0.0) {\n" /* soft: all the taps in the nearest cascade, half in the next, a quarter beyond */ \
+    "    int k = c == 0u ? 1 : c == 1u ? 2 : 4;\n"                                                                    \
+    "    v = sh_pcss(zm, S.m[c], c, uv, h.z, S.info.w, S.pk.x, max(int(S.pk.y) / k, 1), max(int(S.pk.z) / k, 4), sh_turn(wp), nl);\n" \
+    "  } else\n"                                                                                                      \
+    "    v = soft && S.ctx.z > 1.01 && c < 2u ? sh_cpcf(zm, uv, c, h.z, S.info.w * S.ctx.z) : sh_pcf(zm, uv, c, h.z, S.info.w);\n" /* the moon's wider */ \
+    "  if (v > 0.0 && S.info.y > 0.0) v = min(v, sh_char(c, wp, n, nl, soft));\n"                                     \
+    "  return v;\n"                                                                                                   \
+    "}\n"                                                                                                             \
+    "float shadow(vec3 wp, vec3 n, bool soft) {\n" /* soft: PCSS (the zone); a character's own the fixed filter */    \
+    "  float d = length(wp - S.cam.xyz);\n"                                                                           \
+    "  uint nc = uint(S.info.x);\n"                                                                                   \
+    "  for (uint c = 0u; c < nc; ++c) {\n"                                                                            \
+    "    if (S.cas[c].w == 0.0 || d > S.cas[c].x) continue;\n"                                                        \
+    "    float v = sh_at(c, wp, n, soft);\n"                                                                          \
+    "    if (v < 0.0) continue;\n"                                                                                    \
+    "    float r = S.cas[c].x, f = sat((d - 0.9 * r) / (0.1 * r));\n"                                                 \
+    "    if (f > 0.0) {\n"                                                                                            \
+    "      float w = c + 1u < nc && S.cas[c + 1u].w != 0.0 ? sh_at(c + 1u, wp, n, soft) : 1.0;\n"                     \
+    "      v = mix(v, w < 0.0 ? 1.0 : w, f);\n"                                                                       \
+    "    }\n"                                                                                                         \
+    "    return mix(1.0, v, S.info.z);\n"                                                                             \
+    "  }\n"                                                                                                           \
+    "  return 1.0;\n"                                                                                                 \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
+/* a character's vertex in the game's skinned space (CHARS_GLSL, CAST_GLSL): two bones, or their mirror bones mirrored;
+ * GfxCharVertex is 18 words */
+#define SKIN_GLSL                                                                                                     \
+    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"                                       \
+    "layout(std430, set = 0, binding = 5) readonly buffer UB { vec2 uvs[]; };\n"                                      \
+    "const vec3 SIGN[4] = vec3[4](vec3(1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(1.0, 1.0, -1.0));\n"    \
+    "vec4 word4(uint b) { return uintBitsToFloat(uvec4(vb[b], vb[b + 1u], vb[b + 2u], vb[b + 3u])); }\n"              \
+    "vec3 skin(out vec3 n) {\n"                                                                                       \
+    "  uint b = uint(gl_VertexIndex) * 18u;\n"                                                                        \
+    "  vec4 va = word4(b), vb4 = word4(b + 4u);\n"                                                                    \
+    "  vec3 na = word4(b + 8u).xyz, nb = word4(b + 12u).xyz;\n"                                                       \
+    "  uint bones = vb[b + 16u], mir = vb[b + 17u];\n"                                                                \
+    "  uint ba = bones & 0xffu, bb = (bones >> 8) & 0xffu;\n"                                                         \
+    "  if (D.mirror != 0u) {\n"                                                                                       \
+    "    ba = (bones >> 16) & 0xffu, bb = bones >> 24;\n"                                                             \
+    "    vec3 sa = SIGN[mir & 3u], sb = SIGN[(mir >> 2) & 3u];\n"                                                     \
+    "    va.xyz *= sa; vb4.xyz *= sb; na *= sa; nb *= sb;\n"                                                          \
+    "  }\n"                                                                                                           \
+    "  mat4 MA = P[D.palette + ba], MB = P[D.palette + bb];\n"                                                        \
+    "  n = (MA * vec4(na, 0.0)).xyz + (MB * vec4(nb, 0.0)).xyz;\n"                                                    \
+    "  return (MA * va + MB * vb4).xyz;\n"                                                                            \
+    "}\n"
+
 /* --- the scene renderer's zone (gfx_world_draw, gfx.h) --------------------------------------------------------------
  * gfx_metal.m's WORLD_MSL: D3D's fixed function as the game lights its zone, COLORVERTEX with the vertex colour as
  * diffuse and ambient reflectance, the sun (and moon) and the instance's four point lights, then MODULATE2X and
- * MODULATE4X and table fog. W_PIXEL lights per pixel (scene 2), W_ATEST alpha tests GREATER the reference. The vertices
- * are the game's own buffers, fetched as the generated functions fetch theirs (36 bytes: position, normal, D3DCOLOR,
- * uv); the instance (inst) and its flags are push constants. The shadows, bounce light, occlusion, highlights and
- * lamps (Metal's other function constants) are not here yet: the directional light along sd goes to sun, which
- * the shadows will take. */
+ * MODULATE4X and table fog. W_PIXEL lights per pixel (scene 2), W_ATEST alpha tests GREATER the reference, W_SHADOW
+ * shades the directional light along the shadows' (the sun's or the moon's) with them. The vertices are the game's own
+ * buffers, fetched as the generated functions fetch theirs (36 bytes: position, normal, D3DCOLOR, uv); the instance
+ * (inst) and its flags are push constants. The bounce light, occlusion, highlights and lamps (Metal's other function
+ * constants) are not here yet. */
 static const char WORLD_GLSL[] =
     "#define sat(x) clamp(x, 0.0, 1.0)\n"
     "layout(std140, set = 0, binding = 0) uniform WF { mat4 vp; vec4 params; } F;\n" /* params: alpha reference 0..255, the pixel-centre fixup */
@@ -4566,10 +4705,14 @@ static const char WORLD_GLSL[] =
     "layout(std430, set = 0, binding = 1) readonly buffer WIB { WI I[]; };\n"
     "layout(std430, set = 0, binding = 2) readonly buffer WLB { WL L[]; };\n"
     "layout(push_constant) uniform WD { uint inst, flags; } D;\n"
+    "#if W_SHADOW\n"
+    SHADOW_GLSL
+    "#endif\n"
     /* saturate(vc * (ambient + each light's ambient) + vc * sum of N.L x diffuse) without the saturate, and without the
-     * directional light along sd, which goes into sun: saturate(the two's sum) is D3D's */
-    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, out vec3 sun) {\n"
-    "  vec3 a = I[D.inst].ambient.rgb, d = vec3(0.0), s = vec3(0.0);\n"
+     * directional light along sd, which goes into sun: saturate(the two's sum) is D3D's. lmp: the point lights' share,
+     * which fills the sun's (the moon's) shadow (shadow_fill) */
+    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, out vec3 sun, out vec3 lmp) {\n"
+    "  vec3 a = I[D.inst].ambient.rgb, d = vec3(0.0), s = vec3(0.0), pl = vec3(0.0);\n"
     "  if (I[D.inst].sun_dir.w > 0.0) {\n"
     "    vec3 t = I[D.inst].sun_col.rgb * max(dot(N, I[D.inst].sun_dir.xyz), 0.0);\n"
     "    if (dot(I[D.inst].sun_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
@@ -4585,11 +4728,18 @@ static const char WORLD_GLSL[] =
     "    float dist = length(v);\n"
     "    if (dist > L[li].pos.w) continue;\n"
     "    float at = 1.0 / max(L[li].att.x + L[li].att.y * dist + L[li].att.z * dist * dist, 1e-6);\n"
-    "    d += L[li].ambient.rgb * at + L[li].diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
+    "    vec3 t = L[li].ambient.rgb * at + L[li].diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
+    "    d += t, pl += t;\n"
     "  }\n"
+    "  lmp = vc * pl;\n"
     "  sun = vc * s;\n"
     "  return vc * a + vc * d;\n"
     "}\n"
+    "#if W_SHADOW\n"
+    "#define SD S.dir.xyz\n"
+    "#else\n"
+    "#define SD vec3(0.0)\n"
+    "#endif\n"
     "#ifdef GFX_VS\n"
     "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"
     "layout(location = 0) out vec2 o_uv;\n"
@@ -4597,6 +4747,8 @@ static const char WORLD_GLSL[] =
     "layout(location = 2) out vec3 o_wpos;\n"
     "layout(location = 3) out vec3 o_nrm;\n"
     "layout(location = 4) out float o_z;\n"
+    "layout(location = 5) out vec3 o_sun;\n"
+    "layout(location = 6) out vec3 o_lmp;\n"
     "void main() {\n"
     "  uint b = uint(gl_VertexIndex) * 9u;\n"
     "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
@@ -4613,9 +4765,10 @@ static const char WORLD_GLSL[] =
     "  o_wpos = wp.xyz;\n"
     "  o_nrm = n;\n"
     "  o_col = col;\n"
+    "  o_sun = vec3(0.0), o_lmp = vec3(0.0);\n"
     "#if !W_PIXEL\n"
-    "  vec3 sun, rest = lit(wp.xyz, n, col.rgb, vec3(0.0), sun);\n"
-    "  o_col.rgb = sat(rest + sun);\n"
+    "  vec3 rest = lit(wp.xyz, n, col.rgb, SD, o_sun, o_lmp);\n"
+    "  o_col.rgb = W_SHADOW != 0 ? rest : sat(rest + o_sun);\n"
     "#endif\n"
     "}\n"
     "#endif\n"
@@ -4626,13 +4779,33 @@ static const char WORLD_GLSL[] =
     "layout(location = 2) in vec3 i_wpos;\n"
     "layout(location = 3) in vec3 i_nrm;\n"
     "layout(location = 4) in float i_z;\n"
+    "layout(location = 5) in vec3 i_sun;\n"
+    "layout(location = 6) in vec3 i_lmp;\n"
     "layout(location = 0) out vec4 oc;\n"
     "void main() {\n"
-    "  vec3 c = i_col.rgb;\n"
-    "#if W_PIXEL\n"
+    "  vec3 c = i_col.rgb, sun = i_sun, lmp = i_lmp;\n"
     "  vec3 N = (D.flags & 32u) != 0u ? normalize(i_nrm) : i_nrm;\n"
-    "  vec3 sun;\n"
-    "  c = lit(i_wpos, N, i_col.rgb, vec3(0.0), sun);\n"
+    "#if W_PIXEL\n"
+    "  c = lit(i_wpos, N, i_col.rgb, SD, sun, lmp);\n"
+    "#endif\n"
+    "#if W_SHADOW\n"
+    "  if (S.cam.w > 1.5) {\n" /* scene_shadow_debug: the shadow, tinted by its cascade; dark facing away */
+    "    float d = length(i_wpos - S.cam.xyz);\n"
+    "    uint k = 0u;\n"
+    "    while (k < 3u && d > S.cas[k].x) ++k;\n"
+    "    vec3 tint = k == 0u ? vec3(1.0, 0.55, 0.55) : k == 1u ? vec3(0.55, 1.0, 0.55) : k == 2u ? vec3(0.55, 0.55, 1.0) : vec3(1.0, 1.0, 0.55);\n"
+    "    float nl = dot(normalize(N), S.dir.xyz);\n"
+    "    oc = vec4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(i_wpos, normalize(N), true)) : vec3(0.05), 1.0);\n"
+    "    return;\n"
+    "  }\n"
+    "  if (any(greaterThan(sun, vec3(0.0)))) {\n"
+    "    float shv = shadow(i_wpos, normalize(N), true);\n"
+    "    vec3 Y = vec3(0.2126, 0.7152, 0.0722);\n" /* where the lamps outshine the sun or moon, its shadow fades out */
+    "    shv = mix(shv, 1.0, sat(S.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
+    "    sun *= shv;\n"
+    "  }\n"
+    "  c = sat(c + sun);\n"
+    "#elif W_PIXEL\n"
     "  c = sat(c + sun);\n"
     "#endif\n"
     "  vec4 tx = texture(t, i_uv);\n"
@@ -4649,49 +4822,40 @@ static const char WORLD_GLSL[] =
 /* --- the scene renderer's characters (gfx_chars_draw, gfx.h) -------------------------------------------------------
  * gfx_metal.m's CHARS_MSL: skinned from the frame's bone palettes (each vertex its bone-space position and normal for
  * two bones, weights applied, and their mirror bones), lit per vertex with D3D's fixed function as the game sets it
- * for a character, then its two texture stages; alpha tested, no culling. The vertices (GfxCharVertex, 18 words) and
- * uvs are storage buffers, the indices the game's own; the palette, state, mirror and the frame's parameters are push
- * constants. */
+ * for a character, then its two texture stages; alpha tested, no culling. W_SHADOW: the sun's (the moon's) light
+ * shaded with the shadows, looked up where the character stood when last frame's layers were drawn (lag). The
+ * vertices (GfxCharVertex) and uvs are storage buffers, the indices the game's own; the palette, state, mirror, lag
+ * and the frame's parameters are push constants. */
 static const char CHARS_GLSL[] =
     "#define sat(x) clamp(x, 0.0, 1.0)\n"
     "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
     "struct CS { mat4 wvp, world; CL light[4]; vec4 ambient, md, ma, me, tf, fog, fog_col; };\n"
     "layout(std430, set = 0, binding = 1) readonly buffer PB { mat4 P[]; };\n"
-    "layout(std430, set = 0, binding = 2) readonly buffer SB { CS S[]; };\n"
-    "layout(push_constant) uniform CD { vec4 params; uint palette, state, mirror, pad; } D;\n" /* params as WF's */
+    "layout(std430, set = 0, binding = 2) readonly buffer SB { CS St[]; };\n"
+    "layout(push_constant) uniform CD { vec4 params; uint palette, state, mirror, pad; vec4 lag; } D;\n" /* params as WF's */
+    "#if W_SHADOW\n"
+    SHADOW_GLSL
+    "#endif\n"
     "#ifdef GFX_VS\n"
-    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"
-    "layout(std430, set = 0, binding = 5) readonly buffer UB { vec2 uvs[]; };\n"
+    SKIN_GLSL
     "layout(location = 0) out vec2 o_uv;\n"
     "layout(location = 1) out vec4 o_col;\n"
     "layout(location = 2) out float o_z;\n"
-    "const vec3 SIGN[4] = vec3[4](vec3(1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(1.0, 1.0, -1.0));\n"
-    "vec4 word4(uint b) { return uintBitsToFloat(uvec4(vb[b], vb[b + 1u], vb[b + 2u], vb[b + 3u])); }\n"
+    "layout(location = 3) out vec3 o_sun;\n"
+    "layout(location = 4) out vec3 o_wp;\n"
+    "layout(location = 5) out vec3 o_wn;\n"
     "void main() {\n"
-    /* the vertex in the game's skinned space: two bones, or their mirror bones mirrored */
-    "  uint b = uint(gl_VertexIndex) * 18u;\n"
-    "  vec4 va = word4(b), vb4 = word4(b + 4u);\n"
-    "  vec3 na = word4(b + 8u).xyz, nb = word4(b + 12u).xyz;\n"
-    "  uint bones = vb[b + 16u], mir = vb[b + 17u];\n"
-    "  uint ba = bones & 0xffu, bb = (bones >> 8) & 0xffu;\n"
-    "  if (D.mirror != 0u) {\n"
-    "    ba = (bones >> 16) & 0xffu, bb = bones >> 24;\n"
-    "    vec3 sa = SIGN[mir & 3u], sb = SIGN[(mir >> 2) & 3u];\n"
-    "    va.xyz *= sa; vb4.xyz *= sb; na *= sa; nb *= sb;\n"
-    "  }\n"
-    "  mat4 MA = P[D.palette + ba], MB = P[D.palette + bb];\n"
-    "  vec3 n = (MA * vec4(na, 0.0)).xyz + (MB * vec4(nb, 0.0)).xyz;\n"
-    "  vec3 p = (MA * va + MB * vb4).xyz;\n"
-    "  vec3 wp = (S[D.state].world * vec4(p, 1.0)).xyz;\n"
-    "  vec3 wn = normalize((S[D.state].world * vec4(n, 0.0)).xyz);\n" /* NORMALIZENORMALS */
-    "  gl_Position = S[D.state].wvp * vec4(p, 1.0);\n"
+    "  vec3 n, p = skin(n);\n"
+    "  vec3 wp = (St[D.state].world * vec4(p, 1.0)).xyz;\n"
+    "  vec3 wn = normalize((St[D.state].world * vec4(n, 0.0)).xyz);\n" /* NORMALIZENORMALS */
+    "  gl_Position = St[D.state].wvp * vec4(p, 1.0);\n"
     "  o_z = gl_Position.w;\n"
     "  gl_Position.x += gl_Position.w * D.params.y;\n"
     "  gl_Position.y -= gl_Position.w * D.params.z;\n"
     "  o_uv = uvs[gl_VertexIndex];\n"
-    "  vec3 amb = S[D.state].ambient.rgb, dif = vec3(0.0);\n"
+    "  vec3 amb = St[D.state].ambient.rgb, dif = vec3(0.0), sun = vec3(0.0);\n"
     "  for (int k = 0; k < 4; ++k) {\n"
-    "    CL l = S[D.state].light[k];\n"
+    "    CL l = St[D.state].light[k];\n"
     "    if (l.dir.w == 0.0) continue;\n"
     "    float at = 1.0;\n"
     "    vec3 Ld = l.dir.xyz;\n"
@@ -4703,9 +4867,16 @@ static const char CHARS_GLSL[] =
     "      at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
     "    }\n"
     "    amb += l.ambient.rgb * at;\n"
-    "    dif += l.diffuse.rgb * at * max(dot(wn, Ld), 0.0);\n"
+    "    vec3 t = l.diffuse.rgb * at * max(dot(wn, Ld), 0.0);\n"
+    "#if W_SHADOW\n"
+    "    if (l.dir.w < 1.5 && dot(Ld, S.dir.xyz) > 0.98) { sun += t; continue; }\n" /* the sun or moon */
+    "#endif\n"
+    "    dif += t;\n"
     "  }\n"
-    "  o_col = vec4(sat(S[D.state].ma.rgb * amb + S[D.state].md.rgb * dif + S[D.state].me.rgb), S[D.state].md.a);\n"
+    "  vec3 rest = St[D.state].ma.rgb * amb + St[D.state].md.rgb * dif + St[D.state].me.rgb;\n"
+    "  o_col = vec4(W_SHADOW != 0 ? rest : sat(rest), St[D.state].md.a);\n"
+    "  o_sun = St[D.state].md.rgb * sun;\n"
+    "  o_wp = wp, o_wn = wn;\n"
     "}\n"
     "#endif\n"
     "#ifdef GFX_FS\n"
@@ -4713,20 +4884,83 @@ static const char CHARS_GLSL[] =
     "layout(location = 0) in vec2 i_uv;\n"
     "layout(location = 1) in vec4 i_col;\n"
     "layout(location = 2) in float i_z;\n"
+    "layout(location = 3) in vec3 i_sun;\n"
+    "layout(location = 4) in vec3 i_wp;\n"
+    "layout(location = 5) in vec3 i_wn;\n"
     "layout(location = 0) out vec4 oc;\n"
     "void main() {\n"
-    "  vec4 tx = texture(t, i_uv), tf = S[D.state].tf;\n"
-    "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * i_col.rgb) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
-    "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"          /* MODULATE2X, then MODULATE4X */
+    "  vec4 tx = texture(t, i_uv), tf = St[D.state].tf;\n"
+    "  vec3 col = i_col.rgb;\n"
+    "#if W_SHADOW\n"
+    "  vec3 sun = i_sun;\n"
+    "  if (any(greaterThan(sun, vec3(0.0)))) sun *= shadow(i_wp + D.lag.xyz, normalize(i_wn), false);\n" /* (PCSS speckles curved, close self-shadow) */
+    "  col = sat(col + sun);\n"
+    "#endif\n"
+    "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * col) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
+    "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"    /* MODULATE2X, then MODULATE4X */
     "  if (!(a * 255.0 > D.params.x)) discard;\n"
-    "  vec4 fog = S[D.state].fog;\n"
-    "  if (fog.z > 0.0) c = mix(S[D.state].fog_col.rgb, c, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
+    "  vec4 fog = St[D.state].fog;\n"
+    "  if (fog.z > 0.0) c = mix(St[D.state].fog_col.rgb, c, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
     "  oc = vec4(c, a);\n"
     "}\n"
     "#endif\n";
 
-/* the zone's and characters' bindings (push descriptors): 0 the frame's uniforms (WF), 1 the instances or the bone
- * palettes, 2 the lights or the characters' states, 3 the vertices, 4 the texture, 5 the characters' uvs */
+/* --- the shadows' casters: the zone into a cascade of its layer (C_CHARS 0: depth alone, or alpha tested as the walk
+ * tests it, MODULATE4X GREATER 0x60), the characters into a layer of theirs (C_CHARS 1, alpha tested as they are drawn).
+ * F.M is the layer's matrix; the zone's world matrices are a storage buffer (inst a push constant) */
+static const char CAST_GLSL[] =
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "layout(std140, set = 0, binding = 0) uniform CF { mat4 M; vec4 params; } F;\n" /* params.x: the alpha reference */
+    "#if C_CHARS\n"
+    "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
+    "struct CS { mat4 wvp, world; CL light[4]; vec4 ambient, md, ma, me, tf, fog, fog_col; };\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer PB { mat4 P[]; };\n"
+    "layout(std430, set = 0, binding = 2) readonly buffer SB { CS St[]; };\n"
+    "layout(push_constant) uniform CD { vec4 params; uint palette, state, mirror, pad; } D;\n"
+    "#else\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer WB { mat4 W[]; };\n"
+    "layout(push_constant) uniform ZD { uint inst; } D;\n"
+    "#endif\n"
+    "#ifdef GFX_VS\n"
+    "layout(location = 0) out vec2 o_uv;\n"
+    "layout(location = 1) out float o_a;\n"
+    "#if C_CHARS\n"
+    SKIN_GLSL
+    "void main() {\n"
+    "  vec3 n, p = skin(n);\n"
+    "  gl_Position = F.M * (St[D.state].world * vec4(p, 1.0));\n"
+    "  o_uv = uvs[gl_VertexIndex];\n"
+    "  o_a = St[D.state].tf.a;\n"
+    "}\n"
+    "#else\n"
+    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"
+    "void main() {\n"
+    "  uint b = uint(gl_VertexIndex) * 9u;\n"
+    "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
+    "  gl_Position = F.M * (W[D.inst] * vec4(pos, 1.0));\n"
+    "  o_uv = uintBitsToFloat(uvec2(vb[b + 7u], vb[b + 8u]));\n"
+    "  o_a = unpackUnorm4x8(vb[b + 6u]).w;\n"
+    "}\n"
+    "#endif\n"
+    "#endif\n"
+    "#ifdef GFX_FS\n"
+    "layout(set = 0, binding = 4) uniform sampler2D t;\n"
+    "layout(location = 0) in vec2 i_uv;\n"
+    "layout(location = 1) in float i_a;\n"
+    "void main() {\n"
+    "#if C_CHARS\n"
+    "  float a = sat(4.0 * sat(2.0 * texture(t, i_uv).a * i_a) * i_a);\n"
+    "  if (!(a * 255.0 > F.params.x)) discard;\n"
+    "#else\n"
+    "  if (!(sat(4.0 * texture(t, i_uv).a * i_a) * 255.0 > 96.0)) discard;\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n";
+
+/* the zone's and characters' bindings (push descriptors): 0 the frame's uniforms (WF; a caster's CF), 1 the instances or
+ * the bone palettes (a zone caster's world matrices), 2 the lights or the characters' states, 3 the vertices, 4 the
+ * texture, 5 the characters' uvs; with the shadows 6 their uniforms (SH), 7-9 the zone's, the characters' and the
+ * fitted maps, 10 the comparing sampler, 11 the gathering one */
 enum
 {
     W_FRAME = 0,
@@ -4735,7 +4969,13 @@ enum
     W_VB = 3,
     W_TEX = 4,
     W_UV = 5,
-    W_COUNT = 6,
+    W_SH = 6,
+    W_ZM = 7,
+    W_CM = 8,
+    W_CT = 9,
+    W_CS = 10,
+    W_PS = 11,
+    W_COUNT = 12,
 };
 
 static struct
@@ -4743,7 +4983,9 @@ static struct
     int tried, ok;
     VkDescriptorSetLayout dsl;
     VkPipelineLayout layout;
-    VkShaderModule vs[3], fs[5]; /* the zone's by W_PIXEL (and W_ATEST), then the characters' (made on first use) */
+    /* the zone's (by W_PIXEL, W_ATEST, W_SHADOW) and the characters' (by W_SHADOW) functions, made on first use: [stage][key] */
+    VkShaderModule mod[2][32];
+    VkShaderModule cast[2][2]; /* the casters': [stage][C_CHARS] */
     struct
     {
         uint32_t key[2];
@@ -4778,12 +5020,17 @@ static int world_init(void)
     b[W_VB] = (VkDescriptorSetLayoutBinding){ W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
     b[W_TEX] = (VkDescriptorSetLayoutBinding){ W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     b[W_UV] = (VkDescriptorSetLayoutBinding){ W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    b[W_SH] = (VkDescriptorSetLayoutBinding){ W_SH, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    for (uint32_t i = W_ZM; i <= W_CT; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_CS] = (VkDescriptorSetLayoutBinding){ W_CS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_PS] = (VkDescriptorSetLayoutBinding){ W_PS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     dl.bindingCount = W_COUNT;
     dl.pBindings = b;
     VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_world.dsl));
-    VkPushConstantRange pcr = { both, 0, 32 };
+    VkPushConstantRange pcr = { both, 0, 48 };
     VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     pl.setLayoutCount = 1;
     pl.pSetLayouts = &g_world.dsl;
@@ -4794,36 +5041,45 @@ static int world_init(void)
     return g_world.ok;
 }
 
-/* one stage of the zone's (chars 0) or the characters' (1) functions, compiled on first use */
-static VkShaderModule world_module(int chars, int pixel, int atest, int fragment)
+/* the defines and the text into one module, compiled */
+static VkShaderModule world_compile(const char* defines, const char* text, int fragment)
 {
-    VkShaderModule* m = chars ? (fragment ? &g_world.fs[4] : &g_world.vs[2]) : fragment ? &g_world.fs[pixel * 2 + atest] : &g_world.vs[pixel];
+    size_t n = strlen(defines) + strlen(text) + 1;
+    char* src = (char*)malloc(n);
+    snprintf(src, n, "%s%s", defines, text);
+    VkShaderModule m = compile_glsl(src, fragment);
+    free(src);
+    return m;
+}
+
+/* one stage of the zone's (chars 0) or the characters' (1) functions, compiled on first use */
+static VkShaderModule world_module(int chars, int pixel, int atest, int shadow, int fragment)
+{
+    uint32_t key = chars ? 16u | (uint32_t)shadow : (uint32_t)pixel | (uint32_t)atest << 1 | (uint32_t)shadow << 2;
+    VkShaderModule* m = &g_world.mod[fragment][key];
     if (*m)
         return *m;
-    const char* text = chars ? CHARS_GLSL : WORLD_GLSL;
-    size_t n = strlen(text) + 64;
-    char* src = (char*)malloc(n);
-    snprintf(src, n, "#define W_PIXEL %d\n#define W_ATEST %d\n%s", pixel, atest, text);
-    *m = compile_glsl(src, fragment);
-    free(src);
+    char d[96];
+    snprintf(d, sizeof d, "#define W_PIXEL %d\n#define W_ATEST %d\n#define W_SHADOW %d\n", pixel, atest, shadow);
+    *m = world_compile(d, chars ? CHARS_GLSL : WORLD_GLSL, fragment);
     if (!*m)
         fprintf(stderr, "[recomp] gfx: scene renderer %s functions failed\n", chars ? "characters'" : "zone's");
     return *m;
 }
 
-/* a pipeline into the current targets: the zone's (pixel, atest, blend) or the characters' */
-static VkPipeline world_pipeline(int chars, int pixel, int atest, int blend, GfxTex* depth)
+/* a pipeline into the current targets: the zone's (pixel, atest, blend) or the characters', shadowed or not */
+static VkPipeline world_pipeline(int chars, int pixel, int atest, int blend, int shadow, GfxTex* depth)
 {
     uint32_t df = depth ? (uint32_t)depth->vf : 0, sf = depth && depth->has_stencil ? df : 0;
     uint32_t key[2] = { (uint32_t)chars | (uint32_t)pixel << 1 | (uint32_t)atest << 2 | (uint32_t)blend << 3 | (uint32_t)(sf != 0) << 4 |
-            (uint32_t)g_rt->vf << 8,
+            (uint32_t)shadow << 5 | (uint32_t)g_rt->vf << 8,
         df };
     for (uint32_t i = 0; i < g_world.npipe; ++i)
         if (g_world.pipe[i].key[0] == key[0] && g_world.pipe[i].key[1] == key[1])
             return g_world.pipe[i].p;
     if (g_world.npipe == sizeof g_world.pipe / sizeof g_world.pipe[0])
         return VK_NULL_HANDLE;
-    VkShaderModule vs = world_module(chars, pixel, atest, 0), fs = world_module(chars, pixel, atest, 1);
+    VkShaderModule vs = world_module(chars, pixel, atest, shadow, 0), fs = world_module(chars, pixel, atest, shadow, 1);
     VkPipeline p = VK_NULL_HANDLE;
     if (vs && fs)
     {
@@ -4892,6 +5148,618 @@ void gfx_lamps(const GfxWorldLight* l, uint32_t n)
         memcpy(g_lamps.l, l, g_lamps.n * sizeof *l);
 }
 
+/* --- the scene renderer's sun and moon shadows (gfx_shadow_begin, gfx.h): gfx_metal.m's, on Vulkan ----------------
+ * Two depth arrays a cascade a layer: the zone's, 32-bit and kept (a layer drawn again only when host/scene.c says),
+ * and the characters', 16-bit, drawn at each frame's end into the first cascades and a fitted layer round those near
+ * the camera, read by the next frame. Casters are drawn with no culling, the depth clamped rather than clipped where
+ * the device can (what stands nearer the light than the cascade's box still casts) and a slope bias; the receivers'
+ * side (SHADOW_GLSL) adds a normal offset. The passes are the frame's command buffer's, between the game's. */
+
+/* the shadows' uniforms for the draws, as SHADOW_GLSL's SH */
+typedef struct ShU
+{
+    float m[GFX_SHADOW_CASCADES][16];
+    float cas[GFX_SHADOW_CASCADES][4];  /* reach from the camera, texel, depth range (world units), valid */
+    float cbox[GFX_SHADOW_CASCADES][4]; /* the characters in the map (x0, y0, x1, y1), with a margin */
+    float dir[4], cam[4];
+    float info[4]; /* cascades, of them the characters', strength, 1 / size */
+    float cm[GFX_SHADOW_CASCADES][16]; /* the characters' layers (last frame's): 0 fitted round those near the camera, 1
+                                        * and on the first cascades' */
+    float ctx[4];  /* world units a texel in the fitted layer (0: none), 1 / its size, the penumbra's width (1 the sun's), how
+                    * the lamps fill the shadow */
+    float pk[4];   /* soft shadows: the light's tan(angular radius) (0: off), the blocker search's taps, the filter's */
+} ShU;
+
+/* a character's draw as the shadow passes take it at the frame's end: its buffers' and texture's handles as they were
+ * (the game may let them go or fill them anew first: both wait for the frame) */
+typedef struct ShItem
+{
+    VkBuffer vb, uv, ib;
+    VkImageView tex;
+    VkSampler samp;
+    uint32_t index_size, first, count, prim, palette, state, mirror;
+    float at[3]; /* its place, world: its first bone through its state's WORLD */
+    uintptr_t key;
+} ShItem;
+
+static struct
+{
+    int on; /* this batch's draws are shadowed */
+    ShU u;
+    GfxTex *zmap, *cmap, *cmt; /* the zone's layers (kept); the characters' in the first cascades, half size; the fitted one */
+    uint32_t size, fsize;
+    VkSampler cmp, near;
+    VkPipeline zone[2], chars; /* depth alone, alpha tested; the characters' */
+    int tried;
+    float freach;        /* the fitted layer's reach from the camera */
+    uint64_t cframe;     /* the frame of the last batch */
+    uint32_t cdone;      /* of the frame's characters (the host's list grows batch by batch), those taken so far */
+    float near_lo[2], near_hi[2];       /* the frame's near characters in cascade 0's map */
+    float cbox[GFX_SHADOW_CASCADES][4]; /* the frame's characters in each cascade's map */
+    /* the frame's characters for the layers drawn at its end: its last batch (the host's palette and states hold until
+     * the next frame) and every batch's items */
+    GfxShadowFrame lf;
+    GfxCharFrame lc;
+    ShItem* items;
+    uint32_t nitems, capitems;
+    uint32_t lnch;
+    uint64_t lserial;
+    /* the layers drawn at a frame's end, read by the next frame */
+    struct
+    {
+        uint64_t serial;  /* the frame they hold */
+        uint32_t n;       /* cascade layers */
+        float cm[2][16];  /* their matrices */
+        float cbox[2][4]; /* their characters' boxes, with a margin */
+        float tm[16], ttx, chs; /* the fitted layer's matrix, texel (0 none), half size */
+        /* where each character's part (its vertex buffer and mirror) was: open addressing, cap a power of two */
+        uintptr_t* key;
+        float (*at)[3];
+        uint32_t cap;
+    } lag;
+} g_shd;
+static uint32_t g_shd_drawn[2]; /* character draws into the cascades and the fitted layer since the last log line */
+
+static void char_at(const GfxCharFrame* cf, const GfxCharItem* it, float at[3])
+{
+    const float* r = cf->palette + 16 * (size_t)it->palette + 12;
+    const float* W = cf->state[it->state].world;
+    for (int a = 0; a < 3; ++a)
+        at[a] = r[0] * W[a] + r[1] * W[4 + a] + r[2] * W[8 + a] + W[12 + a];
+}
+
+static uint32_t char_hash(uintptr_t k) { return (uint32_t)((k >> 4) * 0x9E3779B97F4A7C15ull >> 32); }
+static uintptr_t char_key(const GfxCharItem* it) { return (uintptr_t)it->vb ^ (uintptr_t)(it->mirror != 0); }
+
+/* how far a character's part moved since last frame's layers were drawn (where it was, less where it is): its shadow
+ * lookups go back by it, so it is shadowed as it stood then; 0 when it wasn't there (or jumped) */
+static void char_lag(const GfxCharFrame* cf, const GfxCharItem* it, float d[4])
+{
+    d[0] = d[1] = d[2] = d[3] = 0.0f;
+    if (!g_shd.lag.cap || g_shd.lag.serial + 1 != g_serial)
+        return;
+    uintptr_t k = char_key(it);
+    for (uint32_t h = char_hash(k) & (g_shd.lag.cap - 1);; h = (h + 1) & (g_shd.lag.cap - 1))
+    {
+        if (!g_shd.lag.key[h])
+            return;
+        if (g_shd.lag.key[h] == k)
+        {
+            float now[3];
+            char_at(cf, it, now);
+            float dx = g_shd.lag.at[h][0] - now[0], dy = g_shd.lag.at[h][1] - now[1], dz = g_shd.lag.at[h][2] - now[2];
+            if (dx * dx + dy * dy + dz * dz < 1.0f)
+                d[0] = dx, d[1] = dy, d[2] = dz;
+            return;
+        }
+    }
+}
+
+/* the host's items [from, nitem) taken (marked used this frame, so a later update renames rather than overwrites) */
+static void shadow_items_add(const GfxCharFrame* cf, uint32_t from)
+{
+    if (g_shd.nitems + (cf->nitem - from) > g_shd.capitems)
+        g_shd.capitems = (g_shd.nitems + (cf->nitem - from)) * 2,
+        g_shd.items = (ShItem*)realloc(g_shd.items, g_shd.capitems * sizeof *g_shd.items);
+    for (uint32_t i = from; i < cf->nitem; ++i)
+    {
+        const GfxCharItem* it = &cf->item[i];
+        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+            continue;
+        it->vb->used = it->uv->used = it->ib->used = it->tex->used = g_serial;
+        it->tex->rec = g_cb_index;
+        ShItem* o = &g_shd.items[g_shd.nitems++];
+        o->vb = it->vb->b, o->uv = it->uv->b, o->ib = it->ib->b, o->tex = it->tex->view;
+        o->samp = sampler(&it->samp);
+        o->index_size = it->index_size, o->first = it->first, o->count = it->count, o->prim = it->prim;
+        o->palette = it->palette, o->state = it->state, o->mirror = it->mirror;
+        char_at(cf, it, o->at);
+        o->key = char_key(it);
+    }
+}
+
+/* a depth array of n layers, size across, in GENERAL and cleared to 1 (as tex_create makes its textures) */
+static GfxTex* tex_array(VkFormat vf, uint32_t size, uint32_t n)
+{
+    GfxTex* t = (GfxTex*)calloc(1, sizeof *t);
+    t->vf = vf, t->type = GFX_TEX_2D, t->use = GFX_USE_DEPTH, t->fmt = F_D16;
+    t->w = t->h = size, t->levels = t->mips = 1, t->nlayers = n, t->aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = vf;
+    ii.extent = (VkExtent3D){ size, size, 1 };
+    ii.mipLevels = 1;
+    ii.arrayLayers = n;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo ai = { 0 };
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(g_vma, &ii, &ai, &t->img, &t->mem, NULL) != VK_SUCCESS)
+    {
+        fprintf(stderr, "[recomp] gfx: shadow map %ux%u x%u failed\n", size, size, n);
+        free(t);
+        return NULL;
+    }
+    t->view = make_view(t, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0, 1, 0, n, NULL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    t->rtv = (VkImageView*)calloc(n, sizeof(VkImageView)); /* a layer each (attachment_view's face) */
+    VkCommandBuffer cb = upcmd();
+    VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = t->img;
+    b.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, n };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    VkClearDepthStencilValue z = { 1.0f, 0 };
+    vkCmdClearDepthStencilImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &b.subresourceRange);
+    g_up_dirty = 1;
+    return t;
+}
+
+/* a caster pipeline: the zone's (chars 0; atest: with its fragment function) into Depth32F, the characters' into Depth16 */
+static VkPipeline cast_pipeline(int chars, int atest)
+{
+    VkShaderModule m[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    for (int s = 0; s < 2; ++s)
+    {
+        if (s && !atest)
+            break;
+        VkShaderModule* p = &g_world.cast[s][chars];
+        if (!*p)
+            *p = world_compile(chars ? "#define C_CHARS 1\n" : "#define C_CHARS 0\n", CAST_GLSL, s);
+        m[s] = *p;
+    }
+    if (!m[0] || (atest && !m[1]))
+        return VK_NULL_HANDLE;
+    return make_pipeline(m[0], m[1], g_world.layout, NULL, VK_FORMAT_UNDEFINED, chars ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, WORLD_DYNAMIC,
+        sizeof WORLD_DYNAMIC / sizeof WORLD_DYNAMIC[0], 2);
+}
+
+static int shadow_init(uint32_t size)
+{
+    if (!world_init())
+        return 0;
+    if (!g_shd.tried)
+    {
+        g_shd.tried = 1;
+        g_shd.zone[0] = cast_pipeline(0, 0);
+        g_shd.zone[1] = cast_pipeline(0, 1);
+        g_shd.chars = cast_pipeline(1, 1);
+        VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.compareEnable = VK_TRUE;
+        si.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_shd.cmp));
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+        si.compareEnable = VK_FALSE;
+        VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_shd.near));
+        if (!g_has_clamp)
+            fprintf(stderr, "[recomp] gfx: no depth clamp: the scene renderer's shadows miss casters nearer the light than a cascade\n");
+    }
+    if (!g_shd.zone[0] || !g_shd.zone[1] || !g_shd.chars || !g_shd.cmp || !g_shd.near)
+        return 0;
+    uint32_t fsz = (uint32_t)g_fxs.scene_shadow_fit_size;
+    fsz = fsz < 256 ? 256 : fsz > 4096 ? 4096 : fsz;
+    if (g_shd.size != size || g_shd.fsize != fsz || !g_shd.zmap || !g_shd.cmap || !g_shd.cmt)
+    {
+        end_pass(); /* (a pass of the game's may hold them) */
+        if (g_shd.size != size || !g_shd.zmap) /* the zone's layers are kept: only a new size draws them anew */
+            gfx_tex_destroy(g_shd.zmap), g_shd.zmap = tex_array(VK_FORMAT_D32_SFLOAT, size, GFX_SHADOW_CASCADES);
+        gfx_tex_destroy(g_shd.cmap), gfx_tex_destroy(g_shd.cmt);
+        g_shd.cmap = tex_array(VK_FORMAT_D16_UNORM, size / 2, GFX_SHADOW_CASCADES);
+        g_shd.cmt = tex_array(VK_FORMAT_D16_UNORM, fsz, 1);
+        g_shd.size = size, g_shd.fsize = fsz;
+        g_shd.cframe = 0, g_shd.lag.serial = 0, g_shd.lserial = 0;
+    }
+    return g_shd.zmap && g_shd.cmap && g_shd.cmt;
+}
+
+/* a depth pass into one layer of a shadow map, cleared, y up as the draws' (set_viewport): the map's rows as
+ * SHADOW_GLSL reads them; the casters' state set; its timestamp's index (ts_end's) */
+static int shadow_pass_begin(GfxTex* t, uint32_t layer, int pass)
+{
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    VkRenderingAttachmentInfo da = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    da.imageView = attachment_view(t, layer, 0);
+    da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    da.clearValue.depthStencil.depth = 1.0f;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ t->w, t->h };
+    ri.layerCount = 1;
+    ri.pDepthAttachment = &da;
+    int ts = ts_begin(cb, pass);
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport v = { 0, (float)t->h, (float)t->w, -(float)t->h, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { t->w, t->h } };
+    vkCmdSetViewport(cb, 0, 1, &v);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdSetCullMode(cb, VK_CULL_MODE_NONE);
+    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetDepthTestEnable(cb, VK_TRUE);
+    vkCmdSetDepthWriteEnable(cb, VK_TRUE);
+    vkCmdSetDepthCompareOp(cb, VK_COMPARE_OP_LESS_OR_EQUAL);
+    vkCmdSetDepthBiasEnable(cb, VK_TRUE);
+    vkCmdSetDepthBias(cb, 0.0f, 0.0f, 2.0f);
+    t->used = g_serial, t->rec = g_cb_index;
+    return ts;
+}
+
+static void shadow_pass_end(int ts)
+{
+    vkCmdEndRendering(g_cb);
+    ts_end(g_cb, ts);
+    g_dirty = 1;
+    g_bound = VK_NULL_HANDLE;
+}
+
+/* one cascade of the zone's layer drawn again */
+static uint32_t shadow_zone(const GfxShadowFrame* f)
+{
+    int c = f->redraw;
+    int ts = shadow_pass_begin(g_shd.zmap, (uint32_t)c, GFX_PASS_SHADOW_ZONE);
+    VkCommandBuffer cb = g_cb;
+    uint32_t drawn = 0;
+    if (f->nitem && f->nworld)
+    {
+        VkDescriptorBufferInfo bi[3];
+        VkBuffer buf;
+        VkDeviceSize off;
+        float cu[20];
+        memcpy(cu, f->c[c].lmat, 64);
+        cu[16] = cu[17] = cu[18] = cu[19] = 0.0f;
+        memcpy(ring(sizeof cu, RING_ALIGN, &buf, &off), cu, sizeof cu);
+        bi[0] = (VkDescriptorBufferInfo){ buf, off, sizeof cu };
+        memcpy(ring((size_t)f->nworld * 64, RING_ALIGN, &buf, &off), f->world, (size_t)f->nworld * 64);
+        bi[1] = (VkDescriptorBufferInfo){ buf, off, (size_t)f->nworld * 64 };
+        int cur = -1, topo = -1;
+        for (uint32_t i = 0; i < f->nitem; ++i)
+        {
+            const GfxWorldItem* it = &f->item[i];
+            if (!it->vb || !it->count || it->inst >= f->nworld)
+                continue;
+            int at = (it->flags & GFX_WORLD_ATEST) && it->tex && it->tex->type == GFX_TEX_2D;
+            if (at != cur)
+                vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shd.zone[at]), cur = at;
+            int strip = it->prim == GFX_TRIANGLESTRIP;
+            if (strip != topo)
+                vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+            bi[2] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
+            VkDescriptorImageInfo ii = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet w[4];
+            world_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+            world_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+            world_write(&w[2], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+            if (at)
+            {
+                ii = (VkDescriptorImageInfo){ sampler(&it->samp), it->tex->view, VK_IMAGE_LAYOUT_GENERAL };
+                world_write(&w[3], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+                it->tex->used = g_serial, it->tex->rec = g_cb_index;
+            }
+            p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, at ? 4 : 3, w);
+            vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &it->inst);
+            it->vb->used = g_serial;
+            vkCmdDraw(cb, vertex_count(it->prim, it->count), 1, it->first, 0);
+            ++drawn;
+        }
+    }
+    shadow_pass_end(ts);
+    g_cmd_draws += drawn;
+    return drawn;
+}
+
+/* characters into a characters' map (tex): the frame's taken items, each into the layers of mats. reach NULL: the one
+ * layer, the characters whose place is within two units of its square; else a layer each cascade, a character into
+ * the one its place (its first bone) from the camera falls in and the next (the cascades blend over their last tenth),
+ * none beyond scene_shadow_char_far. A pass a layer (Metal's one layered pass, without a layer from the vertex
+ * function) */
+static void shadow_chars_pass(const GfxCharFrame* cf, const float* cam, GfxTex* tex, const float (*mats)[16], uint32_t nmat,
+    const float* reach)
+{
+    VkBuffer pb, sb, buf;
+    VkDeviceSize po, so, off;
+    size_t psz = (size_t)cf->nbones * 64, ssz = (size_t)cf->nstate * sizeof(GfxCharState);
+    memcpy(ring(psz, RING_ALIGN, &pb, &po), cf->palette, psz);
+    memcpy(ring(ssz, RING_ALIGN, &sb, &so), cf->state, ssz);
+    const float* M = mats[0];
+    float lim = 1.0f + 2.0f * sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]); /* the square and two units, in the layer */
+    float far2 = g_fxs.scene_shadow_char_far * g_fxs.scene_shadow_char_far;
+    for (uint32_t layer = 0; layer < nmat; ++layer)
+    {
+        int ts = shadow_pass_begin(tex, layer, GFX_PASS_SHADOW_CHARS);
+        VkCommandBuffer cb = g_cb;
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shd.chars);
+        float cu[20];
+        memcpy(cu, mats[layer], 64);
+        cu[16] = cf->alpha_ref, cu[17] = cu[18] = cu[19] = 0.0f;
+        memcpy(ring(sizeof cu, RING_ALIGN, &buf, &off), cu, sizeof cu);
+        VkDescriptorBufferInfo bi[6];
+        bi[0] = (VkDescriptorBufferInfo){ buf, off, sizeof cu };
+        bi[1] = (VkDescriptorBufferInfo){ pb, po, psz };
+        bi[2] = (VkDescriptorBufferInfo){ sb, so, ssz };
+        int topo = -1;
+        uint32_t drawn = 0;
+        for (uint32_t i = 0; i < g_shd.nitems; ++i)
+        {
+            const ShItem* it = &g_shd.items[i];
+            const float* r = it->at;
+            if (!reach)
+            {
+                if (fabsf(r[0] * M[0] + r[1] * M[4] + r[2] * M[8] + M[12]) > lim || fabsf(r[0] * M[1] + r[1] * M[5] + r[2] * M[9] + M[13]) > lim)
+                    continue;
+            }
+            else
+            {
+                float dx = r[0] - cam[0], dy = r[1] - cam[1], dz = r[2] - cam[2], d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > far2)
+                    continue;
+                uint32_t base = 0;
+                while (base < nmat && d2 > (reach[base] + 3.0f) * (reach[base] + 3.0f))
+                    ++base;
+                if (base >= nmat || layer < base || layer > base + 1)
+                    continue;
+            }
+            int strip = it->prim == GFX_TRIANGLESTRIP;
+            if (strip != topo)
+                vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+            bi[3] = (VkDescriptorBufferInfo){ it->vb, 0, VK_WHOLE_SIZE };
+            bi[4] = (VkDescriptorBufferInfo){ it->uv, 0, VK_WHOLE_SIZE };
+            VkDescriptorImageInfo ii = { it->samp, it->tex, VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet w[6];
+            world_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+            world_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+            world_write(&w[2], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+            world_write(&w[3], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
+            world_write(&w[4], W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[4], NULL);
+            world_write(&w[5], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+            p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 6, w);
+            struct
+            {
+                float params[4];
+                uint32_t palette, state, mirror, pad;
+            } pc = { { cf->alpha_ref, 0.0f, 0.0f, 0.0f }, it->palette, it->state, it->mirror, 0 };
+            vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+            vkCmdBindIndexBuffer(cb, it->ib, 0, it->index_size == 4 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(cb, vertex_count(it->prim, it->count), 1, it->first, 0, 0);
+            ++drawn;
+        }
+        shadow_pass_end(ts);
+        g_shd_drawn[!reach] += drawn;
+        g_cmd_draws += drawn;
+    }
+}
+
+/* a fitted layer round the near characters (their extent lo..hi in cascade 0's map, M): its square rounded up to a power
+ * of two (kept in *hs until they outgrow it or fit in a third of it), its centre on whole texels, so it holds still while
+ * the characters do; 0 when there are none */
+static int shadow_fit(const float* M, const float lo[2], const float hi[2], float* hs_kept, float tm[16], float* ttx)
+{
+    if (!(lo[0] <= hi[0] && lo[1] <= hi[1]))
+        return 0;
+    float half0 = 1.0f / sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]); /* cascade 0's half size, world */
+    float m = 1.5f / half0, minhs = 2.0f / half0; /* a unit and a half's margin (the places are hips and feet), two at least */
+    float e = 0.5f * fmaxf(hi[0] - lo[0], hi[1] - lo[1]) + m;
+    float hs = *hs_kept > 0.0f ? *hs_kept : 1.0f;
+    if (e > hs || e < hs * (1.0f / 3.0f))
+        hs = exp2f(ceilf(log2f(fmaxf(e, minhs))));
+    hs = hs > 1.0f ? 1.0f : hs < minhs ? minhs : hs;
+    *hs_kept = hs;
+    float tq = 2.0f * hs / (float)g_shd.fsize; /* a texel, in cascade 0's map */
+    float cx = roundf(0.5f * (lo[0] + hi[0]) / tq) * tq, cy = roundf(0.5f * (lo[1] + hi[1]) / tq) * tq;
+    memcpy(tm, M, 64);
+    for (int r = 0; r < 4; ++r)
+        tm[4 * r] = M[4 * r] / hs, tm[4 * r + 1] = M[4 * r + 1] / hs;
+    tm[12] = (M[12] - cx) / hs, tm[13] = (M[13] - cy) / hs;
+    *ttx = 2.0f * hs * half0 / (float)g_shd.fsize;
+    return 1;
+}
+
+/* The characters' layers drawn at the frame's end, after all its draws, from all of the frame's characters: the first
+ * cascades' (half size) and a fitted one round those near the camera. The next frame's zone reads them (its draws come
+ * before any character is known), and so do its characters beyond the near ones, a frame late. */
+static void shadow_frame_end(void)
+{
+    if (g_shd.lserial != g_serial || !g_shd.cmap || !g_shd.lnch)
+        return;
+    const GfxShadowFrame* f = &g_shd.lf;
+    uint32_t n = g_shd.lnch < 2 ? g_shd.lnch : 2;
+    float reach[2];
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* C = f->c[i].lmat;
+        memcpy(g_shd.lag.cm[i], C, 64);
+        reach[i] = f->c[i].radius;
+        float mi = 2.5f * sqrtf(C[0] * C[0] + C[4] * C[4] + C[8] * C[8]); /* two and a half units */
+        g_shd.lag.cbox[i][0] = g_shd.cbox[i][0] - mi, g_shd.lag.cbox[i][1] = g_shd.cbox[i][1] - mi;
+        g_shd.lag.cbox[i][2] = g_shd.cbox[i][2] + mi, g_shd.lag.cbox[i][3] = g_shd.cbox[i][3] + mi;
+    }
+    g_shd.lag.n = n, g_shd.lag.ttx = 0.0f;
+    if (g_fxs.scene_shadow_fit > 0.0f)
+        shadow_fit(f->c[0].lmat, g_shd.near_lo, g_shd.near_hi, &g_shd.lag.chs, g_shd.lag.tm, &g_shd.lag.ttx);
+    /* where each part is, for the next frame's lookups */
+    uint32_t cap = 64;
+    while (cap < 2 * g_shd.nitems)
+        cap *= 2;
+    if (cap > g_shd.lag.cap)
+    {
+        free(g_shd.lag.key), free(g_shd.lag.at);
+        g_shd.lag.key = (uintptr_t*)malloc(cap * sizeof *g_shd.lag.key), g_shd.lag.at = (float (*)[3])malloc(cap * sizeof *g_shd.lag.at);
+        g_shd.lag.cap = cap;
+    }
+    memset(g_shd.lag.key, 0, g_shd.lag.cap * sizeof *g_shd.lag.key);
+    for (uint32_t i = 0; i < g_shd.nitems; ++i)
+    {
+        uintptr_t k = g_shd.items[i].key;
+        uint32_t h = char_hash(k) & (g_shd.lag.cap - 1);
+        while (g_shd.lag.key[h] && g_shd.lag.key[h] != k)
+            h = (h + 1) & (g_shd.lag.cap - 1);
+        g_shd.lag.key[h] = k, memcpy(g_shd.lag.at[h], g_shd.items[i].at, 12);
+    }
+    cmd();
+    shadow_chars_pass(&g_shd.lc, f->cam, g_shd.cmap, (const float (*)[16])g_shd.lag.cm, n, reach);
+    if (g_shd.lag.ttx > 0.0f)
+        shadow_chars_pass(&g_shd.lc, f->cam, g_shd.cmt, (const float (*)[16])g_shd.lag.tm, 1, NULL);
+    g_shd.lag.serial = g_serial;
+    g_shd.lserial = 0;
+    g_shd.nitems = 0; /* (the handles were the frame's: the next takes its own) */
+}
+
+void gfx_shadow_begin(const GfxShadowFrame* f)
+{
+    g_shd.on = 0;
+    if (!g_dev || !f || f->dir[3] <= 0.0f || !f->size || !f->ncascades)
+        return;
+    uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
+    if (!shadow_init(f->size))
+        return;
+    ShU* u = &g_shd.u;
+    memset(u, 0, sizeof *u);
+    uint32_t nc = f->ncascades < GFX_SHADOW_CASCADES ? f->ncascades : GFX_SHADOW_CASCADES;
+    for (uint32_t i = 0; i < nc; ++i)
+    {
+        memcpy(u->m[i], f->c[i].lmat, 64);
+        u->cas[i][0] = f->c[i].radius, u->cas[i][1] = f->c[i].texel, u->cas[i][2] = f->c[i].depth;
+        u->cas[i][3] = f->c[i].valid ? 1.0f : 0.0f;
+    }
+    memcpy(u->dir, f->dir, 16), memcpy(u->cam, f->cam, 16);
+    uint32_t nch = f->chars && f->chars->nitem && f->chars->nbones && f->c[0].valid ? (f->nchar < nc ? f->nchar : nc) : 0;
+    /* The characters' shadows. A frame has a batch for each run of the game's draws between the scene renderer's (a
+     * crowd: several), and the zone's come before any character is known: the characters' layers are drawn at the
+     * frame's end from all of them (shadow_frame_end) and read by the next frame - the zone a frame late, the
+     * characters each as it stood then (char_lag). Here each batch's new characters are taken. */
+    int first = g_shd.cframe != g_serial;
+    if (first || (f->chars && f->chars->nitem < g_shd.cdone))
+    {
+        g_shd.near_lo[0] = g_shd.near_lo[1] = 1e30f, g_shd.near_hi[0] = g_shd.near_hi[1] = -1e30f;
+        for (int i = 0; i < GFX_SHADOW_CASCADES; ++i)
+            g_shd.cbox[i][0] = g_shd.cbox[i][1] = 1e30f, g_shd.cbox[i][2] = g_shd.cbox[i][3] = -1e30f;
+        g_shd.cdone = 0;
+        g_shd.nitems = 0;
+    }
+    g_shd.cframe = g_serial;
+    g_shd.freach = fminf(f->c[0].radius, fmaxf(g_fxs.scene_shadow_fit_reach, 0.0f));
+    uint32_t from = g_shd.nitems;
+    if (nch)
+    {
+        float reach2 = g_shd.freach * g_shd.freach;
+        /* this batch's characters into the boxes: the near ones' extent, each cascade's box (by their places; the
+         * margins take the rest of them) */
+        shadow_items_add(f->chars, g_shd.cdone);
+        for (uint32_t k = from; k < g_shd.nitems; ++k)
+        {
+            const float* p = g_shd.items[k].at;
+            float dx = p[0] - f->cam[0], dy = p[1] - f->cam[1], dz = p[2] - f->cam[2];
+            int near = dx * dx + dy * dy + dz * dz <= reach2;
+            for (uint32_t i = 0; i < nch; ++i)
+            {
+                const float* C = f->c[i].lmat;
+                for (int a = 0; a < 2; ++a)
+                {
+                    float q = p[0] * C[a] + p[1] * C[4 + a] + p[2] * C[8 + a] + C[12 + a];
+                    g_shd.cbox[i][a] = q < g_shd.cbox[i][a] ? q : g_shd.cbox[i][a];
+                    g_shd.cbox[i][2 + a] = q > g_shd.cbox[i][2 + a] ? q : g_shd.cbox[i][2 + a];
+                    if (i == 0 && near)
+                        g_shd.near_lo[a] = q < g_shd.near_lo[a] ? q : g_shd.near_lo[a],
+                        g_shd.near_hi[a] = q > g_shd.near_hi[a] ? q : g_shd.near_hi[a];
+                }
+            }
+        }
+        g_shd.cdone = f->chars->nitem;
+        g_shd.lf = *f, g_shd.lc = *f->chars, g_shd.lf.chars = &g_shd.lc, g_shd.lnch = nch, g_shd.lserial = g_serial;
+    }
+    if (f->redraw >= 0 && f->redraw < (int32_t)nc)
+        shadow_zone(f); /* (between the game's draws: its pass is taken up again after) */
+    /* the characters' layers they read: last frame's, when it drew them */
+    if (g_shd.lag.serial && g_shd.lag.serial + 1 == g_serial)
+    {
+        memcpy(u->cm[0], g_shd.lag.tm, 64);
+        for (uint32_t i = 0; i < g_shd.lag.n; ++i)
+            memcpy(u->cm[1 + i], g_shd.lag.cm[i], 64), memcpy(u->cbox[i], g_shd.lag.cbox[i], 16);
+        u->info[1] = (float)g_shd.lag.n, u->ctx[0] = g_shd.lag.ttx;
+    }
+    u->ctx[1] = 1.0f / (float)g_shd.fsize, u->ctx[2] = f->soft > 1.0f ? f->soft : 1.0f;
+    u->ctx[3] = fmaxf(g_fxs.shadow_fill, 0.0f);
+    int hq = g_fxs.shadow_soft_q >= 1.5f;
+    u->pk[0] = f->soft_tan, u->pk[1] = hq ? 4.0f : 2.0f, u->pk[2] = hq ? 16.0f : 8.0f, u->pk[3] = 0.0f; /* gathers, compares */
+    u->info[0] = (float)nc, u->info[2] = f->strength, u->info[3] = 1.0f / (float)f->size;
+    g_shd.on = 1;
+    if (gfx_profiling)
+    {
+        g_prof.draw_ns += gfx_now_ns() - t0;
+        static uint64_t last;
+        static uint32_t calls;
+        ++calls;
+        uint64_t now = gfx_now_ns();
+        if (!last)
+            last = now;
+        if (now - last > 2000000000ull)
+        {
+            fprintf(stderr, "[recomp] gfx: scene shadows: %u batches, %.1f/%.1f character draws a batch into the cascades/fitted layer\n",
+                calls, calls ? (double)g_shd_drawn[0] / calls : 0.0, calls ? (double)g_shd_drawn[1] / calls : 0.0);
+            last = now, calls = 0, g_shd_drawn[0] = g_shd_drawn[1] = 0;
+        }
+    }
+}
+
+/* the shadows' bindings for a draw (6-11), their uniforms in bi: how many writes */
+static uint32_t shadow_writes(VkWriteDescriptorSet* w, const VkDescriptorBufferInfo* bi, VkDescriptorImageInfo ii[5])
+{
+    ii[0] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, g_shd.zmap->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[1] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, g_shd.cmap->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[2] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, g_shd.cmt->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[3] = (VkDescriptorImageInfo){ g_shd.cmp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+    ii[4] = (VkDescriptorImageInfo){ g_shd.near, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+    world_write(&w[0], W_SH, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, bi, NULL);
+    world_write(&w[1], W_ZM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &ii[0]);
+    world_write(&w[2], W_CM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &ii[1]);
+    world_write(&w[3], W_CT, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &ii[2]);
+    world_write(&w[4], W_CS, VK_DESCRIPTOR_TYPE_SAMPLER, NULL, &ii[3]);
+    world_write(&w[5], W_PS, VK_DESCRIPTOR_TYPE_SAMPLER, NULL, &ii[4]);
+    g_shd.zmap->used = g_shd.cmap->used = g_shd.cmt->used = g_serial;
+    return 6;
+}
+
+/* the shadows' uniforms into the ring, when the batch is shadowed */
+static int shadow_uniforms(VkDescriptorBufferInfo* bi)
+{
+    if (!g_shd.on)
+        return 0;
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof g_shd.u, RING_ALIGN, &buf, &off), &g_shd.u, sizeof g_shd.u);
+    *bi = (VkDescriptorBufferInfo){ buf, off, sizeof g_shd.u };
+    return 1;
+}
+
 int gfx_world_draw(const GfxWorldFrame* f)
 {
     if (!g_dev || !f->nitem || !world_init())
@@ -4918,7 +5786,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
     } fu;
     gfx_mat_mul(fu.vp, f->view, f->proj);
     fu.params[0] = f->alpha_ref, fu.params[1] = f->pixel[0], fu.params[2] = f->pixel[1], fu.params[3] = 0.0f;
-    VkDescriptorBufferInfo bi[4];
+    VkDescriptorBufferInfo bi[5];
     VkBuffer buf;
     VkDeviceSize off;
     memcpy(ring(sizeof fu, RING_ALIGN, &buf, &off), &fu, sizeof fu);
@@ -4931,6 +5799,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
     uint32_t nl = f->nlight ? f->nlight : 1;
     memcpy(ring((size_t)nl * sizeof none, RING_ALIGN, &buf, &off), f->nlight ? f->light : &none, (size_t)nl * sizeof none);
     bi[2] = (VkDescriptorBufferInfo){ buf, off, (size_t)nl * sizeof none };
+    int shadow = shadow_uniforms(&bi[4]);
     world_state(depth);
     int pixel = f->mode == 2;
     VkPipeline cur = VK_NULL_HANDLE;
@@ -4941,7 +5810,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
         if (!it->vb || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
             continue;
         int blend = (it->flags & GFX_WORLD_BLEND) != 0;
-        VkPipeline p = world_pipeline(0, pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, depth);
+        VkPipeline p = world_pipeline(0, pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, shadow, depth);
         if (!p)
             continue;
         if (p != cur)
@@ -4962,15 +5831,16 @@ int gfx_world_draw(const GfxWorldFrame* f)
         if (g_fxs.fx != 0.0f && g_fxs.aniso > 1.0f && it->tex->levels > 1 && it->tex->levels < 32 && sk.min >= 2 &&
             it->tex->filled == (1u << it->tex->levels) - 1)
             sk.min = 3, sk.mip = 2, sk.max_aniso = (uint8_t)(g_fxs.aniso > 16.0f ? 16.0f : g_fxs.aniso);
-        VkDescriptorImageInfo ii = { sampler(&sk), it->tex->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo ii = { sampler(&sk), it->tex->view, VK_IMAGE_LAYOUT_GENERAL }, si[5];
         bi[3] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
-        VkWriteDescriptorSet w[5];
+        VkWriteDescriptorSet w[11];
         world_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
         world_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
         world_write(&w[2], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
         world_write(&w[3], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
         world_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
-        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 5, w);
+        uint32_t nw = 5 + (shadow ? shadow_writes(&w[5], &bi[4], si) : 0);
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
         uint32_t dc[2] = { it->inst, it->flags };
         vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof dc, dc);
         it->vb->used = g_serial;
@@ -5003,11 +5873,12 @@ int gfx_chars_draw(const GfxCharFrame* f)
     }
     GfxTex* depth = depth_attachment();
     int drew = 0;
-    VkPipeline p = world_pipeline(1, 0, 1, 0, depth);
+    VkDescriptorBufferInfo bi[5];
+    int shadow = shadow_uniforms(&bi[4]);
+    VkPipeline p = world_pipeline(1, 0, 1, 0, shadow, depth);
     if (!p || !set_viewport(f->vp))
         goto done;
     VkCommandBuffer cb = g_cb;
-    VkDescriptorBufferInfo bi[5];
     VkBuffer buf;
     VkDeviceSize off;
     size_t psz = (size_t)f->nbones * 64, ssz = (size_t)f->nstate * sizeof(GfxCharState);
@@ -5025,7 +5896,8 @@ int gfx_chars_draw(const GfxCharFrame* f)
     {
         float params[4];
         uint32_t palette, state, mirror, pad;
-    } pc = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f }, 0, 0, 0, 0 };
+        float lag[4];
+    } pc = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f }, 0, 0, 0, 0, { 0.0f, 0.0f, 0.0f, 0.0f } };
     for (uint32_t i = 0; i < f->nitem; ++i)
     {
         const GfxCharItem* it = &f->item[i];
@@ -5034,17 +5906,20 @@ int gfx_chars_draw(const GfxCharFrame* f)
         int strip = it->prim == GFX_TRIANGLESTRIP;
         if (strip != topo)
             vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
-        VkDescriptorImageInfo ii = { sampler(&it->samp), it->tex->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo ii = { sampler(&it->samp), it->tex->view, VK_IMAGE_LAYOUT_GENERAL }, si[5];
         bi[2] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
         bi[3] = (VkDescriptorBufferInfo){ it->uv->b, 0, VK_WHOLE_SIZE };
-        VkWriteDescriptorSet w[5];
+        VkWriteDescriptorSet w[11];
         world_write(&w[0], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[0], NULL);
         world_write(&w[1], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
         world_write(&w[2], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
         world_write(&w[3], W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
         world_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
-        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 5, w);
+        uint32_t nw = 5 + (shadow ? shadow_writes(&w[5], &bi[4], si) : 0);
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
         pc.palette = it->palette, pc.state = it->state, pc.mirror = it->mirror;
+        if (shadow)
+            char_lag(f, it, pc.lag);
         vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
         vkCmdBindIndexBuffer(cb, it->ib->b, 0, it->index_size == 4 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
         it->vb->used = it->uv->used = it->ib->used = g_serial;
@@ -5062,8 +5937,7 @@ done:
     return drew > 0;
 }
 
-/* the scene renderer's shadows and bounce light are Metal's only so far */
-void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
+/* the scene renderer's bounce light is Metal's only so far */
 void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
 void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
 
@@ -6417,6 +7291,7 @@ void gfx_present(GfxTex* bb)
     uint64_t present_start = gfx_profiling ? gfx_now_ns() : 0;
     g_present_thread = pthread_self();
     flush_pass();
+    shadow_frame_end(); /* the scene renderer's characters' shadows, for the next frame: timed with the frame's passes */
     if (g_surface && bb && bb->use != GFX_USE_DEPTH)
     {
         int pw = 0, ph = 0;
@@ -6613,6 +7488,8 @@ int gfx_init(void* window, int vsync)
     en.samplerAnisotropy = have.samplerAnisotropy;
     en.fillModeNonSolid = have.fillModeNonSolid;
     en.largePoints = have.largePoints;
+    en.depthClamp = have.depthClamp;
+    g_has_clamp = have.depthClamp;
     en.vertexPipelineStoresAndAtomics = g_has_rt ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceRayQueryFeaturesKHR en_rq = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
     en_rq.rayQuery = VK_TRUE;
