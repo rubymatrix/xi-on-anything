@@ -23,7 +23,10 @@
  *
  * The scene effects (gfx_scene_done), the sun's shadow maps and the water are gfx_metal.m's, ported:
  * the same passes in GLSL (FX_GLSL), the same CPU side (gfx_scene.c). The GPU's time per pass
- * (gfx_pass_timing) is timestamp queries around each pass, read when the frame's slot comes round. */
+ * (gfx_pass_timing) is timestamp queries around each pass, read when the frame's slot comes round.
+ * The scene renderer's zone and characters (gfx_world_draw, gfx_chars_draw; host/scene.c) are
+ * gfx_metal.m's WORLD_MSL and CHARS_MSL as GLSL (WORLD_GLSL, CHARS_GLSL), drawn into the game's
+ * targets in its pass. */
 #include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
 
 #include <SDL3/SDL.h>
@@ -224,6 +227,8 @@ static uint8_t g_ts_state[FRAMES];        /* 0 untimed, 1 the pool reset and the
 static uint64_t g_ts_mask;                /* the queue's valid timestamp bits; 0: no timestamps */
 static double g_ts_period;                /* ns a tick */
 static int g_pass = GFX_PASS_COMP;        /* what the next fx_pass or rt_pass times as */
+static int g_pass_next = -1;              /* the next render pass of the game's targets is timed as this (the scene renderer's) */
+static int g_pass_ts = -1;                /* the open pass's ts_begin, for its ts_end */
 static VkCommandBuffer g_upcb; /* uploads to submit ahead of g_cb */
 static uint64_t g_cb_index = 1;
 static int g_in_pass, g_dirty;
@@ -696,6 +701,8 @@ static void end_pass(void)
         vkCmdEndRendering(g_cb);
         g_in_pass = 0;
         g_dirty = 1;
+        if (g_pass_ts >= 0)
+            ts_end(g_cb, g_pass_ts), g_pass_ts = -1;
     }
 }
 
@@ -1344,6 +1351,8 @@ static int begin_pass(void)
             g_rt->depth_seen = depth;
     }
     g_pending_clear = 0;
+    if (g_pass_next >= 0)
+        g_pass_ts = ts_begin(g_cb, g_pass_next), g_pass_next = -1;
     vkCmdBeginRendering(g_cb, &ri);
     g_in_pass = 1;
     g_bound = VK_NULL_HANDLE;
@@ -4541,15 +4550,522 @@ static int rt_init(void)
 
 int gfx_rt_supported(void) { return rt_init(); }
 
-/* the scene renderer is Metal's only so far: the game's own draws stay */
-int gfx_world_supported(void) { return 0; }
-int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
-void gfx_world_time(int pass) { (void)pass; }
+/* --- the scene renderer's zone (gfx_world_draw, gfx.h) --------------------------------------------------------------
+ * gfx_metal.m's WORLD_MSL: D3D's fixed function as the game lights its zone, COLORVERTEX with the vertex colour as
+ * diffuse and ambient reflectance, the sun (and moon) and the instance's four point lights, then MODULATE2X and
+ * MODULATE4X and table fog. W_PIXEL lights per pixel (scene 2), W_ATEST alpha tests GREATER the reference. The vertices
+ * are the game's own buffers, fetched as the generated functions fetch theirs (36 bytes: position, normal, D3DCOLOR,
+ * uv); the instance (inst) and its flags are push constants. The shadows, bounce light, occlusion, highlights and
+ * lamps (Metal's other function constants) are not here yet: the directional light along sd goes to sun, which
+ * the shadows will take. */
+static const char WORLD_GLSL[] =
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "layout(std140, set = 0, binding = 0) uniform WF { mat4 vp; vec4 params; } F;\n" /* params: alpha reference 0..255, the pixel-centre fixup */
+    "struct WL { vec4 pos, diffuse, ambient, att; };\n"
+    "struct WI { mat4 wvp, world, world_inv; vec4 sun_dir, sun_col, sun2_dir, sun2_col, ambient, fog, fog_col; ivec4 light; };\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer WIB { WI I[]; };\n"
+    "layout(std430, set = 0, binding = 2) readonly buffer WLB { WL L[]; };\n"
+    "layout(push_constant) uniform WD { uint inst, flags; } D;\n"
+    /* saturate(vc * (ambient + each light's ambient) + vc * sum of N.L x diffuse) without the saturate, and without the
+     * directional light along sd, which goes into sun: saturate(the two's sum) is D3D's */
+    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, out vec3 sun) {\n"
+    "  vec3 a = I[D.inst].ambient.rgb, d = vec3(0.0), s = vec3(0.0);\n"
+    "  if (I[D.inst].sun_dir.w > 0.0) {\n"
+    "    vec3 t = I[D.inst].sun_col.rgb * max(dot(N, I[D.inst].sun_dir.xyz), 0.0);\n"
+    "    if (dot(I[D.inst].sun_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
+    "  }\n"
+    "  if (I[D.inst].sun2_dir.w > 0.0) {\n"
+    "    vec3 t = I[D.inst].sun2_col.rgb * max(dot(N, I[D.inst].sun2_dir.xyz), 0.0);\n"
+    "    if (dot(I[D.inst].sun2_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
+    "  }\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    int li = I[D.inst].light[k];\n"
+    "    if (li < 0) continue;\n"
+    "    vec3 v = L[li].pos.xyz - P;\n"
+    "    float dist = length(v);\n"
+    "    if (dist > L[li].pos.w) continue;\n"
+    "    float at = 1.0 / max(L[li].att.x + L[li].att.y * dist + L[li].att.z * dist * dist, 1e-6);\n"
+    "    d += L[li].ambient.rgb * at + L[li].diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
+    "  }\n"
+    "  sun = vc * s;\n"
+    "  return vc * a + vc * d;\n"
+    "}\n"
+    "#ifdef GFX_VS\n"
+    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"
+    "layout(location = 0) out vec2 o_uv;\n"
+    "layout(location = 1) out vec4 o_col;\n"
+    "layout(location = 2) out vec3 o_wpos;\n"
+    "layout(location = 3) out vec3 o_nrm;\n"
+    "layout(location = 4) out float o_z;\n"
+    "void main() {\n"
+    "  uint b = uint(gl_VertexIndex) * 9u;\n"
+    "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
+    "  vec3 nrm = uintBitsToFloat(uvec3(vb[b + 3u], vb[b + 4u], vb[b + 5u]));\n"
+    "  vec4 col = unpackUnorm4x8(vb[b + 6u]).zyxw;\n" /* D3DCOLOR's bytes are B, G, R, A */
+    "  o_uv = uintBitsToFloat(uvec2(vb[b + 7u], vb[b + 8u]));\n"
+    "  vec4 wp = I[D.inst].world * vec4(pos, 1.0);\n"
+    "  vec3 n = (vec4(nrm, 0.0) * I[D.inst].world_inv).xyz;\n"
+    "  if ((D.flags & 32u) != 0u) n = normalize(n);\n"
+    "  gl_Position = I[D.inst].wvp * vec4(pos, 1.0);\n"
+    "  o_z = gl_Position.w;\n"
+    "  gl_Position.x += gl_Position.w * F.params.y;\n" /* D3D's pixel centres, as the generated functions' fixup */
+    "  gl_Position.y -= gl_Position.w * F.params.z;\n"
+    "  o_wpos = wp.xyz;\n"
+    "  o_nrm = n;\n"
+    "  o_col = col;\n"
+    "#if !W_PIXEL\n"
+    "  vec3 sun, rest = lit(wp.xyz, n, col.rgb, vec3(0.0), sun);\n"
+    "  o_col.rgb = sat(rest + sun);\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef GFX_FS\n"
+    "layout(set = 0, binding = 4) uniform sampler2D t;\n"
+    "layout(location = 0) in vec2 i_uv;\n"
+    "layout(location = 1) in vec4 i_col;\n"
+    "layout(location = 2) in vec3 i_wpos;\n"
+    "layout(location = 3) in vec3 i_nrm;\n"
+    "layout(location = 4) in float i_z;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "void main() {\n"
+    "  vec3 c = i_col.rgb;\n"
+    "#if W_PIXEL\n"
+    "  vec3 N = (D.flags & 32u) != 0u ? normalize(i_nrm) : i_nrm;\n"
+    "  vec3 sun;\n"
+    "  c = lit(i_wpos, N, i_col.rgb, vec3(0.0), sun);\n"
+    "  c = sat(c + sun);\n"
+    "#endif\n"
+    "  vec4 tx = texture(t, i_uv);\n"
+    "  vec4 o = vec4(sat(2.0 * tx.rgb * c), sat(4.0 * tx.a * i_col.a));\n" /* MODULATE2X, MODULATE4X */
+    "#if W_ATEST\n"
+    "  if (!(o.a * 255.0 > F.params.x)) discard;\n"
+    "#endif\n"
+    "  vec4 fog = I[D.inst].fog;\n"
+    "  if (fog.z > 0.0) o.rgb = mix(I[D.inst].fog_col.rgb, o.rgb, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
+    "  oc = o;\n"
+    "}\n"
+    "#endif\n";
+
+/* --- the scene renderer's characters (gfx_chars_draw, gfx.h) -------------------------------------------------------
+ * gfx_metal.m's CHARS_MSL: skinned from the frame's bone palettes (each vertex its bone-space position and normal for
+ * two bones, weights applied, and their mirror bones), lit per vertex with D3D's fixed function as the game sets it
+ * for a character, then its two texture stages; alpha tested, no culling. The vertices (GfxCharVertex, 18 words) and
+ * uvs are storage buffers, the indices the game's own; the palette, state, mirror and the frame's parameters are push
+ * constants. */
+static const char CHARS_GLSL[] =
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
+    "struct CS { mat4 wvp, world; CL light[4]; vec4 ambient, md, ma, me, tf, fog, fog_col; };\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer PB { mat4 P[]; };\n"
+    "layout(std430, set = 0, binding = 2) readonly buffer SB { CS S[]; };\n"
+    "layout(push_constant) uniform CD { vec4 params; uint palette, state, mirror, pad; } D;\n" /* params as WF's */
+    "#ifdef GFX_VS\n"
+    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"
+    "layout(std430, set = 0, binding = 5) readonly buffer UB { vec2 uvs[]; };\n"
+    "layout(location = 0) out vec2 o_uv;\n"
+    "layout(location = 1) out vec4 o_col;\n"
+    "layout(location = 2) out float o_z;\n"
+    "const vec3 SIGN[4] = vec3[4](vec3(1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(1.0, 1.0, -1.0));\n"
+    "vec4 word4(uint b) { return uintBitsToFloat(uvec4(vb[b], vb[b + 1u], vb[b + 2u], vb[b + 3u])); }\n"
+    "void main() {\n"
+    /* the vertex in the game's skinned space: two bones, or their mirror bones mirrored */
+    "  uint b = uint(gl_VertexIndex) * 18u;\n"
+    "  vec4 va = word4(b), vb4 = word4(b + 4u);\n"
+    "  vec3 na = word4(b + 8u).xyz, nb = word4(b + 12u).xyz;\n"
+    "  uint bones = vb[b + 16u], mir = vb[b + 17u];\n"
+    "  uint ba = bones & 0xffu, bb = (bones >> 8) & 0xffu;\n"
+    "  if (D.mirror != 0u) {\n"
+    "    ba = (bones >> 16) & 0xffu, bb = bones >> 24;\n"
+    "    vec3 sa = SIGN[mir & 3u], sb = SIGN[(mir >> 2) & 3u];\n"
+    "    va.xyz *= sa; vb4.xyz *= sb; na *= sa; nb *= sb;\n"
+    "  }\n"
+    "  mat4 MA = P[D.palette + ba], MB = P[D.palette + bb];\n"
+    "  vec3 n = (MA * vec4(na, 0.0)).xyz + (MB * vec4(nb, 0.0)).xyz;\n"
+    "  vec3 p = (MA * va + MB * vb4).xyz;\n"
+    "  vec3 wp = (S[D.state].world * vec4(p, 1.0)).xyz;\n"
+    "  vec3 wn = normalize((S[D.state].world * vec4(n, 0.0)).xyz);\n" /* NORMALIZENORMALS */
+    "  gl_Position = S[D.state].wvp * vec4(p, 1.0);\n"
+    "  o_z = gl_Position.w;\n"
+    "  gl_Position.x += gl_Position.w * D.params.y;\n"
+    "  gl_Position.y -= gl_Position.w * D.params.z;\n"
+    "  o_uv = uvs[gl_VertexIndex];\n"
+    "  vec3 amb = S[D.state].ambient.rgb, dif = vec3(0.0);\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    CL l = S[D.state].light[k];\n"
+    "    if (l.dir.w == 0.0) continue;\n"
+    "    float at = 1.0;\n"
+    "    vec3 Ld = l.dir.xyz;\n"
+    "    if (l.dir.w > 1.5) {\n"
+    "      vec3 d = l.pos.xyz - wp;\n"
+    "      float dist = length(d);\n"
+    "      if (dist > l.pos.w) continue;\n"
+    "      Ld = d / max(dist, 1e-6);\n"
+    "      at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
+    "    }\n"
+    "    amb += l.ambient.rgb * at;\n"
+    "    dif += l.diffuse.rgb * at * max(dot(wn, Ld), 0.0);\n"
+    "  }\n"
+    "  o_col = vec4(sat(S[D.state].ma.rgb * amb + S[D.state].md.rgb * dif + S[D.state].me.rgb), S[D.state].md.a);\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef GFX_FS\n"
+    "layout(set = 0, binding = 4) uniform sampler2D t;\n"
+    "layout(location = 0) in vec2 i_uv;\n"
+    "layout(location = 1) in vec4 i_col;\n"
+    "layout(location = 2) in float i_z;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "void main() {\n"
+    "  vec4 tx = texture(t, i_uv), tf = S[D.state].tf;\n"
+    "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * i_col.rgb) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
+    "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"          /* MODULATE2X, then MODULATE4X */
+    "  if (!(a * 255.0 > D.params.x)) discard;\n"
+    "  vec4 fog = S[D.state].fog;\n"
+    "  if (fog.z > 0.0) c = mix(S[D.state].fog_col.rgb, c, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
+    "  oc = vec4(c, a);\n"
+    "}\n"
+    "#endif\n";
+
+/* the zone's and characters' bindings (push descriptors): 0 the frame's uniforms (WF), 1 the instances or the bone
+ * palettes, 2 the lights or the characters' states, 3 the vertices, 4 the texture, 5 the characters' uvs */
+enum
+{
+    W_FRAME = 0,
+    W_INST = 1,
+    W_LIGHTS = 2,
+    W_VB = 3,
+    W_TEX = 4,
+    W_UV = 5,
+    W_COUNT = 6,
+};
+
+static struct
+{
+    int tried, ok;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkShaderModule vs[3], fs[5]; /* the zone's by W_PIXEL (and W_ATEST), then the characters' (made on first use) */
+    struct
+    {
+        uint32_t key[2];
+        VkPipeline p;
+    } pipe[64];
+    uint32_t npipe;
+} g_world;
+
+static const VkDynamicState WORLD_DYNAMIC[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+    VK_DYNAMIC_STATE_DEPTH_BIAS,
+    VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
+    VK_DYNAMIC_STATE_CULL_MODE,
+    VK_DYNAMIC_STATE_FRONT_FACE,
+    VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY,
+    VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+    VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+    VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+};
+
+static int world_init(void)
+{
+    if (g_world.tried)
+        return g_world.ok;
+    g_world.tried = 1;
+    VkDescriptorSetLayoutBinding b[W_COUNT];
+    const VkShaderStageFlags both = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    b[W_FRAME] = (VkDescriptorSetLayoutBinding){ W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    b[W_INST] = (VkDescriptorSetLayoutBinding){ W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL };
+    b[W_LIGHTS] = (VkDescriptorSetLayoutBinding){ W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL };
+    b[W_VB] = (VkDescriptorSetLayoutBinding){ W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    b[W_TEX] = (VkDescriptorSetLayoutBinding){ W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_UV] = (VkDescriptorSetLayoutBinding){ W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dl.bindingCount = W_COUNT;
+    dl.pBindings = b;
+    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_world.dsl));
+    VkPushConstantRange pcr = { both, 0, 32 };
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &g_world.dsl;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &pcr;
+    VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, &g_world.layout));
+    g_world.ok = g_world.dsl && g_world.layout;
+    return g_world.ok;
+}
+
+/* one stage of the zone's (chars 0) or the characters' (1) functions, compiled on first use */
+static VkShaderModule world_module(int chars, int pixel, int atest, int fragment)
+{
+    VkShaderModule* m = chars ? (fragment ? &g_world.fs[4] : &g_world.vs[2]) : fragment ? &g_world.fs[pixel * 2 + atest] : &g_world.vs[pixel];
+    if (*m)
+        return *m;
+    const char* text = chars ? CHARS_GLSL : WORLD_GLSL;
+    size_t n = strlen(text) + 64;
+    char* src = (char*)malloc(n);
+    snprintf(src, n, "#define W_PIXEL %d\n#define W_ATEST %d\n%s", pixel, atest, text);
+    *m = compile_glsl(src, fragment);
+    free(src);
+    if (!*m)
+        fprintf(stderr, "[recomp] gfx: scene renderer %s functions failed\n", chars ? "characters'" : "zone's");
+    return *m;
+}
+
+/* a pipeline into the current targets: the zone's (pixel, atest, blend) or the characters' */
+static VkPipeline world_pipeline(int chars, int pixel, int atest, int blend, GfxTex* depth)
+{
+    uint32_t df = depth ? (uint32_t)depth->vf : 0, sf = depth && depth->has_stencil ? df : 0;
+    uint32_t key[2] = { (uint32_t)chars | (uint32_t)pixel << 1 | (uint32_t)atest << 2 | (uint32_t)blend << 3 | (uint32_t)(sf != 0) << 4 |
+            (uint32_t)g_rt->vf << 8,
+        df };
+    for (uint32_t i = 0; i < g_world.npipe; ++i)
+        if (g_world.pipe[i].key[0] == key[0] && g_world.pipe[i].key[1] == key[1])
+            return g_world.pipe[i].p;
+    if (g_world.npipe == sizeof g_world.pipe / sizeof g_world.pipe[0])
+        return VK_NULL_HANDLE;
+    VkShaderModule vs = world_module(chars, pixel, atest, 0), fs = world_module(chars, pixel, atest, 1);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vs && fs)
+    {
+        VkPipelineColorBlendAttachmentState bs = { 0 };
+        bs.colorWriteMask = 0xF;
+        if (blend)
+        {
+            bs.blendEnable = VK_TRUE;
+            bs.srcColorBlendFactor = bs.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            bs.dstColorBlendFactor = bs.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        }
+        p = make_pipeline(vs, fs, g_world.layout, &bs, g_rt->vf, (VkFormat)df, (VkFormat)sf, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            VK_POLYGON_MODE_FILL, WORLD_DYNAMIC, sizeof WORLD_DYNAMIC / sizeof WORLD_DYNAMIC[0], 0);
+    }
+    /* (a failure is kept too: not tried again every draw) */
+    g_world.pipe[g_world.npipe].key[0] = key[0], g_world.pipe[g_world.npipe].key[1] = key[1];
+    g_world.pipe[g_world.npipe++].p = p;
+    return p;
+}
+
+static void world_write(VkWriteDescriptorSet* w, uint32_t binding, VkDescriptorType type, const VkDescriptorBufferInfo* bi,
+    const VkDescriptorImageInfo* ii)
+{
+    *w = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    w->dstBinding = binding;
+    w->descriptorCount = 1;
+    w->descriptorType = type;
+    w->pBufferInfo = bi;
+    w->pImageInfo = ii;
+}
+
+/* the state the zone's and characters' draws share: no stencil, front faces clockwise (D3D's), the depth tested as
+ * the game tests its zone (LESSEQUAL) when there is one, no scissor */
+static void world_state(GfxTex* depth)
+{
+    VkCommandBuffer cb = g_cb;
+    int32_t none[4] = { 0, 0, 0, 0 };
+    set_scissor(none);
+    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetDepthTestEnable(cb, depth ? VK_TRUE : VK_FALSE);
+    vkCmdSetDepthCompareOp(cb, VK_COMPARE_OP_LESS_OR_EQUAL);
+    vkCmdSetDepthBiasEnable(cb, VK_TRUE);
+}
+
+int gfx_world_supported(void) { return g_dev != VK_NULL_HANDLE; }
+
+void gfx_world_time(int pass)
+{
+    if (!g_dev || !gfx_pass_timing_on())
+        return;
+    end_pass();
+    g_pass_next = pass == 1 ? GFX_PASS_WORLD : pass == 2 ? GFX_PASS_CHARS : -1;
+}
+
+/* the lamps lit this frame, kept for the clustered lamps (scene_lamps, not on Vulkan yet) */
+static struct
+{
+    GfxWorldLight l[256];
+    uint32_t n;
+} g_lamps;
+
+void gfx_lamps(const GfxWorldLight* l, uint32_t n)
+{
+    g_lamps.n = n > 256 ? 256 : n;
+    if (g_lamps.n)
+        memcpy(g_lamps.l, l, g_lamps.n * sizeof *l);
+}
+
+int gfx_world_draw(const GfxWorldFrame* f)
+{
+    if (!g_dev || !f->nitem || !world_init())
+        return 0;
+    uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
+    /* timed: a render pass of its own (an extra load and store of the target, only while timing) */
+    int timed = gfx_pass_timing_on();
+    if (timed)
+        end_pass(), g_pass_next = GFX_PASS_WORLD;
+    if (!begin_pass())
+    {
+        g_pass_next = -1;
+        return 0;
+    }
+    GfxTex* depth = depth_attachment();
+    int drew = 0;
+    if (!set_viewport(f->vp))
+        goto done;
+    VkCommandBuffer cb = g_cb;
+    struct
+    {
+        float vp[16];
+        float params[4];
+    } fu;
+    gfx_mat_mul(fu.vp, f->view, f->proj);
+    fu.params[0] = f->alpha_ref, fu.params[1] = f->pixel[0], fu.params[2] = f->pixel[1], fu.params[3] = 0.0f;
+    VkDescriptorBufferInfo bi[4];
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof fu, RING_ALIGN, &buf, &off), &fu, sizeof fu);
+    bi[0] = (VkDescriptorBufferInfo){ buf, off, sizeof fu };
+    size_t isz = (size_t)f->ninst * sizeof(GfxWorldInst);
+    memcpy(ring(isz, RING_ALIGN, &buf, &off), f->inst, isz);
+    bi[1] = (VkDescriptorBufferInfo){ buf, off, isz };
+    GfxWorldLight none;
+    memset(&none, 0, sizeof none);
+    uint32_t nl = f->nlight ? f->nlight : 1;
+    memcpy(ring((size_t)nl * sizeof none, RING_ALIGN, &buf, &off), f->nlight ? f->light : &none, (size_t)nl * sizeof none);
+    bi[2] = (VkDescriptorBufferInfo){ buf, off, (size_t)nl * sizeof none };
+    world_state(depth);
+    int pixel = f->mode == 2;
+    VkPipeline cur = VK_NULL_HANDLE;
+    int cull = -1, bias = INT_MIN, write = -1, topo = -1;
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxWorldItem* it = &f->item[i];
+        if (!it->vb || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+            continue;
+        int blend = (it->flags & GFX_WORLD_BLEND) != 0;
+        VkPipeline p = world_pipeline(0, pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, depth);
+        if (!p)
+            continue;
+        if (p != cur)
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p), cur = p;
+        if (!blend != write)
+            vkCmdSetDepthWriteEnable(cb, depth && !blend ? VK_TRUE : VK_FALSE), write = !blend;
+        int c = (it->flags & GFX_WORLD_TWOSIDED) ? 0 : (it->flags & GFX_WORLD_MIRRORED) ? 1 : 2;
+        if (c != cull)
+            vkCmdSetCullMode(cb, c == 2 ? VK_CULL_MODE_BACK_BIT : c == 1 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE), cull = c;
+        int zb = blend ? f->zbias_blend : f->zbias_opaque;
+        if (zb != bias)
+            vkCmdSetDepthBias(cb, -(float)zb, 0.0f, -(float)zb * 0.5f), bias = zb;
+        int strip = it->prim == GFX_TRIANGLESTRIP;
+        if (strip != topo)
+            vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+        GfxSampler sk = it->samp;
+        sk.addr_u = sk.addr_v = sk.addr_w = (it->flags & GFX_WORLD_CLAMP) ? 3 : 1;
+        if (g_fxs.fx != 0.0f && g_fxs.aniso > 1.0f && it->tex->levels > 1 && it->tex->levels < 32 && sk.min >= 2 &&
+            it->tex->filled == (1u << it->tex->levels) - 1)
+            sk.min = 3, sk.mip = 2, sk.max_aniso = (uint8_t)(g_fxs.aniso > 16.0f ? 16.0f : g_fxs.aniso);
+        VkDescriptorImageInfo ii = { sampler(&sk), it->tex->view, VK_IMAGE_LAYOUT_GENERAL };
+        bi[3] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w[5];
+        world_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+        world_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+        world_write(&w[2], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+        world_write(&w[3], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
+        world_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 5, w);
+        uint32_t dc[2] = { it->inst, it->flags };
+        vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof dc, dc);
+        it->vb->used = g_serial;
+        it->tex->used = g_serial, it->tex->rec = g_cb_index;
+        vkCmdDraw(cb, vertex_count(it->prim, it->count), 1, it->first, 0);
+        ++drew;
+    }
+    g_bound = VK_NULL_HANDLE; /* the game's next draw binds its own */
+    g_cmd_draws += drew;
+done:
+    if (timed)
+        end_pass();
+    if (gfx_profiling)
+        g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws += drew;
+    return drew > 0;
+}
+
+int gfx_chars_draw(const GfxCharFrame* f)
+{
+    if (!g_dev || !f->nitem || !f->nbones || !world_init())
+        return 0;
+    uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
+    int timed = gfx_pass_timing_on();
+    if (timed)
+        end_pass(), g_pass_next = GFX_PASS_CHARS;
+    if (!begin_pass())
+    {
+        g_pass_next = -1;
+        return 0;
+    }
+    GfxTex* depth = depth_attachment();
+    int drew = 0;
+    VkPipeline p = world_pipeline(1, 0, 1, 0, depth);
+    if (!p || !set_viewport(f->vp))
+        goto done;
+    VkCommandBuffer cb = g_cb;
+    VkDescriptorBufferInfo bi[5];
+    VkBuffer buf;
+    VkDeviceSize off;
+    size_t psz = (size_t)f->nbones * 64, ssz = (size_t)f->nstate * sizeof(GfxCharState);
+    memcpy(ring(psz, RING_ALIGN, &buf, &off), f->palette, psz);
+    bi[0] = (VkDescriptorBufferInfo){ buf, off, psz };
+    memcpy(ring(ssz, RING_ALIGN, &buf, &off), f->state, ssz);
+    bi[1] = (VkDescriptorBufferInfo){ buf, off, ssz };
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    world_state(depth);
+    vkCmdSetDepthWriteEnable(cb, depth ? VK_TRUE : VK_FALSE);
+    vkCmdSetCullMode(cb, VK_CULL_MODE_NONE);
+    vkCmdSetDepthBias(cb, 0.0f, 0.0f, 0.0f);
+    int topo = -1;
+    struct
+    {
+        float params[4];
+        uint32_t palette, state, mirror, pad;
+    } pc = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f }, 0, 0, 0, 0 };
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxCharItem* it = &f->item[i];
+        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+            continue;
+        int strip = it->prim == GFX_TRIANGLESTRIP;
+        if (strip != topo)
+            vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+        VkDescriptorImageInfo ii = { sampler(&it->samp), it->tex->view, VK_IMAGE_LAYOUT_GENERAL };
+        bi[2] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
+        bi[3] = (VkDescriptorBufferInfo){ it->uv->b, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w[5];
+        world_write(&w[0], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[0], NULL);
+        world_write(&w[1], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+        world_write(&w[2], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+        world_write(&w[3], W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
+        world_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 5, w);
+        pc.palette = it->palette, pc.state = it->state, pc.mirror = it->mirror;
+        vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+        vkCmdBindIndexBuffer(cb, it->ib->b, 0, it->index_size == 4 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+        it->vb->used = it->uv->used = it->ib->used = g_serial;
+        it->tex->used = g_serial, it->tex->rec = g_cb_index;
+        vkCmdDrawIndexed(cb, vertex_count(it->prim, it->count), 1, it->first, 0, 0);
+        ++drew;
+    }
+    g_bound = VK_NULL_HANDLE;
+    g_cmd_draws += drew;
+done:
+    if (timed)
+        end_pass();
+    if (gfx_profiling)
+        g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws += drew;
+    return drew > 0;
+}
+
+/* the scene renderer's shadows and bounce light are Metal's only so far */
 void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
 void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
 void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
-int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
-void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
 
 /* a buffer of at least need bytes in *b (made again, half as large again, when smaller; the old one let go
  * once the GPU is past it): the GPU's own, or one the CPU writes (host) */

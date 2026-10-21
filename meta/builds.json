@@ -682,6 +682,7 @@
         "water_model_loaded": "0x10175682",
         "lod_pick": "0x1017b2cc",
         "lod_pick2": "0x1017c74d",
+        "fx_draw": "0x10045e80",
         "frame_pace": "0x10012b38",
         "frame_ease": "0x1003d077",
         "frame_cam1": "0x1001fb36",
@@ -780,7 +781,8 @@
         "frame_count": "0x10014bf0",
         "frame_yield": "0x1023c2f0",
         "frame_net": "0x100f9d70",
-        "frame_net_wait": "0x100eda90"
+        "frame_net_wait": "0x100eda90",
+        "mesh_draw": "0x10029e10"
       },
       "geometry": {
         "layout": 1,
