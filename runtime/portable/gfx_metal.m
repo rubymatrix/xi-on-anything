@@ -5297,6 +5297,11 @@ static int cam_cut(void) { return g_cam_cut == g_serial; }
 
 #include "gfx_ao_metal.inc"
 
+static int g_fixed_light; /* the zone's light is fixed (scene.c, the weather record): the modern fog a light dust */
+void gfx_set_fixed_light(int fixed) { g_fixed_light = fixed != 0; }
+static int g_weather = -1; /* the zone's weather (host64, the server's packets): the ground mist and its drift */
+void gfx_set_weather(int weather) { g_weather = weather; }
+
 /* a zone batch's opaque items and their world matrices, kept for lamp_zone_cubes at the frame's end (a frame draws the
  * zone in several batches) */
 static void lamp_zone_collect(const GfxWorldFrame* f)
@@ -6664,7 +6669,7 @@ static const char POST_MSL[] =
     "  float4 lo;     // the small textures' size, 1 / size\n"
     "  float4 hist;   // x: last frame's history is there and lines up; y: its weight\n"
     "  float4 pcam;   // last frame's camera, world\n"
-    "  // the fog volume (fog_modern with fog_volume): the air's own colour (w: the fog's fixed height, world y, for the ground mist);\n"
+    "  // the fog volume (fog_modern with fog_volume): the air's own colour;\n"
     "  // x the lamps' halo density, y how far above the\n"
     "  // game's light its lantern hangs, z the ground fog's strength, w its noise's scale; the noise's drift (xyz) and w 1\n"
     "  // in the volume; the lamps' tiles (origin x, y, across, down; 0 none)\n"
@@ -6728,17 +6733,14 @@ static const char POST_MSL[] =
     "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
     "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
     "  float ray = 0.75 * (1.0 + mu * mu);\n"
-    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0; float3 A = 0.0;\n"
+    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0, llast = 1.0; float3 A = 0.0;\n"
     "  for (int i = 0; i < n; ++i) {\n"
     "    // steps closer together near the camera (t grows as the square): beams through trunks and arches are near\n"
     "    float f = (float(i) + j) / float(n), t = dist * f * f, seg = 2.0 * dist * f / float(n);\n"
     "    float3 x = u.cam.xyz + dir * t;\n"
     "    float hf = exp(clamp(u.p.y * (x.y - u.cam.y), -10.0, 3.0)); // y down: above the camera thinner\n"
     "    float rho = u.p.x * hf;\n"
-    "    if (vol && u.fv.z > 0.0) {\n" /* ground mist: its own layer below about the eye's height (y down), in drifting patches */
-    "      float low = saturate((x.y - (u.airc.w - 2.0)) / 1.2);\n" /* up to some 2 units over the fixed height (airc.w), thicker below it */
-    "      if (low > 0.0) rho += u.fv.z * 0.2 * low * smoothstep(0.3, 0.65, su_ground(u, x));\n"
-    "    }\n"
+
     "    float lit = 1.0, inr = 0.0;\n"
     "    for (int c = 0; c < 4; ++c) {\n"
     "      if (u.cas[c].w == 0.0 || t > u.cas[c].x) continue;\n"
@@ -6747,7 +6749,7 @@ static const char POST_MSL[] =
     "        lit = sm.sample_compare(cmp, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), uint(c), h.z - 2e-4), inr = 1.0;\n"
     "      break;\n"
     "    }\n"
-    "    ls += lit, lin += inr;\n"
+    "    ls += lit, lin += inr, llast = lit;\n"
     "    float a = rho * seg;\n"
     "    L += T * a * lit;\n"
     "    if (vol && !sky) A += T * a;\n" /* the air's own light: the sky's, unshadowed */
@@ -6758,6 +6760,23 @@ static const char POST_MSL[] =
     "  float3 o = u.sunc.rgb * (L * ph);\n"
     "  if (vol && !sky) {\n"
     "    o += u.airc.rgb * (A * ray);\n"
+    "    if (u.fv.z > 0.0) {\n" /* the ground mist: a layer some 1.5 units deep over the surface this ray ends on (the ground taken as */
+    "      // level there), in drifting patches; its depth along the ray in closed form, lit as the surface is\n"
+    "      float sl = max(abs(dir.y), 0.2), H = 1.5;\n"
+    "      float3 P = u.cam.xyz + dir * dist;\n"
+    "      // only over ground: the surface's facing from the depths beside it (up, y down: -y); characters and walls none\n"
+    "      float2 fx = fp + float2(u.vp.z * u.lo.z, 0.0), fy = fp + float2(0.0, u.vp.w * u.lo.w);\n"
+    "      float d1, d2;\n"
+    "      float3 r1 = su_dir(u, fx, dt.read(uint2(clamp(fx, u.vp.xy, u.vp.xy + u.vp.zw - 1.0))), d1);\n"
+    "      float3 r2 = su_dir(u, fy, dt.read(uint2(clamp(fy, u.vp.xy, u.vp.xy + u.vp.zw - 1.0))), d2);\n"
+    "      float3 nn = cross(r1 * d1 - dir * dist, r2 * d2 - dir * dist);\n"
+    "      float up = length(nn) > 1e-6 ? abs(normalize(nn).y) : 0.0;\n"
+    "      float edge = saturate(1.0 - max(abs(d1 - dist), abs(d2 - dist)) / (0.05 * dist + 0.3));\n" /* (a silhouette's edge: no facing to trust) */
+    "      float tm = u.fv.z * 0.12 * smoothstep(0.75, 0.95, up) * edge * smoothstep(0.3, 0.65, su_ground(u, P)) * (H / sl) * (1.0 - exp(-dist * sl / H));\n"
+    "      float am = 1.0 - exp(-tm);\n"
+    "      o += (u.airc.rgb * ray + u.sunc.rgb * (ph * llast)) * (T * am);\n"
+    "      T *= 1.0 - am;\n"
+    "    }\n"
     "    if (u.lt.z > 0.0 && u.fv.x > 0.0) {\n" /* the lamps in this pixel's tile: their light in the mist round them */
     "      int2 tq = int2((fp - u.lt.xy) / 64.0);\n"
     "      if (all(tq >= 0) && tq.x < int(u.lt.z) && tq.y < int(u.lt.w)) {\n"
@@ -6771,6 +6790,7 @@ static const char POST_MSL[] =
     "    }\n"
     "  }\n"
     "  r.c = float4(select(float3(0.0), o, isfinite(o)), dist);\n"
+    "  r.t = sky ? 1.0 : T;\n"
     "  return r;\n"
     "}\n"
     "// over frames: this frame's march and last frame's result where this texel's point was then, clamped to this frame's\n"
@@ -7119,14 +7139,18 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
         if (g_fxs.post_shafts <= 0.0f)
             for (int c = 0; c < 3; ++c)
                 u.sunc[c] = fmaxf(sc[c], 0.0f) * g_shd.u.info[2] * (0.15f + 0.6f * low * low);
-        u.airc[3] = g_fx.has_focus ? fog_ref() : u.cam[1] + 3.0f; /* the ground mist at the zone's fixed height (y down) */
         u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]);
         u.cam[3] = fog_end * 1.5f;
         u.fv[0] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f, u.fv[1] = g_fxs.fog_lamp_lift;
-        u.fv[2] = fmaxf(g_fxs.fog_ground, 0.0f), u.fv[3] = 1.0f / fmaxf(g_fxs.fog_ground_size, 1.0f);
-        double t = (double)gfx_now_ns() * 1e-9;
-        float sp = fmaxf(g_fxs.fog_drift, 0.0f);
-        u.wind[0] = (float)fmod(t * sp, 4096.0), u.wind[1] = 0.0f, u.wind[2] = (float)fmod(t * sp * 0.6, 4096.0), u.wind[3] = 1.0f;
+        /* the weather: fog lies thick on the ground, rain and snow raise some, wind and gales thin it and blow it on */
+        float wm = g_weather == 3 ? 2.0f : g_weather == 6 || g_weather == 7 || g_weather == 12 ? 1.8f : g_weather == 10 ? 0.6f
+                 : g_weather == 11 || g_weather == 13 ? 0.35f : 1.0f;
+        float ws = g_weather == 10 ? 3.0f : g_weather == 11 || g_weather == 13 || g_weather == 7 ? 6.0f : 1.0f;
+        u.fv[2] = fmaxf(g_fxs.fog_ground, 0.0f) * wm, u.fv[3] = 1.0f / fmaxf(g_fxs.fog_ground_size, 1.0f);
+        static double drift, last_t; /* the noise's offset, carried frame to frame (a speed change doesn't jump it) */
+        double t = (double)gfx_now_ns() * 1e-9, dt = last_t > 0.0 ? fmin(t - last_t, 0.25) : 0.0;
+        last_t = t, drift = fmod(drift + dt * fmaxf(g_fxs.fog_drift, 0.0f) * ws, 4096.0);
+        u.wind[0] = (float)drift, u.wind[1] = 0.0f, u.wind[2] = (float)(drift * 0.6), u.wind[3] = 1.0f;
         if (g_fxs.scene_lamps > 0.0f && g_lamps.binned == g_serial && g_lamps.lb && g_lamps.tb)
             u.lt[0] = g_lamps.lu[0], u.lt[1] = g_lamps.lu[1], u.lt[2] = g_lamps.lu[4], u.lt[3] = g_lamps.lu[5];
     }
@@ -7205,10 +7229,12 @@ static float fog_at_cam(float sigma, float cam_y)
 
 static float fog_sigma(const GfxScene* s)
 {
+
     float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
     fog_end = fminf(fmaxf(fog_end, 20.0f), 3000.0f);
     float k = fmaxf(g_fxs.fog_density, 0.0f) * 3.2f / fog_end; /* exp(-3.2): 4% */
-    return k * (1.0f - 0.85f * fminf(fmaxf(s->indoors, 0.0f), 1.0f));
+    (void)s;
+    return k * (g_fixed_light ? 0.15f : 1.0f); /* (GfxScene.indoors waits for the sun to be seen moving: too slow for this) */
 }
 
 static void scene_fog(GfxTex* color, const GfxScene* s)

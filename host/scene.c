@@ -296,6 +296,7 @@ static float scene_day(void)
     if (!env)
         return 1.0f;
     uint32_t rec = rd32(env + 0x18);
+    gfx_set_fixed_light(rec && (rd8(rec) & 1));
     if (rec && (rd8(rec) & 1))
         return 1.0f;
     float y = rdf32(env + 0xa4 + 4);
