@@ -175,7 +175,7 @@ static unsigned g_hide;
 static void hide_apply(void);
 static int g_own_shadows = -1; /* the player's Config > Shadows while host64 holds it at Off (game_shadows_follow) */
 static int g_fx_touched, g_host_touched;
-static char g_fx_keys[32][24]; /* the scene settings changed, to write */
+static char g_fx_keys[64][24]; /* the scene settings changed, to write */
 static int g_nfx_keys;
 
 /* Config > Addons: a row an installed addon (host/addons/manage.c), ADDON_VIS of them at a time
@@ -269,22 +269,30 @@ static void list_set(List* l, int i)
     menu_size(g_win_w, g_win_h, scale, &g_menu_w, &g_menu_h);
 }
 
-/* Graphics' Overall Quality: the Lighting page's settings at each level, and the contact shadows'
- * (shadow, in no menu). Low has no modern lighting, sun or contact shadows, or occlusion; Medium is the
- * defaults (gfx_fx.c); Max has every quality setting at its highest, sun shadows and bounce light at full
- * strength. Settings that are none of these are Custom. */
-static const char* const QUALITY_KEYS[] = { "light", "sun", "sun_casters", "sun_soft", "sun_detail", "ao", "ao_quality",
-    "gi", "shadow" };
+/* Graphics' Overall Quality: the scene renderer's settings at each level (and the older effects' lighting, off under
+ * it). Low: lit per vertex, no shadows, lamps, occlusion or post effects; Medium: lit per pixel into a float target,
+ * soft sun shadows (Low taps), lamps with two shadowed, occlusion low, highlights, shafts and bloom; Max: everything at
+ * its highest, as tools/replay/showcase-fx.txt has it. Settings that are none of these are Custom. */
+static const char* const QUALITY_KEYS[] = { "scene", "scene_hdr", "tonemap", "scene_shadows", "shadow_softness",
+    "shadow_soft_q", "scene_shadow_size", "scene_lamps", "scene_lamp_shadows", "scene_gi", "scene_gi_q", "scene_ao",
+    "scene_ao_q", "scene_spec", "post_shafts", "post_bloom", "post_dof", "light", "sun", "ao", "gi", "shadow", "rays",
+    "bloom" };
 enum
 {
     NQUALITY_KEYS = sizeof QUALITY_KEYS / sizeof QUALITY_KEYS[0],
     NQUALITY = 3,
 };
 static const float QUALITY[NQUALITY][NQUALITY_KEYS] = {
-    { 0, 0, 0, 0, 2048, 0, 0, 0, 0 },             /* Low */
-    { 2, 0.45f, 0, 0, 4096, 0.8f, 1, 0, 0.3f },   /* Medium */
-    { 2, 1.0f, 0, 0.03f, 8192, 0.8f, 2, 3.0f, 0.3f }, /* Max */
+    { 1, 0, 0, 0, 0, 1, 2048, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, /* Low */
+    { 2, 1, 1, 1, 1, 1, 2048, 1, 2, 0, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 }, /* Medium */
+    { 2, 1, 1, 1, 1, 2, 2048, 1, 4, 1, 2, 1, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 }, /* Max */
 };
+
+/* Graphics' Renderer: the scene renderer lit per pixel or per vertex, or the older effects on the game's own draws
+ * (scene 0). The older effects' lighting is turned off under the scene renderer (its own shadows, occlusion and post
+ * effects replace them) and back to its defaults (gfx_fx.c) for it. */
+static const char* const LEGACY_KEYS[] = { "light", "sun", "ao", "gi", "shadow", "rays", "bloom" };
+static const float LEGACY_ON[] = { 2.0f, 0.45f, 0.8f, 0.0f, 0.3f, 0.6f, 0.3f };
 
 /* the level the settings are at; NQUALITY (Custom) when none */
 static int quality_now(void)
@@ -318,6 +326,8 @@ static float get(const Row* r)
         return g_ui_aspect;
     if (!strcmp(r->key, "@quality"))
         return (float)quality_now();
+    if (!strcmp(r->key, "@renderer"))
+        return roundf(gfx_fx_get("scene"));
     if (!strcmp(r->key, "@nameplates"))
         return g_setup.nameplate_fix ? (float)*g_setup.nameplate_fix : 1.0f;
     if (!strcmp(r->key, "@nameplate_size"))
@@ -339,7 +349,7 @@ static void fx_put(const char* key, float v)
     int known = 0;
     for (int i = 0; i < g_nfx_keys; ++i)
         known |= !strcmp(g_fx_keys[i], key);
-    if (!known && g_nfx_keys < 32)
+    if (!known && g_nfx_keys < 64)
         SDL_strlcpy(g_fx_keys[g_nfx_keys++], key, sizeof g_fx_keys[0]);
     g_fx_touched = 1;
 }
@@ -378,6 +388,12 @@ static void set(const Row* r, float v)
         g_ui_aspect = v;
         user32_set_ui_aspect(v);
         g_host_touched = 1;
+    }
+    else if (!strcmp(r->key, "@renderer"))
+    {
+        fx_put("scene", v);
+        for (size_t i = 0; i < sizeof LEGACY_KEYS / sizeof LEGACY_KEYS[0]; ++i)
+            fx_put(LEGACY_KEYS[i], v > 0.5f ? 0.0f : LEGACY_ON[i]);
     }
     else if (!strcmp(r->key, "@quality"))
     {
@@ -475,12 +491,19 @@ static const Row DISPLAY_ROWS[] = {
 static const Row GRAPHICS_ROWS[] = {
     HEADER_ROW("Quality"),
     { "Overall Quality", "@quality", CHOICE, 4, { "Low", "Medium", "Max", "Custom" }, { 0, 1, 2, 3 }, 0, 0,
-        "Sets the Lighting page: Low has no modern lighting, shadows or occlusion. Custom: as you set them." },
+        "Sets the renderer, shadows, lighting and post effects. Low is lightest; Max has everything on. Custom: as you set them." },
+    { "Renderer", "@renderer", CHOICE, 3, { "Per Pixel", "Per Vertex", "Legacy" }, { 2, 1, 0 }, 0, 0,
+        "How the world is drawn: the modern renderer lit per pixel or per vertex, or the game's own draws with the older effects." },
     { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
     { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
         "Sharper ground and walls at an angle." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
     HEADER_ROW("Color"),
+    { "High Dynamic Range", "scene_hdr", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
+        "Bright lights, highlights and glows keep their brightness past white, then roll off. Modern renderer." },
+    { "Tone Mapping", "tonemap", CHOICE, 3, { "Neutral", "Soft", "Film" }, { 0, 1, 2 }, 0, 0,
+        "How the brightest parts roll off to white, with High Dynamic Range." },
+    { "Exposure", "exposure", SLIDER, 0, { 0 }, { 0 }, 0.5f, 2.0f, "How bright the whole scene is, with High Dynamic Range." },
     { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast." },
     { "Saturation", "sat", SLIDER, 0, { 0 }, { 0 }, 0.5f, 1.5f, "How strong the colors are, with Color Grading." },
     { "Contrast", "contrast", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Darker darks and brighter lights, with Color Grading." },
@@ -489,9 +512,78 @@ static const Row GRAPHICS_ROWS[] = {
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
 };
 
+static const Row SHADOWS_ROWS[] = {
+    HEADER_ROW("Sun and Moon"),
+    { "Shadows", "scene_shadows", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How dark the sun's and moon's shadows are. Off at the left." },
+    { "Softness", "shadow_softness", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
+        "Shadows sharp where things meet the ground and softer farther out. Off at the left: one even edge." },
+    { "Sun Size", "sun_size", SLIDER, 0, { 0 }, { 0 }, 0.5f, 6.0f, "A larger sun softens shadows more. It grows near the horizon." },
+    { "Soft Quality", "shadow_soft_q", CHOICE, 2, { "Low", "High" }, { 1, 2 }, 0, 0,
+        "How many samples a soft edge takes. Low is lightest on the GPU." },
+    { "Detail", "scene_shadow_size", CHOICE, 3, { "Normal", "High", "Ultra" }, { 2048, 4096, 8192 }, 0, 0,
+        "Sharper shadows close up. Higher uses more video memory." },
+    HEADER_ROW("Night"),
+    { "Moon Shadows", "moon_shadow", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How dark the moon's shadows are next to the sun's." },
+    { "Lamp Fill", "shadow_fill", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f,
+        "How much a lamp's light fills the sun's and moon's shadows around it. Off at the left." },
+    HEADER_ROW("Lamps"),
+    { "Lamp Shadows", "scene_lamp_shadows", CHOICE, 4, { "Off", "1", "2", "4" }, { 0, 1, 2, 4 }, 0, 0,
+        "How many of the nearest lamps cast shadows of characters." },
+    { "Walls Cast", "scene_lamp_zone", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
+        "Walls and props cast lamp shadows too, not only characters." },
+};
+
 static const Row LIGHTING_ROWS[] = {
-    { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f,
+    HEADER_ROW("Lamps"),
+    { "Lamp Light", "scene_lamps", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f,
+        "Every lit lamp and torch lights the world around it. Off at the left: the game's few nearby lights." },
+    HEADER_ROW("Night"),
+    { "Night Brightness", "night_exposure", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f,
+        "How bright the moon and sky light are at midnight. Lamps stay as bright. At the right: as the game has it." },
+    { "Night Tint", "night_tint", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "A cool, grey moonlight at night." },
+    HEADER_ROW("Bounce Light"),
+    { "Strength", "scene_gi", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f,
         "Sunlit ground and walls light what stands near them. Off at the left." },
+    { "Quality", "scene_gi_q", CHOICE, 3, { "Low", "High", "Per Pixel" }, { 1, 2, 3 }, 0, 0,
+        "How finely the bounce light is worked out. Low is lightest on the GPU." },
+    HEADER_ROW("Ambient Occlusion"),
+    { "Strength", "scene_ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet. Off at the left." },
+    { "Quality", "scene_ao_q", CHOICE, 2, { "Low", "High" }, { 1, 2 }, 0, 0,
+        "How many samples the shade takes a frame. Low is lightest on the GPU." },
+    { "Radius", "scene_ao_radius", SLIDER, 0, { 0 }, { 0 }, 0.25f, 3.0f, "How far from a corner the shade reaches." },
+    HEADER_ROW("Highlights"),
+    { "Strength", "scene_spec", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "The sun's, moon's and lamps' glint on stone and armor. Off at the left." },
+    { "Wetness", "scene_spec_wet", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Surfaces as if after rain: sharper, brighter highlights." },
+};
+
+static const Row ATMOSPHERE_ROWS[] = {
+    HEADER_ROW("Sun Shafts"),
+    { "Strength", "post_shafts", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "Shafts of sunlight through the air, shadowed by the world. Off at the left." },
+    { "Quality", "shafts_q", CHOICE, 2, { "Low", "High" }, { 1, 2 }, 0, 0, "How many steps the shafts take. Low is lightest on the GPU." },
+    HEADER_ROW("Bloom"),
+    { "Strength", "post_bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights and the sky. Off at the left." },
+    { "Effect Glow", "bloom_emissive_fx", SLIDER, 0, { 0 }, { 0 }, 0, 4.0f, "How strongly spells and effects glow." },
+    { "Lamp Glow", "bloom_emissive_lights", SLIDER, 0, { 0 }, { 0 }, 0, 4.0f, "How strongly lamps and lanterns glow." },
+    HEADER_ROW("Depth of Field"),
+    { "Strength", "post_dof", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "Softens the far distance, keeping you sharp. Off at the left." },
+    { "Sharp Distance", "dof_range", SLIDER, 0, { 0 }, { 0 }, 10.0f, 150.0f, "How far behind you the world stays sharp." },
+    HEADER_ROW("Fog"),
+    { "Haze", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun. A modern fog is coming." },
+    HEADER_ROW("Water"),
+    { "Modern Water", "water", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
+        "Water that bends and reflects the world, with foam at its edges. OFF: as the game draws it." },
+    { "Reflection", "water_reflect", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How much of the sky the water mirrors." },
+    { "Sun Highlight", "water_spec", SLIDER, 0, { 0 }, { 0 }, 0, 4.0f, "The sun's glint on the water." },
+    { "Foam", "water_foam", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Foam where the water meets the shore." },
+    { "Surface Lift", "water_lift", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Raises the water over shallow ground it would sink into." },
+};
+
+/* the older effects on the game's own draws (Renderer: Legacy); the modern renderer turns their lighting off */
+static const Row LEGACY_ROWS[] = {
+    HEADER_ROW("Lighting"),
+    { "Modern Lighting", "light", CHOICE, 3, { "Off", "Per Vertex", "Per Pixel" }, { 0, 1, 2 }, 0, 0,
+        "The game's draws lit with smoother light." },
+    { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f, "Sunlit ground and walls light what stands near them. Off at the left." },
     HEADER_ROW("Shadows"),
     { "Sun Shadows", "sun", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How dark the sun's shadows are." },
     { "Shadow Casters", "sun_casters", CHOICE, 3, { "Characters", "World", "All" }, { 1, 2, 0 }, 0, 0,
@@ -507,22 +599,10 @@ static const Row LIGHTING_ROWS[] = {
     { "Quality", "ao_quality", CHOICE, 3, { "Low", "Medium", "High" }, { 0, 1, 2 }, 0, 0,
         "How many samples the shade and the contact shadows take a frame. Low is lightest on the GPU." },
     { "Radius", "radius", SLIDER, 0, { 0 }, { 0 }, 0.25f, 3.0f, "How far from a corner the shade reaches." },
-};
-
-static const Row ATMOSPHERE_ROWS[] = {
-    HEADER_ROW("Fog"),
-    { "Density", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun." },
-    HEADER_ROW("God Rays"),
-    { "Strength", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun." },
-    HEADER_ROW("Bloom"),
-    { "Strength", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights." },
-    { "Threshold", "threshold", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f, "How bright a light must be to glow. Lower: more glows." },
-    HEADER_ROW("Water"),
-    { "Modern Water", "water", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
-        "Water that bends and reflects the world, with foam at its edges. OFF: as the game draws it." },
-    { "Reflection", "water_reflect", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How much of the sky the water mirrors." },
-    { "Sun Highlight", "water_spec", SLIDER, 0, { 0 }, { 0 }, 0, 4.0f, "The sun's glint on the water." },
-    { "Foam", "water_foam", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Foam where the water meets the shore." },
+    HEADER_ROW("Glow"),
+    { "God Rays", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun." },
+    { "Bloom", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights." },
+    { "Bloom Threshold", "threshold", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f, "How bright a light must be to glow. Lower: more glows." },
 };
 #endif
 
@@ -591,7 +671,7 @@ static void save_fx(void)
         fprintf(stderr, "[modern] cannot write %s\n", tmp);
         return;
     }
-    int written[32] = { 0 };
+    int written[64] = { 0 };
     char line[512], key[64];
     float v;
     while (in && fgets(line, sizeof line, in))
@@ -1129,12 +1209,16 @@ static Page PAGES[] = {
     { "menu    displayw", "Display", "Window mode, resolution, the interface's size and shape, and the frame rate.",
         0x1c0209u, DISPLAY_ROWS, sizeof DISPLAY_ROWS / sizeof DISPLAY_ROWS[0] },
 #if !defined(FFXI_ANDROID_VULKAN)
-    { "menu    graphicw", "Graphics", "Overall quality, anti-aliasing, texture filtering, sharpening, color and draw distance.",
+    { "menu    graphicw", "Graphics", "Overall quality, the renderer, anti-aliasing, filtering, color and draw distance.",
         0x1c0201u, GRAPHICS_ROWS, sizeof GRAPHICS_ROWS / sizeof GRAPHICS_ROWS[0] },
-    { "menu    lightinw", "Lighting", "Bounce light, sun shadows and ambient occlusion.", 0x1c0201u,
+    { "menu    shadowsw", "Shadows", "Sun, moon and lamp shadows: how dark, how soft, how detailed.", 0x1c0201u,
+        SHADOWS_ROWS, sizeof SHADOWS_ROWS / sizeof SHADOWS_ROWS[0] },
+    { "menu    lightinw", "Lighting", "Lamps, night, bounce light, ambient occlusion and highlights.", 0x1c0201u,
         LIGHTING_ROWS, sizeof LIGHTING_ROWS / sizeof LIGHTING_ROWS[0] },
-    { "menu    atmosphw", "Atmosphere", "Fog, god rays, bloom and water.", 0x1c0201u, ATMOSPHERE_ROWS,
+    { "menu    atmosphw", "Atmosphere", "Sun shafts, bloom, depth of field, haze and water.", 0x1c0201u, ATMOSPHERE_ROWS,
         sizeof ATMOSPHERE_ROWS / sizeof ATMOSPHERE_ROWS[0] },
+    { "menu    legacyfw", "Legacy", "The older effects on the game's own draws (Renderer: Legacy).", 0x1c0201u,
+        LEGACY_ROWS, sizeof LEGACY_ROWS / sizeof LEGACY_ROWS[0] },
 #endif
     { "menu    interfaw", "Interface", "Nameplates, and items of the game's own menus shown or hidden.", 0x1c0201u,
         INTERFACE_ROWS, sizeof INTERFACE_ROWS / sizeof INTERFACE_ROWS[0] },
@@ -2370,7 +2454,7 @@ static int adv_setup(uint32_t page_vt)
     g_adv_guest = gbytes(l, (uint32_t)n);
     free(l);
     g_adv_str = gstr(ADV_NAME);
-    g_adv_help = gstr("Display, graphics, lighting, the interface and addons, beyond the original's.");
+    g_adv_help = gstr("Display, graphics, shadows, lighting, atmosphere, the interface and addons.");
     g_adv_title = gstr("Advanced");
     uint32_t vt = gheap_alloc(4 * (VTBL_SLOTS + 1), 1);
     for (int i = 0; i < VTBL_SLOTS; ++i)
