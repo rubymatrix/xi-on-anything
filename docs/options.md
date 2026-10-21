@@ -97,6 +97,7 @@ the Lighting and Atmosphere pages.
 | Specular highlights (scene 2 with `scene_shadows`, Metal): strength / lamps' share / wetness / anti-aliasing width | | `scene_spec`, `scene_spec_lamps`, `scene_spec_wet`, `scene_spec_aa` | 0 off (1 tuned) / 1 / 0 (0–1) / 1 |
 | HDR scene target (Metal): on / tonemap (0 neutral, 1 highlight shoulder, 2 ACES) / exposure / white point / knee | | `scene_hdr`, `tonemap`, `exposure`, `tone_white`, `tone_knee` | 0 / 0 / 1 / 4 / 0.8 |
 | Lamps (scene 2, Metal): every lit lamp per pixel, faded at its range / reach / glow sprite and size | | `scene_lamps`, `scene_lamp_far`, `scene_lamp_glow`, `scene_lamp_glow_size` | 0 off (1: the game's strength) / 120 / 0 / 0.6 |
+| Lamps: on/off fade (seconds) / fire flicker / character shadows from the nearest lamps (0-4) and cube size / shadow debug | | `scene_lamp_fade`, `scene_lamp_flicker`, `scene_lamp_shadows`, `scene_lamp_shadow_size`, `scene_lamp_debug` | 1.5 / 0.06 / 4 / 256 / 0 |
 | Testing: the sun held low ahead of the camera (degrees up, degrees turned); the shafts alone | | `scene_sun_test`, `scene_sun_test_turn`, `shafts_debug` | 0 / 0 / 0 |
 
 ## 6. Water

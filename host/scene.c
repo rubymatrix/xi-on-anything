@@ -669,34 +669,66 @@ static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
 #include "scene_gi.inc"
 
 /* the lamps lit now, every one (the light pool's point lights with a colour, as the game's SetLight wrapper takes them),
- * once a frame for the back end's clustered lamps (gfx_lamps, scene_lamps) */
+ * once a frame for the back end's clustered lamps (gfx_lamps, scene_lamps). Each pool slot fades in when the game lights
+ * it and out (as it last was) when the game puts it out, over scene_lamp_fade seconds, so dusk and dawn don't pop; and a
+ * fire-coloured one (red well over blue: torches, lanterns) flickers by scene_lamp_flicker, its own phase a slot - the
+ * pool's lamps hold still (their colour the same frame to frame). */
 static void lamps_frame(void)
 {
     static uint32_t done;
     if (done == g_frame_no)
         return;
     done = g_frame_no;
-    static GfxWorldLight lamps[256];
+    static GfxWorldLight lamps[256], last[256];
+    static float level[256];
+    static uint64_t t_last;
+    uint64_t now = gfx_now_ns();
+    float dt = t_last ? (float)((double)(now - t_last) * 1e-9) : 0.0f;
+    t_last = now;
+    dt = dt > 0.25f ? 0.25f : dt;
     uint32_t n = 0;
 #ifdef FFXI_SCENE_LIGHT_POOL
     if (gfx_fx_get("scene_lamps") > 0.0f)
     {
+        float fade = gfx_fx_get("scene_lamp_fade"), step = fade > 0.01f ? dt / fade : 1.0f;
+        float fl = gfx_fx_get("scene_lamp_flicker"), ts = (float)fmod((double)now * 1e-9, 1000.0);
         uint32_t l = g_scratch + 0x180;
         for (uint32_t i = 0; i < 256; ++i)
         {
             uint32_t e = FFXI_SCENE_LIGHT_POOL + i * 0x70u + 8u;
-            if (rd32(e) != 1 || rdf32(e + 0x4c) <= 0.0f || rdf32(e + 0x5c) <= 0.0f)
+            int on = rd32(e) == 1 && rdf32(e + 0x4c) > 0.0f && rdf32(e + 0x5c) > 0.0f &&
+                (rdf32(e + 4) > 0.0f || rdf32(e + 8) > 0.0f || rdf32(e + 12) > 0.0f);
+            if (on)
+            {
+                memcpy(GUEST_PTR(l), GUEST_PTR(e), 0x68);
+                light_factor(l);
+                GfxWorldLight* w = &last[i];
+                float np[3] = { rdf32(l + 0x34), rdf32(l + 0x38), rdf32(l + 0x3c) };
+                float dx = np[0] - w->pos[0], dy = np[1] - w->pos[1], dz = np[2] - w->pos[2];
+                if (level[i] > 0.0f && dx * dx + dy * dy + dz * dz > 4.0f)
+                    level[i] = 0.0f; /* (the slot reused for another lamp: from dark) */
+                memset(w, 0, sizeof *w);
+                w->diffuse[0] = rdf32(l + 4), w->diffuse[1] = rdf32(l + 8), w->diffuse[2] = rdf32(l + 12);
+                w->ambient[0] = rdf32(l + 0x24), w->ambient[1] = rdf32(l + 0x28), w->ambient[2] = rdf32(l + 0x2c);
+                w->pos[0] = np[0], w->pos[1] = np[1], w->pos[2] = np[2], w->pos[3] = rdf32(l + 0x4c);
+                w->att[0] = rdf32(l + 0x54), w->att[1] = rdf32(l + 0x58), w->att[2] = rdf32(l + 0x5c);
+                level[i] = level[i] + step > 1.0f ? 1.0f : level[i] + step;
+            }
+            else if (level[i] > 0.0f)
+                level[i] = level[i] - step < 0.0f ? 0.0f : level[i] - step;
+            if (level[i] <= 0.0f)
                 continue;
-            if (rdf32(e + 4) <= 0.0f && rdf32(e + 8) <= 0.0f && rdf32(e + 12) <= 0.0f)
-                continue;
-            memcpy(GUEST_PTR(l), GUEST_PTR(e), 0x68);
-            light_factor(l);
             GfxWorldLight* w = &lamps[n++];
-            memset(w, 0, sizeof *w);
-            w->diffuse[0] = rdf32(l + 4), w->diffuse[1] = rdf32(l + 8), w->diffuse[2] = rdf32(l + 12);
-            w->ambient[0] = rdf32(l + 0x24), w->ambient[1] = rdf32(l + 0x28), w->ambient[2] = rdf32(l + 0x2c);
-            w->pos[0] = rdf32(l + 0x34), w->pos[1] = rdf32(l + 0x38), w->pos[2] = rdf32(l + 0x3c), w->pos[3] = rdf32(l + 0x4c);
-            w->att[0] = rdf32(l + 0x54), w->att[1] = rdf32(l + 0x58), w->att[2] = rdf32(l + 0x5c);
+            *w = last[i];
+            float k = level[i] * level[i] * (3.0f - 2.0f * level[i]);
+            if (fl > 0.0f && w->diffuse[0] > 1.5f * w->diffuse[2] + 0.05f)
+            {
+                float ph = (float)i * 2.399f;
+                float f = 0.5f * sinf(ts * 7.3f + ph) + 0.3f * sinf(ts * 13.1f + 1.7f * ph) + 0.2f * sinf(ts * 23.7f + 2.9f * ph);
+                k *= 1.0f + fl * f;
+            }
+            for (int c = 0; c < 3; ++c)
+                w->diffuse[c] *= k, w->ambient[c] *= k;
         }
     }
 #endif
@@ -1104,6 +1136,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                 s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on ? 1.0f : 0.0f;
                 s->fog_col[0] = (float)((fog_col >> 16) & 255) / 255.0f, s->fog_col[1] = (float)((fog_col >> 8) & 255) / 255.0f;
                 s->fog_col[2] = (float)(fog_col & 255) / 255.0f;
+                s->fog_col[3] = f; /* (the material's light scale, for the back end's lamps) */
                 cur_state = g_ncstates++;
                 p += 0x2e;
             }

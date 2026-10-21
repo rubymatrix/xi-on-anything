@@ -188,6 +188,14 @@ static const struct
     { "scene_lamp_far", offsetof(GfxFxSettings, scene_lamp_far), 120.0f },
     { "scene_lamp_glow", offsetof(GfxFxSettings, scene_lamp_glow), 0.0f },
     { "scene_lamp_glow_size", offsetof(GfxFxSettings, scene_lamp_glow_size), 0.6f },
+    /* seconds a lamp takes to come on or go out (host/scene.c lamps_frame); fire-coloured lamps' flicker (0 none) */
+    { "scene_lamp_fade", offsetof(GfxFxSettings, scene_lamp_fade), 1.5f },
+    { "scene_lamp_flicker", offsetof(GfxFxSettings, scene_lamp_flicker), 0.06f },
+    /* characters' shadows from the nearest lamps (0 to 4 of them; with scene_shadows on), their cube faces' size */
+    { "scene_lamp_shadows", offsetof(GfxFxSettings, scene_lamp_shadows), 4.0f },
+    { "scene_lamp_shadow_size", offsetof(GfxFxSettings, scene_lamp_shadow_size), 256.0f },
+    /* the shadowed lamps' reach, red where shadowed and green where lit (0 off) */
+    { "scene_lamp_debug", offsetof(GfxFxSettings, scene_lamp_debug), 0.0f },
     /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;
      * tonemap 0 neutral (today's image), 1 a highlight shoulder (today's image below tone_knee, past it rolled off toward
      * tone_white), 2 ACES fit; the exposure; the white point; the knee */
