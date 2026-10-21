@@ -435,6 +435,12 @@ int gfx_chars_draw(const GfxCharFrame* f);
 /* The lamps lit this frame (the light pool's point lights, world space), for the clustered lamps (scene_lamps): set
  * once a frame before its batches; n 0 none. */
 void gfx_lamps(const GfxWorldLight* l, uint32_t n);
+/* Whether the zone's light is fixed (its weather record says so: no sky, a dungeon or a room), from the scene
+ * renderer each batch, for the modern fog's indoor dust. */
+void gfx_set_fixed_light(int fixed);
+/* The zone's weather as the server last sent it (0x00A, 0x057: 0 none, 3 fog, 6 rain, 10 wind, 11 gales, ...; -1 not
+ * known), for the modern fog's ground mist and its drift. */
+void gfx_set_weather(int weather);
 
 /* While the GPU's passes are timed: the draws from here on are a timed pass of their own, 1 as the scene renderer's
  * zone (GFX_PASS_WORLD), 2 its characters (GFX_PASS_CHARS); 0 that pass ends here (the game's own draws, timed for

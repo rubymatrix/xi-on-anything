@@ -92,6 +92,7 @@
 #include "frame.h"
 #include "addons/addons.h"
 #include "addons/game.h"
+#include "addons/host.h"
 #if defined(_WIN32)
 #include "sampler.h"
 #endif
@@ -734,6 +735,19 @@ static void shadow_focus(void)
     uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0;
     float p[3];
     gfx_set_focus(e && xi_game_rd(e + 4, p, sizeof p) && isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]) ? p : NULL);
+    /* the weather, from the newer of the zone-in (0x00A, +0x68) and the weather change (0x057, +0x08), as the addon host
+     * keeps them (none without it) */
+    if (g_addons_on)
+    {
+        uint8_t b[0x200];
+        uint64_t ta = 0, tb = 0;
+        size_t na = xi_packet_last(0, 0x00A, b, sizeof b, &ta);
+        int w = na > 0x69 ? b[0x68] | b[0x69] << 8 : -1;
+        size_t nb = xi_packet_last(0, 0x057, b, sizeof b, &tb);
+        if (nb > 0x08 && (!na || tb >= ta))
+            w = b[0x08];
+        gfx_set_weather(w);
+    }
 }
 
 static void present_hook(void)

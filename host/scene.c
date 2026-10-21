@@ -296,6 +296,7 @@ static float scene_day(void)
     if (!env)
         return 1.0f;
     uint32_t rec = rd32(env + 0x18);
+    gfx_set_fixed_light(rec && (rd8(rec) & 1));
     if (rec && (rd8(rec) & 1))
         return 1.0f;
     float y = rdf32(env + 0xa4 + 4);
@@ -358,7 +359,8 @@ static void env_light(EnvLight* e, uint32_t env, uint32_t mgr)
     float day = scene_day();
     if (day < 1.0f)
         night_grade(e->sun_col, day), night_grade(e->sun2_col, day), night_grade(e->ambient, day);
-    e->fog[0] = fstart, e->fog[1] = fend > fstart ? fend : fstart + 1.0f, e->fog[2] = 1.0f;
+    e->fog[0] = fstart, e->fog[1] = fend > fstart ? fend : fstart + 1.0f;
+    e->fog[2] = gfx_fx_get("fog_modern") > 0.0f ? 0.0f : 1.0f; /* the modern fog in its place (gfx_metal.m scene_fog) */
 }
 
 /* a pool light (its D3DLIGHT8 at entry + 8) into the frame's list, once */
@@ -1189,7 +1191,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                 s->tfactor[2] = (float)(tf & 255) / 255.0f, s->tfactor[3] = (float)(tf >> 24) / 255.0f;
                 float fsf, fef;
                 memcpy(&fsf, &fs, 4), memcpy(&fef, &fe, 4);
-                s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on ? 1.0f : 0.0f;
+                s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on && gfx_fx_get("fog_modern") <= 0.0f ? 1.0f : 0.0f;
                 s->fog_col[0] = (float)((fog_col >> 16) & 255) / 255.0f, s->fog_col[1] = (float)((fog_col >> 8) & 255) / 255.0f;
                 s->fog_col[2] = (float)(fog_col & 255) / 255.0f;
                 s->fog_col[3] = f; /* (the material's light scale, for the back end's lamps) */
