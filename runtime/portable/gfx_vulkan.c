@@ -30,7 +30,9 @@
  * passes between the game's and at the frame's end (CAST_GLSL), the receivers' SHADOW_GLSL. Its
  * occlusion (SAO_GLSL, made when the scene is done; AO_GLSL), highlights (SPEC_GLSL) and lamps
  * (LAMP_GLSL: the tiles, the cubes at the frame's end beside the characters' shadow layers, the
- * glows) are Metal's as well. */
+ * glows) are Metal's as well, and so are the post effects on the finished scene - bloom (the scene's additive draws
+ * recorded and drawn again: glow_new), depth of field and sun shafts (POST_GLSL, SHAFT_GLSL) - and the HDR scene
+ * (scene_hdr: the world target made float in place, one tonemap). */
 #include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
 
 #include <SDL3/SDL.h>
@@ -1037,6 +1039,8 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
 static void sun_cache_forget_tex(const GfxTex* t);
 static void water_forget(const GfxTex* t);
 static void sao_forget(const GfxTex* t);
+static void glows_forget(const GfxTex* t);
+static void hdr_forget(const GfxTex* t);
 
 void gfx_tex_destroy(GfxTex* t)
 {
@@ -1064,6 +1068,8 @@ void gfx_tex_destroy(GfxTex* t)
                 r->depth_world = NULL;
         }
     sun_cache_forget_tex(t);
+    glows_forget(t);
+    hdr_forget(t);
     water_forget(t);
     sao_forget(t);
     if (t->levelv)
@@ -2000,6 +2006,9 @@ static VkStencilOp stencil_op(uint32_t op)
 
 /* D3D's viewport, clamped to the target, as Vulkan's with y flipped (a negative height: D3D's clip
  * space has y up, Vulkan's down). 0 when nothing of it is left. */
+static VkViewport g_set_vp; /* the last viewport and scissor the draws set (a glow keeps them: glow_new) */
+static VkRect2D g_set_sc;
+
 static int set_viewport(const uint32_t vp[6])
 {
     float zmin, zmax;
@@ -2020,6 +2029,7 @@ static int set_viewport(const uint32_t vp[6])
         return 0;
     VkViewport v = { (float)x, (float)(y + vh), (float)vw, (float)-vh, zmin, zmax };
     vkCmdSetViewport(g_cb, 0, 1, &v);
+    g_set_vp = v;
     return 1;
 }
 
@@ -2046,6 +2056,7 @@ static void set_scissor(const int32_t sc[4])
     }
     VkRect2D r = { { (int32_t)x0, (int32_t)y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
     vkCmdSetScissor(g_cb, 0, 1, &r);
+    g_set_sc = r;
 }
 
 /* index count for a D3D primitive count */
@@ -2150,6 +2161,68 @@ static uint32_t g_ncasters, g_casters_cap;
 static GfxU* g_caster_u;
 
 static void casters_clear(void) { g_ncasters = 0; }
+
+/* --- the glow: the scene's additive draws, drawn again for the post bloom (post_bloom; gfx_metal.m's glow_new) ---
+ * The world's lamps, spell effects and the sun's halo are additive draws (the destination blended by ONE). Each one into
+ * a 3D scene's target is recorded as it is encoded - its pipeline, dynamic state and bindings, all alive until the
+ * frame ends - and when the scene is done they are drawn again onto black over the scene's depth (post_glow): what
+ * glows, as bright as it was added. */
+typedef struct Glow
+{
+    const GfxTex* rt;   /* the target (compared only: gfx_tex_destroy drops its glows) */
+    VkFormat fmt;       /* its format, which the pipeline was built for */
+    VkImageView depth;  /* the depth attachment it was tested against (VK_NULL_HANDLE: none) */
+    int stencil;        /* that attachment has stencil */
+    VkPipeline pipe;
+    VkViewport vp;
+    VkRect2D sc;
+    VkCompareOp zfunc;
+    VkCullModeFlags cull;
+    VkPrimitiveTopology topo;
+    uint8_t ztest, zwrite, nw, indexed;
+    int32_t zbias;
+    VkWriteDescriptorSet w[B_COUNT];
+    int8_t wi[B_COUNT]; /* each write's info: >= 0 bi's, < 0 ii's (-1 - its index) */
+    VkDescriptorBufferInfo bi[GFX_NSTREAMS + 2];
+    VkDescriptorImageInfo ii[10];
+    VkBuffer ib;
+    VkDeviceSize ioff;
+    VkIndexType itype;
+    uint32_t n, vstart;
+} Glow;
+
+static Glow* g_glows;
+static uint32_t g_nglows, g_glows_cap;
+
+static void glows_clear(void) { g_nglows = 0; }
+
+/* a target going: its glows go too */
+static void glows_forget(const GfxTex* t)
+{
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < g_nglows; ++i)
+        if (g_glows[i].rt != t)
+            g_glows[k++] = g_glows[i];
+    g_nglows = k;
+}
+
+/* a record for this draw when it glows: post bloom on, an additive 3D draw into the target's first level */
+static Glow* glow_new(const GfxDraw* d, int water)
+{
+    if (g_fxs.post_bloom <= 0.0f || g_fxs.bloom_emissive_fx <= 0.0f || water || d->vs.rhw || !d->pipe.blend || d->pipe.dst != 2 ||
+        d->depth.stencil || g_rt_face || g_rt_level || !g_rt || g_nglows >= 4096)
+        return NULL;
+    /* not the sky's own layers (drawn round the camera: no translation in world x view), which would haze all of it;
+     * the sun and a bright sky glow by the threshold instead */
+    if (!d->vs.prog && fabsf(d->u.wv[12]) + fabsf(d->u.wv[13]) + fabsf(d->u.wv[14]) < 1e-3f)
+        return NULL;
+    if (g_nglows == g_glows_cap)
+        g_glows_cap = g_glows_cap ? g_glows_cap * 2 : 256, g_glows = (Glow*)realloc(g_glows, g_glows_cap * sizeof(Glow));
+    Glow* g = &g_glows[g_nglows++];
+    memset(g, 0, sizeof *g);
+    g->rt = g_rt, g->fmt = g_rt->vf, g->zbias = d->zbias;
+    return g;
+}
 
 /* clip-space position of the draw's first vertex in out (gfx_clip0); 0 when it cannot be had */
 static int draw_clip0(const GfxDraw* d, float out[4])
@@ -2394,6 +2467,19 @@ static void draw_encode(const GfxDraw* d)
     VkDeviceSize off;
     if (rec)
         rec->prim = vk_prim(d->prim), rec->n = n, rec->vstart = d->vertex_start;
+    Glow* gl = glow_new(d, water);
+    if (gl)
+    {
+        gl->depth = depth ? attachment_view(depth, 0, 0) : VK_NULL_HANDLE, gl->stencil = depth && depth->has_stencil;
+        gl->pipe = p, gl->vp = g_set_vp, gl->sc = g_set_sc;
+        gl->ztest = dk.zenable != 0, gl->zwrite = dk.zenable && dk.zwrite, gl->zfunc = dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS;
+        gl->cull = d->cull == 3 ? VK_CULL_MODE_BACK_BIT : d->cull == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+        gl->topo = vk_prim(d->prim), gl->n = n, gl->vstart = d->vertex_start;
+        memcpy(gl->bi, bi, sizeof bi), memcpy(gl->ii, ii, sizeof ii), memcpy(gl->w, w, nw * sizeof *w);
+        gl->nw = (uint8_t)nw;
+        for (uint32_t i = 0; i < nw; ++i)
+            gl->wi[i] = (int8_t)(w[i].pBufferInfo ? w[i].pBufferInfo - bi : -1 - (w[i].pImageInfo - ii));
+    }
     if (d->prim == GFX_TRIANGLEFAN)
     {
         /* a list with the same vertices, as on Metal */
@@ -2416,6 +2502,8 @@ static void draw_encode(const GfxDraw* d)
         if (rec)
             rec->prim = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, rec->ib = buf, rec->ioff = off, rec->ibp = g_ring_base,
             rec->iblen = g_ring_size, rec->itype = 4;
+        if (gl)
+            gl->indexed = 1, gl->ib = buf, gl->ioff = off, gl->itype = VK_INDEX_TYPE_UINT32;
     }
     else if (d->ibuf)
     {
@@ -2429,6 +2517,9 @@ static void draw_encode(const GfxDraw* d)
         }
         vkCmdBindIndexBuffer(cb, d->ibuf->b, d->ibuf_off, d->index_size == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cb, n, 1, 0, 0, 0);
+        if (gl)
+            gl->indexed = 1, gl->ib = d->ibuf->b, gl->ioff = d->ibuf_off,
+            gl->itype = d->index_size == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     }
     else if (d->indices)
     {
@@ -2439,6 +2530,8 @@ static void draw_encode(const GfxDraw* d)
         if (rec)
             rec->ib = buf, rec->ioff = off, rec->ibp = g_ring_base, rec->iblen = g_ring_size,
             rec->itype = (uint8_t)(d->index_size == 2 ? 2 : 4);
+        if (gl)
+            gl->indexed = 1, gl->ib = buf, gl->ioff = off, gl->itype = d->index_size == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     }
     else
         vkCmdDraw(cb, n, 1, d->vertex_start, 0);
@@ -7059,20 +7152,6 @@ static void post_lamp_glows(GfxTex* color, const GfxScene* s, GfxTex* depth, flo
     color->rec = depth->rec = g_cb_index;
 }
 
-/* the glows from the scene's own: its viewport and depth, as Metal's post effects take them */
-static void scene_lamp_glows(GfxTex* color, const GfxScene* s)
-{
-    if (g_fxs.scene_lamps <= 0.0f || g_fxs.scene_lamp_glow <= 0.0f || g_lamps.binned != g_serial)
-        return;
-    flush_pass();
-    GfxTex* depth = color->depth_world ? color->depth_world : color->depth_seen;
-    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
-    if (vw < 16 || vh < 16 || vx + vw > color->w || vy + vh > color->h)
-        vx = vy = 0, vw = (float)color->w, vh = (float)color->h;
-    if (depth && depth->w == color->w && depth->h == color->h && s->proj[11] != 0.0f)
-        post_lamp_glows(color, s, depth, vx, vy, vw, vh);
-}
-
 int gfx_world_draw(const GfxWorldFrame* f)
 {
     if (!g_dev || !f->nitem || !world_init())
@@ -7876,16 +7955,895 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     color->scene = 0; /* its mips are behind (scene_mips) */
 }
 
+/* --- post effects: bloom and depth of field (post_bloom, post_dof), the sun shafts (post_shafts), the HDR scene ----
+ * gfx_metal.m's POST_MSL and post_effects, on Vulkan (their notes there). On the finished scene, before the interface and
+ * the nameplates go over it, with or without the effects (FFXI_FX) and the scene renderer: the lamps' glows, the sun
+ * shafts, then the depth of field (circles of confusion at half size, a disc gather, blended back by each pixel's own
+ * circle), then the bloom (its source the glow - the scene's additive draws, drawn again: glow_new - and the sky over a
+ * soft threshold; five levels down, a tent back up, screen-blended onto the scene). Each pass a full-screen triangle
+ * of its own on POST_GLSL's layout: the uniforms, then three textures; timed as Metal's. */
+static const char POST_GLSL[] =
+    "layout(std140, set = 0, binding = 0) uniform PU {\n"
+    "  vec4 vp;    // the scene's viewport in its target, pixels\n"
+    "  vec4 src;   // the texture read: width, height, 1 / width, 1 / height\n"
+    "  vec4 bloom; // threshold, knee, glow weight, strength\n"
+    "  vec4 dof;   // focus (view z), sharp range behind it, ramp, largest radius (half-size pixels)\n"
+    "  vec4 dof2;  // near strength, hand, levels, radius scale (up)\n"
+    "  vec4 zp;    // projection [10], [14], viewport min z, max z\n"
+    "  vec4 aux;   // x: a texel step down the target per step across; y: the sky's emissive weight; w: an HDR scene\n"
+    "} u;\n"
+    "#ifdef GFX_VS\n"
+    "layout(location = 0) out vec2 vuv;\n"
+    "void main() {\n"
+    "  vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "  vuv = p;\n"
+    "}\n"
+    "#else\n"
+    "layout(location = 0) in vec2 vuv;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
+    "layout(set = 0, binding = 3) uniform sampler2D t2;\n"
+    "float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }\n"
+    "vec3 finite3(vec3 v) { return vec3(isnan(v.x) || isinf(v.x) ? 0.0 : v.x, isnan(v.y) || isinf(v.y) ? 0.0 : v.y,\n"
+    "                                   isnan(v.z) || isinf(v.z) ? 0.0 : v.z); }\n"
+    "#if defined(POST_BLOOM_PRE)\n"
+    "// the bloom's source at a point of the scene: the glow, and where nothing was drawn with depth (the sky, the sun)\n"
+    "// what is over the threshold (a soft knee) - lit ground and walls, however bright, do not glow\n"
+    "vec3 bright(vec2 uv) {\n"
+    "  vec3 c = texture(t0, uv).rgb;\n"
+    "  ivec2 q = ivec2(clamp(uv * u.src.xy, vec2(0.0), u.src.xy - 1.0));\n"
+    "  float sky = texelFetch(t2, q, 0).r >= u.zp.w - 1e-6 ? 1.0 : 0.0;\n"
+    "  float br = max(c.r, max(c.g, c.b)), k = max(u.bloom.y, 1e-4);\n"
+    "  float soft = clamp(br - u.bloom.x + k, 0.0, 2.0 * k);\n"
+    "  soft = soft * soft / (4.0 * k);\n"
+    "  float w = max(soft, br - u.bloom.x) / max(br, 1e-4);\n"
+    "  // the glow past a little (faint, wide additive layers - a sea's shimmer - stay as they are)\n"
+    "  vec3 g = texture(t1, uv).rgb;\n"
+    "  float gb = max(g.r, max(g.g, g.b)), gs = clamp(gb - 0.1, 0.0, 0.2);\n"
+    "  gs = gs * gs / 0.4;\n"
+    "  float gw = max(gs, gb - 0.2) / max(gb, 1e-4);\n"
+    "  vec3 r = c * (w * sky * u.aux.y) + g * (gw * u.bloom.z); // each by its emissive weight: past 1, the chain is float\n"
+    "  return finite3(clamp(r, 0.0, 64.0)); // (no NaN or infinity into the chain: it would spread)\n"
+    "}\n"
+    "// the first level: four bilinear taps, each weighted by 1 / (1 + its luma) - a Karis average, so a lone bright texel\n"
+    "// cannot flicker as the camera moves\n"
+    "void main() {\n"
+    "  vec2 uv = (u.vp.xy + vuv * u.vp.zw) * u.src.zw, t = u.src.zw * vec2(1.0, u.aux.x);\n"
+    "  vec3 a = bright(uv + t * vec2(-1, -1)), b = bright(uv + t * vec2(1, -1));\n"
+    "  vec3 c = bright(uv + t * vec2(-1, 1)), d = bright(uv + t * vec2(1, 1));\n"
+    "  float wa = 1.0 / (1.0 + luma(a)), wb = 1.0 / (1.0 + luma(b)), wc = 1.0 / (1.0 + luma(c)), wd = 1.0 / (1.0 + luma(d));\n"
+    "  oc = vec4((a * wa + b * wb + c * wc + d * wd) / (wa + wb + wc + wd), 1.0);\n"
+    "}\n"
+    "#elif defined(POST_BLOOM_DOWN)\n"
+    "// the 13 taps a texel apart (Jimenez): a centre box and four corner boxes, weighted half and an eighth each\n"
+    "void main() {\n"
+    "  vec2 uv = vuv, t = u.src.zw * vec2(1.0, u.aux.x);\n"
+    "  vec3 a = texture(t0, uv + t * vec2(-2, -2)).rgb, b = texture(t0, uv + t * vec2(0, -2)).rgb;\n"
+    "  vec3 c = texture(t0, uv + t * vec2(2, -2)).rgb, d = texture(t0, uv + t * vec2(-1, -1)).rgb;\n"
+    "  vec3 e = texture(t0, uv + t * vec2(1, -1)).rgb, f = texture(t0, uv + t * vec2(-2, 0)).rgb;\n"
+    "  vec3 g = texture(t0, uv).rgb, h = texture(t0, uv + t * vec2(2, 0)).rgb;\n"
+    "  vec3 i = texture(t0, uv + t * vec2(-1, 1)).rgb, j = texture(t0, uv + t * vec2(1, 1)).rgb;\n"
+    "  vec3 k = texture(t0, uv + t * vec2(-2, 2)).rgb, l = texture(t0, uv + t * vec2(0, 2)).rgb;\n"
+    "  vec3 m = texture(t0, uv + t * vec2(2, 2)).rgb;\n"
+    "  oc = vec4((d + e + i + j) * 0.125 + (a + c + k + m) * 0.03125 + (b + f + h + l) * 0.0625 + g * 0.125, 1.0);\n"
+    "}\n"
+    "#elif defined(POST_BLOOM_UP)\n"
+    "// a 3x3 tent of the level below, added onto this one (blended): each level the sum of those under it\n"
+    "void main() {\n"
+    "  vec2 uv = vuv, t = u.src.zw * vec2(1.0, u.aux.x) * u.dof2.w;\n"
+    "  vec3 o = texture(t0, uv).rgb * 4.0;\n"
+    "  o += (texture(t0, uv + t * vec2(-1, 0)).rgb + texture(t0, uv + t * vec2(1, 0)).rgb +\n"
+    "        texture(t0, uv + t * vec2(0, -1)).rgb + texture(t0, uv + t * vec2(0, 1)).rgb) * 2.0;\n"
+    "  o += texture(t0, uv + t * vec2(-1, -1)).rgb + texture(t0, uv + t * vec2(1, -1)).rgb +\n"
+    "       texture(t0, uv + t * vec2(-1, 1)).rgb + texture(t0, uv + t * vec2(1, 1)).rgb;\n"
+    "  oc = vec4(o * (1.0 / 16.0), 1.0);\n"
+    "}\n"
+    "#elif defined(POST_BLOOM_COMP)\n"
+    "// onto the scene, screen-blended by the pipeline (src x (1 - dst) + dst); the sum's highlights eased toward 1\n"
+    "void main() {\n"
+    "  vec3 b = texture(t0, vuv).rgb * (u.bloom.w * 1.5 / u.dof2.z);\n"
+    "  oc = u.aux.w > 0.0 ? vec4(max(b, 0.0), 1.0) : vec4(1.0 - exp(-max(b, 0.0)), 1.0); // an HDR scene: added as it is\n"
+    "}\n"
+    "#elif defined(POST_DOF_COC) || defined(POST_DOF_GATHER) || defined(POST_DOF_COMP)\n"
+    "float view_z(float d) {\n"
+    "  d = (d - u.zp.z) / max(u.zp.w - u.zp.z, 1e-6);\n"
+    "  float z = u.zp.y / (d * u.dof2.y - u.zp.x);\n"
+    "  return d >= 0.999999 || !(z * u.dof2.y > 0.0) ? 1e6 : abs(z); // the sky: as far as can be\n"
+    "}\n"
+    "// the circle of confusion, 0 sharp to 1 the largest: behind the focus past its range, and (dof_near) well before it;\n"
+    "// always sharp within 4 units of the focus (the player, whatever the settings)\n"
+    "float coc(float z) {\n"
+    "  float far = clamp((z - u.dof.x - max(u.dof.y, 4.0)) / max(u.dof.z, 1e-3), 0.0, 1.0);\n"
+    "  float nr = min(u.dof.x * 0.5, u.dof.x - 4.0);\n"
+    "  float near = nr > 0.0 ? u.dof2.x * clamp((nr - z) / max(nr, 1e-3), 0.0, 1.0) : 0.0;\n"
+    "  return max(far, near);\n"
+    "}\n"
+    "#if defined(POST_DOF_COC)\n"
+    "// half size: each texel the 2x2 under it, their colours weighted toward the blurred ones, and the largest circle\n"
+    "void main() {\n"
+    "  vec2 p = floor(u.vp.xy + gl_FragCoord.xy * 2.0 - 1.0);\n"
+    "  vec3 c = vec3(0.0); float w = 0.0, m = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    ivec2 q = ivec2(clamp(p + vec2(k & 1, k >> 1), u.vp.xy, u.vp.xy + u.vp.zw - 1.0));\n"
+    "    float r = coc(view_z(texelFetch(t1, q, 0).r));\n"
+    "    float wk = r + 0.02;\n"
+    "    c += texelFetch(t0, q, 0).rgb * wk, w += wk, m = max(m, r);\n"
+    "  }\n"
+    "  oc = vec4(c / w, m);\n"
+    "}\n"
+    "#elif defined(POST_DOF_GATHER)\n"
+    "// the gather: a disc of taps as wide as this texel's circle; a tap counts where its own circle (no wider than this\n"
+    "// one's) reaches here; bright taps count a little more, for bokeh\n"
+    "void main() {\n"
+    "  vec4 c0 = texture(t0, vuv);\n"
+    "  float R = c0.a * u.dof.w;\n"
+    "  if (R < 0.5) { oc = c0; return; }\n"
+    "  int n = R < 2.5 ? 8 : 16; // (the composite's tent fills between the taps)\n"
+    "  vec3 acc = vec3(0.0); float wsum = 0.0;\n"
+    "  for (int i = 0; i < n; ++i) {\n"
+    "    float r = sqrt((float(i) + 0.5) / float(n)) * R, a = float(i) * 2.39996323;\n"
+    "    vec2 o = vec2(cos(a), sin(a)) * r;\n"
+    "    vec4 t = texture(t0, vuv + o * vec2(1.0, u.aux.x) * u.src.zw);\n"
+    "    float w = clamp(min(t.a, c0.a) * u.dof.w - r + 1.0, 0.0, 1.0);\n"
+    "    w *= 1.0 + 3.0 * clamp(luma(t.rgb) - 0.75, 0.0, 1.0);\n"
+    "    acc += t.rgb * w, wsum += w;\n"
+    "  }\n"
+    "  oc = vec4(wsum > 0.0 ? acc / wsum : c0.rgb, c0.a);\n"
+    "}\n"
+    "#else\n"
+    "// onto the scene by its own circle at full size (alpha-blended by the pipeline): sharp where it is in focus\n"
+    "void main() {\n"
+    "  vec2 px = gl_FragCoord.xy;\n"
+    "  float r = coc(view_z(texelFetch(t1, ivec2(px), 0).r)) * u.dof.w;\n"
+    "  float a = smoothstep(0.25, 1.5, r);\n"
+    "  if (a <= 0.0) { oc = vec4(0.0); return; }\n"
+    "  vec2 uv = (px - u.vp.xy) / u.vp.zw, t = u.src.zw * vec2(0.75, 0.75 * u.aux.x);\n"
+    "  vec3 b = (texture(t0, uv + vec2(-t.x, -t.y)).rgb + texture(t0, uv + vec2(t.x, -t.y)).rgb +\n"
+    "            texture(t0, uv + vec2(-t.x, t.y)).rgb + texture(t0, uv + vec2(t.x, t.y)).rgb) * 0.25;\n"
+    "  oc = vec4(b, a);\n"
+    "}\n"
+    "#endif\n"
+    "#elif defined(POST_HDR_COPY)\n"
+    "// the HDR scene (scene_hdr): a target's first level copied into its float replacement, texel for texel\n"
+    "void main() { oc = texelFetch(t0, ivec2(gl_FragCoord.xy), 0); }\n"
+    "#elif defined(POST_HDR_TONE)\n"
+    "// the tonemap (the pixel as it was, from a copy): 0 neutral (clamped), 1 a highlight shoulder, 2 ACES, normalised to\n"
+    "// the white point; u.bloom: mode, exposure, white point, knee\n"
+    "vec3 aces(vec3 x) { return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14); }\n"
+    "void main() {\n"
+    "  vec4 c = texelFetch(t0, ivec2(gl_FragCoord.xy), 0);\n"
+    "  vec3 v = max(c.rgb, 0.0);\n"
+    "  if (u.bloom.x < 0.5) { oc = vec4(min(v, 1.0), c.a); return; }\n"
+    "  if (u.bloom.x < 1.5) {\n"
+    "    v *= u.bloom.y;\n"
+    "    float m = max(v.r, max(v.g, v.b)), kn = u.bloom.w;\n"
+    "    if (m > kn) {\n"
+    "      float r = kn + (1.0 - kn) * (1.0 - exp(-(m - kn) / (1.0 - kn)));\n"
+    "      vec3 h = v * (r / m);\n"
+    "      v = mix(h, vec3(r), clamp((m - 1.0) / (u.bloom.z - 1.0), 0.0, 1.0) * 0.5); // the brightest toward white\n"
+    "    }\n"
+    "    oc = vec4(clamp(v, 0.0, 1.0), c.a);\n"
+    "    return;\n"
+    "  }\n"
+    "  vec3 l = pow(v, vec3(2.2)) * u.bloom.y;\n"
+    "  vec3 t = aces(l) / aces(vec3(u.bloom.z));\n"
+    "  oc = vec4(pow(clamp(t, 0.0, 1.0), vec3(1.0 / 2.2)), c.a);\n"
+    "}\n"
+    "#endif\n"
+    "#endif\n";
+
+/* the sun shafts' passes (gfx_metal.m's shaft_march, shaft_resolve, shaft_comp), on the same layout with SU for PU */
+static const char SHAFT_GLSL[] =
+    "layout(std140, set = 0, binding = 0) uniform SU {\n"
+    "  mat4 ivp;    // the scene's clip space to the world round the camera (the view's turn alone: no translation)\n"
+    "  mat4 pvp;    // the world round last frame's camera to last frame's clip space\n"
+    "  mat4 m[4];   // the zone's shadow cascades (world to the light's clip space)\n"
+    "  vec4 cas[4]; // their reach from the camera, texel, depth range, valid\n"
+    "  vec4 cam;    // the camera, world; w: how far the rays go\n"
+    "  vec4 sun;    // toward the light, world; w: 1 when it shines\n"
+    "  vec4 sunc;   // its colour times the shafts' strength; w: the phase's g\n"
+    "  vec4 p;      // density at the camera's height, its falloff with height, steps, this frame's jitter\n"
+    "  vec4 vp;     // the scene's viewport in its target\n"
+    "  vec4 lo;     // the small textures' size, 1 / size\n"
+    "  vec4 hist;   // x: last frame's history is there and lines up; y: its weight; z: shafts_debug; w: an HDR scene\n"
+    "  vec4 pcam;   // last frame's camera, world\n"
+    "} u;\n"
+    "layout(location = 0) in vec2 vuv;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    "#ifdef SHAFT_MARCH\n"
+    "layout(set = 0, binding = 2) uniform sampler2DArrayShadow t1;\n"
+    "#else\n"
+    "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
+    "#endif\n"
+    "layout(set = 0, binding = 3) uniform sampler2D t2;\n"
+    "vec3 su_dir(vec2 fp, float d, out float dist) {\n"
+    "  vec2 n = vec2((fp.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (fp.y - u.vp.y) / u.vp.w * 2.0);\n"
+    "  bool sky = d >= 0.99999;\n"
+    "  vec4 w = u.ivp * vec4(n, sky ? 0.5 : d, 1.0);\n"
+    "  vec3 v = w.xyz / w.w;\n"
+    "  float l = length(v);\n"
+    "  dist = sky ? u.cam.w : min(l, u.cam.w);\n"
+    "  return v / max(l, 1e-4);\n"
+    "}\n"
+    "#if defined(SHAFT_MARCH)\n"
+    "const float SU_BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);\n"
+    "// the ray to the surface (or as far as the rays go): steps spread as the square of their order, the first by this\n"
+    "// pixel's jitter; the light in-scattered, each step lit where the cascades see the sun\n"
+    "void main() {\n"
+    "  vec2 lp = floor(gl_FragCoord.xy);\n"
+    "  vec2 fp = u.vp.xy + (lp + 0.5) * (u.vp.zw * u.lo.zw);\n"
+    "  ivec2 q = ivec2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0));\n"
+    "  float dist;\n"
+    "  vec3 dir = su_dir(fp, texelFetch(t0, q, 0).r, dist);\n"
+    "  int bi = (int(lp.y) & 3) * 4 + (int(lp.x) & 3);\n"
+    "  float j = fract((SU_BAYER[bi] + 0.5) / 16.0 + u.p.w);\n"
+    "  int n = int(u.p.z);\n"
+    "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
+    "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0;\n"
+    "  for (int i = 0; i < n; ++i) {\n"
+    "    float f = (float(i) + j) / float(n), t = dist * f * f, seg = 2.0 * dist * f / float(n);\n"
+    "    vec3 x = u.cam.xyz + dir * t;\n"
+    "    float rho = u.p.x * exp(clamp(u.p.y * (x.y - u.cam.y), -10.0, 3.0)); // y down: above the camera thinner\n"
+    "    float lit = 1.0, inr = 0.0;\n"
+    "    for (int c = 0; c < 4; ++c) {\n"
+    "      if (u.cas[c].w == 0.0 || t > u.cas[c].x) continue;\n"
+    "      vec4 h = u.m[c] * vec4(x, 1.0);\n"
+    "      if (all(lessThan(abs(h.xy), vec2(0.995))) && h.z > 0.0 && h.z < 1.0)\n"
+    "        lit = texture(t1, vec4(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5, float(c), h.z - 2e-4)), inr = 1.0;\n"
+    "      break;\n"
+    "    }\n"
+    "    ls += lit, lin += inr;\n"
+    "    float a = rho * seg;\n"
+    "    L += T * a * lit;\n"
+    "    T *= exp(-a);\n"
+    "  }\n"
+    "  if (u.hist.z < 0.0) { oc = vec4(ls / float(n), lin / float(n), 0.0, dist); return; } // shafts_debug < 0\n"
+    "  vec3 o = u.sunc.rgb * (L * ph);\n"
+    "  oc = vec4(any(isnan(o)) || any(isinf(o)) ? vec3(0.0) : o, dist);\n"
+    "}\n"
+    "#elif defined(SHAFT_RESOLVE)\n"
+    "// over frames: this frame's march and last frame's result where this texel's point was then, clamped to this frame's\n"
+    "// neighbours (no trails where the scene moved); t0 the scene's depth, t1 this frame's march, t2 last frame's\n"
+    "void main() {\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy), hi = ivec2(u.lo.xy) - 1;\n"
+    "  vec4 c = texelFetch(t1, p, 0);\n"
+    "  if (u.hist.x <= 0.0) { oc = c; return; }\n"
+    "  vec3 mn = c.rgb, mx = c.rgb;\n"
+    "  for (int k = 0; k < 9; ++k) {\n"
+    "    if (k == 4) continue;\n"
+    "    vec3 v = texelFetch(t1, clamp(p + ivec2(k % 3 - 1, k / 3 - 1), ivec2(0), hi), 0).rgb;\n"
+    "    mn = min(mn, v), mx = max(mx, v);\n"
+    "  }\n"
+    "  vec2 fp = u.vp.xy + (vec2(p) + 0.5) * (u.vp.zw * u.lo.zw);\n"
+    "  float dist;\n"
+    "  vec3 dir = su_dir(fp, texelFetch(t0, ivec2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0)), 0).r, dist);\n"
+    "  vec4 pc = u.pvp * vec4(u.cam.xyz + dir * c.a - u.pcam.xyz, 1.0);\n"
+    "  if (pc.w <= 1e-4) { oc = c; return; }\n"
+    "  vec2 uv = vec2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"
+    "  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { oc = c; return; }\n"
+    "  vec3 h = clamp(texture(t2, uv).rgb, mn, mx);\n"
+    "  oc = vec4(mix(c.rgb, h, u.hist.y), c.a);\n"
+    "}\n"
+    "#else\n"
+    "// onto the scene (screen-blended): the four small texels round each pixel, weighted by how near they are and how\n"
+    "// alike in distance; t0 the scene's depth, t1 the resolved shafts\n"
+    "void main() {\n"
+    "  vec2 fp = gl_FragCoord.xy;\n"
+    "  float dist;\n"
+    "  su_dir(fp, texelFetch(t0, ivec2(fp), 0).r, dist);\n"
+    "  vec2 h = (fp - u.vp.xy) * (u.lo.xy / u.vp.zw) - 0.5;\n"
+    "  ivec2 b = ivec2(floor(h)), hi = ivec2(u.lo.xy) - 1;\n"
+    "  vec2 fr = h - vec2(b);\n"
+    "  vec3 sum = vec3(0.0); float ws = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    ivec2 o = ivec2(k & 1, k >> 1);\n"
+    "    vec4 t = texelFetch(t1, clamp(b + o, ivec2(0), hi), 0);\n"
+    "    float w = (o.x != 0 ? fr.x : 1.0 - fr.x) * (o.y != 0 ? fr.y : 1.0 - fr.y) + 1e-3;\n"
+    "    w *= exp(-abs(t.a - dist) / (0.05 * dist + 0.5));\n"
+    "    sum += t.rgb * w, ws += w;\n"
+    "  }\n"
+    "  vec3 c = ws > 1e-6 ? sum / ws : vec3(0.0);\n"
+    "  if (u.hist.z != 0.0) { oc = vec4(clamp(c * abs(u.hist.z), 0.0, 1.0), 1.0); return; } // shafts_debug: the term alone\n"
+    "  oc = u.hist.w > 0.0 ? vec4(max(c, 0.0), 1.0) : vec4(1.0 - exp(-max(c, 0.0)), 1.0); // an HDR scene: added as it is\n"
+    "}\n"
+    "#endif\n";
+
+typedef struct PostU
+{
+    float vp[4], src[4], bloom[4], dof[4], dof2[4], zp[4], aux[4];
+} PostU;
+
+/* the sun shafts' uniforms: SU in SHAFT_GLSL */
+typedef struct ShaftU
+{
+    float ivp[16], pvp[16], m[4][16], cas[4][4], cam[4], sun[4], sunc[4], p[4], vp[4], lo[4], hist[4], pcam[4];
+} ShaftU;
+
+enum
+{
+    POST_LEVELS = 6
+};
+static struct
+{
+    int tried, ok;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkShaderModule vs;
+    VkFormat lvl_fmt;                     /* the bloom's levels: R11G11B10 float where it blends, else RGBA16F */
+    VkPipeline pre, down, up, coc, gather; /* into the post's own textures */
+    VkPipeline smarch, sresolve;          /* the sun shafts' march and their resolve over frames */
+    VkPipeline comp, dcomp, scomp, sdbg, comp_add, scomp_add; /* onto the scene, built for its format */
+    VkFormat comp_fmt;
+    VkSampler lin, near;
+    GfxTex* lvl[POST_LEVELS]; /* the bloom's levels, from half the scene's size */
+    GfxTex* glow;             /* the glow's draws, as the scene's target */
+    GfxTex *h0, *h1;          /* the depth of field at half size: colour and circle; gathered */
+    GfxTex *sh, *shist[2];    /* the shafts at a third or a fifth of the size: this frame's march, the resolved two */
+    int shist_at;             /* which of shist[] the last frame wrote */
+    uint64_t sh_serial;       /* that frame (0: none) */
+    float sh_pvp[16], sh_pcam[3]; /* its view's turn times projection, its camera */
+    float focus;              /* the focus distance (view z), eased */
+    uint64_t focus_ns;
+} g_post;
+
+/* one pass's pipeline: the post's vertex function and POST_<name> (or SHAFT_<name> from SHAFT_GLSL) into fmt; blend 1
+ * added, 2 screen (src (1 - dst) + dst), 3 over by the source's alpha (the colour only) */
+static VkPipeline post_pipeline(const char* name, VkFormat fmt, int blend)
+{
+    int shaft = !strncmp(name, "SHAFT_", 6);
+    const char* body = shaft ? SHAFT_GLSL : POST_GLSL;
+    size_t n = strlen(body) + 64;
+    char* src = (char*)malloc(n);
+    snprintf(src, n, "#define %s%s\n%s", shaft ? "" : "POST_", name, body);
+    VkShaderModule fs = compile_glsl(src, 1);
+    free(src);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (fs)
+    {
+        VkPipelineColorBlendAttachmentState b = { 0 };
+        b.colorWriteMask = 0xF;
+        if (blend)
+        {
+            b.blendEnable = VK_TRUE;
+            b.colorBlendOp = b.alphaBlendOp = VK_BLEND_OP_ADD;
+            b.srcColorBlendFactor = blend == 1 ? VK_BLEND_FACTOR_ONE : blend == 2 ? VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR
+                                                                                : VK_BLEND_FACTOR_SRC_ALPHA;
+            b.dstColorBlendFactor = blend == 3 ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
+            b.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, b.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        }
+        static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        p = make_pipeline(g_post.vs, fs, g_post.layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            VK_POLYGON_MODE_FILL, dyn, 2, 0);
+        vkDestroyShaderModule(g_dev, fs, NULL);
+    }
+    if (!p)
+        atomic_fetch_add(&g_failures, 1), fprintf(stderr, "[recomp] gfx: post effect %s failed\n", name);
+    return p;
+}
+
+static int post_init(VkFormat scene_fmt)
+{
+    if (!g_post.tried)
+    {
+        g_post.tried = 1;
+        VkDescriptorSetLayoutBinding b[4];
+        b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+        for (uint32_t i = 1; i < 4; ++i)
+            b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+        VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+        dl.bindingCount = 4;
+        dl.pBindings = b;
+        VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_post.dsl));
+        VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        pl.setLayoutCount = 1;
+        pl.pSetLayouts = &g_post.dsl;
+        VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, &g_post.layout));
+        size_t n = sizeof POST_GLSL + 32;
+        char* src = (char*)malloc(n);
+        snprintf(src, n, "#define GFX_VS\n%s", POST_GLSL);
+        g_post.vs = compile_glsl(src, 0);
+        free(src);
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(g_phys, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &fp);
+        g_post.lvl_fmt = (fp.optimalTilingFeatures & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) ==
+                (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+            ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
+            : VK_FORMAT_R16G16B16A16_SFLOAT;
+        const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+        if (g_post.vs)
+        {
+            g_post.pre = post_pipeline("BLOOM_PRE", g_post.lvl_fmt, 0);
+            g_post.down = post_pipeline("BLOOM_DOWN", g_post.lvl_fmt, 0);
+            g_post.up = post_pipeline("BLOOM_UP", g_post.lvl_fmt, 1);
+            g_post.coc = post_pipeline("DOF_COC", F16, 0);
+            g_post.gather = post_pipeline("DOF_GATHER", F16, 0);
+            g_post.smarch = post_pipeline("SHAFT_MARCH", F16, 0);
+            g_post.sresolve = post_pipeline("SHAFT_RESOLVE", F16, 0);
+        }
+        VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = 0.25f;
+        VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_post.lin));
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+        VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_post.near));
+        g_post.ok = g_post.vs && g_post.pre && g_post.down && g_post.up && g_post.coc && g_post.gather && g_post.smarch &&
+                    g_post.sresolve && g_post.lin && g_post.near;
+    }
+    if (!g_post.ok)
+        return 0;
+    if (g_post.comp_fmt != scene_fmt || !g_post.comp)
+    {
+        /* (still drawn from the old format's: the frame's command buffer may hold them) */
+        g_post.comp = post_pipeline("BLOOM_COMP", scene_fmt, 2);
+        g_post.dcomp = post_pipeline("DOF_COMP", scene_fmt, 3);
+        g_post.scomp = post_pipeline("SHAFT_COMP", scene_fmt, 2);
+        g_post.sdbg = post_pipeline("SHAFT_COMP", scene_fmt, 0);
+        g_post.comp_add = post_pipeline("BLOOM_COMP", scene_fmt, 1);
+        g_post.scomp_add = post_pipeline("SHAFT_COMP", scene_fmt, 1);
+        g_post.comp_fmt = scene_fmt;
+    }
+    return g_post.comp && g_post.dcomp && g_post.scomp && g_post.sdbg && g_post.comp_add && g_post.scomp_add;
+}
+
+/* one full-screen triangle into the first level of target within vp (x y w h), its uniforms u (un bytes) and t0..t2
+ * (NULL: none) each through its sampler (VK_NULL_HANDLE: the linear one); load keeps what is there; timed as pass */
+static void post_pass(GfxTex* target, int load, VkPipeline p, const float* vp, const void* u, size_t un, GfxTex* const* in,
+    const VkSampler* samp, int pass)
+{
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    ca.imageView = attachment_view(target, 0, 0);
+    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    ca.loadOp = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ target->w, target->h };
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    int ts = ts_begin(cb, pass);
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport v = { vp[0], vp[1], vp[2], vp[3], 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { target->w, target->h } };
+    vkCmdSetViewport(cb, 0, 1, &v);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    VkBuffer ub;
+    VkDeviceSize uoff;
+    memcpy(ring(un, RING_ALIGN, &ub, &uoff), u, un);
+    VkDescriptorBufferInfo bi = { ub, uoff, un };
+    VkDescriptorImageInfo ii[3];
+    VkWriteDescriptorSet w[4];
+    world_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi, NULL);
+    for (int i = 0; i < 3; ++i)
+    {
+        GfxTex* t = in[i] ? in[i] : g_dummy2d;
+        VkSampler s = samp && samp[i] ? samp[i] : g_post.lin;
+        ii[i] = (VkDescriptorImageInfo){ s, t->view, VK_IMAGE_LAYOUT_GENERAL };
+        world_write(&w[1 + i], 1 + (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[i]);
+        t->used = g_serial, t->rec = g_cb_index;
+    }
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_post.layout, 0, 4, w);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+    ts_end(cb, ts);
+    g_dirty = 1;
+    g_bound = VK_NULL_HANDLE;
+    target->used = g_serial, target->rec = g_cb_index;
+}
+
+/* The sun shafts (post_shafts; gfx_metal.m's note): the sun's or moon's light scattered toward the eye along each
+ * pixel's ray, through haze as thick as the game's fog says, where the scene renderer's zone shadow cascades see the
+ * light. Needs the scene renderer's shadows (scene 1 or 2, scene_shadows): without them, or indoors, the pass stays off. */
+static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float vx, float vy, float vw, float vh)
+{
+    if (!g_shd.zmap || g_shd.cframe != g_serial || g_shd.u.dir[3] <= 0.0f || g_shd.u.info[0] <= 0.0f || g_shd.u.info[2] <= 0.0f)
+    {
+        g_post.sh_serial = 0;
+        return;
+    }
+    float Vr[16], VP[16];
+    memcpy(Vr, s->view, 64);
+    Vr[12] = Vr[13] = Vr[14] = 0.0f;
+    gfx_mat_mul(VP, Vr, s->proj);
+    ShaftU u;
+    memset(&u, 0, sizeof u);
+    if (!gfx_mat_inverse(u.ivp, VP))
+        return;
+    int q = g_fxs.shafts_q >= 1.5f ? 2 : 1, div = q == 2 ? 3 : 5;
+    uint32_t lw = (uint32_t)(vw / div), lh = (uint32_t)(vh / div);
+    lw = lw ? lw : 1, lh = lh ? lh : 1;
+    const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (!fx_tex(&g_post.sh, F16, lw, lh, GFX_USE_RT, 1) || !fx_tex(&g_post.shist[0], F16, lw, lh, GFX_USE_RT, 1) ||
+        !fx_tex(&g_post.shist[1], F16, lw, lh, GFX_USE_RT, 1))
+        return;
+    memcpy(u.m, g_shd.u.m, sizeof u.m), memcpy(u.cas, g_shd.u.cas, sizeof u.cas);
+    /* the haze: as thick as the game's fog, the nearer its end the thicker */
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 1000.0f;
+    fog_end = fminf(fmaxf(fog_end, 30.0f), 3000.0f);
+    memcpy(u.cam, g_shd.u.cam, 12);
+    u.cam[3] = fminf(fmaxf(g_fxs.shafts_dist, 10.0f), fog_end * 1.5f);
+    memcpy(u.sun, g_shd.u.dir, 12), u.sun[3] = 1.0f;
+    /* the light: this frame's sun (or moon) colour, as strong as the shadows are drawn; strongest with the light low */
+    float sc[3] = { 1.0f, 0.95f, 0.85f };
+    if (s->sun_dir[3] != 0.0f)
+        sc[0] = s->sun_color[0], sc[1] = s->sun_color[1], sc[2] = s->sun_color[2];
+    float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
+    float k = g_fxs.post_shafts * g_shd.u.info[2] * 1.5f * (0.25f + 0.75f * low * low);
+    for (int c = 0; c < 3; ++c)
+        u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
+    u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
+    u.p[0] = fmaxf(g_fxs.shafts_density, 0.0f) * 2.0f / fog_end, u.p[1] = 0.02f, u.p[2] = q == 2 ? 16.0f : 10.0f;
+    u.p[3] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
+    u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+    u.lo[0] = (float)lw, u.lo[1] = (float)lh, u.lo[2] = 1.0f / (float)lw, u.lo[3] = 1.0f / (float)lh;
+    /* last frame's, when it was the frame before at this size and the camera didn't jump */
+    float jx = u.cam[0] - g_post.sh_pcam[0], jy = u.cam[1] - g_post.sh_pcam[1], jz = u.cam[2] - g_post.sh_pcam[2];
+    int have = g_post.sh_serial && g_post.sh_serial + 1 == g_serial && jx * jx + jy * jy + jz * jz < 25.0f && !cam_cut();
+    memcpy(u.pvp, g_post.sh_pvp, 64), memcpy(u.pcam, g_post.sh_pcam, 12);
+    u.hist[0] = have && g_fxs.shafts_debug >= 0.0f ? 1.0f : 0.0f, u.hist[1] = fminf(fmaxf(g_fxs.shafts_temporal, 0.0f), 0.97f),
+    u.hist[2] = g_fxs.shafts_debug;
+    u.hist[3] = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? 1.0f : 0.0f;
+    GfxTex *prev = g_post.shist[g_post.shist_at], *out = g_post.shist[g_post.shist_at ^ 1];
+    float lv[4] = { 0, 0, (float)lw, (float)lh };
+    GfxTex* march_in[3] = { depth, g_shd.zmap, NULL };
+    VkSampler march_s[3] = { g_post.near, g_shd.cmp, VK_NULL_HANDLE };
+    post_pass(g_post.sh, 0, g_post.smarch, lv, &u, sizeof u, march_in, march_s, GFX_PASS_POST_SHAFTS);
+    GfxTex* res_in[3] = { depth, g_post.sh, prev };
+    VkSampler res_s[3] = { g_post.near, g_post.near, VK_NULL_HANDLE };
+    post_pass(out, 0, g_post.sresolve, lv, &u, sizeof u, res_in, res_s, GFX_PASS_POST_SHAFTS);
+    GfxTex* comp_in[3] = { depth, out, NULL };
+    VkSampler comp_s[3] = { g_post.near, g_post.near, VK_NULL_HANDLE };
+    float fv[4] = { vx, vy, vw, vh };
+    post_pass(color, 1, u.hist[2] != 0.0f ? g_post.sdbg : u.hist[3] > 0.0f ? g_post.scomp_add : g_post.scomp, fv, &u, sizeof u,
+        comp_in, comp_s, GFX_PASS_POST_SHAFTS);
+    g_post.shist_at ^= 1, g_post.sh_serial = g_serial;
+    memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
+}
+
+/* the glow's draws again, onto black over the scene's depth (glow_new's records); 0 when there were none */
+static int post_glow(GfxTex* color)
+{
+    VkImageView depth = VK_NULL_HANDLE;
+    int stencil = 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g_nglows; ++i)
+        if (g_glows[i].rt == color && g_glows[i].fmt == color->vf) /* (not those from before a format change) */
+        {
+            if (!n++)
+                depth = g_glows[i].depth, stencil = g_glows[i].stencil;
+        }
+    if (!n || !fx_tex(&g_post.glow, color->vf, color->w, color->h, GFX_USE_RT, 1))
+        return 0;
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    ca.imageView = attachment_view(g_post.glow, 0, 0);
+    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo da = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    da.imageView = depth;
+    da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ color->w, color->h };
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    if (depth)
+    {
+        ri.pDepthAttachment = &da;
+        if (stencil)
+            ri.pStencilAttachment = &da;
+    }
+    int ts = ts_begin(cb, GFX_PASS_POST_BLOOM);
+    vkCmdBeginRendering(cb, &ri);
+    vkCmdSetStencilTestEnable(cb, VK_FALSE);
+    vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
+    vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
+    vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    VkPipeline bound = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < g_nglows; ++i)
+    {
+        Glow* g = &g_glows[i];
+        if (g->rt != color || g->depth != depth || g->fmt != color->vf)
+            continue;
+        if (g->pipe != bound)
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g->pipe), bound = g->pipe;
+        vkCmdSetViewport(cb, 0, 1, &g->vp);
+        vkCmdSetScissor(cb, 0, 1, &g->sc);
+        vkCmdSetDepthTestEnable(cb, g->ztest ? VK_TRUE : VK_FALSE);
+        vkCmdSetDepthWriteEnable(cb, g->zwrite ? VK_TRUE : VK_FALSE);
+        vkCmdSetDepthCompareOp(cb, g->zfunc);
+        vkCmdSetCullMode(cb, g->cull);
+        vkCmdSetDepthBiasEnable(cb, g->zbias ? VK_TRUE : VK_FALSE);
+        vkCmdSetDepthBias(cb, -(float)g->zbias, 0.0f, -(float)g->zbias * 0.5f);
+        vkCmdSetPrimitiveTopology(cb, g->topo);
+        for (uint32_t k = 0; k < g->nw; ++k)
+        {
+            if (g->wi[k] >= 0)
+                g->w[k].pBufferInfo = &g->bi[g->wi[k]], g->w[k].pImageInfo = NULL;
+            else
+                g->w[k].pImageInfo = &g->ii[-1 - g->wi[k]], g->w[k].pBufferInfo = NULL;
+        }
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, g->nw, g->w);
+        if (g->indexed)
+        {
+            vkCmdBindIndexBuffer(cb, g->ib, g->ioff, g->itype);
+            vkCmdDrawIndexed(cb, g->n, 1, 0, 0, 0);
+        }
+        else
+            vkCmdDraw(cb, g->n, 1, g->vstart, 0);
+    }
+    vkCmdEndRendering(cb);
+    ts_end(cb, ts);
+    g_dirty = 1;
+    g_bound = VK_NULL_HANDLE;
+    g_post.glow->used = g_serial, g_post.glow->rec = g_cb_index;
+    return 1;
+}
+
+static void post_effects(GfxTex* color, const GfxScene* s)
+{
+    int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f, shafts = g_fxs.post_shafts > 0.0f;
+    int glows = g_fxs.scene_lamps > 0.0f && g_fxs.scene_lamp_glow > 0.0f && g_lamps.binned == g_serial;
+    if (!bloom && !dof && !shafts && !glows)
+    {
+        g_post.sh_serial = 0;
+        return;
+    }
+    flush_pass();
+    cam_cut_note(s->view);
+    GfxTex *ct = color, *depth = color->depth_world ? color->depth_world : color->depth_seen;
+    if (!post_init(ct->vf))
+        return;
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > ct->w || vy + vh > ct->h)
+        vx = vy = 0, vw = (float)ct->w, vh = (float)ct->h;
+    float minz, maxz;
+    memcpy(&minz, &s->vp[4], 4);
+    memcpy(&maxz, &s->vp[5], 4);
+    if (maxz <= minz)
+        minz = 0, maxz = 1;
+    int full_depth = depth && depth->w == ct->w && depth->h == ct->h;
+    /* a texel step down the target per step across: the scene's square stretched to the screen's shape (the
+     * projection's aspect), so a blur is round on screen */
+    float aspect = s->proj[0] != 0.0f ? fabsf(s->proj[5] / s->proj[0]) : 1.0f;
+    PostU u = { { vx, vy, vw, vh }, { 0 }, { 0 }, { 0 }, { 0 }, { s->proj[10], s->proj[14], minz, maxz }, { aspect * vh / vw, 0, 0, 0 } };
+    u.dof2[1] = s->proj[11] < 0.0f ? -1.0f : 1.0f, u.dof2[2] = POST_LEVELS, u.dof2[3] = fmaxf(g_fxs.bloom_radius, 0.0f);
+    uint32_t hw = (uint32_t)(vw + 1) / 2, hh = (uint32_t)(vh + 1) / 2;
+    float fv[4] = { vx, vy, vw, vh };
+    if (glows && full_depth && s->proj[11] != 0.0f)
+        post_lamp_glows(color, s, depth, vx, vy, vw, vh);
+    if (shafts && full_depth && s->proj[11] != 0.0f)
+        post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it) */
+    else
+        g_post.sh_serial = 0;
+    const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (dof && full_depth && s->proj[11] != 0.0f)
+    {
+        /* the focus: the player's distance along the view (or dof_focus), eased over some 0.2 s; a jump (a new place,
+         * the camera cut) taken at once */
+        float want = g_fxs.dof_focus > 0.0f ? g_fxs.dof_focus : 0.0f;
+        if (want <= 0.0f && g_fx.has_focus)
+        {
+            const float* V = s->view;
+            const float* p = g_fx.focus;
+            want = fabsf(p[0] * V[2] + p[1] * V[6] + p[2] * V[10] + V[14]);
+        }
+        if (!(want > 0.5f) || !isfinite(want)) /* (no player, or the camera in its head: first person) */
+            want = g_post.focus > 0.5f && isfinite(g_post.focus) ? g_post.focus : 10.0f;
+        uint64_t now = gfx_now_ns();
+        double dt = g_post.focus_ns ? (double)(now - g_post.focus_ns) * 1e-9 : 1.0;
+        g_post.focus_ns = now;
+        if (!(g_post.focus > 0.0f) || !isfinite(g_post.focus) || dt > 0.5 || cam_cut() || fabsf(want - g_post.focus) > 0.5f * fmaxf(want, g_post.focus))
+            g_post.focus = want;
+        else
+            g_post.focus += (want - g_post.focus) * (float)(1.0 - exp(-dt / 0.2));
+        u.dof[0] = g_post.focus, u.dof[1] = fmaxf(g_fxs.dof_range, 0.0f), u.dof[2] = fmaxf(g_fxs.dof_ramp, 1e-3f);
+        u.dof[3] = g_fxs.post_dof * 4.0f * vw / 2048.0f; /* at 1: some 8 pixels of a 2048 scene */
+        u.dof2[0] = fminf(fmaxf(g_fxs.dof_near, 0.0f), 1.0f);
+        if (fx_tex(&g_post.h0, F16, hw, hh, GFX_USE_RT, 1) && fx_tex(&g_post.h1, F16, hw, hh, GFX_USE_RT, 1))
+        {
+            float hv[4] = { 0, 0, (float)hw, (float)hh };
+            u.src[0] = (float)hw, u.src[1] = (float)hh, u.src[2] = 1.0f / (float)hw, u.src[3] = 1.0f / (float)hh;
+            GfxTex* coc_in[3] = { ct, depth, NULL };
+            VkSampler coc_s[3] = { g_post.near, g_post.near, VK_NULL_HANDLE };
+            post_pass(g_post.h0, 0, g_post.coc, hv, &u, sizeof u, coc_in, coc_s, GFX_PASS_POST_DOF);
+            GfxTex* gat_in[3] = { g_post.h0, NULL, NULL };
+            post_pass(g_post.h1, 0, g_post.gather, hv, &u, sizeof u, gat_in, NULL, GFX_PASS_POST_DOF);
+            GfxTex* cmp_in[3] = { g_post.h1, depth, NULL };
+            VkSampler cmp_s[3] = { VK_NULL_HANDLE, g_post.near, VK_NULL_HANDLE };
+            post_pass(ct, 1, g_post.dcomp, fv, &u, sizeof u, cmp_in, cmp_s, GFX_PASS_POST_DOF);
+        }
+    }
+    if (bloom && full_depth)
+    {
+        u.bloom[0] = g_fxs.bloom_threshold, u.bloom[1] = g_fxs.bloom_knee, u.bloom[2] = g_fxs.bloom_emissive_fx;
+        u.aux[1] = fmaxf(g_fxs.bloom_emissive_lights, 0.0f);
+        u.bloom[3] = g_fxs.post_bloom;
+        GfxTex* glow = post_glow(color) ? g_post.glow : NULL; /* (none: the dummy, black) */
+        uint32_t w[POST_LEVELS], h[POST_LEVELS];
+        int ok = 1;
+        for (int i = 0; i < POST_LEVELS; ++i)
+        {
+            w[i] = (uint32_t)(vw / (float)(2 << i)), h[i] = (uint32_t)(vh / (float)(2 << i));
+            w[i] = w[i] ? w[i] : 1, h[i] = h[i] ? h[i] : 1;
+            ok = ok && fx_tex(&g_post.lvl[i], g_post.lvl_fmt, w[i], h[i], GFX_USE_RT, 1);
+        }
+        if (ok)
+        {
+            u.src[0] = (float)ct->w, u.src[1] = (float)ct->h, u.src[2] = 1.0f / (float)ct->w, u.src[3] = 1.0f / (float)ct->h;
+            GfxTex* pre_in[3] = { ct, glow, depth };
+            VkSampler pre_s[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, g_post.near };
+            float lv[4] = { 0, 0, (float)w[0], (float)h[0] };
+            post_pass(g_post.lvl[0], 0, g_post.pre, lv, &u, sizeof u, pre_in, pre_s, GFX_PASS_POST_BLOOM);
+            for (int i = 1; i < POST_LEVELS; ++i)
+            {
+                u.src[0] = (float)w[i - 1], u.src[1] = (float)h[i - 1], u.src[2] = 1.0f / (float)w[i - 1], u.src[3] = 1.0f / (float)h[i - 1];
+                GfxTex* in[3] = { g_post.lvl[i - 1], NULL, NULL };
+                float l[4] = { 0, 0, (float)w[i], (float)h[i] };
+                post_pass(g_post.lvl[i], 0, g_post.down, l, &u, sizeof u, in, NULL, GFX_PASS_POST_BLOOM);
+            }
+            for (int i = POST_LEVELS - 2; i >= 0; --i)
+            {
+                u.src[0] = (float)w[i + 1], u.src[1] = (float)h[i + 1], u.src[2] = 1.0f / (float)w[i + 1], u.src[3] = 1.0f / (float)h[i + 1];
+                GfxTex* in[3] = { g_post.lvl[i + 1], NULL, NULL };
+                float l[4] = { 0, 0, (float)w[i], (float)h[i] };
+                post_pass(g_post.lvl[i], 1, g_post.up, l, &u, sizeof u, in, NULL, GFX_PASS_POST_BLOOM);
+            }
+            u.aux[3] = ct->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? 1.0f : 0.0f;
+            GfxTex* in[3] = { g_post.lvl[0], NULL, NULL };
+            post_pass(ct, 1, u.aux[3] > 0.0f ? g_post.comp_add : g_post.comp, fv, &u, sizeof u, in, NULL, GFX_PASS_POST_BLOOM);
+        }
+    }
+    color->scene = 0; /* its mips are behind (scene_mips) */
+    color->used = g_serial, color->rec = g_cb_index;
+}
+
+/* --- the HDR scene (scene_hdr; gfx_metal.m's note) -----------------------------------------------------------------
+ * The game's world target (its large background) made RGBA16F in place: a new image of the same size and levels, the
+ * old one's first level drawn into it, so the frame goes on with what was drawn; its draws build their pipelines for the
+ * float target as they would for any. One tonemap pass at the scene's end (hdr_tone) brings it back to the display's
+ * range before the nameplates and the interface go over it - from a copy of the scene, as Vulkan has no reading the
+ * pixel being shaded. The game's copies between targets of other formats are skipped (gfx_copy), as on Metal. */
+static struct
+{
+    GfxTex* t;    /* the target made float */
+    VkPipeline copy[2]; /* POST_HDR_COPY into RGBA16F, into BGRA8 */
+    VkPipeline tone;
+    GfxTex* src;  /* the scene as it was, for the tonemap to read */
+} g_hdr;
+
+static void hdr_swap(GfxTex* t, VkFormat vf)
+{
+    if (t->vf == vf || !post_init(t->vf))
+        return;
+    VkPipeline* cp = &g_hdr.copy[vf == VK_FORMAT_R16G16B16A16_SFLOAT ? 0 : 1];
+    if (!*cp)
+        *cp = post_pipeline("HDR_COPY", vf, 0);
+    if (!*cp)
+        return;
+    /* the new image as gfx_tex_create would make it in this format (the same levels and views), taken into t */
+    GfxTex* n = tex_create(GFX_TEX_2D, t->fmt, t->w, t->h, t->levels, GFX_USE_RT, vf, 0);
+    if (!n)
+        return;
+    end_pass();
+    flush_pass();
+    if (n->mips != t->mips)
+    {
+        gfx_tex_destroy(n);
+        return;
+    }
+    PostU u;
+    memset(&u, 0, sizeof u);
+    GfxTex* in[3] = { t, NULL, NULL };
+    VkSampler ns[3] = { g_post.near, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    float vp[4] = { 0, 0, (float)t->w, (float)t->h };
+    post_pass(n, 0, *cp, vp, &u, sizeof u, in, ns, GFX_PASS_HDR);
+    /* t's image and views go once the frame is done; n's become t's, and the shell goes */
+    if (t->levelv)
+        for (uint32_t i = 0; i < t->mips; ++i)
+            trash(1, (uint64_t)(uintptr_t)t->levelv[i], NULL);
+    free(t->levelv), t->levelv = NULL;
+    trash(1, (uint64_t)(uintptr_t)t->view, NULL);
+    trash(1, (uint64_t)(uintptr_t)t->mipview, NULL);
+    for (uint32_t i = 0; i < t->mips; ++i)
+        trash(1, (uint64_t)(uintptr_t)t->rtv[i], NULL);
+    free(t->rtv);
+    trash(0, (uint64_t)(uintptr_t)t->img, t->mem);
+    t->img = n->img, t->mem = n->mem, t->view = n->view, t->mipview = n->mipview, t->rtv = n->rtv;
+    t->vf = n->vf;
+    if (n->rt_prev)
+        n->rt_prev->rt_next = n->rt_next;
+    else
+        g_rts = n->rt_next;
+    if (n->rt_next)
+        n->rt_next->rt_prev = n->rt_prev;
+    free(n);
+    t->scene = 0, t->used = g_serial, t->rec = g_cb_index;
+    g_bound = VK_NULL_HANDLE;
+    glows_forget(t);
+}
+
+/* the scene's target float while scene_hdr is on (and back once it is off) */
+static void hdr_update(GfxTex* color)
+{
+    int want = g_fxs.scene_hdr > 0.0f && color->use == GFX_USE_RT && color->mips > 1 && !color->block;
+    if (g_hdr.t && g_hdr.t != color && g_hdr.t->vf == VK_FORMAT_R16G16B16A16_SFLOAT)
+        hdr_swap(g_hdr.t, VK_FORMAT_B8G8R8A8_UNORM), g_hdr.t = NULL; /* (another target is the world now) */
+    if (want && color->vf == VK_FORMAT_B8G8R8A8_UNORM)
+        hdr_swap(color, VK_FORMAT_R16G16B16A16_SFLOAT), g_hdr.t = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? color : NULL;
+    else if (!want && g_hdr.t == color && color->vf == VK_FORMAT_R16G16B16A16_SFLOAT)
+        hdr_swap(color, VK_FORMAT_B8G8R8A8_UNORM), g_hdr.t = NULL;
+}
+
+/* the tonemap over the scene's viewport, from a copy of it */
+static void hdr_tone(GfxTex* color, const GfxScene* s)
+{
+    if (g_hdr.t != color || color->vf != VK_FORMAT_R16G16B16A16_SFLOAT)
+        return;
+    if (!g_hdr.tone)
+        g_hdr.tone = post_pipeline("HDR_TONE", VK_FORMAT_R16G16B16A16_SFLOAT, 0);
+    if (!g_hdr.tone || !fx_tex(&g_hdr.src, VK_FORMAT_R16G16B16A16_SFLOAT, color->w, color->h, GFX_USE_RT, 1))
+        return;
+    flush_pass();
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > color->w || vy + vh > color->h)
+        vx = vy = 0, vw = (float)color->w, vh = (float)color->h;
+    gpu_sync();
+    VkImageCopy c = { 0 };
+    c.srcSubresource = (VkImageSubresourceLayers){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    c.dstSubresource = c.srcSubresource;
+    c.srcOffset = c.dstOffset = (VkOffset3D){ (int32_t)vx, (int32_t)vy, 0 };
+    c.extent = (VkExtent3D){ (uint32_t)vw, (uint32_t)vh, 1 };
+    int ts = ts_begin(g_cb, GFX_PASS_HDR);
+    vkCmdCopyImage(g_cb, color->img, VK_IMAGE_LAYOUT_GENERAL, g_hdr.src->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    ts_end(g_cb, ts);
+    g_dirty = 1;
+    PostU u;
+    memset(&u, 0, sizeof u);
+    u.bloom[0] = g_fxs.tonemap, u.bloom[1] = fmaxf(g_fxs.exposure, 0.01f), u.bloom[2] = fmaxf(g_fxs.tone_white, 1.01f);
+    u.bloom[3] = fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f);
+    GfxTex* in[3] = { g_hdr.src, NULL, NULL };
+    VkSampler ns[3] = { g_post.near, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    float fv[4] = { vx, vy, vw, vh };
+    post_pass(color, 1, g_hdr.tone, fv, &u, sizeof u, in, ns, GFX_PASS_HDR);
+    color->scene = 0;
+}
+
+static void hdr_forget(const GfxTex* t)
+{
+    if (g_hdr.t == t)
+        g_hdr.t = NULL;
+}
+
 static void scene_fx(GfxTex* color, const GfxScene* s);
 
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
         return;
+    hdr_update(color);
     ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
-    scene_lamp_glows(color, s);
+    post_effects(color, s); /* (the lamps' glows among them, ahead of the bloom) */
+    hdr_tone(color, s);
     scene_aa(color, s);
 }
 
@@ -8617,6 +9575,7 @@ static int present_to_window(GfxTex* bb)
 static void frame_end(void)
 {
     casters_clear();
+    glows_clear();
     submit(0);
     Frame* f = &g_frames[g_frame];
     if (!f->value)
