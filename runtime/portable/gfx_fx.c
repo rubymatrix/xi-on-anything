@@ -206,6 +206,15 @@ static const struct
     /* the lamps fill the sun's and moon's shadows: gone where a lamp's light is this many times less than the sun's or
      * moon's would be (0: the lamps never fill them) */
     { "shadow_fill", offsetof(GfxFxSettings, shadow_fill), 0.5f },
+    /* soft shadows, hard where a caster meets the ground and softer the farther from it (the scene renderer's sun and
+     * moon cascades, the characters' layers, the lamps' cubes): how soft, times each light's size (0: the fixed
+     * filter); the sun's and moon's angular size in degrees (the sun's tripled toward the horizon, through haze), a
+     * lamp's in units; 1 Low, 2 High (the taps) */
+    { "shadow_softness", offsetof(GfxFxSettings, shadow_softness), 1.0f },
+    { "sun_size", offsetof(GfxFxSettings, sun_size), 2.0f },
+    { "moon_size", offsetof(GfxFxSettings, moon_size), 3.0f },
+    { "lamp_size", offsetof(GfxFxSettings, lamp_size), 0.3f },
+    { "shadow_soft_q", offsetof(GfxFxSettings, shadow_soft_q), 2.0f },
     /* the shadowed lamps' reach, red where shadowed and green where lit (0 off) */
     { "scene_lamp_debug", offsetof(GfxFxSettings, scene_lamp_debug), 0.0f },
     /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;

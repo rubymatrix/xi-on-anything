@@ -101,6 +101,7 @@ the Lighting and Atmosphere pages.
 | Lamps: the zone casts in those lamps' cubes too (what the game drew that frame; drawn again when the lamps change or every 600 frames) | | `scene_lamp_zone` | 1 on (0: characters only) |
 | Night (scene renderer, eased through dusk and dawn by the sun's height): the moon's shadows' strength as a share of the sun's / their penumbra's width / the sun, moon and ambient light at midnight / a cool grey shift on them; lamps untouched | | `moon_shadow`, `moon_soft`, `night_exposure`, `night_tint` | 0.7 / 1.5 / 0.6 / 0.35 |
 | Lamps fill the sun's and moon's shadows: gone where lamp light is at least 1/n of the sun's or moon's | | `shadow_fill` | 0.5 (0: never) |
+| Soft shadows (scene renderer: sun and moon cascades, characters' layers, lamp cubes), hard at contact and softer away from the caster: how soft (0: the fixed filter) / the sun's angular size in degrees (tripled toward the horizon) / the moon's / a lamp's in units / 1 Low, 2 High taps | | `shadow_softness`, `sun_size`, `moon_size`, `lamp_size`, `shadow_soft_q` | 1 / 2 / 3 / 0.3 / 2 |
 | Testing: the sun held low ahead of the camera (degrees up, degrees turned); the shafts alone | | `scene_sun_test`, `scene_sun_test_turn`, `shafts_debug` | 0 / 0 / 0 |
 
 ## 6. Water

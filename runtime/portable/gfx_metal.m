@@ -4444,10 +4444,10 @@ static void water_bind(void)
  * (1 - (d/r)^4)^2 rather than cut off there - no circles on the ground. LU: viewport, tiles across and down, strength. */
 #define LAMP_MSL                                                                                                    \
     "struct LL { float4 pos, col, att, amb; };\n"                                                                 \
-    "struct LU { float4 vp; float4 t; float4 k; };\n" /* k.x: the zone's cubes are there */                       \
+    "struct LU { float4 vp; float4 t; float4 k; };\n" /* k: the zone's cubes are there, a lamp's size (soft), taps */ \
     /* the lamp's shadow at P: the cube face its direction falls in, the point pushed toward the lamp a little */      \
     "static float lamp_shadow(depth2d_array<float> SM, depth2d_array<float> ZM, constant float4x4* M, uint s, float3 P,\n" \
-    "                         float3 Lp, float3 N, bool zone) {\n"                                                 \
+    "                         float3 Lp, float3 N, bool zone, float ls, int nt) {\n"                               \
     "  constexpr sampler c(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);\n" \
     "  float3 d = P - Lp, a = abs(d);\n"                                                                         \
     "  uint f = a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0u : 1u) : a.y >= a.z ? (d.y > 0.0 ? 2u : 3u) : (d.z > 0.0 ? 4u : 5u);\n" \
@@ -4455,9 +4455,22 @@ static void water_bind(void)
     "  float4 h = M[s * 6u + f] * float4(P - d * (0.08 / max(dl, 0.5)) * min(dl, 2.0) + N * 0.06, 1.0);\n"       \
     "  if (h.w <= 1e-4) return 1.0;\n"                                                                           \
     "  float2 uv = float2(h.x / h.w * 0.5 + 0.5, 0.5 - h.y / h.w * 0.5);\n"                                      \
-    "  float v = SM.sample_compare(c, uv, s * 6u + f, h.z / h.w);\n"                                             \
-    "  if (zone) v = min(v, ZM.sample_compare(c, uv, s * 6u + f, h.z / h.w));\n"                                \
-    "  return v;\n"                                                                                              \
+    "  float z = h.z / h.w;\n"                                                                                   \
+    "  if (ls <= 0.0) {\n"                                                                                       \
+    "    float v = SM.sample_compare(c, uv, s * 6u + f, z);\n"                                                   \
+    "    return zone ? min(v, ZM.sample_compare(c, uv, s * 6u + f, z)) : v;\n"                                   \
+    "  }\n"                                                                                                      \
+    /* soft (lamp_size): a disc as wide as the lamp seen from here, a face spanning twice the distance, one to six \
+     * texels */                                                                                                   \
+    "  float tx = 1.0 / float(SM.get_width()), r = clamp(ls / (4.0 * max(dl, 0.3)), tx, 6.0 * tx);\n" \
+    "  float2 a0 = sh_turn(P);\n"                                                                                \
+    "  float v = 0.0;\n"                                                                                         \
+    "  for (int i = 0; i < nt; ++i) {\n"                                                                         \
+    "    float2 q = uv + sh_vogel(i, nt, a0) * r;\n"                                                             \
+    "    float w = SM.sample_compare(c, q, s * 6u + f, z);\n"                                                    \
+    "    v += zone ? min(w, ZM.sample_compare(c, q, s * 6u + f, z)) : w;\n"                                      \
+    "  }\n"                                                                                                      \
+    "  return v / float(nt);\n"                                                                                  \
     "}\n"                                                                                                        \
     "static void lamp_light(constant LU& U, const device LL* LS, const device ushort* TL, float2 fp, float3 P, float3 N,\n" \
     "                       thread float3& dif, thread float3& amb, depth2d_array<float> SM, depth2d_array<float> ZM,\n" \
@@ -4475,7 +4488,7 @@ static void water_bind(void)
     "    float w = saturate(1.0 - q * q * q * q);\n"                                                              \
     "    float at = w * w / max(l.att.x + l.att.y * d + l.att.z * d * d, 1e-3);\n"                                \
     "    amb += l.amb.rgb * at;\n"                                                                                \
-    "    float sh = l.att.w > 0.5 && U.t.z > 0.5 ? lamp_shadow(SM, ZM, SMM, uint(l.att.w) - 1u, Ps, l.pos.xyz, N, U.k.x > 0.5) : 1.0;\n" \
+    "    float sh = l.att.w > 0.5 && U.t.z > 0.5 ? lamp_shadow(SM, ZM, SMM, uint(l.att.w) - 1u, Ps, l.pos.xyz, N, U.k.x > 0.5, U.k.y, int(U.k.z)) : 1.0;\n" \
     "    dif += l.col.rgb * at * sh * max(dot(N, v / max(d, 1e-4)), 0.0);\n"                                      \
     "    if (U.t.w > 0.5 && l.att.w > 0.5) amb += float3(1.0 - sh, sh, 0.0) * 4.0 * w;\n" /* scene_lamp_debug: red shadowed, green lit */ \
     "  }\n"                                                                                                       \
@@ -4515,7 +4528,7 @@ static void water_bind(void)
  * shadow (strength applied). */
 #define SHADOW_MSL                                                                                                  \
     "struct SH { float4x4 m[4]; float4 cas[4]; float4 cbox[4]; float4 dir; float4 cam; float4 info; float4x4 cm[4];\n" \
-    "            float4 ctx; };\n"                                                                                \
+    "            float4 ctx; float4 pk; };\n"                                                                     \
     "static float sh_pcf(depth2d_array<float> t, sampler s, float2 uv, uint c, float z, float tx) {\n"           \
     "  if (c >= 2u) return t.sample_compare(s, uv, c, z);\n" /* far: the hardware's 2x2 alone */                 \
     "  return 0.25 * (t.sample_compare(s, uv + float2(-0.5, -0.5) * tx, c, z) +\n"                               \
@@ -4532,20 +4545,63 @@ static void water_bind(void)
     "    for (int x = -1; x <= 1; ++x) v += t.sample_compare(s, uv + float2(x, y) * tx, l, z);\n"                \
     "  return v * (1.0 / 9.0);\n"                                                                                \
     "}\n"                                                                                                        \
+    /* contact-hardening soft shadows (shadow_softness; pk: the light's tan(angular radius), the blocker search's  \
+     * gathers, the filter's taps): the blockers' mean depth round the point (gathers on a disc), then that   \
+     * far from them times the light's size wide, in hardware 2x2 compares on a disc turned by a hash of the place \
+     * (world-locked: still under a moving camera). A map's texel and depth in world units come from its matrix;  \
+     * the depths are lowered along the receiver's slope by the disc's reach (no acne at grazing angles, the slope  \
+     * no blocker of itself); no blocker: lit, no filter; all blockers and a narrow penumbra: one compare */         \
+    "static float2 sh_turn(float3 p) {\n"                                                                             \
+    "  float a = 6.2831853 * fract(52.9829189 * fract(dot(floor(p * 40.0), float3(0.06711056, 0.00583715, 0.1234567))));\n" \
+    "  return float2(cos(a), sin(a));\n"                                                                              \
+    "}\n"                                                                                                             \
+    "constant float2 sh_disc[16] = { float2(0.1768, 0.0000), float2(-0.2258, 0.2068), float2(0.0346, -0.3938), float2(0.2846, 0.3712),\n" \
+    "  float2(-0.5222, -0.0924), float2(0.4947, -0.3147), float2(-0.1655, 0.6155), float2(-0.3156, -0.6076),\n"       \
+    "  float2(0.6846, 0.2500), float2(-0.7123, 0.2940), float2(0.3434, -0.7337), float2(0.2537, 0.8089),\n"           \
+    "  float2(-0.7647, -0.4432), float2(0.8971, -0.1972), float2(-0.5475, 0.7788), float2(-0.1265, -0.9761) };\n"     \
+    "static float2 sh_vogel(int i, int n, float2 r) {\n"                                                              \
+    "  float2 q = sh_disc[i * (16 / n) + (16 / n - 1)];\n"                                                            \
+    "  return float2(q.x * r.x - q.y * r.y, q.x * r.y + q.y * r.x);\n"                                                \
+    "}\n"                                                                                                             \
+    "static float sh_pcss(depth2d_array<float> t, sampler cs, float4x4 M, uint l, float2 uv, float z, float tx, float tl,\n" \
+    "                     int nb, int nf, float2 rot, float nl) {\n"                                                  \
+    "  constexpr sampler ps(coord::normalized, filter::nearest, address::clamp_to_edge);\n"                           \
+    "  float wpt = 2.0 * tx / length(float3(M[0][0], M[1][0], M[2][0]));\n"                                           \
+    "  float wpd = 1.0 / length(float3(M[0][2], M[1][2], M[2][2]));\n"                                                \
+    "  float rs = clamp(tl * 6.0 / wpt, 1.0, 12.0);\n"                                                                \
+    "  float sl = sqrt(1.0 - nl * nl) / max(nl, 0.2), zs = z - min(rs * wpt * sl, 1.0) / wpd;\n" /* the slope's own fall */ \
+    "  float sum = 0.0, n = 0.0;\n"                                                                                   \
+    "  for (int i = 0; i < nb; ++i) {\n"                                                                              \
+    "    float4 d = t.gather(ps, uv + sh_vogel(i, 4, rot) * (rs * tx), l);\n"                                         \
+    "    float4 b = select(float4(0.0), float4(1.0), d < zs);\n"                                                       \
+    "    sum += dot(d, b), n += b.x + b.y + b.z + b.w;\n"                                                             \
+    "  }\n"                                                                                                           \
+    "  if (n == 0.0) return 1.0;\n"                                                                                   \
+    "  float pen = clamp((z - sum / n) * wpd * tl / wpt, 0.5, 12.0);\n"                                               \
+    "  float zb = z - min(pen * wpt * sl, 0.5) / wpd;\n"                              \
+    "  if (n == 4.0 * float(nb) && pen < 1.5) return t.sample_compare(cs, uv, l, zb);\n"                              \
+    "  float v = 0.0;\n"                                                                                              \
+    "  for (int i = 0; i < nf; ++i) v += t.sample_compare(cs, uv + sh_vogel(i, nf, rot) * (pen * tx), l, zb);\n"      \
+    "  return v / float(nf);\n"                                                                                       \
+    "}\n"                                                                                                             \
     "static float sh_char(constant SH& S, depth2d_array<float> cm, depth2d_array<float> ct, sampler cs, uint c, float3 wp,\n" \
     "                     float3 n, float nl) {\n"                                                                  \
     "  float off = 1.0 + 4.0 * sqrt(1.0 - nl * nl);\n"                                                           \
     "  float t = S.ctx.x;\n" /* the fitted layer, when there is one and the point is in it */                     \
     "  if (t > 0.0) {\n"                                                                                          \
     "    float4 h = S.cm[0] * float4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                 \
-    "    if (all(abs(h.xy) < 0.995)) return sh_cpcf(ct, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), 0u, h.z, S.ctx.y * max(S.ctx.z, 1.0));\n" \
+    "    float2 u0 = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                               \
+    "    if (all(abs(h.xy) < 0.995)) return S.pk.x > 0.0 ? sh_pcss(ct, cs, S.cm[0], 0u, u0, h.z, S.ctx.y, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl)\n" \
+    "                                                   : sh_cpcf(ct, cs, u0, 0u, h.z, S.ctx.y * max(S.ctx.z, 1.0));\n" \
     "  }\n"                                                                                                       \
     "  if (c >= uint(S.info.y)) return 1.0;\n" /* the cascade's characters' layer, half size, only round them */      \
     "  t = 2.0 * S.cas[c].y;\n"                                                                                   \
     "  float4 h = S.cm[1u + c] * float4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                               \
     "  float4 b = S.cbox[c];\n"                                                                                   \
     "  if (any(abs(h.xy) > 0.995) || any(h.xy < b.xy) || any(h.xy > b.zw)) return 1.0;\n"                         \
-    "  return sh_cpcf(cm, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), c, h.z, 2.0 * S.info.w * max(S.ctx.z, 1.0));\n"                \
+    "  float2 u1 = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                 \
+    "  if (S.pk.x > 0.0) return sh_pcss(cm, cs, S.cm[1u + c], c, u1, h.z, 2.0 * S.info.w, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl);\n" \
+    "  return sh_cpcf(cm, cs, u1, c, h.z, 2.0 * S.info.w * max(S.ctx.z, 1.0));\n"                                \
     "}\n"                                                                                                        \
     "static float sh_at(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, depth2d_array<float> ct,\n" \
     "                   sampler cs, uint c,\n"                                                                  \
@@ -4554,7 +4610,12 @@ static void water_bind(void)
     "  float4 h = S.m[c] * float4(wp + n * (t * (1.0 + 4.0 * sqrt(1.0 - nl * nl))) + S.dir.xyz * t, 1.0);\n"  \
     "  if (abs(h.x) > 0.995 || abs(h.y) > 0.995) return -1.0;\n"                                                \
     "  float2 uv = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                 \
-    "  float v = S.ctx.z > 1.01 && c < 2u ? sh_cpcf(zm, cs, uv, c, h.z, S.info.w * S.ctx.z) : sh_pcf(zm, cs, uv, c, h.z, S.info.w);\n" /* the moon's wider */                                                        \
+    "  float v;\n"                                                                                               \
+    "  if (S.pk.x > 0.0) {\n" /* soft: all the taps in the nearest cascade, half in the next, a quarter beyond */ \
+    "    int k = c == 0u ? 1 : c == 1u ? 2 : 4;\n"                                                               \
+    "    v = sh_pcss(zm, cs, S.m[c], c, uv, h.z, S.info.w, S.pk.x, max(int(S.pk.y) / k, 1), max(int(S.pk.z) / k, 4), sh_turn(wp), nl);\n" \
+    "  } else\n"                                                                                                 \
+    "    v = S.ctx.z > 1.01 && c < 2u ? sh_cpcf(zm, cs, uv, c, h.z, S.info.w * S.ctx.z) : sh_pcf(zm, cs, uv, c, h.z, S.info.w);\n" /* the moon's wider */ \
     "  if (v > 0.0 && S.info.y > 0.0) v = min(v, sh_char(S, cm, ct, cs, c, wp, n, nl));\n"                      \
     "  return v;\n"                                                                                              \
     "}\n"                                                                                                        \
@@ -4795,6 +4856,7 @@ typedef struct ShU
                                         * and on the first cascades' */
     float ctx[4];  /* world units a texel in the fitted layer (0: none), 1 / its size, the penumbra's width (1 the sun's), how
                     * the lamps fill the shadow */
+    float pk[4];   /* soft shadows: the light's tan(angular radius) (0: off), the blocker search's taps, the filter's */
 } ShU;
 static struct
 {
@@ -5101,6 +5163,8 @@ static int lamps_bind(id<MTLRenderCommandEncoder> e, const float* view, const fl
     g_lamps.lu[6] = sh ? 1.0f : 0.0f, g_lamps.lu[7] = g_fxs.scene_lamp_debug;
     int zs = sh && g_lamps.zlsm && g_lamps.zn == g_lamps.nsh && !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
     g_lamps.lu[8] = zs ? 1.0f : 0.0f;
+    g_lamps.lu[9] = fmaxf(g_fxs.lamp_size, 0.0f) * fmaxf(g_fxs.shadow_softness, 0.0f);
+    g_lamps.lu[10] = g_fxs.shadow_soft_q >= 1.5f ? 8.0f : 4.0f;
     [e setFragmentBytes:g_lamps.lu length:sizeof g_lamps.lu atIndex:14];
     static id<MTLTexture> dummy, zdummy;
     if (!zdummy)
@@ -6313,6 +6377,8 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
         }
         u->ctx[1] = 1.0f / (float)g_shd.fsize, u->ctx[2] = f->soft > 1.0f ? f->soft : 1.0f;
         u->ctx[3] = fmaxf(g_fxs.shadow_fill, 0.0f);
+        int hq = g_fxs.shadow_soft_q >= 1.5f;
+        u->pk[0] = f->soft_tan, u->pk[1] = hq ? 4.0f : 2.0f, u->pk[2] = hq ? 16.0f : 8.0f, u->pk[3] = 0.0f; /* gathers, compares */
         u->info[0] = (float)nc, u->info[2] = f->strength, u->info[3] = 1.0f / (float)f->size;
         g_shd.on = 1;
     }

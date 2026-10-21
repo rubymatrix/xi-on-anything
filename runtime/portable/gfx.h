@@ -464,6 +464,7 @@ typedef struct GfxShadowFrame
     float cam[4];       /* the camera, world (the cascades are chosen by the distance from it) */
     float strength;     /* 0..1: how much of the light the shadow takes */
     float soft;         /* the penumbra's width, times the day's (1; the moon's wider) */
+    float soft_tan;     /* contact-hardening soft shadows: tan of the light's angular radius (0: off, the fixed filter) */
     GfxShadowCascade c[GFX_SHADOW_CASCADES];
     int32_t redraw;     /* the zone's layer of this cascade drawn again from the items below; -1 none */
     const float* world; /* 16 floats an instance (the items' inst indexes it) */

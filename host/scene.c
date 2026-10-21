@@ -702,6 +702,16 @@ static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
     float day = scene_day(), ms = gfx_fx_get("moon_shadow"), msoft = gfx_fx_get("moon_soft");
     sf->strength = (want > 1.0f ? 1.0f : want) * (ms + (1.0f - ms) * day);
     sf->soft = msoft > 1.0f ? msoft + (1.0f - msoft) * day : 1.0f;
+    /* the light's size for the soft shadows (shadow_softness): the sun's, wider low in the sky (haze), or the moon's */
+    float soft = gfx_fx_get("shadow_softness");
+    if (soft > 0.0f)
+    {
+        float up = -g_sh.L[1], haze = 1.0f - up / 0.35f; /* (y down) */
+        haze = haze < 0.0f ? 0.0f : haze > 1.0f ? 1.0f : haze;
+        float sun = gfx_fx_get("sun_size") * (1.0f + 2.0f * haze), moon = gfx_fx_get("moon_size");
+        float deg = (moon + (sun - moon) * day) * soft;
+        sf->soft_tan = tanf(0.5f * deg * 3.14159265f / 180.0f);
+    }
     memcpy(sf->c, g_sh.c, sizeof sf->c);
     sf->world = g_sh.world, sf->nworld = g_sh.nworld, sf->item = g_sh.items.v, sf->nitem = sf->redraw >= 0 ? g_sh.items.n : 0;
 }
