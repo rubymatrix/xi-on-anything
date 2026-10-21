@@ -3395,6 +3395,44 @@ extern "C"
     {
         return 0;
     }
+    // No scene renderer here: the game's own draws stay.
+    int gfx_world_supported(void)
+    {
+        return 0;
+    }
+    int gfx_world_draw(const GfxWorldFrame* f)
+    {
+        (void)f;
+        return 0;
+    }
+    void gfx_world_time(int pass)
+    {
+        (void)pass;
+    }
+    void gfx_shadow_begin(const GfxShadowFrame* f)
+    {
+        (void)f;
+    }
+    int gfx_chars_draw(const GfxCharFrame* f)
+    {
+        (void)f;
+        return 0;
+    }
+    void gfx_lamps(const GfxWorldLight* l, uint32_t n)
+    {
+        (void)l, (void)n;
+    }
+    // No GPU time per pass here.
+    void gfx_pass_timing(int on)
+    {
+        (void)on;
+    }
+    int gfx_pass_report(char (*out)[96], int max)
+    {
+        (void)out;
+        (void)max;
+        return 0;
+    }
     void gfx_set_sync_pipelines(int on)
     {
         (void)on;

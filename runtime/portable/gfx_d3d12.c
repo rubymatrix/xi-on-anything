@@ -4298,6 +4298,19 @@ static int rt_init(void)
 
 int gfx_rt_supported(void) { return rt_init(); }
 
+/* the scene renderer is Metal's only so far: the game's own draws stay */
+int gfx_world_supported(void) { return 0; }
+int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
+void gfx_world_time(int pass) { (void)pass; }
+void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
+void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
+void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
+int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
+void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
+/* no time per pass here: the profile has the whole frame's GPU time */
+void gfx_pass_timing(int on) { (void)on; }
+int gfx_pass_report(char (*out)[96], int max) { return (void)out, (void)max, 0; }
+
 /* a buffer of the GPU's own of at least need bytes in *r (made again, half as large again, when it is
  * smaller), in state; uav: the acceleration structures' and scratch's */
 static int rt_buffer(ID3D12Resource** r, uint64_t* size, uint64_t need, D3D12_RESOURCE_STATES state, int uav)

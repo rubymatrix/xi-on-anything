@@ -139,6 +139,18 @@ int gfx_sun_shadows_shown(void) { return 0; }
 int gfx_sun_shadows_on(void) { return 0; }
 float gfx_sun_prime(float* center) { (void)center; return 0.0f; }
 int gfx_rt_supported(void) { return 0; }
+
+/* the scene renderer is Metal's only so far: the game's own draws stay */
+int gfx_world_supported(void) { return 0; }
+int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
+void gfx_world_time(int pass) { (void)pass; }
+void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
+void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
+void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
+int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
+void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
+void gfx_pass_timing(int on) { (void)on; }
+int gfx_pass_report(char (*out)[96], int max) { return (void)out, (void)max, 0; }
 float gfx_fx_get(const char* key) { return (void)key, 0.0f; }
 void gfx_trace_dump(const char* path) { (void)path; }
 void gfx_finish(void) {}

@@ -105,6 +105,7 @@
 #include "plat.h"
 #include "vfs.h"
 #include "geometry_guest.h"
+#include "scene.h"
 #include "build.h" /* FFXI_VERSION */
 #if defined(FFXI_ANDROID_VULKAN)
 #include "benchmark.h"
@@ -523,7 +524,8 @@ static uint32_t lod_pick_model(uint32_t obj, uint32_t model)
 
 static void lod_pick(Guest* g)
 {
-    g->ebx = lod_pick_model(g->ecx, g->ebx);
+    /* then the scene renderer may take the instance (the light list and moving flag are the walk's arguments) */
+    g->ebx = scene_zone_pick(g->ecx, lod_pick_model(g->ecx, g->ebx), rd32(g->esp + 0x1d8), (int)rd32(g->esp + 0x1e0));
 }
 
 static void lod_pick2(Guest* g)
@@ -752,6 +754,7 @@ static void present_hook(void)
     fix_aspect();
     fix_draw_distance();
     lod_frame();
+    scene_frame();
     modern_frame();
     cexi_frame();
     shadow_focus();
@@ -1332,6 +1335,7 @@ int main(int argc, char** argv)
     setup_nameplates();
     setup_water();
     setup_lod();
+    scene_setup();
     frame_setup();
     setup_cull_prime();
     cexi_init(cexi, game);

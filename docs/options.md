@@ -87,6 +87,22 @@ the Lighting and Atmosphere pages.
 | Ray decay / length | | `rays_decay`, `rays_length` | 0.965 / 0.85 |
 | Bloom | Atmosphere › [Bloom] Strength | `bloom` | 0.3 (0–2) |
 | Bloom threshold | Atmosphere › [Bloom] Threshold | `threshold` | 0.75 (0.3–1) |
+| Post bloom (lamps, spells, sun; with or without `FFXI_FX`, Metal) | | `post_bloom` | 0 off (1 tuned) |
+| Post bloom sky threshold / knee / spread | | `bloom_threshold`, `bloom_knee`, `bloom_radius` | 0.95 / 0.05 / 1 |
+| Post bloom emissive weight: effects and lamp glows / sun, moon, sky | | `bloom_emissive_fx`, `bloom_emissive_lights` | 1.2 / 1.5 |
+| Depth of field (Metal) | | `post_dof` | 0 off (1 tuned) |
+| DOF focus (0 follows the player) / sharp range / ramp / near blur | | `dof_focus`, `dof_range`, `dof_ramp`, `dof_near` | 0 / 50 / 150 / 0 (0–1) |
+| Sun shafts (scene renderer with `scene_shadows`, Metal) | | `post_shafts` | 0 off (1 tuned) |
+| Shafts haze density / quality (2 a third of the scene, 16 steps; 1 a fifth, 10) / forward lobe / reach / over frames | | `shafts_density`, `shafts_q`, `shafts_g`, `shafts_dist`, `shafts_temporal` | 1 / 2 / 0.6 / 120 / 0.9 |
+| Specular highlights (scene 2 with `scene_shadows`, Metal): strength / lamps' share / wetness / anti-aliasing width | | `scene_spec`, `scene_spec_lamps`, `scene_spec_wet`, `scene_spec_aa` | 0 off (1 tuned) / 1 / 0 (0–1) / 1 |
+| HDR scene target (Metal): on / tonemap (0 neutral, 1 highlight shoulder, 2 ACES) / exposure / white point / knee | | `scene_hdr`, `tonemap`, `exposure`, `tone_white`, `tone_knee` | 0 / 0 / 1 / 4 / 0.8 |
+| Lamps (scene 2, Metal): every lit lamp per pixel, faded at its range / reach / glow sprite and size | | `scene_lamps`, `scene_lamp_far`, `scene_lamp_glow`, `scene_lamp_glow_size` | 0 off (1: the game's strength) / 120 / 0 / 0.6 |
+| Lamps: on/off fade (seconds) / fire flicker / character shadows from the nearest lamps (0-4) and cube size / shadow debug | | `scene_lamp_fade`, `scene_lamp_flicker`, `scene_lamp_shadows`, `scene_lamp_shadow_size`, `scene_lamp_debug` | 1.5 / 0.06 / 4 / 256 / 0 |
+| Lamps: the zone casts in those lamps' cubes too (what the game drew that frame; drawn again when the lamps change or every 600 frames) | | `scene_lamp_zone` | 1 on (0: characters only) |
+| Night (scene renderer, eased through dusk and dawn by the sun's height): the moon's shadows' strength as a share of the sun's / their penumbra's width / the sun, moon and ambient light at midnight / a cool grey shift on them; lamps untouched | | `moon_shadow`, `moon_soft`, `night_exposure`, `night_tint` | 0.7 / 1.5 / 0.6 / 0.35 |
+| Lamps fill the sun's and moon's shadows: gone where lamp light is at least 1/n of the sun's or moon's | | `shadow_fill` | 0.5 (0: never) |
+| Soft shadows (scene renderer: sun and moon cascades, characters' layers, lamp cubes), hard at contact and softer away from the caster: how soft (0: the fixed filter) / the sun's angular size in degrees (tripled toward the horizon) / the moon's / a lamp's in units / 1 Low, 2 High taps | | `shadow_softness`, `sun_size`, `moon_size`, `lamp_size`, `shadow_soft_q` | 1 / 2 / 3 / 0.3 / 2 |
+| Testing: the sun held low ahead of the camera (degrees up, degrees turned); the shafts alone | | `scene_sun_test`, `scene_sun_test_turn`, `shafts_debug` | 0 / 0 / 0 |
 
 ## 6. Water
 

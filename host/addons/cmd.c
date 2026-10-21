@@ -4,7 +4,8 @@
  *   1. aliases expand (Ashita's /alias, Windower's alias), then route again;
  *   2. the host's own commands: //addon and /addon (load, unload, reload, list, prof), Windower's //lua
  *      (load, unload, reload, list, command), //exec and /exec, //bind /bind //unbind /unbind,
- *      //alias /alias, //input (a line for the game), //echo (to the chat log);
+ *      //alias /alias, //input (a line for the game), //echo (to the chat log), /fx set (one scene-effect setting), /fx prof (the GPU's
+ *      time per scene-effects pass, gfx.h gfx_pass_report);
  *   3. the addons' command event (every addon sees the line; one may block it);
  *   4. a line nobody handled that starts with // is an error, never chat the server would see;
  *   5. otherwise text_out (addons may change the line), then the game.
@@ -18,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gfx.h"
 #include "host.h"
 #include "plat.h"
 
@@ -335,6 +337,34 @@ static int addon_command(char w[][256], int n, int kind_hint)
     return 1;
 }
 
+/* /fx prof: turns the GPU's time per effects pass on (it stays on), then shows the last two seconds'
+ * averages each time; /fx prof off turns it off again (FFXI_PROFILE=1 keeps it on for the log) */
+static void fx_prof(const char* op)
+{
+    static int on;
+    if (!strcasecmp(op, "off"))
+    {
+        gfx_pass_timing(0), on = 0;
+        chatf("fx prof: off");
+        return;
+    }
+    char lines[6][96];
+    int n = gfx_pass_report(lines, 6);
+    if (!on)
+    {
+        gfx_pass_timing(1), on = 1;
+        if (!n)
+        {
+            chatf("fx prof: timing the effects' passes on the GPU; /fx prof again in two seconds for the numbers");
+            return;
+        }
+    }
+    if (!n)
+        chatf("fx prof: nothing timed yet (this back end may have no GPU timestamps per pass)");
+    for (int i = 0; i < n; ++i) /* to chat and to the log, as /addon prof's */
+        chatf("%s%s", i ? "" : "fx prof: ", lines[i]), xi_log("fx prof: %s", lines[i]);
+}
+
 static int host_command(const char* line)
 {
     int dbl = line[0] == '/' && line[1] == '/';
@@ -451,6 +481,16 @@ static int host_command(const char* line)
         char exp[1100];
         snprintf(exp, sizeof exp, "%s%s", dbl && expansion[0] != '/' ? "//" : "", expansion);
         xi_alias_set(name, exp);
+        return 1;
+    }
+    if (!strcasecmp(c, "fx") && n > 1 && !strcasecmp(w[1], "prof"))
+        return fx_prof(n > 2 ? w[2] : ""), 1;
+    /* /fx set <key> <value>: one scene-effect setting now, until the settings file next changes (tests: the
+     * scene renderer turned on and off between frame captures) */
+    if (!strcasecmp(c, "fx") && n > 3 && !strcasecmp(w[1], "set"))
+    {
+        gfx_fx_set(w[2], (float)atof(w[3]));
+        chatf("fx: %s = %g", w[2], gfx_fx_get(w[2]));
         return 1;
     }
     if (dbl && !strcasecmp(c, "input"))
