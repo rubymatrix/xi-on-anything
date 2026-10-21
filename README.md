@@ -184,7 +184,7 @@ reuses one (`--help`).
   | --- | --- | --- | --- |
   | 2026-08-22 | `6f8844eb…3c3b` | `30260805_0` | a retail install |
   | 2026-09-03 | `f2245d1c…23e4` | `30260903_0` | a private-server install (no `patch.ver`) |
-  | 2026-10-05 | `04288488…e872` | `30261005_0` | a loose `FFXiMain.dll`, with 2026-09-03's `FFXi.dll` (no `patch.ver`) |
+  | 2026-10-05 | `04288488…e872` | `30261006_0` | a private-server install's `FFXiMain.dll`, `FFXi.dll` and `patch.ver` |
   | 2025-12-26 | `f5ed4c3b…a7f6` | `30251226_0` | loose `FFXiMain.dll`/`FFXi.dll`, an older client than 2026-08-22 (no `patch.ver`) |
   | 2025-11-12 | `bda769e2…0d9a` | `30251101_2` | a private-server install (`patch.ver` present) |
 

@@ -990,10 +990,10 @@
         "meta": "FFXiMain.2026-10-05.meta.json"
       },
       "FFXi.dll": {
-        "sha256": "9053d4106160a073a215dcd1d9045c804a27f459c6cb7cacec74eaefaf827bc7",
+        "sha256": "760f8245173c85976ddf2b0828f90a11db6a2987e96982efc58df812dff5b2a4",
         "meta": "FFXi.2026-10-05.meta.json"
       },
-      "version": "30261005_0",
+      "version": "30261006_0",
       "addresses": {
         "chars_ptr": "0x104df770",
         "present_site": "0x100035cb",

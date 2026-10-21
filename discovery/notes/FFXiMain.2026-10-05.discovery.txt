@@ -1,19 +1,21 @@
 FFXiMain.dll / FFXi.dll build 2026-10-05: R1 function discovery for static recompilation
 =====================================================================================
 
-Retail files  a loose FFXiMain.dll (no install folder, no patch.ver), paired with 2026-09-03's FFXi.dll
+Retail files  a private-server install's FFXiMain.dll, FFXi.dll and patch.ver (first a loose
+              FFXiMain.dll alone, paired with 2026-09-03's FFXi.dll until the install's arrived)
   FFXiMain.dll  SHA-256 042884888eea4fadac183e520f2ae9f8c4fa267860e685048e1880efd358e872
                 PE timestamp 0x6ac37846 (2026-10-05); unpacked .text 0x10001000-0x1032862e,
                 real entry 0x1031676f
-  FFXi.dll      SHA-256 9053d4106160a073a215dcd1d9045c804a27f459c6cb7cacec74eaefaf827bc7
-                (2026-09-03's file, PE timestamp 0x6a995417; not shipped with this FFXiMain.dll)
+  FFXi.dll      SHA-256 760f8245173c85976ddf2b0828f90a11db6a2987e96982efc58df812dff5b2a4
+                PE timestamp 0x6ac37836
 Metadata      FFXiMain.2026-10-05.meta.json, FFXi.2026-10-05.meta.json (ffxi-recomp-meta/1)
-Version       30261005_0, inferred from the PE timestamp (no patch.ver)
+Version       30261006_0, read from patch.ver (the PE date alone would give 30261005_0)
 
 What changed from 2026-09-03
 ----------------------------
-FFXi.dll: the same file. Its metadata is 2026-09-03's with the new label
-(tools/newbuild.py meta).
+FFXi.dll: rebuilt, but its unpacked .text and .reloc are byte-identical to 2026-09-03's;
+.rdata/.data/.rsrc differ in 27 bytes (as 2026-08-22 -> 2026-09-03). Its metadata is
+2026-09-03's with the new hash and label (tools/newbuild.py meta).
 
 FFXiMain.dll: a small update. .text is 0x40 bytes longer; code moves by 0 at the bottom (the
 Present call site, the hooks, the menu functions and nearly every manual verdict are unchanged) and
@@ -64,7 +66,7 @@ tail_jumps                        -               2,165             2,165
 
 Verification
 ------------
-macOS arm64, a folder of links to a retail install with this FFXiMain.dll in place:
+macOS arm64, a folder of links to a retail install with this build's FFXiMain.dll, FFXi.dll and patch.ver in place (rerun with the real FFXi.dll, same results):
 tools/build_posix.py prepare -> build 2026-10-05.
 boot64: translated 21,891 entries (211 with unimplemented instructions, all MMX/3DNow!/SSE;
 21,735 jmp and 156 int3 entry patches); BOOT64 OK.
