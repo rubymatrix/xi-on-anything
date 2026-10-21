@@ -4444,9 +4444,10 @@ static void water_bind(void)
  * (1 - (d/r)^4)^2 rather than cut off there - no circles on the ground. LU: viewport, tiles across and down, strength. */
 #define LAMP_MSL                                                                                                    \
     "struct LL { float4 pos, col, att, amb; };\n"                                                                 \
-    "struct LU { float4 vp; float4 t; };\n"                                                                       \
+    "struct LU { float4 vp; float4 t; float4 k; };\n" /* k.x: the zone's cubes are there */                       \
     /* the lamp's shadow at P: the cube face its direction falls in, the point pushed toward the lamp a little */      \
-    "static float lamp_shadow(depth2d_array<float> SM, constant float4x4* M, uint s, float3 P, float3 Lp, float3 N) {\n" \
+    "static float lamp_shadow(depth2d_array<float> SM, depth2d_array<float> ZM, constant float4x4* M, uint s, float3 P,\n" \
+    "                         float3 Lp, float3 N, bool zone) {\n"                                                 \
     "  constexpr sampler c(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);\n" \
     "  float3 d = P - Lp, a = abs(d);\n"                                                                         \
     "  uint f = a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0u : 1u) : a.y >= a.z ? (d.y > 0.0 ? 2u : 3u) : (d.z > 0.0 ? 4u : 5u);\n" \
@@ -4454,10 +4455,13 @@ static void water_bind(void)
     "  float4 h = M[s * 6u + f] * float4(P - d * (0.08 / max(dl, 0.5)) * min(dl, 2.0) + N * 0.06, 1.0);\n"       \
     "  if (h.w <= 1e-4) return 1.0;\n"                                                                           \
     "  float2 uv = float2(h.x / h.w * 0.5 + 0.5, 0.5 - h.y / h.w * 0.5);\n"                                      \
-    "  return SM.sample_compare(c, uv, s * 6u + f, h.z / h.w);\n"                                                \
+    "  float v = SM.sample_compare(c, uv, s * 6u + f, h.z / h.w);\n"                                             \
+    "  if (zone) v = min(v, ZM.sample_compare(c, uv, s * 6u + f, h.z / h.w));\n"                                \
+    "  return v;\n"                                                                                              \
     "}\n"                                                                                                        \
     "static void lamp_light(constant LU& U, const device LL* LS, const device ushort* TL, float2 fp, float3 P, float3 N,\n" \
-    "                       thread float3& dif, thread float3& amb, depth2d_array<float> SM, constant float4x4* SMM,\n" \
+    "                       thread float3& dif, thread float3& amb, depth2d_array<float> SM, depth2d_array<float> ZM,\n" \
+    "                       constant float4x4* SMM,\n"                                                         \
     "                       float3 Ps) {\n"                                                                      \
     "  int2 t = int2((fp - U.vp.xy) / 64.0);\n"                                                                   \
     "  if (any(t < 0) || t.x >= int(U.t.x) || t.y >= int(U.t.y)) return;\n"                                       \
@@ -4471,7 +4475,7 @@ static void water_bind(void)
     "    float w = saturate(1.0 - q * q * q * q);\n"                                                              \
     "    float at = w * w / max(l.att.x + l.att.y * d + l.att.z * d * d, 1e-3);\n"                                \
     "    amb += l.amb.rgb * at;\n"                                                                                \
-    "    float sh = l.att.w > 0.5 && U.t.z > 0.5 ? lamp_shadow(SM, SMM, uint(l.att.w) - 1u, Ps, l.pos.xyz, N) : 1.0;\n" \
+    "    float sh = l.att.w > 0.5 && U.t.z > 0.5 ? lamp_shadow(SM, ZM, SMM, uint(l.att.w) - 1u, Ps, l.pos.xyz, N, U.k.x > 0.5) : 1.0;\n" \
     "    dif += l.col.rgb * at * sh * max(dot(N, v / max(d, 1e-4)), 0.0);\n"                                      \
     "    if (U.t.w > 0.5 && l.att.w > 0.5) amb += float3(1.0 - sh, sh, 0.0) * 4.0 * w;\n" /* scene_lamp_debug: red shadowed, green lit */ \
     "  }\n"                                                                                                       \
@@ -4681,6 +4685,7 @@ static const char WORLD_MSL[] =
     "                         const device ushort* TL [[buffer(13), function_constant(k_lamps)]],\n"
     "                         constant LU& LUc [[buffer(14), function_constant(k_lamps)]],\n"
     "                         depth2d_array<float> lsm [[texture(7), function_constant(k_lamps)]],\n"
+    "                         depth2d_array<float> zlsm [[texture(8), function_constant(k_lamps)]],\n"
     "                         constant float4x4* lsmm [[buffer(15), function_constant(k_lamps)]]) {\n"
     "  float3 c = i.col.rgb, sun = i.sun, amb = i.amb;\n"
     "  float shv = 1.0;\n"
@@ -4690,7 +4695,7 @@ static const char WORLD_MSL[] =
     "  if (k_pixel) c = lit(i.wpos, N, i.col.rgb, I[i.inst], L, k_shadow ? S.dir.xyz : float3(0.0), g, sun, amb);\n"
     "  if (k_lamps && k_pixel) {\n"
     "    float3 ld = float3(0.0), la = float3(0.0);\n"
-    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wpos, normalize(N), ld, la, lsm, lsmm, i.wpos);\n"
+    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wpos, normalize(N), ld, la, lsm, zlsm, lsmm, i.wpos);\n"
     "    c += i.col.rgb * (ld + la);\n" /* (on the vertex colour, as lit() lights) */
     "    amb += i.col.rgb * la;\n"
     "  }\n"
@@ -4957,7 +4962,7 @@ static struct
     uint64_t set, binned;            /* the frames they were set, binned */
     id<MTLBuffer> lb, tb;            /* the lamps (LL), the tiles (32 ushort each: count, indices) */
     NSUInteger lo, to;
-    float lu[8];                     /* LU: viewport, tiles across, down */
+    float lu[12];                    /* LU: viewport, tiles across, down; shadows; debug; the zone's cubes */
     float vp[16];                    /* the camera's view x projection, for the glows */
     float cam[3];
     /* the characters' shadows from the nearest lamps (scene_lamp_shadows): drawn at a frame's end into a cube a lamp
@@ -4967,6 +4972,17 @@ static struct
     float shpos[4][4];               /* the shadowed lamps' places (w: range) */
     float shm[24][16];               /* their faces' matrices */
     uint64_t sh_serial;              /* the frame they were drawn */
+    /* the zone into the same lamps' cubes (zlsm, Depth32F), kept: drawn again when the shadowed lamps change or every
+     * 600 frames (a door, a lift) */
+    id<MTLTexture> zlsm;
+    float zpos[4][4];
+    uint32_t zn;
+    uint64_t z_serial;
+    /* the frame's opaque zone items, every batch's, and their world matrices, for the cubes at the frame's end */
+    GfxWorldItem* zi;
+    float (*zw)[16];
+    uint32_t nzi, czi, nzw, czw;
+    uint64_t zc_serial;
 } g_lamps;
 
 void gfx_lamps(const GfxWorldLight* l, uint32_t n)
@@ -5052,7 +5068,7 @@ static void lamps_bin(const float* view, const float* proj, const uint32_t vp[6]
                     t[1 + t[0]++] = (uint16_t)i;
             }
     }
-    float lu[8] = { x0, y0, w, h, (float)tx, (float)ty, 0, 0 };
+    float lu[12] = { x0, y0, w, h, (float)tx, (float)ty, 0, 0, 0, 0, 0, 0 };
     memcpy(g_lamps.lu, lu, sizeof lu);
     g_lamps.binned = g_serial;
 }
@@ -5074,8 +5090,18 @@ static int lamps_bind(id<MTLRenderCommandEncoder> e, const float* view, const fl
     [e setFragmentBuffer:g_lamps.tb offset:g_lamps.to atIndex:13];
     int sh = g_lamps.lsm && g_lamps.nsh && g_lamps.sh_serial + 1 == g_serial;
     g_lamps.lu[6] = sh ? 1.0f : 0.0f, g_lamps.lu[7] = g_fxs.scene_lamp_debug;
+    int zs = sh && g_lamps.zlsm && g_lamps.zn == g_lamps.nsh && !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
+    g_lamps.lu[8] = zs ? 1.0f : 0.0f;
     [e setFragmentBytes:g_lamps.lu length:sizeof g_lamps.lu atIndex:14];
-    static id<MTLTexture> dummy;
+    static id<MTLTexture> dummy, zdummy;
+    if (!zdummy)
+    {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:1 height:1 mipmapped:NO];
+        td.textureType = MTLTextureType2DArray, td.arrayLength = 24;
+        td.usage = MTLTextureUsageShaderRead, td.storageMode = MTLStorageModePrivate;
+        zdummy = [g_dev newTextureWithDescriptor:td];
+    }
+    [e setFragmentTexture:zs ? g_lamps.zlsm : zdummy atIndex:8];
     if (!dummy)
     {
         MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth16Unorm width:1 height:1 mipmapped:NO];
@@ -5198,6 +5224,121 @@ static int cam_cut(void) { return g_cam_cut == g_serial; }
 
 #include "gfx_ao_metal.inc"
 
+/* a zone batch's opaque items and their world matrices, kept for lamp_zone_cubes at the frame's end (a frame draws the
+ * zone in several batches) */
+static void lamp_zone_collect(const GfxWorldFrame* f)
+{
+    if (g_fxs.scene_lamp_zone <= 0.0f || g_fxs.scene_lamp_shadows <= 0.0f || !f->nitem || !f->ninst)
+        return;
+    if (g_lamps.zc_serial != g_serial)
+        g_lamps.nzi = g_lamps.nzw = 0, g_lamps.zc_serial = g_serial;
+    if (g_lamps.nzw + f->ninst > g_lamps.czw)
+    {
+        uint32_t c = g_lamps.czw ? g_lamps.czw : 256;
+        while (c < g_lamps.nzw + f->ninst)
+            c *= 2;
+        float (*w)[16] = (float (*)[16])realloc(g_lamps.zw, (size_t)c * sizeof *w);
+        if (!w)
+            return;
+        g_lamps.zw = w, g_lamps.czw = c;
+    }
+    if (g_lamps.nzi + f->nitem > g_lamps.czi)
+    {
+        uint32_t c = g_lamps.czi ? g_lamps.czi : 1024;
+        while (c < g_lamps.nzi + f->nitem)
+            c *= 2;
+        GfxWorldItem* v = (GfxWorldItem*)realloc(g_lamps.zi, (size_t)c * sizeof *v);
+        if (!v)
+            return;
+        g_lamps.zi = v, g_lamps.czi = c;
+    }
+    uint32_t base = g_lamps.nzw;
+    for (uint32_t i = 0; i < f->ninst; ++i)
+        memcpy(g_lamps.zw[base + i], f->inst[i].world, 64);
+    g_lamps.nzw += f->ninst;
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxWorldItem* it = &f->item[i];
+        if (!it->vb || !it->count || it->inst >= f->ninst || (it->flags & GFX_WORLD_BLEND))
+            continue;
+        GfxWorldItem* o = &g_lamps.zi[g_lamps.nzi++];
+        *o = *it, o->inst = base + it->inst;
+    }
+}
+
+/* the frame's zone into the cubes of the lamps lamp_shadows_draw just took, when they changed or every 600 frames; read from
+ * the next frame on. The zone is what the game drew this frame: none of what lies out of its view */
+static void lamp_zone_cubes(id<MTLCommandBuffer> cb)
+{
+    if (!g_lamps.nsh || g_lamps.sh_serial != g_serial || g_lamps.zc_serial != g_serial || !g_lamps.nzi || !g_shd.zone[0] ||
+        !g_shd.zone[1])
+        return;
+    int same = g_lamps.zn == g_lamps.nsh && g_lamps.z_serial && g_serial - g_lamps.z_serial < 600 &&
+        !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
+    if (same)
+        return;
+    uint32_t size = g_lamps.lsize;
+    if (!g_lamps.zlsm || g_lamps.zlsm.width != size)
+    {
+        [g_lamps.zlsm release];
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:size height:size
+                                                                                   mipmapped:NO];
+        td.textureType = MTLTextureType2DArray, td.arrayLength = 24;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget, td.storageMode = MTLStorageModePrivate;
+        g_lamps.zlsm = [g_dev newTextureWithDescriptor:td];
+        if (!g_lamps.zlsm)
+            return;
+    }
+    id<MTLBuffer> wb;
+    NSUInteger wo;
+    memcpy(ring((size_t)g_lamps.nzw * 64, 256, &wb, &wo), g_lamps.zw, (size_t)g_lamps.nzw * 64);
+    for (uint32_t layer = 0; layer < 6 * g_lamps.nsh; ++layer)
+    {
+        const float* L = g_lamps.shpos[layer / 6];
+        float reach = L[3] + 40.0f;
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.depthAttachment.texture = g_lamps.zlsm;
+        rp.depthAttachment.slice = layer;
+        rp.depthAttachment.loadAction = MTLLoadActionClear;
+        rp.depthAttachment.clearDepth = 1.0;
+        rp.depthAttachment.storeAction = MTLStoreActionStore;
+        ts_mark(rp, GFX_PASS_LAMPS);
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        [e setViewport:(MTLViewport){ 0, 0, (double)size, (double)size, 0, 1 }];
+        [e setDepthStencilState:g_shd.ds];
+        [e setCullMode:MTLCullModeNone];
+        [e setDepthClipMode:MTLDepthClipModeClamp];
+        [e setDepthBias:0 slopeScale:2.0f clamp:0.0f];
+        [e setVertexBytes:g_lamps.shm[layer] length:64 atIndex:1];
+        [e setVertexBuffer:wb offset:wo atIndex:2];
+        int cur = -1;
+        for (uint32_t i = 0; i < g_lamps.nzi; ++i)
+        {
+            const GfxWorldItem* it = &g_lamps.zi[i];
+            const float* w = g_lamps.zw[it->inst];
+            float dx = w[12] - L[0], dy = w[13] - L[1], dz = w[14] - L[2];
+            if (dx * dx + dy * dy + dz * dz > reach * reach)
+                continue;
+            int at = (it->flags & GFX_WORLD_ATEST) && it->tex;
+            if (at != cur)
+                [e setRenderPipelineState:g_shd.zone[at]], cur = at;
+            if (at)
+            {
+                [e setFragmentTexture:it->tex->view atIndex:0];
+                [e setFragmentSamplerState:sampler(&it->samp) atIndex:0];
+            }
+            [e setVertexBuffer:it->vb->b offset:0 atIndex:0];
+            [e setVertexBytes:&it->inst length:4 atIndex:4];
+            [e drawPrimitives:it->prim == GFX_TRIANGLESTRIP ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle
+                  vertexStart:it->first
+                  vertexCount:vertex_count(it->prim, it->count)];
+        }
+        [e endEncoding];
+    }
+    memcpy(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos);
+    g_lamps.zn = g_lamps.nsh, g_lamps.z_serial = g_serial;
+}
+
 int gfx_world_draw(const GfxWorldFrame* f)
 {
     if (!g_dev || !f->nitem || !world_init())
@@ -5253,6 +5394,8 @@ int gfx_world_draw(const GfxWorldFrame* f)
         int ao = ao_bind(g_enc);
         int spec = spec_bind(g_enc, shadow && pixel);
         int lamps = pixel && lamps_bind(g_enc, f->view, f->proj, f->vp);
+        if (lamps)
+            lamp_zone_collect(f);
         id<MTLRenderPipelineState> cur = nil;
         id<MTLDepthStencilState> curds = nil;
         int cull = -1, bias = INT_MIN;
@@ -5411,12 +5554,13 @@ static const char CHARS_MSL[] =
     "                        const device ushort* TL [[buffer(13), function_constant(k_lamps)]],\n"
     "                        constant LU& LUc [[buffer(14), function_constant(k_lamps)]],\n"
     "                        depth2d_array<float> lsm [[texture(7), function_constant(k_lamps)]],\n"
+    "                        depth2d_array<float> zlsm [[texture(8), function_constant(k_lamps)]],\n"
     "                        constant float4x4* lsmm [[buffer(15), function_constant(k_lamps)]]) {\n"
     "  float4 tx = t.sample(sm, i.uv);\n"
     "  float3 col = i.col.rgb;\n"
     "  if (k_lamps) {\n"
     "    float3 ld = float3(0.0), la = float3(0.0);\n"
-    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wp, normalize(i.wn), ld, la, lsm, lsmm, k_shadow ? i.wp + LG.xyz : i.wp);\n"
+    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wp, normalize(i.wn), ld, la, lsm, zlsm, lsmm, k_shadow ? i.wp + LG.xyz : i.wp);\n"
     "    col += i.lmd * ld + i.lma * la;\n"
     "  }\n"
     "  float shv = 1.0;\n"
@@ -6058,6 +6202,7 @@ static void shadow_frame_end(void)
     if (g_shd.lag.ttx > 0.0f)
         shadow_chars_pass(cb, &g_shd.lc, f->cam, g_shd.cmt, (double)g_shd.fsize, 1, (const float (*)[16])g_shd.lag.tm, 1, NULL, 0);
     lamp_shadows_draw(cb, &g_shd.lc);
+    lamp_zone_cubes(cb);
     g_shd.lag.serial = g_serial;
     g_shd.lserial = 0;
     shadow_items_clear(); /* (the command buffer holds what it draws) */

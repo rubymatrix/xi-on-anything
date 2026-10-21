@@ -13,7 +13,7 @@ typedef struct GfxFxSettings
         gi_distance, rt, contact_steps, scene, scene_shadows, scene_shadow_size, scene_shadow_far, scene_shadow_step, scene_shadow_debug,
         scene_shadow_fit, scene_shadow_fit_size, scene_shadow_char_far, scene_shadow_fit_reach,
         post_bloom, bloom_threshold, bloom_knee, bloom_emissive_fx, bloom_emissive_lights, bloom_radius,
-        post_dof, dof_focus, dof_range, dof_ramp, dof_near, water_lift, scene_shadow_envmap, post_shafts, shafts_density, shafts_q, shafts_g, shafts_dist, scene_sun_test, scene_sun_test_turn, shafts_debug, shafts_temporal, scene_spec, scene_spec_lamps, scene_spec_wet, scene_spec_aa, scene_hdr, tonemap, exposure, tone_white, tone_knee, scene_lamps, scene_lamp_far, scene_lamp_glow, scene_lamp_glow_size, scene_lamp_fade, scene_lamp_flicker, scene_lamp_shadows, scene_lamp_shadow_size, scene_lamp_debug,
+        post_dof, dof_focus, dof_range, dof_ramp, dof_near, water_lift, scene_shadow_envmap, post_shafts, shafts_density, shafts_q, shafts_g, shafts_dist, scene_sun_test, scene_sun_test_turn, shafts_debug, shafts_temporal, scene_spec, scene_spec_lamps, scene_spec_wet, scene_spec_aa, scene_hdr, tonemap, exposure, tone_white, tone_knee, scene_lamps, scene_lamp_far, scene_lamp_glow, scene_lamp_glow_size, scene_lamp_fade, scene_lamp_flicker, scene_lamp_shadows, scene_lamp_shadow_size, scene_lamp_debug, scene_lamp_zone,
         scene_gi, scene_gi_q, scene_gi_sky, scene_gi_bounce, scene_gi_debug,
         scene_ao, scene_ao_q, scene_ao_radius, scene_ao_chars, scene_ao_debug;
 } GfxFxSettings;
