@@ -286,6 +286,40 @@ typedef struct EnvLight
     float sun_dir[4], sun_col[4], sun2_dir[4], sun2_col[4], ambient[4], fog[4], fog_col[4];
 } EnvLight;
 
+/* how much it is day, 0..1, eased through dusk and dawn: from the sun's height (the environment's +0xa4, its direction
+ * as placed by the clock; the game's y is down and the sun is the main light while that y is at least 0, so it rises
+ * through 0). 1 where the zone's lights are fixed (no sky, no night) or there is no environment. */
+static float scene_day(void)
+{
+#ifdef FFXI_SCENE_ENV
+    uint32_t env = rd32(FFXI_SCENE_ENV);
+    if (!env)
+        return 1.0f;
+    uint32_t rec = rd32(env + 0x18);
+    if (rec && (rd8(rec) & 1))
+        return 1.0f;
+    float y = rdf32(env + 0xa4 + 4);
+    float t = (y + 0.05f) / 0.25f;
+    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+    return t * t * (3.0f - 2.0f * t);
+#else
+    return 1.0f;
+#endif
+}
+
+/* the night's grade on the sun or moon's colour and the ambient (never the lamps): scaled toward night_exposure and
+ * shifted cool and grey by night_tint as day goes */
+static void night_grade(float* c, float day)
+{
+    float k = gfx_fx_get("night_exposure"), tint = gfx_fx_get("night_tint");
+    k = k <= 0.0f ? 1.0f : k;
+    float n = 1.0f - day, e = 1.0f + (k - 1.0f) * n, w = (tint > 1.0f ? 1.0f : tint < 0.0f ? 0.0f : tint) * n;
+    float l = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+    static const float cool[3] = { 0.80f, 0.95f, 1.25f };
+    for (int i = 0; i < 3; ++i)
+        c[i] = (c[i] + (l * cool[i] - c[i]) * w) * e;
+}
+
 static void env_light(EnvLight* e, uint32_t env, uint32_t mgr)
 {
     memset(e, 0, sizeof *e);
@@ -321,6 +355,9 @@ static void env_light(EnvLight* e, uint32_t env, uint32_t mgr)
     }
     color4(e->ambient, amb);
     color4(e->fog_col, fogc);
+    float day = scene_day();
+    if (day < 1.0f)
+        night_grade(e->sun_col, day), night_grade(e->sun2_col, day), night_grade(e->ambient, day);
     e->fog[0] = fstart, e->fog[1] = fend > fstart ? fend : fstart + 1.0f, e->fog[2] = 1.0f;
 }
 
@@ -661,7 +698,10 @@ static void shadow_frame(GfxShadowFrame* sf, uint32_t mgr, const float* view)
     sf->size = size, sf->ncascades = GFX_SHADOW_CASCADES, sf->nchar = 2;
     memcpy(sf->dir, g_sh.L, sizeof g_sh.L), sf->dir[3] = 1.0f;
     memcpy(sf->cam, cam, sizeof cam), sf->cam[3] = gfx_fx_get("scene_shadow_debug") > 0.0f ? 2.0f : 1.0f;
-    sf->strength = want > 1.0f ? 1.0f : want;
+    /* the moon's shadows weaker and softer than the sun's: by day, eased through dusk and dawn */
+    float day = scene_day(), ms = gfx_fx_get("moon_shadow"), msoft = gfx_fx_get("moon_soft");
+    sf->strength = (want > 1.0f ? 1.0f : want) * (ms + (1.0f - ms) * day);
+    sf->soft = msoft > 1.0f ? msoft + (1.0f - msoft) * day : 1.0f;
     memcpy(sf->c, g_sh.c, sizeof sf->c);
     sf->world = g_sh.world, sf->nworld = g_sh.nworld, sf->item = g_sh.items.v, sf->nitem = sf->redraw >= 0 ? g_sh.items.n : 0;
 }
@@ -966,6 +1006,9 @@ static void state_light(GfxCharLight* o, uint32_t l, float scale)
     o->ambient[0] = rdf32(l + 0x24), o->ambient[1] = rdf32(l + 0x28), o->ambient[2] = rdf32(l + 0x2c);
     if (type == 3)
     {
+        float day = scene_day(); /* the sun or moon: the night's grade, as the zone's */
+        if (day < 1.0f)
+            night_grade(o->diffuse, day), night_grade(o->ambient, day);
         float x = rdf32(l + 0x40), y = rdf32(l + 0x44), z = rdf32(l + 0x48), n = sqrtf(x * x + y * y + z * z);
         if (n > 0.0f)
             o->dir[0] = -x / n, o->dir[1] = -y / n, o->dir[2] = -z / n, o->dir[3] = 1.0f;
@@ -1125,6 +1168,9 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                     uint32_t b = v > 0.0f ? (uint32_t)v : 0;
                     s->ambient[c] = (float)(b > 255 ? 255 : b) / 255.0f;
                 }
+                float day = scene_day();
+                if (day < 1.0f)
+                    night_grade(s->ambient, day);
                 for (int c = 0; c < 4; ++c)
                     s->mat_diffuse[c] = rdf32(mat + 4u * c), s->mat_ambient[c] = rdf32(mat + 16 + 4u * c),
                     s->mat_emissive[c] = rdf32(mat + 48 + 4u * c);

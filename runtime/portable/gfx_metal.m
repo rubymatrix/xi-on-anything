@@ -4538,14 +4538,14 @@ static void water_bind(void)
     "  float t = S.ctx.x;\n" /* the fitted layer, when there is one and the point is in it */                     \
     "  if (t > 0.0) {\n"                                                                                          \
     "    float4 h = S.cm[0] * float4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                 \
-    "    if (all(abs(h.xy) < 0.995)) return sh_cpcf(ct, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), 0u, h.z, S.ctx.y);\n" \
+    "    if (all(abs(h.xy) < 0.995)) return sh_cpcf(ct, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), 0u, h.z, S.ctx.y * max(S.ctx.z, 1.0));\n" \
     "  }\n"                                                                                                       \
     "  if (c >= uint(S.info.y)) return 1.0;\n" /* the cascade's characters' layer, half size, only round them */      \
     "  t = 2.0 * S.cas[c].y;\n"                                                                                   \
     "  float4 h = S.cm[1u + c] * float4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                               \
     "  float4 b = S.cbox[c];\n"                                                                                   \
     "  if (any(abs(h.xy) > 0.995) || any(h.xy < b.xy) || any(h.xy > b.zw)) return 1.0;\n"                         \
-    "  return sh_cpcf(cm, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), c, h.z, 2.0 * S.info.w);\n"                \
+    "  return sh_cpcf(cm, cs, float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5), c, h.z, 2.0 * S.info.w * max(S.ctx.z, 1.0));\n"                \
     "}\n"                                                                                                        \
     "static float sh_at(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, depth2d_array<float> ct,\n" \
     "                   sampler cs, uint c,\n"                                                                  \
@@ -4554,7 +4554,7 @@ static void water_bind(void)
     "  float4 h = S.m[c] * float4(wp + n * (t * (1.0 + 4.0 * sqrt(1.0 - nl * nl))) + S.dir.xyz * t, 1.0);\n"  \
     "  if (abs(h.x) > 0.995 || abs(h.y) > 0.995) return -1.0;\n"                                                \
     "  float2 uv = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                 \
-    "  float v = sh_pcf(zm, cs, uv, c, h.z, S.info.w);\n"                                                        \
+    "  float v = S.ctx.z > 1.01 && c < 2u ? sh_cpcf(zm, cs, uv, c, h.z, S.info.w * S.ctx.z) : sh_pcf(zm, cs, uv, c, h.z, S.info.w);\n" /* the moon's wider */                                                        \
     "  if (v > 0.0 && S.info.y > 0.0) v = min(v, sh_char(S, cm, ct, cs, c, wp, n, nl));\n"                      \
     "  return v;\n"                                                                                              \
     "}\n"                                                                                                        \
@@ -4600,7 +4600,7 @@ static const char WORLD_MSL[] =
     "struct VI { float3 pos [[attribute(0)]]; float3 nrm [[attribute(1)]]; float4 col [[attribute(2)]]; float2 uv [[attribute(3)]]; };\n"
     "struct VO { float4 pos [[position]]; float2 uv; float4 col; float3 sun; float3 wpos; float3 nrm; float z;\n"
     "            float4 fog [[flat]]; float3 fog_col [[flat]]; uint inst [[flat]]; float4 gi;\n"
-    "            float4 aop; float3 amb; };\n"
+    "            float4 aop; float3 amb; float3 lmp; };\n"
     /* D3D's fixed function, COLORVERTEX with the vertex colour as diffuse and ambient reflectance, no specular:
      * saturate(vc * (ambient + sum of each light's ambient) + vc * sum of N.L x diffuse), point lights with
      * 1 / (a0 + a1 d + a2 d^2) out to their range. Unsaturated, without the directional light along sd (the shadows'
@@ -4608,7 +4608,8 @@ static const char WORLD_MSL[] =
      * and what the ambient is multiplied by (gfx_gi_metal.inc; (0, 0, 0, 1) without it). amb: the ambient's share of
      * the result, which the occlusion scales (gfx_ao_metal.inc) */
     "static float3 lit(float3 P, float3 N, float3 vc, constant WI& I, constant WL* L, float3 sd, float4 g, thread float3& sun,\n"
-    "                  thread float3& amb) {\n"
+    "                  thread float3& amb, thread float3& lmp) {\n"
+    "  float3 pl = float3(0.0);\n"
     "  float3 a = I.ambient.rgb * g.a + g.rgb, d = float3(0.0), s = float3(0.0);\n"
     "  if (I.sun_dir.w > 0.0) {\n"
     "    float3 t = I.sun_col.rgb * max(dot(N, I.sun_dir.xyz), 0.0);\n"
@@ -4626,9 +4627,10 @@ static const char WORLD_MSL[] =
     "    float dist = length(v);\n"
     "    if (dist > l.pos.w) continue;\n"
     "    float at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
-    "    a += l.ambient.rgb * at;\n"
-    "    d += l.diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
+    "    float3 t = l.ambient.rgb * at + l.diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
+    "    d += t, pl += t;\n"
     "  }\n"
+    "  lmp = vc * pl;\n" /* the lamps' share: it fills the sun's (the moon's) shadow (shadow_fill) */
     "  sun = vc * s;\n"
     "  amb = vc * a;\n"
     "  return vc * a + vc * d;\n"
@@ -4656,11 +4658,11 @@ static const char WORLD_MSL[] =
     "  o.inst = D.inst;\n"
     "  o.fog = in.fog;\n"
     "  o.fog_col = in.fog_col.rgb;\n"
-    "  o.col = v.col, o.sun = float3(0.0), o.gi = float4(0.0, 0.0, 0.0, 1.0), o.amb = float3(0.0);\n"
+    "  o.col = v.col, o.sun = float3(0.0), o.gi = float4(0.0, 0.0, 0.0, 1.0), o.amb = float3(0.0), o.lmp = float3(0.0);\n"
     "  o.aop = k_ao ? A.pvp * wp : float4(0.0);\n" /* where the occlusion was made: this point last frame */
     "  if (k_gi && !(k_pixel && G.org.x > 0.5)) { o.gi = gi_at(G, PS, gir, gid, wp.xyz, normalize(n)); o.gi.rgb *= G.k.x; }\n"
     "  if (!k_pixel) {\n"
-    "    float3 sun, rest = lit(wp.xyz, n, v.col.rgb, in, L, k_shadow ? S.dir.xyz : float3(0.0), o.gi, sun, o.amb);\n"
+    "    float3 sun, rest = lit(wp.xyz, n, v.col.rgb, in, L, k_shadow ? S.dir.xyz : float3(0.0), o.gi, sun, o.amb, o.lmp);\n"
     "    o.col.rgb = k_shadow || k_ao ? rest : saturate(rest + sun);\n"
     "    o.sun = sun;\n"
     "  }\n"
@@ -4687,16 +4689,17 @@ static const char WORLD_MSL[] =
     "                         depth2d_array<float> lsm [[texture(7), function_constant(k_lamps)]],\n"
     "                         depth2d_array<float> zlsm [[texture(8), function_constant(k_lamps)]],\n"
     "                         constant float4x4* lsmm [[buffer(15), function_constant(k_lamps)]]) {\n"
-    "  float3 c = i.col.rgb, sun = i.sun, amb = i.amb;\n"
+    "  float3 c = i.col.rgb, sun = i.sun, amb = i.amb, lmp = i.lmp;\n"
     "  float shv = 1.0;\n"
     "  float3 N = (D.flags & 32u) ? normalize(i.nrm) : i.nrm;\n"
     "  float4 g = i.gi;\n"
     "  if (k_gi && k_pixel && G.org.x > 0.5) { g = gi_at(G, PS, gir, gid, i.wpos, normalize(N)); g.rgb *= G.k.x; }\n"
-    "  if (k_pixel) c = lit(i.wpos, N, i.col.rgb, I[i.inst], L, k_shadow ? S.dir.xyz : float3(0.0), g, sun, amb);\n"
+    "  if (k_pixel) c = lit(i.wpos, N, i.col.rgb, I[i.inst], L, k_shadow ? S.dir.xyz : float3(0.0), g, sun, amb, lmp);\n"
     "  if (k_lamps && k_pixel) {\n"
     "    float3 ld = float3(0.0), la = float3(0.0);\n"
     "    lamp_light(LUc, LS, TL, i.pos.xy, i.wpos, normalize(N), ld, la, lsm, zlsm, lsmm, i.wpos);\n"
     "    c += i.col.rgb * (ld + la);\n" /* (on the vertex colour, as lit() lights) */
+    "    lmp += i.col.rgb * (ld + la);\n"
     "    amb += i.col.rgb * la;\n"
     "  }\n"
     "  if (k_ao) {\n" /* the occlusion takes from the ambient alone; scene_ao_debug 1 shows it */
@@ -4715,7 +4718,12 @@ static const char WORLD_MSL[] =
     "    return float4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(S, zm, cm, ct, cs, i.wpos, normalize(N))) : float3(0.05), 1.0);\n"
     "  }\n"
     "  if (k_shadow) {\n"
-    "    if (any(sun > 0.0)) { shv = shadow(S, zm, cm, ct, cs, i.wpos, normalize(N)); sun *= shv; }\n"
+    "    if (any(sun > 0.0)) {\n"
+    "      shv = shadow(S, zm, cm, ct, cs, i.wpos, normalize(N));\n"
+    "      float3 Y = float3(0.2126, 0.7152, 0.0722);\n" /* where the lamps outshine the sun or moon, its shadow fades out */
+    "      shv = mix(shv, 1.0, saturate(S.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
+    "      sun *= shv;\n"
+    "    }\n"
     "    c = saturate(c + sun);\n"
     "  } else if (k_pixel || k_ao) c = saturate(c + sun);\n"
     "  float4 tx = t.sample(s, i.uv);\n"
@@ -4785,7 +4793,8 @@ typedef struct ShU
     float info[4]; /* cascades, of them the characters', strength, 1 / size */
     float cm[GFX_SHADOW_CASCADES][16]; /* the characters' layers (last frame's): 0 fitted round those near the camera, 1
                                         * and on the first cascades' */
-    float ctx[4];  /* world units a texel in the fitted layer (0: none), 1 / its size */
+    float ctx[4];  /* world units a texel in the fitted layer (0: none), 1 / its size, the penumbra's width (1 the sun's), how
+                    * the lamps fill the shadow */
 } ShU;
 static struct
 {
@@ -5557,11 +5566,12 @@ static const char CHARS_MSL[] =
     "                        depth2d_array<float> zlsm [[texture(8), function_constant(k_lamps)]],\n"
     "                        constant float4x4* lsmm [[buffer(15), function_constant(k_lamps)]]) {\n"
     "  float4 tx = t.sample(sm, i.uv);\n"
-    "  float3 col = i.col.rgb;\n"
+    "  float3 col = i.col.rgb, lmp = float3(0.0);\n"
     "  if (k_lamps) {\n"
     "    float3 ld = float3(0.0), la = float3(0.0);\n"
     "    lamp_light(LUc, LS, TL, i.pos.xy, i.wp, normalize(i.wn), ld, la, lsm, zlsm, lsmm, k_shadow ? i.wp + LG.xyz : i.wp);\n"
-    "    col += i.lmd * ld + i.lma * la;\n"
+    "    lmp = i.lmd * ld + i.lma * la;\n"
+    "    col += lmp;\n"
     "  }\n"
     "  float shv = 1.0;\n"
     "  if (k_ao) {\n"
@@ -5572,7 +5582,12 @@ static const char CHARS_MSL[] =
     "  }\n"
     "  if (k_shadow) {\n"
     "    float3 sun = i.sun;\n"
-    "    if (any(sun > 0.0)) { shv = shadow(H, zm, cm, ct, cs, i.wp + LG.xyz, normalize(i.wn)); sun *= shv; }\n"
+    "    if (any(sun > 0.0)) {\n"
+    "      shv = shadow(H, zm, cm, ct, cs, i.wp + LG.xyz, normalize(i.wn));\n"
+    "      float3 Y = float3(0.2126, 0.7152, 0.0722);\n" /* the lamps fill it, as the zone's (shadow_fill) */
+    "      shv = mix(shv, 1.0, saturate(H.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
+    "      sun *= shv;\n"
+    "    }\n"
     "    col = saturate(col + sun);\n"
     "  }\n"
     "  float3 c = saturate(2.0 * saturate(2.0 * tx.rgb * col) * i.tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
@@ -6296,7 +6311,8 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
                 memcpy(u->cm[1 + i], g_shd.lag.cm[i], 64), memcpy(u->cbox[i], g_shd.lag.cbox[i], 16);
             u->info[1] = (float)g_shd.lag.n, u->ctx[0] = g_shd.lag.ttx;
         }
-        u->ctx[1] = 1.0f / (float)g_shd.fsize;
+        u->ctx[1] = 1.0f / (float)g_shd.fsize, u->ctx[2] = f->soft > 1.0f ? f->soft : 1.0f;
+        u->ctx[3] = fmaxf(g_fxs.shadow_fill, 0.0f);
         u->info[0] = (float)nc, u->info[2] = f->strength, u->info[3] = 1.0f / (float)f->size;
         g_shd.on = 1;
     }

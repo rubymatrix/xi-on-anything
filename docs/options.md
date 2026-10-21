@@ -99,6 +99,8 @@ the Lighting and Atmosphere pages.
 | Lamps (scene 2, Metal): every lit lamp per pixel, faded at its range / reach / glow sprite and size | | `scene_lamps`, `scene_lamp_far`, `scene_lamp_glow`, `scene_lamp_glow_size` | 0 off (1: the game's strength) / 120 / 0 / 0.6 |
 | Lamps: on/off fade (seconds) / fire flicker / character shadows from the nearest lamps (0-4) and cube size / shadow debug | | `scene_lamp_fade`, `scene_lamp_flicker`, `scene_lamp_shadows`, `scene_lamp_shadow_size`, `scene_lamp_debug` | 1.5 / 0.06 / 4 / 256 / 0 |
 | Lamps: the zone casts in those lamps' cubes too (what the game drew that frame; drawn again when the lamps change or every 600 frames) | | `scene_lamp_zone` | 1 on (0: characters only) |
+| Night (scene renderer, eased through dusk and dawn by the sun's height): the moon's shadows' strength as a share of the sun's / their penumbra's width / the sun, moon and ambient light at midnight / a cool grey shift on them; lamps untouched | | `moon_shadow`, `moon_soft`, `night_exposure`, `night_tint` | 0.7 / 1.5 / 0.6 / 0.35 |
+| Lamps fill the sun's and moon's shadows: gone where lamp light is at least 1/n of the sun's or moon's | | `shadow_fill` | 0.5 (0: never) |
 | Testing: the sun held low ahead of the camera (degrees up, degrees turned); the shafts alone | | `scene_sun_test`, `scene_sun_test_turn`, `shafts_debug` | 0 / 0 / 0 |
 
 ## 6. Water

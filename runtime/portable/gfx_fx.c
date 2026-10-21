@@ -196,6 +196,16 @@ static const struct
     { "scene_lamp_shadow_size", offsetof(GfxFxSettings, scene_lamp_shadow_size), 256.0f },
     /* the zone casts in the shadowed lamps' cubes too (kept, drawn again when they change; 0 characters only) */
     { "scene_lamp_zone", offsetof(GfxFxSettings, scene_lamp_zone), 1.0f },
+    /* the scene renderer's night (host/scene.c scene_day): the moon's shadows' strength as a share of the sun's and their
+     * penumbra's width (times the sun's); the sun, moon and ambient light at midnight (1: as the game's), and a cool grey
+     * shift on them (0 none); eased through dusk and dawn, the lamps never touched */
+    { "moon_shadow", offsetof(GfxFxSettings, moon_shadow), 0.7f },
+    { "moon_soft", offsetof(GfxFxSettings, moon_soft), 1.5f },
+    { "night_exposure", offsetof(GfxFxSettings, night_exposure), 0.6f },
+    { "night_tint", offsetof(GfxFxSettings, night_tint), 0.35f },
+    /* the lamps fill the sun's and moon's shadows: gone where a lamp's light is this many times less than the sun's or
+     * moon's would be (0: the lamps never fill them) */
+    { "shadow_fill", offsetof(GfxFxSettings, shadow_fill), 0.5f },
     /* the shadowed lamps' reach, red where shadowed and green where lit (0 off) */
     { "scene_lamp_debug", offsetof(GfxFxSettings, scene_lamp_debug), 0.0f },
     /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;
