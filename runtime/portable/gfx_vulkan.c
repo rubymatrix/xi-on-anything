@@ -96,6 +96,7 @@ enum
     CONV_X555,
     CONV_1555,
     CONV_4444,
+    CONV_F16, /* an 8-bit color target made RGBA16F (scene_hdr): D3D's BGRA8 to and from half floats */
 };
 
 /* the bindings of the draw functions' set (gfx_msl.h) */
@@ -469,6 +470,31 @@ static void trash(int kind, uint64_t h, VmaAllocation mem)
     f->trash[f->ntrash++] = (Trash){ kind, h, mem };
 }
 
+/* pipelines built for a target's format, two formats kept (the world target 8-bit and float, scene_hdr, so turning
+ * it on and off builds nothing again): a third replaces the older, its pipelines destroyed once the frame is done */
+typedef struct FmtPipes
+{
+    VkFormat fmt[2];
+    VkPipeline p[2][6];
+    uint32_t next;
+} FmtPipes;
+
+/* the slot for f; *fresh when its pipelines are to be built (it was another format's, or none) */
+static VkPipeline* fmt_pipes(FmtPipes* c, VkFormat f, int* fresh)
+{
+    *fresh = 0;
+    for (int i = 0; i < 2; ++i)
+        if (c->fmt[i] == f && f)
+            return c->p[i];
+    uint32_t i = c->next;
+    c->next ^= 1;
+    for (int k = 0; k < 6; ++k)
+        trash(4, (uint64_t)(uintptr_t)c->p[i][k], NULL), c->p[i][k] = VK_NULL_HANDLE;
+    c->fmt[i] = f;
+    *fresh = 1;
+    return c->p[i];
+}
+
 static void empty_trash(Frame* f)
 {
     for (uint32_t i = 0; i < f->ntrash; ++i)
@@ -480,6 +506,8 @@ static void empty_trash(Frame* f)
             vkDestroyImageView(g_dev, (VkImageView)(uintptr_t)t->h, NULL);
         else if (t->kind == 3)
             vkDestroyAccelerationStructureKHR(g_dev, (VkAccelerationStructureKHR)(uintptr_t)t->h, NULL);
+        else if (t->kind == 4)
+            vkDestroyPipeline(g_dev, (VkPipeline)(uintptr_t)t->h, NULL);
         else
             vmaDestroyBuffer(g_vma, (VkBuffer)(uintptr_t)t->h, t->mem);
     }
@@ -837,9 +865,42 @@ static uint32_t expand(uint32_t v, int bits)
     return bits == 1 ? (v ? 255u : 0u) : (v << (8 - bits)) | (v >> (2 * bits - 8 > 0 ? 2 * bits - 8 : 0));
 }
 
-/* one row of a 16-bit D3D format into BGRA8 */
+static uint16_t f16_from_unit(uint32_t v) /* 0..255 / 255 as a half float */
+{
+    if (!v)
+        return 0;
+    float f = (float)v / 255.0f;
+    int e;
+    float m = frexpf(f, &e); /* f = m * 2^e, m in [0.5, 1) */
+    if (e < -13) /* (a subnormal half; 1/255 isn't one) */
+        return (uint16_t)lrintf(f * 16777216.0f);
+    return (uint16_t)(((uint32_t)(e + 14) << 10) + ((uint32_t)lrintf(m * 2048.0f) - 1024u)); /* (a carry: the next exponent) */
+}
+
+static uint8_t unit_from_f16(uint16_t h) /* a half float saturated to 0..1, as a byte */
+{
+    uint32_t e = h >> 10 & 31, m = h & 1023;
+    if (h & 0x8000)
+        return 0;
+    if (e == 31)
+        return m ? 0 : 255;
+    float f = e ? ldexpf((float)(m | 1024), (int)e - 25) : ldexpf((float)m, -24);
+    return f >= 1.0f ? 255 : (uint8_t)lrintf(f * 255.0f);
+}
+
+/* one row of a 16-bit D3D format into BGRA8 (CONV_F16: BGRA8 into RGBA16F) */
 static void convert_row(int conv, const uint8_t* src, uint8_t* dst, uint32_t w)
 {
+    if (conv == CONV_F16)
+    {
+        for (uint32_t x = 0; x < w; ++x)
+        {
+            const uint8_t* p = src + 4 * x;
+            uint16_t* d = (uint16_t*)(dst + 8 * x);
+            d[0] = f16_from_unit(p[2]), d[1] = f16_from_unit(p[1]), d[2] = f16_from_unit(p[0]), d[3] = f16_from_unit(p[3]);
+        }
+        return;
+    }
     for (uint32_t x = 0; x < w; ++x)
     {
         uint32_t p = (uint32_t)src[2 * x] | ((uint32_t)src[2 * x + 1] << 8), r, g, b, a;
@@ -1164,6 +1225,13 @@ static void copy_out(const GfxTex* t, const uint8_t* s, uint32_t w, uint32_t h, 
         uint8_t* d = (uint8_t*)dst + (size_t)y * pitch;
         if (!t->conv)
             memcpy(d, s + (size_t)y * row, (size_t)w * bpp);
+        else if (t->conv == CONV_F16) /* the float world target: its colors saturated, as the tonemap's input */
+            for (uint32_t x = 0; x < w; ++x)
+            {
+                const uint16_t* p = (const uint16_t*)(s + (size_t)y * row + 8 * x);
+                d[4 * x] = unit_from_f16(p[2]), d[4 * x + 1] = unit_from_f16(p[1]), d[4 * x + 2] = unit_from_f16(p[0]);
+                d[4 * x + 3] = unit_from_f16(p[3]);
+            }
         else /* 16-bit color targets: back from BGRA8 */
             for (uint32_t x = 0; x < w; ++x)
             {
@@ -2181,7 +2249,7 @@ typedef struct Glow
     VkCompareOp zfunc;
     VkCullModeFlags cull;
     VkPrimitiveTopology topo;
-    uint8_t ztest, zwrite, nw, indexed;
+    uint8_t ztest, nw, indexed;
     int32_t zbias;
     VkWriteDescriptorSet w[B_COUNT];
     int8_t wi[B_COUNT]; /* each write's info: >= 0 bi's, < 0 ii's (-1 - its index) */
@@ -2474,7 +2542,7 @@ static void draw_encode(const GfxDraw* d)
     {
         gl->depth = depth ? attachment_view(depth, 0, 0) : VK_NULL_HANDLE, gl->stencil = depth && depth->has_stencil;
         gl->pipe = p, gl->vp = g_set_vp, gl->sc = g_set_sc;
-        gl->ztest = dk.zenable != 0, gl->zwrite = dk.zenable && dk.zwrite, gl->zfunc = dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS;
+        gl->ztest = dk.zenable != 0, gl->zfunc = dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS;
         gl->cull = d->cull == 3 ? VK_CULL_MODE_BACK_BIT : d->cull == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
         gl->topo = vk_prim(d->prim), gl->n = n, gl->vstart = d->vertex_start;
         memcpy(gl->bi, bi, sizeof bi), memcpy(gl->ii, ii, sizeof ii), memcpy(gl->w, w, nw * sizeof *w);
@@ -3159,7 +3227,7 @@ static struct
     VkShaderModule vs;
     VkPipeline ao_pipe, blur_pipe, bright_pipe, down_pipe, gauss_pipe, raymask_pipe, rays_pipe, comp_pipe, temporal_pipe, aa_pipe,
         linz_pipe, zmip_pipe, gi_pipe, gitemp_pipe, mip_pipe;
-    VkFormat comp_fmt, aa_fmt;
+    FmtPipes comp_pipes, aa_pipes; /* comp_pipe, aa_pipe: the current target's */
     GfxTex* lz;     /* the occlusion's depth: view z at its size and three levels below (FX_LINZ, FX_ZMIP) */
     GfxTex* aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
     GfxTex *src, *ao0, *ao1, *b1a, *b1b, *b2a, *b2b, *ra, *rb;
@@ -5380,6 +5448,7 @@ static const char CAST_GLSL[] =
     "void main() {\n"
     "  vec3 n, p = skin(n);\n"
     "  gl_Position = F.M * (St[D.state].world * vec4(p, 1.0));\n"
+    "  CLAMP_Z;\n"
     "  o_uv = uvs[gl_VertexIndex];\n"
     "  o_a = St[D.state].tf.a;\n"
     "}\n"
@@ -5389,6 +5458,7 @@ static const char CAST_GLSL[] =
     "  uint b = uint(gl_VertexIndex) * 9u;\n"
     "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
     "  gl_Position = F.M * (W[D.inst] * vec4(pos, 1.0));\n"
+    "  CLAMP_Z;\n"
     "  o_uv = uintBitsToFloat(uvec2(vb[b + 7u], vb[b + 8u]));\n"
     "  o_a = unpackUnorm4x8(vb[b + 6u]).w;\n"
     "}\n"
@@ -5867,8 +5937,13 @@ static VkPipeline cast_pipeline(int chars, int atest)
         if (s && !atest)
             break;
         VkShaderModule* p = &g_world.cast[s][chars];
+        /* without depth clamp, a caster nearer the light than the cascade is flattened onto its near plane instead of
+         * clipped (the cascades are orthographic: z is the depth) */
+        const char* def[2][2] = { { "#define C_CHARS 0\n#define CLAMP_Z\n", "#define C_CHARS 1\n#define CLAMP_Z\n" },
+            { "#define C_CHARS 0\n#define CLAMP_Z gl_Position.z = max(gl_Position.z, 0.0)\n",
+                "#define C_CHARS 1\n#define CLAMP_Z gl_Position.z = max(gl_Position.z, 0.0)\n" } };
         if (!*p)
-            *p = world_compile(chars ? "#define C_CHARS 1\n" : "#define C_CHARS 0\n", CAST_GLSL, s);
+            *p = world_compile(def[!g_has_clamp][chars], CAST_GLSL, s);
         m[s] = *p;
     }
     if (!m[0] || (atest && !m[1]))
@@ -5876,6 +5951,20 @@ static VkPipeline cast_pipeline(int chars, int atest)
     return make_pipeline(m[0], m[1], g_world.layout, NULL, VK_FORMAT_UNDEFINED, chars ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT,
         VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, WORLD_DYNAMIC,
         sizeof WORLD_DYNAMIC / sizeof WORLD_DYNAMIC[0], 2);
+}
+
+/* the scene renderer's compare samplers read D32_SFLOAT and D16_UNORM maps: filtered where the device filters both */
+static VkFilter depth_filter(void)
+{
+    VkFormat f[2] = { VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM };
+    for (int i = 0; i < 2; ++i)
+    {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(g_phys, f[i], &fp);
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+            return VK_FILTER_NEAREST;
+    }
+    return VK_FILTER_LINEAR;
 }
 
 static int shadow_init(uint32_t size)
@@ -5889,7 +5978,7 @@ static int shadow_init(uint32_t size)
         g_shd.zone[1] = cast_pipeline(0, 1);
         g_shd.chars = cast_pipeline(1, 1);
         VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.magFilter = si.minFilter = depth_filter();
         si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         si.compareEnable = VK_TRUE;
@@ -5899,7 +5988,7 @@ static int shadow_init(uint32_t size)
         si.compareEnable = VK_FALSE;
         VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_shd.near));
         if (!g_has_clamp)
-            fprintf(stderr, "[recomp] gfx: no depth clamp: the scene renderer's shadows miss casters nearer the light than a cascade\n");
+            fprintf(stderr, "[recomp] gfx: no depth clamp: the scene renderer's casters nearer the light than a cascade are flattened onto it\n");
     }
     if (!g_shd.zone[0] || !g_shd.zone[1] || !g_shd.chars || !g_shd.cmp || !g_shd.near)
         return 0;
@@ -6368,6 +6457,7 @@ static struct
     RtBuf ps, pc, rb;
     int clear;        /* ps and pc to be zeroed before the next update (every probe afresh) */
     uint32_t quality;
+    uint32_t failed;  /* the qualities whose atlases or buffers couldn't be made (a bit each): not tried again */
     uint64_t updated; /* the frame they were last traced */
     uint32_t phase;
     uint32_t seed;
@@ -6658,7 +6748,8 @@ static int sao_init(void)
     si.magFilter = si.minFilter = VK_FILTER_NEAREST;
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_sao.near));
+    if (!g_sao.near) /* (the lamp glows may have made it first) */
+        VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_sao.near));
     g_sao.ok = g_sao.prep && g_sao.gtao && g_sao.resolve && g_sao.near;
     if (!g_sao.ok)
     {
@@ -6984,7 +7075,7 @@ static int lamps_bind(LampBind* b, const float* view, const float* proj, const u
     if (!g_lamps.dummy)
     {
         VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.magFilter = si.minFilter = depth_filter();
         si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         si.compareEnable = VK_TRUE;
@@ -8261,15 +8352,19 @@ static void gi_preset(uint32_t q, int32_t d[3], float* sp, uint32_t* rays, uint3
 
 static int gi_probes(uint32_t q)
 {
-    if (g_gi.irr && g_gi.quality == q)
-        return 1;
-    gfx_tex_destroy(g_gi.irr), gfx_tex_destroy(g_gi.dis);
-    g_gi.irr = g_gi.dis = NULL;
-    rt_free(&g_gi.ps), rt_free(&g_gi.pc), rt_free(&g_gi.rb);
     int32_t d[3];
     float sp, hyst;
     uint32_t rays, stride;
     gi_preset(q, d, &sp, &rays, &stride, &hyst);
+    if (q >= 2 && (uint32_t)(d[0] * d[1]) * (GI_DIS + 2) > g_props.limits.maxImageDimension2D)
+        q = 1, gi_preset(q, d, &sp, &rays, &stride, &hyst); /* (high's distance atlas, 6144 across, is past this GPU's) */
+    if (g_gi.irr && g_gi.quality == q)
+        return 1;
+    if (g_gi.failed & (1u << q))
+        return 0;
+    gfx_tex_destroy(g_gi.irr), gfx_tex_destroy(g_gi.dis);
+    g_gi.irr = g_gi.dis = NULL;
+    rt_free(&g_gi.ps), rt_free(&g_gi.pc), rt_free(&g_gi.rb);
     uint32_t np = (uint32_t)(d[0] * d[1] * d[2]), slots = (np + stride - 1) / stride;
     g_gi.irr = gi_image((uint32_t)(d[0] * d[1]) * (GI_IRR + 2), (uint32_t)d[2] * (GI_IRR + 2), 0);
     g_gi.dis = gi_image((uint32_t)(d[0] * d[1]) * (GI_DIS + 2), (uint32_t)d[2] * (GI_DIS + 2), 0);
@@ -8279,6 +8374,9 @@ static int gi_probes(uint32_t q)
     {
         gfx_tex_destroy(g_gi.irr), gfx_tex_destroy(g_gi.dis);
         g_gi.irr = g_gi.dis = NULL;
+        rt_free(&g_gi.ps), rt_free(&g_gi.pc), rt_free(&g_gi.rb);
+        g_gi.failed |= 1u << q;
+        fprintf(stderr, "[recomp] gfx: scene bounce light: its probes at quality %u could not be made\n", q);
         return 0;
     }
     g_gi.quality = q, g_gi.updated = 0, g_gi.phase = 0, g_gi.clear = 1;
@@ -8964,11 +9062,11 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     float vp[4] = { (float)s->vp[0], (float)s->vp[1], (float)s->vp[2], (float)s->vp[3] };
     if (vp[2] < 16 || vp[3] < 16 || vp[0] + vp[2] > color->w || vp[1] + vp[3] > color->h)
         vp[0] = vp[1] = 0, vp[2] = (float)color->w, vp[3] = (float)color->h;
-    if (!g_fx.aa_pipe || g_fx.aa_fmt != color->vf)
-    {
-        g_fx.aa_pipe = fx_pipeline("FXAA", color->vf);
-        g_fx.aa_fmt = color->vf;
-    }
+    int fresh;
+    VkPipeline* ap = fmt_pipes(&g_fx.aa_pipes, color->vf, &fresh);
+    if (fresh)
+        ap[0] = fx_pipeline("FXAA", color->vf);
+    g_fx.aa_pipe = ap[0];
     if (!g_fx.aa_pipe || !fx_tex(&g_fx.aa_src, color->vf, color->w, color->h, GFX_USE_RT, 1))
         return;
     gpu_sync();
@@ -9304,8 +9402,8 @@ static struct
     VkFormat lvl_fmt;                     /* the bloom's levels: R11G11B10 float where it blends, else RGBA16F */
     VkPipeline pre, down, up, coc, gather; /* into the post's own textures */
     VkPipeline smarch, sresolve;          /* the sun shafts' march and their resolve over frames */
-    VkPipeline comp, dcomp, scomp, sdbg, comp_add, scomp_add; /* onto the scene, built for its format */
-    VkFormat comp_fmt;
+    VkPipeline comp, dcomp, scomp, sdbg, comp_add, scomp_add; /* onto the scene: its format's, from comps */
+    FmtPipes comps;
     VkSampler lin, near;
     GfxTex* lvl[POST_LEVELS]; /* the bloom's levels, from half the scene's size */
     GfxTex* glow;             /* the glow's draws, as the scene's target */
@@ -9406,17 +9504,19 @@ static int post_init(VkFormat scene_fmt)
     }
     if (!g_post.ok)
         return 0;
-    if (g_post.comp_fmt != scene_fmt || !g_post.comp)
+    int fresh;
+    VkPipeline* cp = fmt_pipes(&g_post.comps, scene_fmt, &fresh);
+    if (fresh)
     {
-        /* (still drawn from the old format's: the frame's command buffer may hold them) */
-        g_post.comp = post_pipeline("BLOOM_COMP", scene_fmt, 2);
-        g_post.dcomp = post_pipeline("DOF_COMP", scene_fmt, 3);
-        g_post.scomp = post_pipeline("SHAFT_COMP", scene_fmt, 2);
-        g_post.sdbg = post_pipeline("SHAFT_COMP", scene_fmt, 0);
-        g_post.comp_add = post_pipeline("BLOOM_COMP", scene_fmt, 1);
-        g_post.scomp_add = post_pipeline("SHAFT_COMP", scene_fmt, 1);
-        g_post.comp_fmt = scene_fmt;
+        cp[0] = post_pipeline("BLOOM_COMP", scene_fmt, 2);
+        cp[1] = post_pipeline("DOF_COMP", scene_fmt, 3);
+        cp[2] = post_pipeline("SHAFT_COMP", scene_fmt, 2);
+        cp[3] = post_pipeline("SHAFT_COMP", scene_fmt, 0);
+        cp[4] = post_pipeline("BLOOM_COMP", scene_fmt, 1);
+        cp[5] = post_pipeline("SHAFT_COMP", scene_fmt, 1);
     }
+    g_post.comp = cp[0], g_post.dcomp = cp[1], g_post.scomp = cp[2], g_post.sdbg = cp[3], g_post.comp_add = cp[4];
+    g_post.scomp_add = cp[5];
     return g_post.comp && g_post.dcomp && g_post.scomp && g_post.sdbg && g_post.comp_add && g_post.scomp_add;
 }
 
@@ -9595,7 +9695,10 @@ static int post_glow(GfxTex* color)
         vkCmdSetViewport(cb, 0, 1, &g->vp);
         vkCmdSetScissor(cb, 0, 1, &g->sc);
         vkCmdSetDepthTestEnable(cb, g->ztest ? VK_TRUE : VK_FALSE);
-        vkCmdSetDepthWriteEnable(cb, g->zwrite ? VK_TRUE : VK_FALSE);
+        /* tested against the scene's depth, never written: Metal discards this pass's depth (DontCare), which here would
+         * leave the game's depth undefined for what reads it later (water, nameplates); the draws are additive, so the
+         * order among them that a write would have kept doesn't show */
+        vkCmdSetDepthWriteEnable(cb, VK_FALSE);
         vkCmdSetDepthCompareOp(cb, g->zfunc);
         vkCmdSetCullMode(cb, g->cull);
         vkCmdSetDepthBiasEnable(cb, g->zbias ? VK_TRUE : VK_FALSE);
@@ -9625,10 +9728,27 @@ static int post_glow(GfxTex* color)
     return 1;
 }
 
+/* the textures of the effects turned off, let go (once the frames that drew with them are done) */
+static void post_release(int bloom, int dof, int shafts)
+{
+    if (!bloom)
+    {
+        for (int i = 0; i < POST_LEVELS; ++i)
+            gfx_tex_destroy(g_post.lvl[i]), g_post.lvl[i] = NULL;
+        gfx_tex_destroy(g_post.glow), g_post.glow = NULL;
+    }
+    if (!dof)
+        gfx_tex_destroy(g_post.h0), gfx_tex_destroy(g_post.h1), g_post.h0 = g_post.h1 = NULL;
+    if (!shafts)
+        gfx_tex_destroy(g_post.sh), gfx_tex_destroy(g_post.shist[0]), gfx_tex_destroy(g_post.shist[1]),
+            g_post.sh = g_post.shist[0] = g_post.shist[1] = NULL;
+}
+
 static void post_effects(GfxTex* color, const GfxScene* s)
 {
     int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f, shafts = g_fxs.post_shafts > 0.0f;
     int glows = g_fxs.scene_lamps > 0.0f && g_fxs.scene_lamp_glow > 0.0f && g_lamps.binned == g_serial;
+    post_release(bloom, dof, shafts);
     if (!bloom && !dof && !shafts && !glows)
     {
         g_post.sh_serial = 0;
@@ -9796,6 +9916,12 @@ static void hdr_swap(GfxTex* t, VkFormat vf)
     trash(0, (uint64_t)(uintptr_t)t->img, t->mem);
     t->img = n->img, t->mem = n->mem, t->view = n->view, t->mipview = n->mipview, t->rtv = n->rtv;
     t->vf = n->vf;
+    /* the game's reads and writes of it (LockRect, CopyRects) stay BGRA8, converted (its readbacks sized by this) */
+    int f16 = vf == VK_FORMAT_R16G16B16A16_SFLOAT;
+    t->texel = f16 ? 8 : 4, t->conv = f16 ? CONV_F16 : CONV_NONE;
+    for (int i = 0; i < GFX_READBACKS; ++i) /* (sized for the old texel; made again on the next read) */
+        if (t->rb[i])
+            trash(2, (uint64_t)(uintptr_t)t->rb[i], t->rbm[i]), t->rb[i] = VK_NULL_HANDLE, t->rbsize[i] = 0, t->rb_serial[i] = 0;
     if (n->rt_prev)
         n->rt_prev->rt_next = n->rt_next;
     else
@@ -9818,6 +9944,8 @@ static void hdr_update(GfxTex* color)
         hdr_swap(color, VK_FORMAT_R16G16B16A16_SFLOAT), g_hdr.t = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? color : NULL;
     else if (!want && g_hdr.t == color && color->vf == VK_FORMAT_R16G16B16A16_SFLOAT)
         hdr_swap(color, VK_FORMAT_B8G8R8A8_UNORM), g_hdr.t = NULL;
+    if (!g_hdr.t && g_hdr.src) /* (the tonemap's copy, once no target is float) */
+        gfx_tex_destroy(g_hdr.src), g_hdr.src = NULL;
 }
 
 /* the tonemap over the scene's viewport, from a copy of it */
@@ -10084,11 +10212,11 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             fx_tex(&g_fx.b2b, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) && fx_tex(&g_fx.ra, F16, bw, bh, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.rb, F16, bw, bh, GFX_USE_RT, 1))
         {
-            if (!g_fx.comp_pipe || g_fx.comp_fmt != ct->vf)
-            {
-                g_fx.comp_pipe = fx_pipeline("COMP", ct->vf);
-                g_fx.comp_fmt = ct->vf;
-            }
+            int fresh;
+            VkPipeline* cp = fmt_pipes(&g_fx.comp_pipes, ct->vf, &fresh);
+            if (fresh)
+                cp[0] = fx_pipeline("COMP", ct->vf);
+            g_fx.comp_pipe = cp[0];
             if (g_fx.comp_pipe)
             {
                 gpu_sync();
