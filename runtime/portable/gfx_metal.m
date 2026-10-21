@@ -4475,7 +4475,7 @@ static void water_bind(void)
     "static void lamp_light(constant LU& U, const device LL* LS, const device ushort* TL, float2 fp, float3 P, float3 N,\n" \
     "                       thread float3& dif, thread float3& amb, depth2d_array<float> SM, depth2d_array<float> ZM,\n" \
     "                       constant float4x4* SMM,\n"                                                         \
-    "                       float3 Ps) {\n"                                                                      \
+    "                       float3 Ps, bool soft) {\n"                                                                      \
     "  int2 t = int2((fp - U.vp.xy) / 64.0);\n"                                                                   \
     "  if (any(t < 0) || t.x >= int(U.t.x) || t.y >= int(U.t.y)) return;\n"                                       \
     "  const device ushort* L = TL + (uint(t.y) * uint(U.t.x) + uint(t.x)) * 32u;\n"                              \
@@ -4488,7 +4488,7 @@ static void water_bind(void)
     "    float w = saturate(1.0 - q * q * q * q);\n"                                                              \
     "    float at = w * w / max(l.att.x + l.att.y * d + l.att.z * d * d, 1e-3);\n"                                \
     "    amb += l.amb.rgb * at;\n"                                                                                \
-    "    float sh = l.att.w > 0.5 && U.t.z > 0.5 ? lamp_shadow(SM, ZM, SMM, uint(l.att.w) - 1u, Ps, l.pos.xyz, N, U.k.x > 0.5, U.k.y, int(U.k.z)) : 1.0;\n" \
+    "    float sh = l.att.w > 0.5 && U.t.z > 0.5 ? lamp_shadow(SM, ZM, SMM, uint(l.att.w) - 1u, Ps, l.pos.xyz, N, U.k.x > 0.5, soft ? U.k.y : 0.0, int(U.k.z)) : 1.0;\n" \
     "    dif += l.col.rgb * at * sh * max(dot(N, v / max(d, 1e-4)), 0.0);\n"                                      \
     "    if (U.t.w > 0.5 && l.att.w > 0.5) amb += float3(1.0 - sh, sh, 0.0) * 4.0 * w;\n" /* scene_lamp_debug: red shadowed, green lit */ \
     "  }\n"                                                                                                       \
@@ -4585,14 +4585,14 @@ static void water_bind(void)
     "  return v / float(nf);\n"                                                                                       \
     "}\n"                                                                                                             \
     "static float sh_char(constant SH& S, depth2d_array<float> cm, depth2d_array<float> ct, sampler cs, uint c, float3 wp,\n" \
-    "                     float3 n, float nl) {\n"                                                                  \
+    "                     float3 n, float nl, bool soft) {\n"                                                                  \
     "  float off = 1.0 + 4.0 * sqrt(1.0 - nl * nl);\n"                                                           \
     "  float t = S.ctx.x;\n" /* the fitted layer, when there is one and the point is in it */                     \
     "  if (t > 0.0) {\n"                                                                                          \
     "    float4 h = S.cm[0] * float4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                 \
     "    float2 u0 = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                               \
-    "    if (all(abs(h.xy) < 0.995)) return S.pk.x > 0.0 ? sh_pcss(ct, cs, S.cm[0], 0u, u0, h.z, S.ctx.y, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl)\n" \
-    "                                                   : sh_cpcf(ct, cs, u0, 0u, h.z, S.ctx.y * max(S.ctx.z, 1.0));\n" \
+    "    if (all(abs(h.xy) < 0.995)) return soft && S.pk.x > 0.0 ? sh_pcss(ct, cs, S.cm[0], 0u, u0, h.z, S.ctx.y, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl)\n" \
+    "                                                   : sh_cpcf(ct, cs, u0, 0u, h.z, S.ctx.y * (soft ? max(S.ctx.z, 1.0) : 1.0));\n" \
     "  }\n"                                                                                                       \
     "  if (c >= uint(S.info.y)) return 1.0;\n" /* the cascade's characters' layer, half size, only round them */      \
     "  t = 2.0 * S.cas[c].y;\n"                                                                                   \
@@ -4600,38 +4600,38 @@ static void water_bind(void)
     "  float4 b = S.cbox[c];\n"                                                                                   \
     "  if (any(abs(h.xy) > 0.995) || any(h.xy < b.xy) || any(h.xy > b.zw)) return 1.0;\n"                         \
     "  float2 u1 = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                 \
-    "  if (S.pk.x > 0.0) return sh_pcss(cm, cs, S.cm[1u + c], c, u1, h.z, 2.0 * S.info.w, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl);\n" \
-    "  return sh_cpcf(cm, cs, u1, c, h.z, 2.0 * S.info.w * max(S.ctx.z, 1.0));\n"                                \
+    "  if (soft && S.pk.x > 0.0) return sh_pcss(cm, cs, S.cm[1u + c], c, u1, h.z, 2.0 * S.info.w, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl);\n" \
+    "  return sh_cpcf(cm, cs, u1, c, h.z, 2.0 * S.info.w * (soft ? max(S.ctx.z, 1.0) : 1.0));\n"                                \
     "}\n"                                                                                                        \
     "static float sh_at(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, depth2d_array<float> ct,\n" \
     "                   sampler cs, uint c,\n"                                                                  \
-    "                   float3 wp, float3 n) {\n"                                                               \
+    "                   float3 wp, float3 n, bool soft) {\n"                                                               \
     "  float nl = saturate(dot(n, S.dir.xyz)), t = S.cas[c].y;\n" /* more the more the surface turns from it */ \
     "  float4 h = S.m[c] * float4(wp + n * (t * (1.0 + 4.0 * sqrt(1.0 - nl * nl))) + S.dir.xyz * t, 1.0);\n"  \
     "  if (abs(h.x) > 0.995 || abs(h.y) > 0.995) return -1.0;\n"                                                \
     "  float2 uv = float2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                 \
     "  float v;\n"                                                                                               \
-    "  if (S.pk.x > 0.0) {\n" /* soft: all the taps in the nearest cascade, half in the next, a quarter beyond */ \
+    "  if (soft && S.pk.x > 0.0) {\n" /* soft: all the taps in the nearest cascade, half in the next, a quarter beyond */ \
     "    int k = c == 0u ? 1 : c == 1u ? 2 : 4;\n"                                                               \
     "    v = sh_pcss(zm, cs, S.m[c], c, uv, h.z, S.info.w, S.pk.x, max(int(S.pk.y) / k, 1), max(int(S.pk.z) / k, 4), sh_turn(wp), nl);\n" \
     "  } else\n"                                                                                                 \
-    "    v = S.ctx.z > 1.01 && c < 2u ? sh_cpcf(zm, cs, uv, c, h.z, S.info.w * S.ctx.z) : sh_pcf(zm, cs, uv, c, h.z, S.info.w);\n" /* the moon's wider */ \
-    "  if (v > 0.0 && S.info.y > 0.0) v = min(v, sh_char(S, cm, ct, cs, c, wp, n, nl));\n"                      \
+    "    v = soft && S.ctx.z > 1.01 && c < 2u ? sh_cpcf(zm, cs, uv, c, h.z, S.info.w * S.ctx.z) : sh_pcf(zm, cs, uv, c, h.z, S.info.w);\n" /* the moon's wider */ \
+    "  if (v > 0.0 && S.info.y > 0.0) v = min(v, sh_char(S, cm, ct, cs, c, wp, n, nl, soft));\n"                      \
     "  return v;\n"                                                                                              \
     "}\n"                                                                                                        \
     "static float shadow(constant SH& S, depth2d_array<float> zm, depth2d_array<float> cm, depth2d_array<float> ct,\n" \
     "                    sampler cs, float3 wp,\n"                                                              \
-    "                    float3 n) {\n"                                                                          \
+    "                    float3 n, bool soft) {\n" /* soft: PCSS (the zone); a character's own the fixed filter */ \
     "  float3 e = wp - S.cam.xyz;\n"                                                                             \
     "  float d = length(e);\n"                                                                                   \
     "  uint nc = uint(S.info.x);\n"                                                                              \
     "  for (uint c = 0; c < nc; ++c) {\n"                                                                        \
     "    if (S.cas[c].w == 0.0 || d > S.cas[c].x) continue;\n"                                                   \
-    "    float v = sh_at(S, zm, cm, ct, cs, c, wp, n);\n"                                                            \
+    "    float v = sh_at(S, zm, cm, ct, cs, c, wp, n, soft);\n"                                                            \
     "    if (v < 0.0) continue;\n"                                                                               \
     "    float r = S.cas[c].x, f = saturate((d - 0.9 * r) / (0.1 * r));\n"                                       \
     "    if (f > 0.0) {\n"                                                                                       \
-    "      float w = c + 1 < nc && S.cas[c + 1].w != 0.0 ? sh_at(S, zm, cm, ct, cs, c + 1, wp, n) : 1.0;\n"          \
+    "      float w = c + 1 < nc && S.cas[c + 1].w != 0.0 ? sh_at(S, zm, cm, ct, cs, c + 1, wp, n, soft) : 1.0;\n"          \
     "      v = mix(v, w < 0.0 ? 1.0 : w, f);\n"                                                                  \
     "    }\n"                                                                                                    \
     "    return mix(1.0, v, S.info.z);\n"                                                                        \
@@ -4758,7 +4758,7 @@ static const char WORLD_MSL[] =
     "  if (k_pixel) c = lit(i.wpos, N, i.col.rgb, I[i.inst], L, k_shadow ? S.dir.xyz : float3(0.0), g, sun, amb, lmp);\n"
     "  if (k_lamps && k_pixel) {\n"
     "    float3 ld = float3(0.0), la = float3(0.0);\n"
-    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wpos, normalize(N), ld, la, lsm, zlsm, lsmm, i.wpos);\n"
+    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wpos, normalize(N), ld, la, lsm, zlsm, lsmm, i.wpos, true);\n"
     "    c += i.col.rgb * (ld + la);\n" /* (on the vertex colour, as lit() lights) */
     "    lmp += i.col.rgb * (ld + la);\n"
     "    amb += i.col.rgb * la;\n"
@@ -4776,11 +4776,11 @@ static const char WORLD_MSL[] =
     "    while (k < 3 && d > S.cas[k].x) ++k;\n"
     "    float3 tint = k == 0 ? float3(1.0, 0.55, 0.55) : k == 1 ? float3(0.55, 1.0, 0.55) : k == 2 ? float3(0.55, 0.55, 1.0) : float3(1.0, 1.0, 0.55);\n"
     "    float nl = dot(normalize(N), S.dir.xyz);\n"
-    "    return float4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(S, zm, cm, ct, cs, i.wpos, normalize(N))) : float3(0.05), 1.0);\n"
+    "    return float4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(S, zm, cm, ct, cs, i.wpos, normalize(N), true)) : float3(0.05), 1.0);\n"
     "  }\n"
     "  if (k_shadow) {\n"
     "    if (any(sun > 0.0)) {\n"
-    "      shv = shadow(S, zm, cm, ct, cs, i.wpos, normalize(N));\n"
+    "      shv = shadow(S, zm, cm, ct, cs, i.wpos, normalize(N), true);\n"
     "      float3 Y = float3(0.2126, 0.7152, 0.0722);\n" /* where the lamps outshine the sun or moon, its shadow fades out */
     "      shv = mix(shv, 1.0, saturate(S.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
     "      sun *= shv;\n"
@@ -5633,7 +5633,7 @@ static const char CHARS_MSL[] =
     "  float3 col = i.col.rgb, lmp = float3(0.0);\n"
     "  if (k_lamps) {\n"
     "    float3 ld = float3(0.0), la = float3(0.0);\n"
-    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wp, normalize(i.wn), ld, la, lsm, zlsm, lsmm, k_shadow ? i.wp + LG.xyz : i.wp);\n"
+    "    lamp_light(LUc, LS, TL, i.pos.xy, i.wp, normalize(i.wn), ld, la, lsm, zlsm, lsmm, k_shadow ? i.wp + LG.xyz : i.wp, false);\n"
     "    lmp = i.lmd * ld + i.lma * la;\n"
     "    col += lmp;\n"
     "  }\n"
@@ -5647,7 +5647,7 @@ static const char CHARS_MSL[] =
     "  if (k_shadow) {\n"
     "    float3 sun = i.sun;\n"
     "    if (any(sun > 0.0)) {\n"
-    "      shv = shadow(H, zm, cm, ct, cs, i.wp + LG.xyz, normalize(i.wn));\n"
+    "      shv = shadow(H, zm, cm, ct, cs, i.wp + LG.xyz, normalize(i.wn), false);\n" /* (PCSS speckles curved, close self-shadow) */
     "      float3 Y = float3(0.2126, 0.7152, 0.0722);\n" /* the lamps fill it, as the zone's (shadow_fill) */
     "      shv = mix(shv, 1.0, saturate(H.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
     "      sun *= shv;\n"
