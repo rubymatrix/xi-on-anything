@@ -3422,6 +3422,14 @@ extern "C"
     {
         (void)l, (void)n;
     }
+    void gfx_gi_zone(const GfxGiZone* z)
+    {
+        (void)z;
+    }
+    void gfx_gi_frame(const GfxGiFrame* f)
+    {
+        (void)f;
+    }
     // No GPU time per pass here.
     void gfx_pass_timing(int on)
     {
