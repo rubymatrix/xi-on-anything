@@ -5869,6 +5869,10 @@ void gfx_lamps(const GfxWorldLight* l, uint32_t n)
     g_lamps.set = g_serial;
 }
 
+/* the modern fog (fog_modern) is Metal's only so far */
+void gfx_set_fixed_light(int fixed) { (void)fixed; }
+void gfx_set_weather(int weather) { (void)weather; }
+
 static void lamp_shadows_draw(const GfxCharFrame* cf, VkDescriptorBufferInfo pal, VkDescriptorBufferInfo st);
 static void lamp_zone_cubes(void);
 

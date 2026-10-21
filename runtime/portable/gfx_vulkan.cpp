@@ -3430,6 +3430,14 @@ extern "C"
     {
         (void)f;
     }
+    void gfx_set_fixed_light(int fixed)
+    {
+        (void)fixed;
+    }
+    void gfx_set_weather(int weather)
+    {
+        (void)weather;
+    }
     // No GPU time per pass here.
     void gfx_pass_timing(int on)
     {
