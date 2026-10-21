@@ -225,6 +225,13 @@ static const struct
     /* the halo's centre this far above the game's light (it sits under its lantern, where it lights the ground) */
     { "fog_lamp_lift", offsetof(GfxFxSettings, fog_lamp_lift), 1.5f },
     { "fog_debug", offsetof(GfxFxSettings, fog_debug), 0.0f },
+    /* the fog as one volume with the sun shafts (needs the scene renderer's shadows): marched through the shadow cascades,
+     * the sun's light shafting in it, its lamps' halos, over frames; 0 the analytic fog (Low); the ground fog's patchiness
+     * (0 none), its size (units) and drift (units a second) */
+    { "fog_volume", offsetof(GfxFxSettings, fog_volume), 1.0f },
+    { "fog_ground", offsetof(GfxFxSettings, fog_ground), 0.5f },
+    { "fog_ground_size", offsetof(GfxFxSettings, fog_ground_size), 8.0f },
+    { "fog_drift", offsetof(GfxFxSettings, fog_drift), 0.6f },
     /* the shadowed lamps' reach, red where shadowed and green where lit (0 off) */
     { "scene_lamp_debug", offsetof(GfxFxSettings, scene_lamp_debug), 0.0f },
     /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;

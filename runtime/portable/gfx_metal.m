@@ -6664,7 +6664,41 @@ static const char POST_MSL[] =
     "  float4 lo;     // the small textures' size, 1 / size\n"
     "  float4 hist;   // x: last frame's history is there and lines up; y: its weight\n"
     "  float4 pcam;   // last frame's camera, world\n"
+    "  // the fog volume (fog_modern with fog_volume): the air's own colour (w: the fog's fixed height, world y, for the ground mist);\n"
+    "  // x the lamps' halo density, y how far above the\n"
+    "  // game's light its lantern hangs, z the ground fog's strength, w its noise's scale; the noise's drift (xyz) and w 1\n"
+    "  // in the volume; the lamps' tiles (origin x, y, across, down; 0 none)\n"
+    "  float4 airc;\n"
+    "  float4 fv;\n"
+    "  float4 wind;\n"
+    "  float4 lt;\n"
     "};\n"
+    "struct SL { float4 pos, col, att, amb; };\n"
+    "// low, smooth noise for the ground fog: value noise, two octaves, 0..1\n"
+    "static float su_hash(float3 p) { return fract(sin(dot(p, float3(127.1, 311.7, 74.7))) * 43758.5453); }\n"
+    "static float su_vnoise(float3 x) {\n"
+    "  float3 i = floor(x), f = x - i; f = f * f * (3.0 - 2.0 * f);\n"
+    "  return mix(mix(mix(su_hash(i), su_hash(i + float3(1, 0, 0)), f.x), mix(su_hash(i + float3(0, 1, 0)), su_hash(i + float3(1, 1, 0)), f.x), f.y),\n"
+    "             mix(mix(su_hash(i + float3(0, 0, 1)), su_hash(i + float3(1, 0, 1)), f.x), mix(su_hash(i + float3(0, 1, 1)), su_hash(i + float3(1, 1, 1)), f.x), f.y), f.z);\n"
+    "}\n"
+    "static float su_ground(constant SU& u, float3 x) {\n"
+    "  float3 q = (x + u.wind.xyz) * u.fv.w;\n"
+    "  return 0.65 * su_vnoise(q) + 0.35 * su_vnoise(q * 2.7 + 13.1);\n"
+    "}\n"
+    "// optical depth from the camera along dir for d, the smooth density alone (closed form; the volume's comp)\n"
+    "static float su_tau(constant SU& u, float3 dir, float d) {\n"
+    "  float rise = -dir.y * d * u.p.y;\n"
+    "  float f = abs(rise) < 1e-3 ? 1.0 - 0.5 * rise : (1.0 - exp(-rise)) / rise;\n"
+    "  return u.p.x * d * f;\n"
+    "}\n"
+    "static float su_lamp(float3 Lp, float range, float3 dir, float d) {\n"
+    "  float tc = dot(Lp, dir), h2 = max(dot(Lp, Lp) - tc * tc, 0.0), r2 = range * range;\n"
+    "  if (h2 >= r2) return 0.0;\n"
+    "  float w = sqrt(r2 - h2), a = max(tc - w, 0.0), b = min(tc + w, d);\n"
+    "  if (b <= a) return 0.0;\n"
+    "  float h = sqrt(max(h2, 0.09));\n"
+    "  return (atan((b - tc) / h) - atan((a - tc) / h)) / h;\n"
+    "}\n"
     "static float3 su_dir(constant SU& u, float2 fp, float d, thread float& dist) {\n"
     "  float2 n = float2((fp.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (fp.y - u.vp.y) / u.vp.w * 2.0);\n"
     "  bool sky = d >= 0.99999;\n"
@@ -6676,25 +6710,35 @@ static const char POST_MSL[] =
     "}\n"
     "// the ray to the surface (or as far as the rays go): steps spread as the square of their order, the first by this pixel's jitter (a 4x4 Bayer\n"
     "// order turned a golden ratio each frame); the light in-scattered, each step lit where the cascades see the sun\n"
-    "fragment float4 shaft_march(PV in [[stage_in]], constant SU& u [[buffer(0)]], depth2d<float> dt [[texture(0)]],\n"
-    "                            depth2d_array<float> sm [[texture(1)]]) {\n"
+    "struct SMO { float4 c [[color(0)]]; float t [[color(1)]]; };\n" /* the in-scatter and distance; what gets through */
+    "fragment SMO shaft_march(PV in [[stage_in]], constant SU& u [[buffer(0)]], depth2d<float> dt [[texture(0)]],\n"
+    "                            depth2d_array<float> sm [[texture(1)]], const device SL* LS [[buffer(1)]],\n"
+    "                            const device ushort* TL [[buffer(2)]]) {\n"
     "  constexpr sampler cmp(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);\n"
     "  float2 lp = floor(in.pos.xy);\n"
     "  float2 fp = u.vp.xy + (lp + 0.5) * (u.vp.zw * u.lo.zw);\n"
     "  uint2 q = uint2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0));\n"
     "  float dist;\n"
-    "  float3 dir = su_dir(u, fp, dt.read(q), dist);\n"
-    "  uint bi = (uint(lp.y) & 3u) * 4u + (uint(lp.x) & 3u);\n"
-    "  float j = fract((SU_BAYER[bi] + 0.5) / 16.0 + u.p.w);\n"
+    "  float d0 = dt.read(q);\n"
+    "  float3 dir = su_dir(u, fp, d0, dist);\n"
+    "  bool vol = u.wind.w > 0.5, sky = d0 >= 0.99999;\n"
+    "  // this texel's jitter: interleaved gradient noise (near blue), turned a golden ratio each frame\n"
+    "  float j = fract(fract(52.9829189 * fract(dot(lp, float2(0.06711056, 0.00583715)))) + u.p.w);\n"
     "  int n = int(u.p.z);\n"
     "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
     "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
-    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0;\n"
+    "  float ray = 0.75 * (1.0 + mu * mu);\n"
+    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0; float3 A = 0.0;\n"
     "  for (int i = 0; i < n; ++i) {\n"
     "    // steps closer together near the camera (t grows as the square): beams through trunks and arches are near\n"
     "    float f = (float(i) + j) / float(n), t = dist * f * f, seg = 2.0 * dist * f / float(n);\n"
     "    float3 x = u.cam.xyz + dir * t;\n"
-    "    float rho = u.p.x * exp(clamp(u.p.y * (x.y - u.cam.y), -10.0, 3.0)); // y down: above the camera thinner\n"
+    "    float hf = exp(clamp(u.p.y * (x.y - u.cam.y), -10.0, 3.0)); // y down: above the camera thinner\n"
+    "    float rho = u.p.x * hf;\n"
+    "    if (vol && u.fv.z > 0.0) {\n" /* ground mist: its own layer below about the eye's height (y down), in drifting patches */
+    "      float low = saturate((x.y - (u.airc.w - 2.0)) / 1.2);\n" /* up to some 2 units over the fixed height (airc.w), thicker below it */
+    "      if (low > 0.0) rho += u.fv.z * 0.2 * low * smoothstep(0.3, 0.65, su_ground(u, x));\n"
+    "    }\n"
     "    float lit = 1.0, inr = 0.0;\n"
     "    for (int c = 0; c < 4; ++c) {\n"
     "      if (u.cas[c].w == 0.0 || t > u.cas[c].x) continue;\n"
@@ -6706,11 +6750,28 @@ static const char POST_MSL[] =
     "    ls += lit, lin += inr;\n"
     "    float a = rho * seg;\n"
     "    L += T * a * lit;\n"
+    "    if (vol && !sky) A += T * a;\n" /* the air's own light: the sky's, unshadowed */
     "    T *= exp(-a);\n"
     "  }\n"
-    "  if (u.hist.z < 0.0) return float4(ls / float(n), lin / float(n), 0.0, dist); // shafts_debug < 0: lit fraction, in-map fraction\n"
+    "  SMO r; r.t = sky ? 1.0 : T;\n"
+    "  if (u.hist.z < 0.0) { r.c = float4(ls / float(n), lin / float(n), 0.0, dist); return r; } // shafts_debug < 0: lit fraction, in-map fraction\n"
     "  float3 o = u.sunc.rgb * (L * ph);\n"
-    "  return float4(select(float3(0.0), o, isfinite(o)), dist);\n"
+    "  if (vol && !sky) {\n"
+    "    o += u.airc.rgb * (A * ray);\n"
+    "    if (u.lt.z > 0.0 && u.fv.x > 0.0) {\n" /* the lamps in this pixel's tile: their light in the mist round them */
+    "      int2 tq = int2((fp - u.lt.xy) / 64.0);\n"
+    "      if (all(tq >= 0) && tq.x < int(u.lt.z) && tq.y < int(u.lt.w)) {\n"
+    "        const device ushort* LT = TL + (uint(tq.y) * uint(u.lt.z) + uint(tq.x)) * 32u;\n"
+    "        for (uint k = 0; k < uint(LT[0]); ++k) {\n"
+    "          SL lm = LS[LT[1 + k]];\n"
+    "          float3 Lp = lm.pos.xyz - u.cam.xyz - float3(0.0, u.fv.y, 0.0);\n"
+    "          o += lm.col.rgb * (u.fv.x * su_lamp(Lp, lm.pos.w, dir, dist) * exp(-su_tau(u, dir, max(dot(Lp, dir), 0.0))));\n"
+    "        }\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "  r.c = float4(select(float3(0.0), o, isfinite(o)), dist);\n"
+    "  return r;\n"
     "}\n"
     "// over frames: this frame's march and last frame's result where this texel's point was then, clamped to this frame's\n"
     "// neighbours (no trails where the scene moved)\n"
@@ -6738,23 +6799,30 @@ static const char POST_MSL[] =
     "// onto the scene (screen-blended): the four small texels round each pixel, weighted by how near they are and how alike\n"
     "// in distance - a wall's edge takes the wall's shafts, the sky beside it the sky's\n"
     "fragment float4 shaft_comp(PV in [[stage_in]], constant SU& u [[buffer(0)]], texture2d<float> ft [[texture(0)]],\n"
-    "                           depth2d<float> dt [[texture(1)]]) {\n"
+    "                           depth2d<float> dt [[texture(1)]], texture2d<float> tt [[texture(2)]]) {\n"
     "  float2 fp = in.pos.xy;\n"
     "  float dist;\n"
     "  su_dir(u, fp, dt.read(uint2(fp)), dist);\n"
     "  float2 h = (fp - u.vp.xy) * (u.lo.xy / u.vp.zw) - 0.5;\n"
     "  int2 b = int2(floor(h)), hi = int2(u.lo.xy) - 1;\n"
     "  float2 fr = h - float2(b);\n"
-    "  float3 sum = 0.0; float ws = 0.0;\n"
+    "  float3 sum = 0.0; float ws = 0.0, tsum = 0.0;\n"
     "  for (int k = 0; k < 4; ++k) {\n"
     "    int2 o = int2(k & 1, k >> 1);\n"
-    "    float4 t = ft.read(uint2(clamp(b + o, int2(0), hi)));\n"
+    "    uint2 q = uint2(clamp(b + o, int2(0), hi));\n"
+    "    float4 t = ft.read(q);\n"
     "    float w = (o.x ? fr.x : 1.0 - fr.x) * (o.y ? fr.y : 1.0 - fr.y) + 1e-3;\n"
     "    w *= exp(-abs(t.a - dist) / (0.05 * dist + 0.5));\n"
     "    sum += t.rgb * w, ws += w;\n"
+    "    if (u.wind.w > 0.5) tsum += tt.read(q).r * w;\n"
     "  }\n"
     "  float3 c = ws > 1e-6 ? sum / ws : float3(0.0);\n"
     "  if (u.hist.z != 0.0) return float4(saturate(c * abs(u.hist.z)), 1.0); // shafts_debug: the term alone, scaled (no blend)\n"
+    "  if (u.wind.w > 0.5) {\n" /* the fog volume: the scene dimmed by the air, what it scatters added (ONE, 1 - src alpha) */
+    "    float a = dt.read(uint2(fp)) >= 0.99999 ? 0.0 : saturate(1.0 - (ws > 1e-6 ? tsum / ws : 1.0));\n" /* (as marched: the mist's patches too) */
+    "    float r = (fract(sin(dot(fp, float2(12.9898, 78.233))) * 43758.5453) - 0.5) * (u.hist.w > 0.0 ? 0.0 : 1.0 / 255.0);\n"
+    "    return float4(max(c + r, 0.0), a);\n"
+    "  }\n"
     "  if (u.hist.w > 0.0) return float4(max(c, 0.0), 1.0); // an HDR scene: added as it is\n"
     "  return float4(1.0 - exp(-max(c, 0.0)), 1.0);\n"
     "}\n"
@@ -6827,6 +6895,7 @@ typedef struct PostU
 typedef struct ShaftU
 {
     float ivp[16], pvp[16], m[4][16], cas[4][4], cam[4], sun[4], sunc[4], p[4], vp[4], lo[4], hist[4], pcam[4];
+    float airc[4], fv[4], wind[4], lt[4];
 } ShaftU;
 
 enum { POST_LEVELS = 6 };
@@ -6837,8 +6906,10 @@ static struct
     id<MTLRenderPipelineState> pre, down, up, coc, gather;
     id<MTLRenderPipelineState> comp, dcomp, scomp, sdbg; /* onto the scene, built for its format */
     id<MTLRenderPipelineState> comp_add, scomp_add;      /* the same added (an HDR scene: no screen blend) */
+    id<MTLRenderPipelineState> svol;                     /* the shafts as the fog volume: premultiplied over */
     id<MTLRenderPipelineState> smarch, sresolve; /* the sun shafts' march and their resolve over frames */
     id<MTLTexture> sh, shist[2];     /* the shafts at half or quarter size: this frame's march, the resolved two */
+    id<MTLTexture> sht;              /* what gets through, as marched (the fog volume's) */
     int shist_at;                    /* which of shist[] the last frame wrote */
     uint64_t sh_serial;              /* that frame (0: none) */
     float sh_pvp[16], sh_pcam[3];    /* its view's turn times projection, its camera */
@@ -6863,10 +6934,10 @@ static id<MTLRenderPipelineState> post_pipeline(NSString* frag, MTLPixelFormat f
     {
         ca.blendingEnabled = YES;
         ca.rgbBlendOperation = ca.alphaBlendOperation = MTLBlendOperationAdd;
-        /* 1: added; 2: screen (src (1 - dst) + dst); 3: over, by the source's alpha (the colour only) */
-        ca.sourceRGBBlendFactor = blend == 1 ? MTLBlendFactorOne : blend == 2 ? MTLBlendFactorOneMinusDestinationColor
-                                                                             : MTLBlendFactorSourceAlpha;
-        ca.destinationRGBBlendFactor = blend == 3 ? MTLBlendFactorOneMinusSourceAlpha : MTLBlendFactorOne;
+        /* 1: added; 2: screen (src (1 - dst) + dst); 3: over, by the source's alpha (the colour only); 4: over, premultiplied */
+        ca.sourceRGBBlendFactor = blend == 1 || blend == 4 ? MTLBlendFactorOne : blend == 2 ? MTLBlendFactorOneMinusDestinationColor
+                                                                                            : MTLBlendFactorSourceAlpha;
+        ca.destinationRGBBlendFactor = blend >= 3 ? MTLBlendFactorOneMinusSourceAlpha : MTLBlendFactorOne;
         ca.sourceAlphaBlendFactor = MTLBlendFactorZero, ca.destinationAlphaBlendFactor = MTLBlendFactorOne;
     }
     NSError* err = nil;
@@ -6891,7 +6962,19 @@ static int post_init(MTLPixelFormat scene_fmt)
         g_post.up = post_pipeline(@"bloom_up", MTLPixelFormatRG11B10Float, 1);
         g_post.coc = post_pipeline(@"dof_coc", MTLPixelFormatRGBA16Float, 0);
         g_post.gather = post_pipeline(@"dof_gather", MTLPixelFormatRGBA16Float, 0);
-        g_post.smarch = post_pipeline(@"shaft_march", MTLPixelFormatRGBA16Float, 0);
+        {
+            /* two targets: the in-scatter and distance, and what gets through */
+            MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+            id<MTLFunction> vf = [g_post.lib newFunctionWithName:@"post_vs"], ff = [g_post.lib newFunctionWithName:@"shaft_march"];
+            pd.vertexFunction = vf, pd.fragmentFunction = ff;
+            pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+            pd.colorAttachments[1].pixelFormat = MTLPixelFormatR16Float;
+            NSError* err = nil;
+            g_post.smarch = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+            if (!g_post.smarch)
+                fprintf(stderr, "[recomp] gfx: post effect shaft_march failed: %s\n", err ? [[err localizedDescription] UTF8String] : "?");
+            [vf release], [ff release], [pd release];
+        }
         g_post.sresolve = post_pipeline(@"shaft_resolve", MTLPixelFormatRGBA16Float, 0);
         MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
         sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
@@ -6909,13 +6992,14 @@ static int post_init(MTLPixelFormat scene_fmt)
     if (g_post.comp_fmt != scene_fmt || !g_post.comp || !g_post.dcomp || !g_post.scomp)
     {
         [g_post.comp release], [g_post.dcomp release], [g_post.scomp release], [g_post.sdbg release];
-        [g_post.comp_add release], [g_post.scomp_add release];
+        [g_post.comp_add release], [g_post.scomp_add release], [g_post.svol release];
         g_post.comp = post_pipeline(@"bloom_comp", scene_fmt, 2);
         g_post.dcomp = post_pipeline(@"dof_comp", scene_fmt, 3);
         g_post.scomp = post_pipeline(@"shaft_comp", scene_fmt, 2);
         g_post.sdbg = post_pipeline(@"shaft_comp", scene_fmt, 0);
         g_post.comp_add = post_pipeline(@"bloom_comp", scene_fmt, 1);
         g_post.scomp_add = post_pipeline(@"shaft_comp", scene_fmt, 1);
+        g_post.svol = post_pipeline(@"shaft_comp", scene_fmt, 4);
         g_post.comp_fmt = scene_fmt;
     }
     return g_post.comp && g_post.dcomp && g_post.scomp && g_post.comp_add && g_post.scomp_add;
@@ -6968,6 +7052,16 @@ static void post_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPip
  * the scene renderer's shadows (scene 1 or 2, scene_shadows): without them there is nothing to shade the beams by and the
  * pass stays off; indoors (no sun shadows) likewise, so nothing leaks through a roof. */
 static float fog_sigma(const GfxScene* s);
+static float fog_ref(void);
+static float fog_at_cam(float sigma, float cam_y);
+
+/* whether the fog is the shafts' volume this frame (fog_modern, fog_volume, and the sun's cascades to shade it by);
+ * else the analytic pass (scene_fog) */
+static int fog_volume_on(void)
+{
+    return g_fxs.fog_modern > 0.0f && g_fxs.fog_volume > 0.0f && g_shd.zmap && g_shd.cframe == g_serial && g_shd.u.dir[3] > 0.0f &&
+        g_shd.u.info[0] > 0.0f && g_shd.u.info[2] > 0.0f;
+}
 
 static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, float vx, float vy, float vw, float vh)
 {
@@ -6987,7 +7081,8 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     int q = g_fxs.shafts_q >= 1.5f ? 2 : 1, div = q == 2 ? 3 : 5; /* (of the 2048 scene: some 0.47 M and 0.17 M texels) */
     NSUInteger lw = (NSUInteger)(vw / div), lh = (NSUInteger)(vh / div);
     lw = lw ? lw : 1, lh = lh ? lh : 1;
-    if (!post_tex(&g_post.sh, lw, lh, MTLPixelFormatRGBA16Float) || !post_tex(&g_post.shist[0], lw, lh, MTLPixelFormatRGBA16Float) ||
+    if (!post_tex(&g_post.sh, lw, lh, MTLPixelFormatRGBA16Float) || !post_tex(&g_post.sht, lw, lh, MTLPixelFormatR16Float) ||
+        !post_tex(&g_post.shist[0], lw, lh, MTLPixelFormatRGBA16Float) ||
         !post_tex(&g_post.shist[1], lw, lh, MTLPixelFormatRGBA16Float))
         return;
     memcpy(u.m, g_shd.u.m, sizeof u.m), memcpy(u.cas, g_shd.u.cas, sizeof u.cas);
@@ -7010,7 +7105,31 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
     u.p[0] = fmaxf(g_fxs.shafts_density, 0.0f) * 2.0f / fog_end, u.p[1] = 0.02f, u.p[2] = q == 2 ? 16.0f : 10.0f;
     if (g_fxs.fog_modern > 0.0f) /* one air: the modern fog's density and falloff */
-        u.p[0] = fog_sigma(s) * fmaxf(g_fxs.shafts_density, 0.0f), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f);
+        u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]) * fmaxf(g_fxs.shafts_density, 0.0f), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f);
+    int vol = fog_volume_on();
+    if (vol)
+    {
+        /* the fog volume: the air's own light, the ground fog's drift, the lamps; the sun's in-scatter the fog's when the
+         * shafts are off; to the fog's far limit, not the shafts' reach */
+        float fc[3] = { s->fogcolor[0], s->fogcolor[1], s->fogcolor[2] };
+        float lum = 0.2126f * fc[0] + 0.7152f * fc[1] + 0.0722f * fc[2];
+        static const float cool[3] = { 0.88f, 0.97f, 1.18f };
+        for (int c = 0; c < 3; ++c)
+            u.airc[c] = fmaxf(fc[c] * 0.7f + lum * cool[c] * 0.3f, 0.0f);
+        if (g_fxs.post_shafts <= 0.0f)
+            for (int c = 0; c < 3; ++c)
+                u.sunc[c] = fmaxf(sc[c], 0.0f) * g_shd.u.info[2] * (0.15f + 0.6f * low * low);
+        u.airc[3] = g_fx.has_focus ? fog_ref() : u.cam[1] + 3.0f; /* the ground mist at the zone's fixed height (y down) */
+        u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]);
+        u.cam[3] = fog_end * 1.5f;
+        u.fv[0] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f, u.fv[1] = g_fxs.fog_lamp_lift;
+        u.fv[2] = fmaxf(g_fxs.fog_ground, 0.0f), u.fv[3] = 1.0f / fmaxf(g_fxs.fog_ground_size, 1.0f);
+        double t = (double)gfx_now_ns() * 1e-9;
+        float sp = fmaxf(g_fxs.fog_drift, 0.0f);
+        u.wind[0] = (float)fmod(t * sp, 4096.0), u.wind[1] = 0.0f, u.wind[2] = (float)fmod(t * sp * 0.6, 4096.0), u.wind[3] = 1.0f;
+        if (g_fxs.scene_lamps > 0.0f && g_lamps.binned == g_serial && g_lamps.lb && g_lamps.tb)
+            u.lt[0] = g_lamps.lu[0], u.lt[1] = g_lamps.lu[1], u.lt[2] = g_lamps.lu[4], u.lt[3] = g_lamps.lu[5];
+    }
     u.p[3] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
     u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
     u.lo[0] = (float)lw, u.lo[1] = (float)lh, u.lo[2] = 1.0f / (float)lw, u.lo[3] = 1.0f / (float)lh;
@@ -7021,10 +7140,31 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     u.hist[0] = have && g_fxs.shafts_debug >= 0.0f ? 1.0f : 0.0f, u.hist[1] = fminf(fmaxf(g_fxs.shafts_temporal, 0.0f), 0.97f), u.hist[2] = g_fxs.shafts_debug;
     id<MTLTexture> prev = g_post.shist[g_post.shist_at], out = g_post.shist[g_post.shist_at ^ 1];
     MTLViewport lv = { 0, 0, (double)lw, (double)lh, 0, 1 };
-    post_pass_n(g_post.sh, MTLLoadActionDontCare, g_post.smarch, lv, &u, sizeof u, depth, g_shd.zmap, nil, GFX_PASS_POST_SHAFTS);
+    {
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = g_post.sh;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        rp.colorAttachments[1].texture = g_post.sht;
+        rp.colorAttachments[1].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[1].storeAction = MTLStoreActionStore;
+        ts_mark(rp, GFX_PASS_POST_SHAFTS);
+        id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+        [e setRenderPipelineState:g_post.smarch];
+        [e setViewport:lv];
+        [e setFragmentBytes:&u length:sizeof u atIndex:0];
+        [e setFragmentTexture:depth atIndex:0];
+        [e setFragmentTexture:g_shd.zmap atIndex:1];
+        int lt = u.lt[2] > 0.0f;
+        [e setFragmentBuffer:lt ? g_lamps.lb : g_dummy offset:lt ? g_lamps.lo : 0 atIndex:1];
+        [e setFragmentBuffer:lt ? g_lamps.tb : g_dummy offset:lt ? g_lamps.to : 0 atIndex:2];
+        [e setFragmentSamplerState:g_post.lin atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+    }
     post_pass_n(out, MTLLoadActionDontCare, g_post.sresolve, lv, &u, sizeof u, g_post.sh, prev, depth, GFX_PASS_POST_SHAFTS);
     u.hist[3] = color->tex.pixelFormat == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f;
-    post_pass_n(color->tex, MTLLoadActionLoad, u.hist[2] != 0.0f ? g_post.sdbg : u.hist[3] > 0.0f ? g_post.scomp_add : g_post.scomp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, sizeof u, out, depth, nil,
+    post_pass_n(color->tex, MTLLoadActionLoad, u.hist[2] != 0.0f ? g_post.sdbg : vol ? g_post.svol : u.hist[3] > 0.0f ? g_post.scomp_add : g_post.scomp, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, sizeof u, out, depth, g_post.sht,
         GFX_PASS_POST_SHAFTS);
     g_post.shist_at ^= 1, g_post.sh_serial = g_serial;
     memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
@@ -7040,6 +7180,29 @@ typedef struct
     float cam[4], sun[4], sunc[4], airc[4], p[4], vp[4], lt[4], dbg[4];
 } FogU;
 
+/* the fog's fixed height in the world (y down): the player's feet as they arrived in a zone, kept until they jump far
+ * (a zone change, a teleport), so the haze and the ground mist stay put as the player climbs or descends */
+static float fog_ref(void)
+{
+    static float ref, last[3];
+    static int set;
+    if (g_fx.has_focus)
+    {
+        float dx = g_fx.focus[0] - last[0], dy = g_fx.focus[1] - last[1], dz = g_fx.focus[2] - last[2];
+        if (!set || dx * dx + dy * dy + dz * dz > 60.0f * 60.0f)
+            ref = g_fx.focus[1], set = 1;
+        memcpy(last, g_fx.focus, sizeof last);
+    }
+    return set ? ref : 0.0f;
+}
+
+/* the haze's density at the camera's height, from its density at the fixed height and its thinning upward */
+static float fog_at_cam(float sigma, float cam_y)
+{
+    float e = fminf(fmaxf(g_fxs.fog_thin * (cam_y - fog_ref()), -3.0f), 3.0f);
+    return sigma * expf(e);
+}
+
 static float fog_sigma(const GfxScene* s)
 {
     float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
@@ -7050,7 +7213,7 @@ static float fog_sigma(const GfxScene* s)
 
 static void scene_fog(GfxTex* color, const GfxScene* s)
 {
-    if (g_fxs.fog_modern <= 0.0f || !gfx_world_supported() || s->proj[11] == 0.0f)
+    if (g_fxs.fog_modern <= 0.0f || !gfx_world_supported() || s->proj[11] == 0.0f || fog_volume_on())
         return;
     static id<MTLRenderPipelineState> pipe[2];
     id<MTLTexture> ct = color->tex, depth = color->depth_world ? color->depth_world : color->depth_seen;
@@ -7092,7 +7255,7 @@ static void scene_fog(GfxTex* color, const GfxScene* s)
     float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
     for (int c = 0; c < 3; ++c)
         u.sunc[c] = shafts || s->sun_dir[3] == 0.0f ? 0.0f : fmaxf(s->sun_color[c], 0.0f) * (0.15f + 0.6f * low * low);
-    u.p[0] = fog_sigma(s), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f), u.p[2] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f; /* (mist round a lamp: its own, not the haze's) */
+    u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f), u.p[2] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f; /* (mist round a lamp: its own, not the haze's) */
     u.p[3] = hdr ? 0.0f : 1.0f / 255.0f;
     u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
     int lamps = g_fxs.scene_lamps > 0.0f && g_lamps.binned == g_serial && g_lamps.lb && g_lamps.tb;
@@ -7238,7 +7401,7 @@ static void post_effects(GfxTex* color, const GfxScene* s)
 {
     int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f, shafts = g_fxs.post_shafts > 0.0f;
     int glows = g_fxs.scene_lamps > 0.0f && g_fxs.scene_lamp_glow > 0.0f && g_lamps.binned == g_serial;
-    if (!bloom && !dof && !shafts && !glows)
+    if (!bloom && !dof && !shafts && !glows && !fog_volume_on())
     {
         g_post.sh_serial = 0;
         return;
@@ -7267,8 +7430,8 @@ static void post_effects(GfxTex* color, const GfxScene* s)
         NSUInteger hw = (NSUInteger)(vw + 1) / 2, hh = (NSUInteger)(vh + 1) / 2;
         if (glows && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
             post_lamp_glows(color, s, depth, vx, vy, vw, vh);
-        if (shafts && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
-            post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it) */
+        if ((shafts || fog_volume_on()) && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)
+            post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it; the fog volume too) */
         else
             g_post.sh_serial = 0;
         if (dof && depth && depth.width == ct.width && depth.height == ct.height && s->proj[11] != 0.0f)

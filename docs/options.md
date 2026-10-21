@@ -104,6 +104,7 @@ the Lighting and Atmosphere pages.
 | Lamps fill the sun's and moon's shadows: gone where lamp light is at least 1/n of the sun's or moon's | Shadows › [Night] Lamp Fill | `shadow_fill` | 0.5 (0: never) |
 | Soft shadows (scene renderer: sun and moon cascades, characters' layers, lamp cubes), hard at contact and softer away from the caster: how soft (0: the fixed filter) / the sun's angular size in degrees (tripled toward the horizon) / the moon's / a lamp's in units / 1 Low, 2 High taps | | `shadow_softness`, `sun_size`, `moon_size`, `lamp_size`, `shadow_soft_q` | 1 / 2 / 3 / 0.3 / 2 |
 | Modern fog (scene renderer) in place of the game's fade to grey: on / density next to the game's fog end (1: 4% of a point's light left there) / thinning with height per unit risen / lamp halos and how far above the game's light their lanterns hang / debug (1 how much it takes, 2 what it adds) | Atmosphere › [Fog] Modern Fog, Density, Ground Fog, Lamp Halos | `fog_modern`, `fog_density`, `fog_thin`, `fog_lamps`, `fog_lamp_lift`, `fog_debug` | 0 / 1 / 0.03 / 1.5 / 1.5 / 0 |
+| Modern fog as one volume with the sun shafts (the shafts' march: shadowed sun, the air's own light, lamp halos, ground mist; over frames) / drifting mist's strength, size (units), drift (units a second) | Atmosphere › [Fog] Volume, Drifting Mist | `fog_volume`, `fog_ground`, `fog_ground_size`, `fog_drift` | 1 / 0.5 / 8 / 0.6 |
 | Testing: the sun held low ahead of the camera (degrees up, degrees turned); the shafts alone | | `scene_sun_test`, `scene_sun_test_turn`, `shafts_debug` | 0 / 0 / 0 |
 
 ## 6. Water
@@ -237,7 +238,7 @@ Config
     │   ├── [Ambient Occlusion] Strength, Quality, Radius
     │   └── [Highlights] .... Strength, Wetness
     ├── Atmosphere
-    │   ├── [Fog] ........... Modern Fog, Density, Ground Fog, Lamp Halos
+    │   ├── [Fog] ........... Modern Fog, Density, Ground Fog, Lamp Halos, Volume, Drifting Mist
     │   ├── [Sun Shafts] .... Strength, Quality
     │   ├── [Bloom] ......... Strength, Effect Glow, Lamp Glow
     │   └── [Depth of Field]  Strength, Sharp Distance
