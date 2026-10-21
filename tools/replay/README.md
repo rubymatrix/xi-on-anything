@@ -79,6 +79,16 @@ before the mean moves. With `FFXI_PROFILE=1` the client's log has it directly: t
 (`N cached`) and the Direct3D work a frame (`encode`). Without the bound, the cache here grew from
 about 1,000 entries to 23,000 over the three minutes and encode from 2 ms to 11; with it, both stay flat.
 
+### Everything on
+
+`showcase-fx.txt` beside this file turns on every scene-renderer feature at its tuned strength: the
+zone and characters lit per pixel into the HDR target with the highlight tonemap, sun and moon
+shadows, every lamp with shadows from the nearest four, bounce light and ambient occlusion at high
+quality, specular, sun shafts, bloom and depth of field. `FFXI_FX=0` turns the older effects path
+off, which the file can't (fx is read only at start). Any scene plays with it:
+
+    FFXI_FX=0 FFXI_FX_FILE="$PWD/tools/replay/showcase-fx.txt" python3 tools/replay.py play tools/replay/default.txt
+
 ## The reference set
 
 `scenes/` holds the recordings `default.txt` plays, committed so that every machine and CI plays the

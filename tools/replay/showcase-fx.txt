@@ -1,0 +1,30 @@
+# Every scene-renderer feature on at once, at its tuned strength (README, "Everything on"), as host64's
+# settings file in place of the machine's own:
+#   FFXI_FX=0 FFXI_FX_FILE="$PWD/tools/replay/showcase-fx.txt" python3 tools/replay.py play tools/replay/default.txt
+# FFXI_FX=0 turns the older effects path off (the scene renderer, its shadows and the post effects replace
+# it); fx is read only at start, from the environment, so this file can't set it.
+
+# the zone and characters drawn from the game's data, lit per pixel, into a float target
+scene = 2
+scene_hdr = 1
+tonemap = 1
+
+# sun and moon shadows (soft, darker nights and lamps filling the moon's shadows are on by default)
+scene_shadows = 1
+
+# every lamp per pixel, with shadows from the nearest four
+scene_lamps = 1
+
+# bounce light, high, and ambient occlusion, GTAO high
+scene_gi = 1
+scene_gi_q = 2
+scene_ao = 1
+scene_ao_q = 2
+
+# specular highlights
+scene_spec = 1
+
+# sun shafts, bloom and depth of field
+post_shafts = 1
+post_bloom = 1
+post_dof = 1
