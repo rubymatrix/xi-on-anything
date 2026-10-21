@@ -6583,6 +6583,71 @@ static const char POST_MSL[] =
     "              t0.sample(s, uv + float2(-t.x, t.y)).rgb + t0.sample(s, uv + float2(t.x, t.y)).rgb) * 0.25;\n"
     "  return float4(b, a);\n"
     "}\n"
+    "// --- the modern fog (fog_modern): light scattered by the air between the eye and each point, and the point's light dimmed\n"
+    "// by it - not a fade to grey. Thick as the game's fog says (its end the far limit, where little is left to see) and\n"
+    "// thinning with height; its colour the game's fog colour, bluer away from the sun and warm toward it (the air's forward\n"
+    "// scattering); the lamps' light scattered round them (halos in mist). Over the scene by its own alpha: the colour times\n"
+    "// what gets through, plus what is scattered in\n"
+    "struct FU {\n"
+    "  float4x4 ivp; // the scene's clip space to the world round the camera (the view's turn alone)\n"
+    "  float4 cam;   // the camera, world; w: how far the fog goes (beyond: the sky)\n"
+    "  float4 sun;   // toward the sun (or moon), world; w: the forward lobe's g\n"
+    "  float4 sunc;  // its scattered colour (0 with the shafts on: theirs)\n"
+    "  float4 airc;  // the air's own colour (the game's fog colour, cooled)\n"
+    "  float4 p;     // density at the camera's height, its falloff with height, the lamps' halo strength, the 8-bit dither\n"
+    "  float4 vp;    // the scene's viewport in its target\n"
+    "  float4 lt;    // the lamps' tiles: origin x, y, tiles across, down (0: no lamps)\n"
+    "  float4 dbg;   // x: fog_debug; y: how far above the game's light its lantern hangs (the halo's centre)\n"
+    "};\n"
+    "struct FL { float4 pos, col, att, amb; };\n"
+    "// optical depth along t in [0, d] of dir from the camera: density p.x at the camera's height, falling as exp(-k * rise)\n"
+    "static float fog_tau(constant FU& u, float3 dir, float d) {\n"
+    "  float rise = -dir.y * d * u.p.y;\n" /* (y down: up is -y) */
+    "  float f = abs(rise) < 1e-3 ? 1.0 - 0.5 * rise : (1.0 - exp(-rise)) / rise;\n"
+    "  return u.p.x * d * f;\n"
+    "}\n"
+    "// a point light's light scattered toward the eye along the ray inside its reach: the integral of 1 / r^2 in closed form\n"
+    "static float fog_lamp(float3 Lp, float range, float3 dir, float d) {\n"
+    "  float tc = dot(Lp, dir), h2 = max(dot(Lp, Lp) - tc * tc, 0.0), r2 = range * range;\n"
+    "  if (h2 >= r2) return 0.0;\n"
+    "  float w = sqrt(r2 - h2), a = max(tc - w, 0.0), b = min(tc + w, d);\n"
+    "  if (b <= a) return 0.0;\n"
+    "  float h = sqrt(max(h2, 0.09));\n"
+    "  return (atan((b - tc) / h) - atan((a - tc) / h)) / h;\n"
+    "}\n"
+    "fragment float4 fog_comp(PV in [[stage_in]], constant FU& u [[buffer(0)]], depth2d<float> dt [[texture(0)]],\n"
+    "                         const device FL* LS [[buffer(1)]], const device ushort* TL [[buffer(2)]]) {\n"
+    "  float2 fp = in.pos.xy;\n"
+    "  float d0 = dt.read(uint2(fp));\n"
+    "  if (d0 >= 0.99999) return float4(0.0);\n" /* the sky: the game's own, with its own haze */
+    "  float2 n = float2((fp.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (fp.y - u.vp.y) / u.vp.w * 2.0);\n"
+    "  float4 w = u.ivp * float4(n, d0, 1.0);\n"
+    "  float3 v = w.xyz / w.w;\n"
+    "  float l = length(v), d = min(l, u.cam.w);\n"
+    "  float3 dir = v / max(l, 1e-4);\n"
+    "  float T = exp(-fog_tau(u, dir, d));\n"
+    "  float g = u.sun.w, mu = dot(dir, u.sun.xyz);\n"
+    "  float mie = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float ray = 0.75 * (1.0 + mu * mu);\n" /* (Rayleigh: a little more toward and away from the sun than across) */
+    "  float3 I = (u.airc.rgb * ray + u.sunc.rgb * mie) * (1.0 - T);\n"
+    "  if (u.lt.z > 0.0 && u.p.z > 0.0) {\n" /* the lamps in this tile: their light scattered in the mist round them */
+    "    int2 tq = int2((fp - u.lt.xy) / 64.0);\n"
+    "    if (all(tq >= 0) && tq.x < int(u.lt.z) && tq.y < int(u.lt.w)) {\n"
+    "      const device ushort* L = TL + (uint(tq.y) * uint(u.lt.z) + uint(tq.x)) * 32u;\n"
+    "      float sig = u.p.z;\n"
+    "      for (uint k = 0; k < uint(L[0]); ++k) {\n"
+    "        FL lm = LS[L[1 + k]];\n"
+    "        float3 Lp = lm.pos.xyz - u.cam.xyz - float3(0.0, u.dbg.y, 0.0);\n"
+    "        I += lm.col.rgb * (sig * fog_lamp(Lp, lm.pos.w, dir, d) * exp(-fog_tau(u, dir, max(dot(Lp, dir), 0.0))));\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "  if (u.dbg.x > 0.5) return float4(u.dbg.x > 1.5 ? I : float3(1.0 - T), 1.0);\n" /* fog_debug: 1 how much it takes, 2 what it adds */
+    "  float a = 1.0 - T;\n"
+    "  if (a < 1e-4 && all(I < 1e-4)) return float4(0.0);\n"
+    "  float r = fract(sin(dot(fp, float2(12.9898, 78.233))) * 43758.5453) - 0.5;\n"
+    "  return float4(max(I / max(a, 1e-4) + r * u.p.w / max(a, 1e-4), 0.0), a);\n" /* over: I / a * a + scene * T; dithered at 8 bits */
+    "}\n"
     "// --- sun shafts: the sun's (or moon's) light scattered toward the eye along each view ray, where the scene renderer's\n"
     "// shadow cascades say it reaches; at half or quarter size, over frames, then onto the scene by depth\n"
     "constant float SU_BAYER[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };\n"
@@ -6902,6 +6967,8 @@ static void post_pass(id<MTLTexture> target, MTLLoadAction load, id<MTLRenderPip
  * by where its point was, clamped to its neighbours; screen-blended onto the scene through a depth-aware upsample. Needs
  * the scene renderer's shadows (scene 1 or 2, scene_shadows): without them there is nothing to shade the beams by and the
  * pass stays off; indoors (no sun shadows) likewise, so nothing leaks through a roof. */
+static float fog_sigma(const GfxScene* s);
+
 static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, float vx, float vy, float vw, float vh)
 {
     if (!g_shd.zmap || g_shd.cframe != g_serial || g_shd.u.dir[3] <= 0.0f || g_shd.u.info[0] <= 0.0f || g_shd.u.info[2] <= 0.0f)
@@ -6942,6 +7009,8 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
         u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
     u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
     u.p[0] = fmaxf(g_fxs.shafts_density, 0.0f) * 2.0f / fog_end, u.p[1] = 0.02f, u.p[2] = q == 2 ? 16.0f : 10.0f;
+    if (g_fxs.fog_modern > 0.0f) /* one air: the modern fog's density and falloff */
+        u.p[0] = fog_sigma(s) * fmaxf(g_fxs.shafts_density, 0.0f), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f);
     u.p[3] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
     u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
     u.lo[0] = (float)lw, u.lo[1] = (float)lh, u.lo[2] = 1.0f / (float)lw, u.lo[3] = 1.0f / (float)lh;
@@ -6959,6 +7028,92 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
         GFX_PASS_POST_SHAFTS);
     g_post.shist_at ^= 1, g_post.sh_serial = g_serial;
     memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
+}
+
+/* The modern fog (fog_modern; FOG_MSL above): over the finished scene before the shafts, depth of field and bloom. Its
+ * density from the game's fog end (some 4% of a point's light left there, so the draw distance's edge stays hidden) times
+ * fog_density, thinning with height by fog_thin; indoors (a zone's fixed light) a light dust. The scene renderer's own
+ * draws leave the game's fog off while it is on (scene.c). */
+typedef struct
+{
+    float ivp[16];
+    float cam[4], sun[4], sunc[4], airc[4], p[4], vp[4], lt[4], dbg[4];
+} FogU;
+
+static float fog_sigma(const GfxScene* s)
+{
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
+    fog_end = fminf(fmaxf(fog_end, 20.0f), 3000.0f);
+    float k = fmaxf(g_fxs.fog_density, 0.0f) * 3.2f / fog_end; /* exp(-3.2): 4% */
+    return k * (1.0f - 0.85f * fminf(fmaxf(s->indoors, 0.0f), 1.0f));
+}
+
+static void scene_fog(GfxTex* color, const GfxScene* s)
+{
+    if (g_fxs.fog_modern <= 0.0f || !gfx_world_supported() || s->proj[11] == 0.0f)
+        return;
+    static id<MTLRenderPipelineState> pipe[2];
+    id<MTLTexture> ct = color->tex, depth = color->depth_world ? color->depth_world : color->depth_seen;
+    if (!depth || depth.width != ct.width || depth.height != ct.height || !post_init(ct.pixelFormat))
+        return;
+    int hdr = ct.pixelFormat == MTLPixelFormatRGBA16Float;
+    if (!pipe[hdr] && !(pipe[hdr] = post_pipeline(@"fog_comp", ct.pixelFormat, 3)))
+        return;
+    float Vr[16], VP[16], iv[16];
+    memcpy(Vr, s->view, 64);
+    Vr[12] = Vr[13] = Vr[14] = 0.0f;
+    gfx_mat_mul(VP, Vr, s->proj);
+    FogU u;
+    memset(&u, 0, sizeof u);
+    if (!gfx_mat_inverse(u.ivp, VP) || !gfx_mat_inverse(iv, s->view))
+        return;
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > ct.width || vy + vh > ct.height)
+        vx = vy = 0, vw = (float)ct.width, vh = (float)ct.height;
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
+    u.cam[0] = iv[12], u.cam[1] = iv[13], u.cam[2] = iv[14], u.cam[3] = fminf(fmaxf(fog_end, 20.0f), 3000.0f) * 1.5f;
+    /* the sun (or moon) toward it, world: the scene's is in camera space */
+    float sd[3] = { 0, -1, 0 };
+    if (s->sun_dir[3] != 0.0f)
+        for (int j = 0; j < 3; ++j)
+            sd[j] = s->sun_dir[0] * iv[j] + s->sun_dir[1] * iv[4 + j] + s->sun_dir[2] * iv[8 + j];
+    float sl = sqrtf(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]);
+    for (int j = 0; j < 3; ++j)
+        u.sun[j] = sl > 1e-4f ? sd[j] / sl : 0.0f;
+    u.sun[3] = 0.6f;
+    /* the air's colour: the game's fog colour, a little cooler and brighter where the sky lights it; the sun's forward
+     * scattering in its own colour, none with the shafts on (theirs is shadowed) */
+    float fc[3] = { s->fogcolor[0], s->fogcolor[1], s->fogcolor[2] };
+    float lum = 0.2126f * fc[0] + 0.7152f * fc[1] + 0.0722f * fc[2];
+    static const float cool[3] = { 0.88f, 0.97f, 1.18f };
+    for (int c = 0; c < 3; ++c)
+        u.airc[c] = fmaxf(fc[c] * 0.7f + lum * cool[c] * 0.3f, 0.0f);
+    int shafts = g_fxs.post_shafts > 0.0f && g_shd.zmap && g_shd.cframe == g_serial && g_shd.u.dir[3] > 0.0f;
+    float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
+    for (int c = 0; c < 3; ++c)
+        u.sunc[c] = shafts || s->sun_dir[3] == 0.0f ? 0.0f : fmaxf(s->sun_color[c], 0.0f) * (0.15f + 0.6f * low * low);
+    u.p[0] = fog_sigma(s), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f), u.p[2] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f; /* (mist round a lamp: its own, not the haze's) */
+    u.p[3] = hdr ? 0.0f : 1.0f / 255.0f;
+    u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+    int lamps = g_fxs.scene_lamps > 0.0f && g_lamps.binned == g_serial && g_lamps.lb && g_lamps.tb;
+    if (lamps)
+        u.lt[0] = g_lamps.lu[0], u.lt[1] = g_lamps.lu[1], u.lt[2] = g_lamps.lu[4], u.lt[3] = g_lamps.lu[5];
+    u.dbg[0] = g_fxs.fog_debug, u.dbg[1] = g_fxs.fog_lamp_lift;
+    flush_pass();
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = ct;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    ts_mark(rp, GFX_PASS_POST_SHAFTS);
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:pipe[hdr]];
+    [e setViewport:(MTLViewport){ vx, vy, vw, vh, 0, 1 }];
+    [e setFragmentBytes:&u length:sizeof u atIndex:0];
+    [e setFragmentTexture:depth atIndex:0];
+    [e setFragmentBuffer:lamps ? g_lamps.lb : g_dummy offset:lamps ? g_lamps.lo : 0 atIndex:1];
+    [e setFragmentBuffer:lamps ? g_lamps.tb : g_dummy offset:lamps ? g_lamps.to : 0 atIndex:2];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
 }
 
 /* the lamps' glows: a sprite each, added to the scene (scene_lamp_glow) */
@@ -7316,6 +7471,7 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
     ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
+    scene_fog(color, s);
     post_effects(color, s);
     hdr_tone(color, s);
     scene_aa(color, s);

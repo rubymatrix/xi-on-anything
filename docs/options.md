@@ -1,8 +1,8 @@
 # Options catalog
 
 Every setting the client has, grouped by what it changes rather than where it lives. In game, the
-player-facing ones are under **Config › Advanced** (`host/modern.c`), in eight pages: Display,
-Graphics, Shadows, Lighting, Atmosphere, Legacy, Interface and Addons. The tree is at the end.
+player-facing ones are under **Config › Advanced** (`host/modern.c`), in nine pages: Display,
+Graphics, Shadows, Lighting, Atmosphere, Water, Legacy, Interface and Addons. The tree is at the end.
 
 Sources, as the tables abbreviate them:
 
@@ -81,7 +81,7 @@ the Lighting and Atmosphere pages.
 
 | Setting | Menu | fx | Default / range |
 |---|---|---|---|
-| Fog density | Atmosphere › [Fog] Haze | `fog` | 0.004 (0–0.02) |
+| Fog density | Legacy › [Glow] Haze | `fog` | 0.004 (0–0.02) |
 | Fog falloff / height / max | | `fog_falloff`, `fog_height`, `fog_max` | 0.08 / 2.0 / 0.5 |
 | Fog sun glow / phase | | `fog_sun`, `fog_g` | 0.5 / 0.6 |
 | God rays | Legacy › [Glow] God Rays | `rays` | 0.6 (0–1.5) |
@@ -103,6 +103,7 @@ the Lighting and Atmosphere pages.
 | Night (scene renderer, eased through dusk and dawn by the sun's height): the moon's shadows' strength as a share of the sun's / their penumbra's width / the sun, moon and ambient light at midnight / a cool grey shift on them; lamps untouched | | `moon_shadow`, `moon_soft`, `night_exposure`, `night_tint` | 0.7 / 1.5 / 0.6 / 0.35 |
 | Lamps fill the sun's and moon's shadows: gone where lamp light is at least 1/n of the sun's or moon's | Shadows › [Night] Lamp Fill | `shadow_fill` | 0.5 (0: never) |
 | Soft shadows (scene renderer: sun and moon cascades, characters' layers, lamp cubes), hard at contact and softer away from the caster: how soft (0: the fixed filter) / the sun's angular size in degrees (tripled toward the horizon) / the moon's / a lamp's in units / 1 Low, 2 High taps | | `shadow_softness`, `sun_size`, `moon_size`, `lamp_size`, `shadow_soft_q` | 1 / 2 / 3 / 0.3 / 2 |
+| Modern fog (scene renderer) in place of the game's fade to grey: on / density next to the game's fog end (1: 4% of a point's light left there) / thinning with height per unit risen / lamp halos and how far above the game's light their lanterns hang / debug (1 how much it takes, 2 what it adds) | Atmosphere › [Fog] Modern Fog, Density, Ground Fog, Lamp Halos | `fog_modern`, `fog_density`, `fog_thin`, `fog_lamps`, `fog_lamp_lift`, `fog_debug` | 0 / 1 / 0.03 / 1.5 / 1.5 / 0 |
 | Testing: the sun held low ahead of the camera (degrees up, degrees turned); the shafts alone | | `scene_sun_test`, `scene_sun_test_turn`, `shafts_debug` | 0 / 0 / 0 |
 
 ## 6. Water
@@ -236,16 +237,17 @@ Config
     │   ├── [Ambient Occlusion] Strength, Quality, Radius
     │   └── [Highlights] .... Strength, Wetness
     ├── Atmosphere
+    │   ├── [Fog] ........... Modern Fog, Density, Ground Fog, Lamp Halos
     │   ├── [Sun Shafts] .... Strength, Quality
     │   ├── [Bloom] ......... Strength, Effect Glow, Lamp Glow
-    │   ├── [Depth of Field]  Strength, Sharp Distance
-    │   ├── [Fog] ........... Haze (until the modern fog)
+    │   └── [Depth of Field]  Strength, Sharp Distance
+    ├── Water
     │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift
     ├── Legacy (the older effects, Renderer: Legacy)
     │   ├── [Lighting] ...... Modern Lighting, Bounce Light
     │   ├── [Shadows] ....... Sun Shadows, Shadow Casters, Shadow Edges, Shadow Detail, Indoor Shadows
     │   ├── [Ambient Occlusion] Strength, Quality, Radius
-    │   └── [Glow] .......... God Rays, Bloom, Bloom Threshold
+    │   └── [Glow] .......... God Rays, Bloom, Bloom Threshold, Haze
     ├── Interface
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy

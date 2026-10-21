@@ -215,6 +215,16 @@ static const struct
     { "moon_size", offsetof(GfxFxSettings, moon_size), 3.0f },
     { "lamp_size", offsetof(GfxFxSettings, lamp_size), 0.3f },
     { "shadow_soft_q", offsetof(GfxFxSettings, shadow_soft_q), 2.0f },
+    /* the modern fog (gfx_metal.m scene_fog; scene renderer): light scattered by the air, not a fade to grey; 0 off (the
+     * game's fog), 1 on; its density times the game's (1: some 4% of a point's light left at the game's fog end), how fast
+     * it thins with height (per unit risen), the lamps' halos in it (0 none), fog_debug 1 how much it takes, 2 what it adds */
+    { "fog_modern", offsetof(GfxFxSettings, fog_modern), 0.0f },
+    { "fog_density", offsetof(GfxFxSettings, fog_density), 1.0f },
+    { "fog_thin", offsetof(GfxFxSettings, fog_thin), 0.03f },
+    { "fog_lamps", offsetof(GfxFxSettings, fog_lamps), 1.5f },
+    /* the halo's centre this far above the game's light (it sits under its lantern, where it lights the ground) */
+    { "fog_lamp_lift", offsetof(GfxFxSettings, fog_lamp_lift), 1.5f },
+    { "fog_debug", offsetof(GfxFxSettings, fog_debug), 0.0f },
     /* the shadowed lamps' reach, red where shadowed and green where lit (0 off) */
     { "scene_lamp_debug", offsetof(GfxFxSettings, scene_lamp_debug), 0.0f },
     /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;

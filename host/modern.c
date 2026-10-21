@@ -275,7 +275,7 @@ static void list_set(List* l, int i)
  * its highest, as tools/replay/showcase-fx.txt has it. Settings that are none of these are Custom. */
 static const char* const QUALITY_KEYS[] = { "scene", "scene_hdr", "tonemap", "scene_shadows", "shadow_softness",
     "shadow_soft_q", "scene_shadow_size", "scene_lamps", "scene_lamp_shadows", "scene_gi", "scene_gi_q", "scene_ao",
-    "scene_ao_q", "scene_spec", "post_shafts", "post_bloom", "post_dof", "light", "sun", "ao", "gi", "shadow", "rays",
+    "scene_ao_q", "scene_spec", "post_shafts", "post_bloom", "post_dof", "fog_modern", "light", "sun", "ao", "gi", "shadow", "rays",
     "bloom" };
 enum
 {
@@ -283,9 +283,9 @@ enum
     NQUALITY = 3,
 };
 static const float QUALITY[NQUALITY][NQUALITY_KEYS] = {
-    { 1, 0, 0, 0, 0, 1, 2048, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, /* Low */
-    { 2, 1, 1, 1, 1, 1, 2048, 1, 2, 0, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 }, /* Medium */
-    { 2, 1, 1, 1, 1, 2, 2048, 1, 4, 1, 2, 1, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 }, /* Max */
+    { 1, 0, 0, 0, 0, 1, 2048, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, /* Low */
+    { 2, 1, 1, 1, 1, 1, 2048, 1, 2, 0, 2, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0 }, /* Medium */
+    { 2, 1, 1, 1, 1, 2, 2048, 1, 4, 1, 2, 1, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 }, /* Max */
 };
 
 /* Graphics' Renderer: the scene renderer lit per pixel or per vertex, or the older effects on the game's own draws
@@ -557,6 +557,12 @@ static const Row LIGHTING_ROWS[] = {
 };
 
 static const Row ATMOSPHERE_ROWS[] = {
+    HEADER_ROW("Fog"),
+    { "Modern Fog", "fog_modern", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
+        "Haze that scatters light instead of fading to grey: bluer far away, warm toward the sun, halos round lamps. OFF: the game's fog." },
+    { "Density", "fog_density", SLIDER, 0, { 0 }, { 0 }, 0.25f, 3.0f, "How thick the haze is next to the game's own fog distance." },
+    { "Ground Fog", "fog_thin", SLIDER, 0, { 0 }, { 0 }, 0, 0.15f, "How fast the haze thins as the ground rises: valleys fill, ridges stand clear." },
+    { "Lamp Halos", "fog_lamps", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f, "Lamplight glowing in the haze round each lamp." },
     HEADER_ROW("Sun Shafts"),
     { "Strength", "post_shafts", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "Shafts of sunlight through the air, shadowed by the world. Off at the left." },
     { "Quality", "shafts_q", CHOICE, 2, { "Low", "High" }, { 1, 2 }, 0, 0, "How many steps the shafts take. Low is lightest on the GPU." },
@@ -567,8 +573,9 @@ static const Row ATMOSPHERE_ROWS[] = {
     HEADER_ROW("Depth of Field"),
     { "Strength", "post_dof", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "Softens the far distance, keeping you sharp. Off at the left." },
     { "Sharp Distance", "dof_range", SLIDER, 0, { 0 }, { 0 }, 10.0f, 150.0f, "How far behind you the world stays sharp." },
-    HEADER_ROW("Fog"),
-    { "Haze", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun. A modern fog is coming." },
+};
+
+static const Row WATER_ROWS[] = {
     HEADER_ROW("Water"),
     { "Modern Water", "water", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
         "Water that bends and reflects the world, with foam at its edges. OFF: as the game draws it." },
@@ -602,6 +609,7 @@ static const Row LEGACY_ROWS[] = {
     HEADER_ROW("Glow"),
     { "God Rays", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun." },
     { "Bloom", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights." },
+    { "Haze", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun." },
     { "Bloom Threshold", "threshold", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f, "How bright a light must be to glow. Lower: more glows." },
 };
 #endif
@@ -1215,8 +1223,10 @@ static Page PAGES[] = {
         SHADOWS_ROWS, sizeof SHADOWS_ROWS / sizeof SHADOWS_ROWS[0] },
     { "menu    lightinw", "Lighting", "Lamps, night, bounce light, ambient occlusion and highlights.", 0x1c0201u,
         LIGHTING_ROWS, sizeof LIGHTING_ROWS / sizeof LIGHTING_ROWS[0] },
-    { "menu    atmosphw", "Atmosphere", "Sun shafts, bloom, depth of field, haze and water.", 0x1c0201u, ATMOSPHERE_ROWS,
+    { "menu    atmosphw", "Atmosphere", "Fog, sun shafts, bloom and depth of field.", 0x1c0201u, ATMOSPHERE_ROWS,
         sizeof ATMOSPHERE_ROWS / sizeof ATMOSPHERE_ROWS[0] },
+    { "menu    waterw  ", "Water", "Modern water: reflection, highlights, foam.", 0x1c0201u, WATER_ROWS,
+        sizeof WATER_ROWS / sizeof WATER_ROWS[0] },
     { "menu    legacyfw", "Legacy", "The older effects on the game's own draws (Renderer: Legacy).", 0x1c0201u,
         LEGACY_ROWS, sizeof LEGACY_ROWS / sizeof LEGACY_ROWS[0] },
 #endif
@@ -2454,7 +2464,7 @@ static int adv_setup(uint32_t page_vt)
     g_adv_guest = gbytes(l, (uint32_t)n);
     free(l);
     g_adv_str = gstr(ADV_NAME);
-    g_adv_help = gstr("Display, graphics, shadows, lighting, atmosphere, the interface and addons.");
+    g_adv_help = gstr("Display, graphics, shadows, lighting, atmosphere, water, the interface and addons.");
     g_adv_title = gstr("Advanced");
     uint32_t vt = gheap_alloc(4 * (VTBL_SLOTS + 1), 1);
     for (int i = 0; i < VTBL_SLOTS; ++i)
