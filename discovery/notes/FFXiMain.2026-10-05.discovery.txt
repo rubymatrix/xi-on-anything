@@ -39,6 +39,13 @@ some frame_int_sites); cexi_item_ranges, cexi_gear_groups, cexi_item_general and
 patch bytes unchanged. The cexi_slots patches (91) are carry's byte-window mapping; no cexidats
 checkout was at hand to re-derive them with --slots.
 
+The scene renderer's addresses (29 scene_* globals and functions, the fx_draw and model_draw hooks,
+the mesh_draw wrap), recorded for 2026-09-03 only, were mapped with newbuild.py's map_code and
+map_data: every one unchanged (data by unanimous votes, code by a unique window). Each function is
+an entry in the new metadata with the same ranges, and its body is byte-identical apart from
+call rel32s into code that moved (_ftol 0x10311c2c -> 0x10311c6c, as the CRT slice, and others by
++0x20 / +0x40); the zone and character draw ranges likewise.
+
 Method
 ------
 Ghidra 11.3.2 headless (JDK 21), tools/discover.py, as for 2026-09-03.
@@ -62,5 +69,7 @@ tools/build_posix.py prepare -> build 2026-10-05.
 boot64: translated 21,891 entries (211 with unimplemented instructions, all MMX/3DNow!/SSE;
 21,735 jmp and 156 int3 entry patches); BOOT64 OK.
 host64: FFXi.dll module 399 functions; built build/host64, no compiler warnings.
+With the scene renderer's addresses added: host64 rebuilt, generated/build.h has every
+FFXI_SCENE_* define. Scene renderer not yet seen running on this build.
 No geometry section (as 2026-09-03), so no geometry replay test. Windows targets (difftest, host,
 boot64, host64) not run. Not yet run in-game (sign in, zone in, fight, zone again).

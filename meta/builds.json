@@ -1012,7 +1012,36 @@
         "map_cull_ret4": "0x1017dfd3",
         "map_cull_ret5": "0x10183e3f",
         "map_cull_model1": "0x101834df",
-        "map_cull_model2": "0x101837af"
+        "map_cull_model2": "0x101837af",
+        "scene_mgr": "0x10631f24",
+        "scene_dev": "0x1045666c",
+        "scene_light_factor": "0x1000be50",
+        "scene_fog": "0x10189120",
+        "scene_sun": "0x10188ca0",
+        "scene_sun_pair": "0x10188b70",
+        "scene_ambient": "0x10188e00",
+        "scene_zbias_blend": "0x10631f18",
+        "scene_zbias_opaque": "0x10632038",
+        "scene_res_mgr": "0x1047d128",
+        "scene_res_get": "0x10072fb0",
+        "scene_palette": "0x1045ec20",
+        "scene_bones": "0x10462430",
+        "scene_actor_lights": "0x104572b8",
+        "scene_actor_ambient": "0x104571d8",
+        "scene_actor_material": "0x104571e0",
+        "scene_tint": "0x104574ac",
+        "scene_shine": "0x104570fc",
+        "scene_shadow_mode": "0x1045b77a",
+        "scene_env_tex": "0x1045745c",
+        "scene_tex_mgr": "0x1047b970",
+        "scene_tex_find": "0x1003af10",
+        "scene_skin_force": "0x10457460",
+        "scene_zone_draw": "0x1017c9c0",
+        "scene_zone_draw_end": "0x1017de20",
+        "scene_char_draw": "0x1002dc10",
+        "scene_char_draw_end": "0x1002f0d3",
+        "scene_env": "0x1065cb04",
+        "scene_light_pool": "0x10632040"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
@@ -1042,7 +1071,9 @@
         "frame_cam_swing": "0x1001fcc8",
         "frame_cam_wait": "0x1001fb9c",
         "frame_look1": "0x1001f5d9",
-        "frame_look2": "0x1002017c"
+        "frame_look2": "0x1002017c",
+        "fx_draw": "0x10046070",
+        "model_draw": "0x1002b6e0"
       },
       "wraps": {
         "parse_input": "0x10080dc0",
@@ -1057,7 +1088,8 @@
         "frame_count": "0x10014d50",
         "frame_yield": "0x1023e4d0",
         "frame_net": "0x100fa180",
-        "frame_net_wait": "0x100edeb0"
+        "frame_net_wait": "0x100edeb0",
+        "mesh_draw": "0x1002a000"
       },
       "modern": {
         "mgr": "0x10621838",
