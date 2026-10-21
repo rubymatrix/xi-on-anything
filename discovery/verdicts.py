@@ -20,6 +20,7 @@ BUILDS = {
     0x6a995417: '2026-09-03',
     0x694e5955: '2025-12-26',
     0x69144fa8: '2025-11-12',
+    0x6ac37846: '2026-10-05',  # FFXiMain.dll
 }
 
 # NOT_CODE: false function starts (data records decoded as code, or aligned starts inside a real
@@ -93,6 +94,20 @@ VERDICTS = {
         'SWITCHES': {0x100063fc: 21, 0x10006fe1: 11, 0x102208dd: 9, 0x102a5888: 4, 0x102b92a9: 6},
     },
     ('ffxi', '2025-12-26'): {'NOT_CODE': [0x100067d0], 'REDECODE': [0x100067c8], 'SWITCHES': {}},
+    # Carried over from 2026-09-03 by tools/newbuild.py carry; re-checked by the discovery pass.
+    # modern menus_conf1win/menus_display/menus_addons (meta/builds.json): no code references them;
+    # the menu table 0x10372000..0x10376400 is byte-identical to 2026-09-03's, so they keep 0x10375064,
+    # 0x10375b0c, 0x103740ec. The cexi_fx_spell_edi hook and cexi_region were read by hand the same way.
+    ('ffximain', '2026-10-05'): {
+        'NOT_CODE': [0x1030df80, 0x1030ef80, 0x1030eff0, 0x10310f40, 0x1030fdd0, 0x1015bee0, 0x101aec08, 0x100657d0, 0x100f46b0, 0x1015d7e0],
+        'REDECODE': [0x1015bedd, 0x101aec07, 0x10310f38, 0x100657ce],
+        'SWITCHES': {0x10006412: 21, 0x10006ff7: 11, 0x1022221d: 9, 0x102a72f8: 4, 0x102bad19: 6},
+    },
+    ('ffxi', '2026-10-05'): {
+        'NOT_CODE': [0x100067d0],
+        'REDECODE': [0x100067c8],
+        'SWITCHES': {},
+    },
 }
 
 

@@ -1,0 +1,66 @@
+FFXiMain.dll / FFXi.dll build 2026-10-05: R1 function discovery for static recompilation
+=====================================================================================
+
+Retail files  a loose FFXiMain.dll (no install folder, no patch.ver), paired with 2026-09-03's FFXi.dll
+  FFXiMain.dll  SHA-256 042884888eea4fadac183e520f2ae9f8c4fa267860e685048e1880efd358e872
+                PE timestamp 0x6ac37846 (2026-10-05); unpacked .text 0x10001000-0x1032862e,
+                real entry 0x1031676f
+  FFXi.dll      SHA-256 9053d4106160a073a215dcd1d9045c804a27f459c6cb7cacec74eaefaf827bc7
+                (2026-09-03's file, PE timestamp 0x6a995417; not shipped with this FFXiMain.dll)
+Metadata      FFXiMain.2026-10-05.meta.json, FFXi.2026-10-05.meta.json (ffxi-recomp-meta/1)
+Version       30261005_0, inferred from the PE timestamp (no patch.ver)
+
+What changed from 2026-09-03
+----------------------------
+FFXi.dll: the same file. Its metadata is 2026-09-03's with the new label
+(tools/newbuild.py meta).
+
+FFXiMain.dll: a small update. .text is 0x40 bytes longer; code moves by 0 at the bottom (the
+Present call site, the hooks, the menu functions and nearly every manual verdict are unchanged) and
+by +0x20 / +0x40 near the top (the CRT slice, malloc, five NOT_CODE and one REDECODE verdict by +0x40, two
+switch overrides by +0x20). Every section after .text keeps its address and size; .rdata differs
+in 1,556 bytes and .data in 379, mostly code pointers into the moved range.
+
+Carrying addresses over
+-----------------------
+tools/newbuild.py carry --from 2026-09-03 --to 2026-10-05 --write mapped everything except five:
+  cexi_region          not an image address: cexi_sites.py's fixed REGION (0xfe000000), kept
+  cexi_fx_spell_edi    no unique byte window; disassembly at 0x100a8e9c is the same
+                       `add edi,0xaf0 ; push 0x34 ; mov [esp+0x18],edi ; call <malloc>` in both
+                       builds (only the call's rel32 moved, by +0x40) -> 0x100a8e9c
+  menus_conf1win       menu-table entries no code references. The whole table
+  menus_display        0x10372000..0x10376400 is byte-identical to 2026-09-03's (the entries read
+  menus_addons         "menu    conf1win", "tkdebug dbdelsel", "menu    oplev") -> 0x10375064,
+                       0x10375b0c, 0x103740ec, unchanged
+  character table pointer 0x104df770 (1,733 of 1,733 sites agree), Present call site 0x100035cb.
+After prepare, tools/frame_sites.py and tools/cexi_sites.py (without --slots) found their sites
+by shape: every one where 2026-09-03 has it or moved by +0x20 (frame_yield, the lobby's wait sites,
+some frame_int_sites); cexi_item_ranges, cexi_gear_groups, cexi_item_general and the cexi_items
+patch bytes unchanged. The cexi_slots patches (91) are carry's byte-window mapping; no cexidats
+checkout was at hand to re-derive them with --slots.
+
+Method
+------
+Ghidra 11.3.2 headless (JDK 21), tools/discover.py, as for 2026-09-03.
+The carried verdicts (10 NOT_CODE, 4 REDECODE, 5 switch overrides) were enough: round 1 and
+round 2 both ended with 0 conflicts, 0 suspect functions, switch review 0. No new verdicts.
+
+Results
+-------
+                                  auto-analysis   after discovery   2026-09-03 after discovery
+functions in .text                14,159          21,761            21,762
+instructions                      890,486         996,147           996,083
+instruction bytes                 83.3%           93.0%             93.0%
+instructions outside functions    152,197         0                 0
+scaled-index switches             857             943               943
+tail_jumps                        -               2,165             2,165
+
+Verification
+------------
+macOS arm64, a folder of links to a retail install with this FFXiMain.dll in place:
+tools/build_posix.py prepare -> build 2026-10-05.
+boot64: translated 21,891 entries (211 with unimplemented instructions, all MMX/3DNow!/SSE;
+21,735 jmp and 156 int3 entry patches); BOOT64 OK.
+host64: FFXi.dll module 399 functions; built build/host64, no compiler warnings.
+No geometry section (as 2026-09-03), so no geometry replay test. Windows targets (difftest, host,
+boot64, host64) not run. Not yet run in-game (sign in, zone in, fight, zone again).
