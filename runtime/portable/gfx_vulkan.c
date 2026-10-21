@@ -27,7 +27,10 @@
  * The scene renderer's zone and characters (gfx_world_draw, gfx_chars_draw; host/scene.c) are
  * gfx_metal.m's WORLD_MSL and CHARS_MSL as GLSL (WORLD_GLSL, CHARS_GLSL), drawn into the game's
  * targets in its pass, and its sun and moon shadows (gfx_shadow_begin) Metal's too: the casters'
- * passes between the game's and at the frame's end (CAST_GLSL), the receivers' SHADOW_GLSL. */
+ * passes between the game's and at the frame's end (CAST_GLSL), the receivers' SHADOW_GLSL. Its
+ * occlusion (SAO_GLSL, made when the scene is done; AO_GLSL), highlights (SPEC_GLSL) and lamps
+ * (LAMP_GLSL: the tiles, the cubes at the frame's end beside the characters' shadow layers, the
+ * glows) are Metal's as well. */
 #include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
 
 #include <SDL3/SDL.h>
@@ -1033,6 +1036,7 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
 
 static void sun_cache_forget_tex(const GfxTex* t);
 static void water_forget(const GfxTex* t);
+static void sao_forget(const GfxTex* t);
 
 void gfx_tex_destroy(GfxTex* t)
 {
@@ -1061,6 +1065,7 @@ void gfx_tex_destroy(GfxTex* t)
         }
     sun_cache_forget_tex(t);
     water_forget(t);
+    sao_forget(t);
     if (t->levelv)
         for (uint32_t i = 0; i < t->mips; ++i)
             trash(1, (uint64_t)(uintptr_t)t->levelv[i], NULL);
@@ -4556,6 +4561,24 @@ static int rt_init(void)
 
 int gfx_rt_supported(void) { return rt_init(); }
 
+/* the soft shadows' disc (the sun's and moon's, SHADOW_GLSL, and the lamps', LAMP_GLSL): sixteen points on a Vogel
+ * spiral, n of them turned by r; sh_turn, a turn from a hash of the place, so neighbouring pixels' taps differ */
+#define SHDISC_GLSL                                                                                                   \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "vec2 sh_turn(vec3 p) {\n"                                                                                        \
+    "  float a = 6.2831853 * fract(52.9829189 * fract(dot(floor(p * 40.0), vec3(0.06711056, 0.00583715, 0.1234567))));\n" \
+    "  return vec2(cos(a), sin(a));\n"                                                                                \
+    "}\n"                                                                                                             \
+    "const vec2 sh_disc[16] = vec2[16](vec2(0.1768, 0.0000), vec2(-0.2258, 0.2068), vec2(0.0346, -0.3938), vec2(0.2846, 0.3712),\n" \
+    "  vec2(-0.5222, -0.0924), vec2(0.4947, -0.3147), vec2(-0.1655, 0.6155), vec2(-0.3156, -0.6076),\n"               \
+    "  vec2(0.6846, 0.2500), vec2(-0.7123, 0.2940), vec2(0.3434, -0.7337), vec2(0.2537, 0.8089),\n"                   \
+    "  vec2(-0.7647, -0.4432), vec2(0.8971, -0.1972), vec2(-0.5475, 0.7788), vec2(-0.1265, -0.9761));\n"              \
+    "vec2 sh_vogel(int i, int n, vec2 r) {\n"                                                                         \
+    "  vec2 q = sh_disc[i * (16 / n) + (16 / n - 1)];\n"                                                              \
+    "  return vec2(q.x * r.x - q.y * r.y, q.x * r.y + q.y * r.x);\n"                                                  \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
 /* --- the scene renderer's sun and moon shadows, the receivers' side (gfx_metal.m's SHADOW_MSL) ----------------------
  * SH is ShU: the cascades' matrices and ranges, the characters' layers (last frame's), the light, the camera, the
  * filters. The maps are depth arrays a cascade a layer, compared through cs (LESS_OR_EQUAL, linear) and gathered
@@ -4583,19 +4606,8 @@ int gfx_rt_supported(void) { return rt_init(); }
     "  return v * (1.0 / 9.0);\n"                                                                                     \
     "}\n"                                                                                                             \
     /* contact-hardening soft shadows (shadow_softness), as gfx_metal.m's sh_pcss: the blockers' mean depth round the \
-     * point (gathers on a disc turned by a hash of the place), then that far from them times the light's size wide */ \
-    "vec2 sh_turn(vec3 p) {\n"                                                                                        \
-    "  float a = 6.2831853 * fract(52.9829189 * fract(dot(floor(p * 40.0), vec3(0.06711056, 0.00583715, 0.1234567))));\n" \
-    "  return vec2(cos(a), sin(a));\n"                                                                                \
-    "}\n"                                                                                                             \
-    "const vec2 sh_disc[16] = vec2[16](vec2(0.1768, 0.0000), vec2(-0.2258, 0.2068), vec2(0.0346, -0.3938), vec2(0.2846, 0.3712),\n" \
-    "  vec2(-0.5222, -0.0924), vec2(0.4947, -0.3147), vec2(-0.1655, 0.6155), vec2(-0.3156, -0.6076),\n"               \
-    "  vec2(0.6846, 0.2500), vec2(-0.7123, 0.2940), vec2(0.3434, -0.7337), vec2(0.2537, 0.8089),\n"                   \
-    "  vec2(-0.7647, -0.4432), vec2(0.8971, -0.1972), vec2(-0.5475, 0.7788), vec2(-0.1265, -0.9761));\n"              \
-    "vec2 sh_vogel(int i, int n, vec2 r) {\n"                                                                         \
-    "  vec2 q = sh_disc[i * (16 / n) + (16 / n - 1)];\n"                                                              \
-    "  return vec2(q.x * r.x - q.y * r.y, q.x * r.y + q.y * r.x);\n"                                                  \
-    "}\n"                                                                                                             \
+     * point (gathers on a disc turned by SHDISC_GLSL's hash of the place), then that far from them times the light's \
+     * size wide */                                                                                                   \
     "float sh_pcss(texture2DArray t, mat4 M, uint l, vec2 uv, float z, float tx, float tl, int nb, int nf, vec2 rot, float nl) {\n" \
     "  float wpt = 2.0 * tx / length(vec3(M[0][0], M[1][0], M[2][0]));\n"                                            \
     "  float wpd = 1.0 / length(vec3(M[0][2], M[1][2], M[2][2]));\n"                                                 \
@@ -4689,14 +4701,127 @@ int gfx_rt_supported(void) { return rt_init(); }
     "  return (MA * va + MB * vb4).xyz;\n"                                                                            \
     "}\n"
 
+/* the scene renderer's occlusion, the shading's side (gfx_ao_msl.h's AO_MSL; how it is made: SAO_GLSL): AU the last
+ * result's view and projection (pvp), its viewport's size and the share of the texture it fills (vp), the zone's
+ * strength, the characters', debug and the depth test's tolerance (k). ao_at: a bilinear gather of the half-size result
+ * (x the occlusion, y the distance it was made at), each tap weighted by how near its distance is to the point's; 1
+ * where nothing matches */
+#define AO_GLSL                                                                                                       \
+    "layout(std140, set = 0, binding = 12) uniform AUB { mat4 pvp; vec4 vp; vec4 k; } A;\n"                           \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "layout(set = 0, binding = 13) uniform sampler2D aot;\n"                                                          \
+    "float ao_at(vec4 pc) {\n"                                                                                        \
+    "  if (pc.w <= 1e-4) return 1.0;\n"                                                                               \
+    "  vec2 uv = vec2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"                                          \
+    "  if (any(lessThanEqual(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) return 1.0;\n"                  \
+    "  vec2 tc = uv * A.vp.zw;\n"                                                                                     \
+    "  vec2 sz = vec2(textureSize(aot, 0)), t = tc * sz - 0.5, f = fract(t);\n"                                       \
+    "  vec2 g = (floor(t) + 1.0) / sz;\n"                                                                             \
+    "  vec4 o = textureGather(aot, g, 0), d = textureGather(aot, g, 1);\n"                                            \
+    /* gather's order: (0,1) (1,1) (1,0) (0,0) */                                                                     \
+    "  vec4 w = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));\n"                 \
+    "  w *= sat(1.0 - abs(d - pc.w) / (A.k.w * pc.w));\n"                                                             \
+    "  float ws = w.x + w.y + w.z + w.w;\n"                                                                           \
+    "  return ws > 1e-3 ? dot(o, w) / ws : 1.0;\n"                                                                    \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
+/* the highlights (scene_spec, gfx_metal.m's SPEC_MSL and its notes): GGX with Schlick's Fresnel and Smith-Schlick
+ * visibility; the roughness widened by how fast the normal turns across the pixel. SP: k (strength, the lamps' share,
+ * wetness, anti-aliasing), pad.x 1 on an HDR target */
+#define SPEC_GLSL                                                                                                     \
+    "layout(std140, set = 0, binding = 14) uniform SPB { vec4 k; vec4 pad; } SPc;\n"                                  \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "float spec_ggx(vec3 N, vec3 V, vec3 L, float a2, float f0) {\n"                                                  \
+    "  vec3 H = normalize(V + L);\n"                                                                                  \
+    "  float nl = sat(dot(N, L)), nv = max(dot(N, V), 1e-3), nh = sat(dot(N, H)), vh = sat(dot(V, H));\n"             \
+    "  float d = nh * nh * (a2 - 1.0) + 1.0;\n"                                                                       \
+    "  float D = a2 / (3.14159265 * d * d);\n"                                                                        \
+    "  float k = 0.5 * sqrt(a2);\n"                                                                                   \
+    "  float vis = 0.25 / ((nl * (1.0 - k) + k) * (nv * (1.0 - k) + k));\n"                                           \
+    "  float F = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);\n"                                                             \
+    "  return min(D * vis * F * nl, 16.0);\n"                                                                         \
+    "}\n"                                                                                                             \
+    "float spec_a2(float rough, vec3 N, float aa) {\n"                                                                \
+    "  vec3 dx = dFdx(N), dy = dFdy(N);\n"                                                                            \
+    "  float var = 0.5 * (dot(dx, dx) + dot(dy, dy)) * aa;\n"                                                         \
+    "  float a = rough * rough;\n"                                                                                    \
+    "  return clamp(a * a + min(2.0 * var, 0.18), 0.002, 1.0);\n"                                                     \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
+/* the lamps (scene_lamps, gfx_metal.m's LAMP_MSL and its notes): every lit point light of the pool, binned into 64-pixel
+ * tiles once a frame (lamps_bin); a pixel takes its tile's, each faded to nothing at its range. LS the lamps, TL the
+ * tiles (32 16-bit words each: the count, the lamps), LU the viewport (vp), tiles across and down, shadows on and debug
+ * (t), the zone's cubes, the lamp's size and the taps (k). The characters' shadows from the nearest lamps are cubes
+ * (lsm, a lamp six layers, LM their faces' matrices), the zone's in zlsm, compared through lcs */
+#define LAMP_GLSL                                                                                                     \
+    "struct LL { vec4 pos, col, att, amb; };\n"                                                                       \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "layout(std430, set = 0, binding = 15) readonly buffer LLB { LL LS[]; };\n"                                       \
+    "layout(std430, set = 0, binding = 16) readonly buffer TLB { uint TL[]; };\n"                                     \
+    "layout(std140, set = 0, binding = 17) uniform LUB { vec4 vp; vec4 t; vec4 k; } LU;\n"                            \
+    "layout(set = 0, binding = 18) uniform texture2DArray lsm;\n"                                                     \
+    "layout(set = 0, binding = 19) uniform texture2DArray zlsm;\n"                                                    \
+    "layout(std430, set = 0, binding = 20) readonly buffer LMB { mat4 LM[]; };\n"                                     \
+    "layout(set = 0, binding = 21) uniform samplerShadow lcs;\n"                                                      \
+    "uint tl_at(uint i) { uint w = TL[i >> 1]; return (i & 1u) != 0u ? w >> 16 : w & 0xffffu; }\n"                   \
+    "float lamp_cmp(texture2DArray t, vec2 uv, uint l, float z) { return texture(sampler2DArrayShadow(t, lcs), vec4(uv, float(l), z)); }\n" \
+    /* the lamp's shadow at P: the cube face its direction falls in, the point pushed toward the lamp a little */      \
+    "float lamp_shadow(uint s, vec3 P, vec3 Lp, vec3 N, bool zone, float ls, int nt) {\n"                             \
+    "  vec3 d = P - Lp, a = abs(d);\n"                                                                                \
+    "  uint f = a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0u : 1u) : a.y >= a.z ? (d.y > 0.0 ? 2u : 3u) : (d.z > 0.0 ? 4u : 5u);\n" \
+    "  float dl = length(d);\n"                                                                                       \
+    "  uint l = s * 6u + f;\n"                                                                                        \
+    "  vec4 h = LM[l] * vec4(P - d * (0.08 / max(dl, 0.5)) * min(dl, 2.0) + N * 0.06, 1.0);\n"                        \
+    "  if (h.w <= 1e-4) return 1.0;\n"                                                                                \
+    "  vec2 uv = vec2(h.x / h.w * 0.5 + 0.5, 0.5 - h.y / h.w * 0.5);\n"                                               \
+    "  float z = h.z / h.w;\n"                                                                                        \
+    "  if (ls <= 0.0) {\n"                                                                                            \
+    "    float v = lamp_cmp(lsm, uv, l, z);\n"                                                                        \
+    "    return zone ? min(v, lamp_cmp(zlsm, uv, l, z)) : v;\n"                                                       \
+    "  }\n"                                                                                                           \
+    /* soft (lamp_size): a disc as wide as the lamp seen from here, a face spanning twice the distance, one to six    \
+     * texels */                                                                                                      \
+    "  float tx = 1.0 / float(textureSize(sampler2DArrayShadow(lsm, lcs), 0).x), r = clamp(ls / (4.0 * max(dl, 0.3)), tx, 6.0 * tx);\n" \
+    "  vec2 a0 = sh_turn(P);\n"                                                                                       \
+    "  float v = 0.0;\n"                                                                                              \
+    "  for (int i = 0; i < nt; ++i) {\n"                                                                              \
+    "    vec2 q = uv + sh_vogel(i, nt, a0) * r;\n"                                                                    \
+    "    float w = lamp_cmp(lsm, q, l, z);\n"                                                                         \
+    "    v += zone ? min(w, lamp_cmp(zlsm, q, l, z)) : w;\n"                                                          \
+    "  }\n"                                                                                                           \
+    "  return v / float(nt);\n"                                                                                       \
+    "}\n"                                                                                                             \
+    "void lamp_light(vec2 fp, vec3 P, vec3 N, inout vec3 dif, inout vec3 amb, vec3 Ps, bool soft) {\n"                \
+    "  ivec2 t = ivec2((fp - LU.vp.xy) / 64.0);\n"                                                                    \
+    "  if (any(lessThan(t, ivec2(0))) || t.x >= int(LU.t.x) || t.y >= int(LU.t.y)) return;\n"                        \
+    "  uint b = (uint(t.y) * uint(LU.t.x) + uint(t.x)) * 32u;\n"                                                      \
+    "  uint n = tl_at(b);\n"                                                                                          \
+    "  for (uint k = 0u; k < n; ++k) {\n"                                                                             \
+    "    LL l = LS[tl_at(b + 1u + k)];\n"                                                                             \
+    "    vec3 v = l.pos.xyz - P;\n"                                                                                   \
+    "    float d = length(v), q = d / l.pos.w;\n"                                                                     \
+    "    if (q >= 1.0) continue;\n"                                                                                   \
+    "    float w = sat(1.0 - q * q * q * q);\n"                                                                       \
+    "    float at = w * w / max(l.att.x + l.att.y * d + l.att.z * d * d, 1e-3);\n"                                    \
+    "    amb += l.amb.rgb * at;\n"                                                                                    \
+    "    float sh = l.att.w > 0.5 && LU.t.z > 0.5 ? lamp_shadow(uint(l.att.w) - 1u, Ps, l.pos.xyz, N, LU.k.x > 0.5, soft ? LU.k.y : 0.0, int(LU.k.z)) : 1.0;\n" \
+    "    dif += l.col.rgb * at * sh * max(dot(N, v / max(d, 1e-4)), 0.0);\n"                                         \
+    "    if (LU.t.w > 0.5 && l.att.w > 0.5) amb += vec3(1.0 - sh, sh, 0.0) * 4.0 * w;\n" /* scene_lamp_debug: red shadowed, green lit */ \
+    "  }\n"                                                                                                           \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
 /* --- the scene renderer's zone (gfx_world_draw, gfx.h) --------------------------------------------------------------
  * gfx_metal.m's WORLD_MSL: D3D's fixed function as the game lights its zone, COLORVERTEX with the vertex colour as
  * diffuse and ambient reflectance, the sun (and moon) and the instance's four point lights, then MODULATE2X and
  * MODULATE4X and table fog. W_PIXEL lights per pixel (scene 2), W_ATEST alpha tests GREATER the reference, W_SHADOW
  * shades the directional light along the shadows' (the sun's or the moon's) with them. The vertices are the game's own
  * buffers, fetched as the generated functions fetch theirs (36 bytes: position, normal, D3DCOLOR, uv); the instance
- * (inst) and its flags are push constants. The bounce light, occlusion, highlights and lamps (Metal's other function
- * constants) are not here yet. */
+ * (inst) and its flags are push constants. W_AO takes the occlusion from the ambient, W_SPEC adds the highlights (with
+ * W_SHADOW), W_LAMPS lights every lamp per pixel in place of the instance's four point lights (with W_PIXEL); the bounce
+ * light (Metal's last function constant) is not here yet. */
 static const char WORLD_GLSL[] =
     "#define sat(x) clamp(x, 0.0, 1.0)\n"
     "layout(std140, set = 0, binding = 0) uniform WF { mat4 vp; vec4 params; } F;\n" /* params: alpha reference 0..255, the pixel-centre fixup */
@@ -4705,13 +4830,26 @@ static const char WORLD_GLSL[] =
     "layout(std430, set = 0, binding = 1) readonly buffer WIB { WI I[]; };\n"
     "layout(std430, set = 0, binding = 2) readonly buffer WLB { WL L[]; };\n"
     "layout(push_constant) uniform WD { uint inst, flags; } D;\n"
+    "#if W_SHADOW || W_LAMPS\n"
+    SHDISC_GLSL
+    "#endif\n"
     "#if W_SHADOW\n"
     SHADOW_GLSL
     "#endif\n"
+    "#if W_AO\n"
+    AO_GLSL
+    "#endif\n"
+    "#if W_SPEC\n"
+    SPEC_GLSL
+    "#endif\n"
+    "#if W_LAMPS\n"
+    LAMP_GLSL
+    "#endif\n"
     /* saturate(vc * (ambient + each light's ambient) + vc * sum of N.L x diffuse) without the saturate, and without the
      * directional light along sd, which goes into sun: saturate(the two's sum) is D3D's. lmp: the point lights' share,
-     * which fills the sun's (the moon's) shadow (shadow_fill) */
-    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, out vec3 sun, out vec3 lmp) {\n"
+     * which fills the sun's (the moon's) shadow (shadow_fill); amb: the ambient's, which the occlusion scales. With
+     * W_LAMPS the point lights are the lamps', every one, per pixel (lamp_light) */
+    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, out vec3 sun, out vec3 amb, out vec3 lmp) {\n"
     "  vec3 a = I[D.inst].ambient.rgb, d = vec3(0.0), s = vec3(0.0), pl = vec3(0.0);\n"
     "  if (I[D.inst].sun_dir.w > 0.0) {\n"
     "    vec3 t = I[D.inst].sun_col.rgb * max(dot(N, I[D.inst].sun_dir.xyz), 0.0);\n"
@@ -4721,6 +4859,7 @@ static const char WORLD_GLSL[] =
     "    vec3 t = I[D.inst].sun2_col.rgb * max(dot(N, I[D.inst].sun2_dir.xyz), 0.0);\n"
     "    if (dot(I[D.inst].sun2_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
     "  }\n"
+    "#if !W_LAMPS\n"
     "  for (int k = 0; k < 4; ++k) {\n"
     "    int li = I[D.inst].light[k];\n"
     "    if (li < 0) continue;\n"
@@ -4731,8 +4870,10 @@ static const char WORLD_GLSL[] =
     "    vec3 t = L[li].ambient.rgb * at + L[li].diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
     "    d += t, pl += t;\n"
     "  }\n"
+    "#endif\n"
     "  lmp = vc * pl;\n"
     "  sun = vc * s;\n"
+    "  amb = vc * a;\n"
     "  return vc * a + vc * d;\n"
     "}\n"
     "#if W_SHADOW\n"
@@ -4749,6 +4890,8 @@ static const char WORLD_GLSL[] =
     "layout(location = 4) out float o_z;\n"
     "layout(location = 5) out vec3 o_sun;\n"
     "layout(location = 6) out vec3 o_lmp;\n"
+    "layout(location = 7) out vec3 o_amb;\n"
+    "layout(location = 8) out vec4 o_aop;\n" /* where the occlusion was made: this point through last frame's camera */
     "void main() {\n"
     "  uint b = uint(gl_VertexIndex) * 9u;\n"
     "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
@@ -4765,10 +4908,15 @@ static const char WORLD_GLSL[] =
     "  o_wpos = wp.xyz;\n"
     "  o_nrm = n;\n"
     "  o_col = col;\n"
-    "  o_sun = vec3(0.0), o_lmp = vec3(0.0);\n"
+    "  o_sun = vec3(0.0), o_lmp = vec3(0.0), o_amb = vec3(0.0);\n"
+    "#if W_AO\n"
+    "  o_aop = A.pvp * wp;\n"
+    "#else\n"
+    "  o_aop = vec4(0.0);\n"
+    "#endif\n"
     "#if !W_PIXEL\n"
-    "  vec3 rest = lit(wp.xyz, n, col.rgb, SD, o_sun, o_lmp);\n"
-    "  o_col.rgb = W_SHADOW != 0 ? rest : sat(rest + o_sun);\n"
+    "  vec3 rest = lit(wp.xyz, n, col.rgb, SD, o_sun, o_amb, o_lmp);\n"
+    "  o_col.rgb = W_SHADOW != 0 || W_AO != 0 ? rest : sat(rest + o_sun);\n"
     "#endif\n"
     "}\n"
     "#endif\n"
@@ -4781,12 +4929,31 @@ static const char WORLD_GLSL[] =
     "layout(location = 4) in float i_z;\n"
     "layout(location = 5) in vec3 i_sun;\n"
     "layout(location = 6) in vec3 i_lmp;\n"
+    "layout(location = 7) in vec3 i_amb;\n"
+    "layout(location = 8) in vec4 i_aop;\n"
     "layout(location = 0) out vec4 oc;\n"
     "void main() {\n"
-    "  vec3 c = i_col.rgb, sun = i_sun, lmp = i_lmp;\n"
+    "  vec3 c = i_col.rgb, sun = i_sun, lmp = i_lmp, amb = i_amb;\n"
+    "  float shv = 1.0;\n"
     "  vec3 N = (D.flags & 32u) != 0u ? normalize(i_nrm) : i_nrm;\n"
     "#if W_PIXEL\n"
-    "  c = lit(i_wpos, N, i_col.rgb, SD, sun, lmp);\n"
+    "  c = lit(i_wpos, N, i_col.rgb, SD, sun, amb, lmp);\n"
+    "#endif\n"
+    "#if W_LAMPS && W_PIXEL\n"
+    "  {\n"
+    "    vec3 ld = vec3(0.0), la = vec3(0.0);\n"
+    "    lamp_light(gl_FragCoord.xy, i_wpos, normalize(N), ld, la, i_wpos, true);\n"
+    "    c += i_col.rgb * (ld + la);\n" /* (on the vertex colour, as lit() lights) */
+    "    lmp += i_col.rgb * (ld + la);\n"
+    "    amb += i_col.rgb * la;\n"
+    "  }\n"
+    "#endif\n"
+    "#if W_AO\n" /* the occlusion takes from the ambient alone; scene_ao_debug 1 shows it */
+    "  {\n"
+    "    float ao = pow(ao_at(i_aop), A.k.x);\n"
+    "    if (A.k.z > 0.5) { oc = vec4(vec3(ao), 1.0); return; }\n"
+    "    c -= amb * (1.0 - ao);\n"
+    "  }\n"
     "#endif\n"
     "#if W_SHADOW\n"
     "  if (S.cam.w > 1.5) {\n" /* scene_shadow_debug: the shadow, tinted by its cascade; dark facing away */
@@ -4799,19 +4966,43 @@ static const char WORLD_GLSL[] =
     "    return;\n"
     "  }\n"
     "  if (any(greaterThan(sun, vec3(0.0)))) {\n"
-    "    float shv = shadow(i_wpos, normalize(N), true);\n"
+    "    shv = shadow(i_wpos, normalize(N), true);\n"
     "    vec3 Y = vec3(0.2126, 0.7152, 0.0722);\n" /* where the lamps outshine the sun or moon, its shadow fades out */
     "    shv = mix(shv, 1.0, sat(S.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
     "    sun *= shv;\n"
     "  }\n"
     "  c = sat(c + sun);\n"
-    "#elif W_PIXEL\n"
+    "#elif W_PIXEL || W_AO\n"
     "  c = sat(c + sun);\n"
     "#endif\n"
     "  vec4 tx = texture(t, i_uv);\n"
     "  vec4 o = vec4(sat(2.0 * tx.rgb * c), sat(4.0 * tx.a * i_col.a));\n" /* MODULATE2X, MODULATE4X */
     "#if W_ATEST\n"
     "  if (!(o.a * 255.0 > F.params.x)) discard;\n"
+    "#endif\n"
+    "#if W_SPEC && W_SHADOW\n" /* the sun's (or moon's) highlight, where it reaches, and the lamps' */
+    "  {\n"
+    "    vec3 Nn = normalize(N), V = normalize(S.cam.xyz - i_wpos);\n"
+    "    float wet = SPc.k.z, lum = dot(tx.rgb, vec3(0.299, 0.587, 0.114));\n"
+    "    float a2 = spec_a2(mix(0.8, 0.5, wet), Nn, SPc.k.w);\n"
+    "    float f0 = mix(0.03, 0.05, wet) * (0.5 + lum);\n"
+    "    float occ = sat(2.0 * dot(i_col.rgb, vec3(0.333)));\n" /* the vertex colour's darkness: corners and crevices */
+    "    vec3 sp = vec3(0.0);\n"
+    "    vec4 s1 = I[D.inst].sun_dir, s2 = I[D.inst].sun2_dir;\n"
+    "    vec3 scol = s2.w > 0.0 && dot(s2.xyz, S.dir.xyz) > dot(s1.xyz, S.dir.xyz) ? I[D.inst].sun2_col.rgb : I[D.inst].sun_col.rgb;\n"
+    "    if (s1.w > 0.0 || s2.w > 0.0) sp += scol * spec_ggx(Nn, V, S.dir.xyz, a2, f0) * shv;\n" /* (the light the shadows are drawn from) */
+    "    for (int k = 0; k < 4 && SPc.k.y > 0.0; ++k) {\n"
+    "      int li = I[D.inst].light[k];\n"
+    "      if (li < 0) continue;\n"
+    "      vec3 v = L[li].pos.xyz - i_wpos;\n"
+    "      float dist = length(v);\n"
+    "      if (dist > L[li].pos.w) continue;\n"
+    "      float at = 1.0 / max(L[li].att.x + L[li].att.y * dist + L[li].att.z * dist * dist, 1e-6);\n"
+    "      sp += L[li].diffuse.rgb * at * SPc.k.y * spec_ggx(Nn, V, v / max(dist, 1e-6), a2, f0);\n"
+    "    }\n"
+    "    if (SPc.pad.x > 0.0) o.rgb += sp * (SPc.k.x * occ);\n" /* an HDR scene: past white, the tonemap's to roll off */
+    "    else o.rgb = 1.0 - (1.0 - o.rgb) * exp(-sp * (SPc.k.x * occ));\n" /* (a soft shoulder: toward white, never flat white) */
+    "  }\n"
     "#endif\n"
     "  vec4 fog = I[D.inst].fog;\n"
     "  if (fog.z > 0.0) o.rgb = mix(I[D.inst].fog_col.rgb, o.rgb, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
@@ -4823,9 +5014,10 @@ static const char WORLD_GLSL[] =
  * gfx_metal.m's CHARS_MSL: skinned from the frame's bone palettes (each vertex its bone-space position and normal for
  * two bones, weights applied, and their mirror bones), lit per vertex with D3D's fixed function as the game sets it
  * for a character, then its two texture stages; alpha tested, no culling. W_SHADOW: the sun's (the moon's) light
- * shaded with the shadows, looked up where the character stood when last frame's layers were drawn (lag). The
- * vertices (GfxCharVertex) and uvs are storage buffers, the indices the game's own; the palette, state, mirror, lag
- * and the frame's parameters are push constants. */
+ * shaded with the shadows, looked up where the character stood when last frame's layers were drawn (lag); W_AO, W_SPEC
+ * and W_LAMPS as the zone's (the lamps per pixel, in place of the state's point lights). The vertices (GfxCharVertex)
+ * and uvs are storage buffers, the indices the game's own; the palette, state, mirror, lag and the frame's parameters
+ * are push constants. */
 static const char CHARS_GLSL[] =
     "#define sat(x) clamp(x, 0.0, 1.0)\n"
     "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
@@ -4833,8 +5025,20 @@ static const char CHARS_GLSL[] =
     "layout(std430, set = 0, binding = 1) readonly buffer PB { mat4 P[]; };\n"
     "layout(std430, set = 0, binding = 2) readonly buffer SB { CS St[]; };\n"
     "layout(push_constant) uniform CD { vec4 params; uint palette, state, mirror, pad; vec4 lag; } D;\n" /* params as WF's */
+    "#if W_SHADOW || W_LAMPS\n"
+    SHDISC_GLSL
+    "#endif\n"
     "#if W_SHADOW\n"
     SHADOW_GLSL
+    "#endif\n"
+    "#if W_AO\n"
+    AO_GLSL
+    "#endif\n"
+    "#if W_SPEC\n"
+    SPEC_GLSL
+    "#endif\n"
+    "#if W_LAMPS\n"
+    LAMP_GLSL
     "#endif\n"
     "#ifdef GFX_VS\n"
     SKIN_GLSL
@@ -4844,6 +5048,10 @@ static const char CHARS_GLSL[] =
     "layout(location = 3) out vec3 o_sun;\n"
     "layout(location = 4) out vec3 o_wp;\n"
     "layout(location = 5) out vec3 o_wn;\n"
+    "layout(location = 6) out vec3 o_camb;\n" /* the ambient's share, which the occlusion scales */
+    "layout(location = 7) out vec4 o_aop;\n"
+    "layout(location = 8) flat out vec3 o_lmd;\n" /* a lamp's light as the game's would be: the material's scale and colours */
+    "layout(location = 9) flat out vec3 o_lma;\n"
     "void main() {\n"
     "  vec3 n, p = skin(n);\n"
     "  vec3 wp = (St[D.state].world * vec4(p, 1.0)).xyz;\n"
@@ -4857,6 +5065,9 @@ static const char CHARS_GLSL[] =
     "  for (int k = 0; k < 4; ++k) {\n"
     "    CL l = St[D.state].light[k];\n"
     "    if (l.dir.w == 0.0) continue;\n"
+    "#if W_LAMPS\n"
+    "    if (l.dir.w > 1.5) continue;\n" /* (point lights: the lamps, per pixel) */
+    "#endif\n"
     "    float at = 1.0;\n"
     "    vec3 Ld = l.dir.xyz;\n"
     "    if (l.dir.w > 1.5) {\n"
@@ -4874,9 +5085,16 @@ static const char CHARS_GLSL[] =
     "    dif += t;\n"
     "  }\n"
     "  vec3 rest = St[D.state].ma.rgb * amb + St[D.state].md.rgb * dif + St[D.state].me.rgb;\n"
-    "  o_col = vec4(W_SHADOW != 0 ? rest : sat(rest), St[D.state].md.a);\n"
+    "  o_col = vec4(W_SHADOW != 0 || W_AO != 0 ? rest : sat(rest), St[D.state].md.a);\n"
+    "  o_camb = St[D.state].ma.rgb * amb;\n"
+    "#if W_AO\n"
+    "  o_aop = A.pvp * vec4(wp, 1.0);\n"
+    "#else\n"
+    "  o_aop = vec4(0.0);\n"
+    "#endif\n"
     "  o_sun = St[D.state].md.rgb * sun;\n"
     "  o_wp = wp, o_wn = wn;\n"
+    "  o_lmd = St[D.state].md.rgb * St[D.state].fog_col.a, o_lma = St[D.state].ma.rgb;\n"
     "}\n"
     "#endif\n"
     "#ifdef GFX_FS\n"
@@ -4887,18 +5105,62 @@ static const char CHARS_GLSL[] =
     "layout(location = 3) in vec3 i_sun;\n"
     "layout(location = 4) in vec3 i_wp;\n"
     "layout(location = 5) in vec3 i_wn;\n"
+    "layout(location = 6) in vec3 i_camb;\n"
+    "layout(location = 7) in vec4 i_aop;\n"
+    "layout(location = 8) flat in vec3 i_lmd;\n"
+    "layout(location = 9) flat in vec3 i_lma;\n"
     "layout(location = 0) out vec4 oc;\n"
     "void main() {\n"
     "  vec4 tx = texture(t, i_uv), tf = St[D.state].tf;\n"
-    "  vec3 col = i_col.rgb;\n"
+    "  vec3 col = i_col.rgb, lmp = vec3(0.0);\n"
+    "  float shv = 1.0;\n"
+    "#if W_LAMPS\n"
+    "  {\n"
+    "    vec3 ld = vec3(0.0), la = vec3(0.0);\n"
+    "    lamp_light(gl_FragCoord.xy, i_wp, normalize(i_wn), ld, la, W_SHADOW != 0 ? i_wp + D.lag.xyz : i_wp, false);\n"
+    "    lmp = i_lmd * ld + i_lma * la;\n"
+    "    col += lmp;\n"
+    "  }\n"
+    "#endif\n"
+    "#if W_AO\n"
+    "  {\n"
+    "    float ao = pow(ao_at(i_aop), A.k.y);\n"
+    "    if (A.k.z > 0.5) { oc = vec4(vec3(ao), 1.0); return; }\n"
+    "    col -= i_camb * (1.0 - ao);\n"
+    "    if (W_SHADOW == 0) col = sat(col);\n"
+    "  }\n"
+    "#endif\n"
     "#if W_SHADOW\n"
     "  vec3 sun = i_sun;\n"
-    "  if (any(greaterThan(sun, vec3(0.0)))) sun *= shadow(i_wp + D.lag.xyz, normalize(i_wn), false);\n" /* (PCSS speckles curved, close self-shadow) */
+    "  if (any(greaterThan(sun, vec3(0.0)))) {\n"
+    "    shv = shadow(i_wp + D.lag.xyz, normalize(i_wn), false);\n" /* (PCSS speckles curved, close self-shadow) */
+    "    vec3 Y = vec3(0.2126, 0.7152, 0.0722);\n" /* the lamps fill it, as the zone's (shadow_fill) */
+    "    shv = mix(shv, 1.0, sat(S.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
+    "    sun *= shv;\n"
+    "  }\n"
     "  col = sat(col + sun);\n"
     "#endif\n"
     "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * col) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
     "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"    /* MODULATE2X, then MODULATE4X */
     "  if (!(a * 255.0 > D.params.x)) discard;\n"
+    "#if W_SPEC && W_SHADOW\n" /* the sun's highlight: its colour from what it lit here (its diffuse over N.L) */
+    "  {\n"
+    "    vec3 Nn = normalize(i_wn), V = normalize(S.cam.xyz - i_wp), Ls = S.dir.xyz;\n"
+    "    vec3 tc = sat(2.0 * tx.rgb * tf.rgb);\n"
+    "    float lum = dot(tc, vec3(0.299, 0.587, 0.114));\n"
+    "    float sa = max(tc.r, max(tc.g, tc.b)) - min(tc.r, min(tc.g, tc.b));\n"
+    "    float m = smoothstep(0.25, 0.6, lum) * (1.0 - smoothstep(0.08, 0.3, sa));\n" /* bright and grey: metal */
+    "    float a2 = spec_a2(mix(0.7, 0.3, m), Nn, SPc.k.w);\n"
+    "    vec3 sc = i_sun / max(sat(dot(Nn, Ls)), 0.2);\n"
+    "    vec3 f = mix(vec3(0.03), tc * 0.6, m);\n"
+    "    float g = spec_ggx(Nn, V, Ls, a2, 1.0);\n" /* (Fresnel's own, tinted below) */
+    "    vec3 Hh = normalize(V + Ls);\n"
+    "    float fr = pow(1.0 - sat(dot(V, Hh)), 5.0);\n"
+    "    vec3 Fr = f + (1.0 - f) * fr;\n"
+    "    if (SPc.pad.x > 0.0) c += sc * g * Fr * (SPc.k.x * shv);\n"
+    "    else c = 1.0 - (1.0 - c) * exp(-sc * g * Fr * (SPc.k.x * shv));\n"
+    "  }\n"
+    "#endif\n"
     "  vec4 fog = St[D.state].fog;\n"
     "  if (fog.z > 0.0) c = mix(St[D.state].fog_col.rgb, c, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
     "  oc = vec4(c, a);\n"
@@ -4960,7 +5222,9 @@ static const char CAST_GLSL[] =
 /* the zone's and characters' bindings (push descriptors): 0 the frame's uniforms (WF; a caster's CF), 1 the instances or
  * the bone palettes (a zone caster's world matrices), 2 the lights or the characters' states, 3 the vertices, 4 the
  * texture, 5 the characters' uvs; with the shadows 6 their uniforms (SH), 7-9 the zone's, the characters' and the
- * fitted maps, 10 the comparing sampler, 11 the gathering one */
+ * fitted maps, 10 the comparing sampler, 11 the gathering one; with the occlusion 12 its uniforms (AU), 13 the result;
+ * with the highlights 14 theirs (SP); with the lamps 15 the lamps, 16 the tiles, 17 their uniforms (LU), 18-19 the
+ * characters' and the zone's cubes, 20 the cubes' faces, 21 their comparing sampler */
 enum
 {
     W_FRAME = 0,
@@ -4975,7 +5239,17 @@ enum
     W_CT = 9,
     W_CS = 10,
     W_PS = 11,
-    W_COUNT = 12,
+    W_AU = 12,
+    W_AOT = 13,
+    W_SP = 14,
+    W_LL = 15,
+    W_TL = 16,
+    W_LU = 17,
+    W_LSM = 18,
+    W_ZLSM = 19,
+    W_LSMM = 20,
+    W_LCS = 21,
+    W_COUNT = 22,
 };
 
 static struct
@@ -4983,15 +5257,17 @@ static struct
     int tried, ok;
     VkDescriptorSetLayout dsl;
     VkPipelineLayout layout;
-    /* the zone's (by W_PIXEL, W_ATEST, W_SHADOW) and the characters' (by W_SHADOW) functions, made on first use: [stage][key] */
-    VkShaderModule mod[2][32];
+    /* the zone's (by W_PIXEL, W_ATEST, W_SHADOW, W_AO, W_SPEC, W_LAMPS) and the characters' (by W_SHADOW, W_AO, W_SPEC,
+     * W_LAMPS) functions, made on first use: [stage][key] */
+    VkShaderModule mod[2][128];
     VkShaderModule cast[2][2]; /* the casters': [stage][C_CHARS] */
     struct
     {
         uint32_t key[2];
         VkPipeline p;
-    } pipe[64];
+    } pipe[128];
     uint32_t npipe;
+    VkPipeline glow[2]; /* the lamps' glows (post_lamp_glows): onto an 8-bit target, a float one */
 } g_world;
 
 static const VkDynamicState WORLD_DYNAMIC[] = {
@@ -5025,6 +5301,16 @@ static int world_init(void)
         b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     b[W_CS] = (VkDescriptorSetLayoutBinding){ W_CS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     b[W_PS] = (VkDescriptorSetLayoutBinding){ W_PS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_AU] = (VkDescriptorSetLayoutBinding){ W_AU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    b[W_AOT] = (VkDescriptorSetLayoutBinding){ W_AOT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_SP] = (VkDescriptorSetLayoutBinding){ W_SP, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LL] = (VkDescriptorSetLayoutBinding){ W_LL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL }; /* (the glows' too) */
+    b[W_TL] = (VkDescriptorSetLayoutBinding){ W_TL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LU] = (VkDescriptorSetLayoutBinding){ W_LU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LSM] = (VkDescriptorSetLayoutBinding){ W_LSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_ZLSM] = (VkDescriptorSetLayoutBinding){ W_ZLSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LSMM] = (VkDescriptorSetLayoutBinding){ W_LSMM, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LCS] = (VkDescriptorSetLayoutBinding){ W_LCS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     dl.bindingCount = W_COUNT;
@@ -5052,34 +5338,46 @@ static VkShaderModule world_compile(const char* defines, const char* text, int f
     return m;
 }
 
-/* one stage of the zone's (chars 0) or the characters' (1) functions, compiled on first use */
-static VkShaderModule world_module(int chars, int pixel, int atest, int shadow, int fragment)
+/* the effects a zone's or characters' pipeline has (the GLSL's defines): WK_* bits */
+enum
 {
-    uint32_t key = chars ? 16u | (uint32_t)shadow : (uint32_t)pixel | (uint32_t)atest << 1 | (uint32_t)shadow << 2;
-    VkShaderModule* m = &g_world.mod[fragment][key];
+    WK_PIXEL = 1,
+    WK_ATEST = 2,
+    WK_SHADOW = 4,
+    WK_AO = 8,
+    WK_SPEC = 16,
+    WK_LAMPS = 32,
+};
+
+/* one stage of the zone's (chars 0) or the characters' (1) functions, compiled on first use (k: WK_*; the characters'
+ * are neither per pixel nor alpha tested by a define) */
+static VkShaderModule world_module(int chars, uint32_t k, int fragment)
+{
+    if (chars)
+        k &= ~(uint32_t)(WK_PIXEL | WK_ATEST);
+    VkShaderModule* m = &g_world.mod[fragment][(chars ? 64u : 0u) | k];
     if (*m)
         return *m;
-    char d[96];
-    snprintf(d, sizeof d, "#define W_PIXEL %d\n#define W_ATEST %d\n#define W_SHADOW %d\n", pixel, atest, shadow);
+    char d[192];
+    snprintf(d, sizeof d, "#define W_PIXEL %d\n#define W_ATEST %d\n#define W_SHADOW %d\n#define W_AO %d\n#define W_SPEC %d\n#define W_LAMPS %d\n",
+        !!(k & WK_PIXEL), !!(k & WK_ATEST), !!(k & WK_SHADOW), !!(k & WK_AO), !!(k & WK_SPEC), !!(k & WK_LAMPS));
     *m = world_compile(d, chars ? CHARS_GLSL : WORLD_GLSL, fragment);
     if (!*m)
         fprintf(stderr, "[recomp] gfx: scene renderer %s functions failed\n", chars ? "characters'" : "zone's");
     return *m;
 }
 
-/* a pipeline into the current targets: the zone's (pixel, atest, blend) or the characters', shadowed or not */
-static VkPipeline world_pipeline(int chars, int pixel, int atest, int blend, int shadow, GfxTex* depth)
+/* a pipeline into the current targets: the zone's or the characters', with the effects k (WK_*), blended or not */
+static VkPipeline world_pipeline(int chars, uint32_t k, int blend, GfxTex* depth)
 {
     uint32_t df = depth ? (uint32_t)depth->vf : 0, sf = depth && depth->has_stencil ? df : 0;
-    uint32_t key[2] = { (uint32_t)chars | (uint32_t)pixel << 1 | (uint32_t)atest << 2 | (uint32_t)blend << 3 | (uint32_t)(sf != 0) << 4 |
-            (uint32_t)shadow << 5 | (uint32_t)g_rt->vf << 8,
-        df };
+    uint32_t key[2] = { (uint32_t)chars | (uint32_t)blend << 1 | (uint32_t)(sf != 0) << 2 | k << 3 | (uint32_t)g_rt->vf << 12, df };
     for (uint32_t i = 0; i < g_world.npipe; ++i)
         if (g_world.pipe[i].key[0] == key[0] && g_world.pipe[i].key[1] == key[1])
             return g_world.pipe[i].p;
     if (g_world.npipe == sizeof g_world.pipe / sizeof g_world.pipe[0])
         return VK_NULL_HANDLE;
-    VkShaderModule vs = world_module(chars, pixel, atest, shadow, 0), fs = world_module(chars, pixel, atest, shadow, 1);
+    VkShaderModule vs = world_module(chars, k, 0), fs = world_module(chars, k, 1);
     VkPipeline p = VK_NULL_HANDLE;
     if (vs && fs)
     {
@@ -5134,11 +5432,48 @@ void gfx_world_time(int pass)
     g_pass_next = pass == 1 ? GFX_PASS_WORLD : pass == 2 ? GFX_PASS_CHARS : -1;
 }
 
-/* the lamps lit this frame, kept for the clustered lamps (scene_lamps, not on Vulkan yet) */
+/* --- the lamps (scene_lamps): gfx_lamps hands the frame's; binned into 64-pixel tiles of the scene's viewport at the
+ * frame's first zone batch (its camera), the list and the tiles in the frame's ring (gfx_metal.m's, its notes there) */
+
+/* a zone item kept for the lamps' zone cubes at the frame's end: its buffer, texture and sampler as handles (the game
+ * may destroy the GfxBuf meanwhile; the handles live until the frame is done) */
+typedef struct LampZoneItem
+{
+    VkBuffer vb;
+    VkImageView tex; /* alpha tested with it; VK_NULL_HANDLE: depth alone */
+    VkSampler samp;
+    uint32_t first, count, prim, inst;
+} LampZoneItem;
+
 static struct
 {
     GfxWorldLight l[256];
     uint32_t n;
+    uint64_t set, binned;            /* the frames they were set, binned */
+    VkBuffer lb, tb;                 /* the lamps (LL), the tiles (32 16-bit words each: count, indices) */
+    VkDeviceSize lo, to, lsz, tsz;
+    float lu[12];                    /* LU: viewport, tiles across, down; shadows; debug; the zone's cubes, size, taps */
+    float vp[16];                    /* the camera's view x projection, for the glows */
+    float cam[3];
+    /* the characters' shadows from the nearest lamps (scene_lamp_shadows): drawn at a frame's end into a cube a lamp
+     * (six layers each of lsm), read by the next frame; each its lamp's place, to find it again */
+    GfxTex *lsm, *dummy;
+    uint32_t lsize, nsh;
+    float shpos[4][4];               /* the shadowed lamps' places (w: range) */
+    float shm[24][16];               /* their faces' matrices */
+    uint64_t sh_serial;              /* the frame they were drawn */
+    /* the zone into the same lamps' cubes (zlsm, Depth32F), kept: drawn again when the shadowed lamps change or every
+     * 600 frames (a door, a lift) */
+    GfxTex* zlsm;
+    float zpos[4][4];
+    uint32_t zn;
+    uint64_t z_serial;
+    /* the frame's opaque zone items, every batch's, and their world matrices, for the cubes at the frame's end */
+    LampZoneItem* zi;
+    float (*zw)[16];
+    uint32_t nzi, czi, nzw, czw;
+    uint64_t zc_serial;
+    VkSampler cmp; /* the cubes' comparing sampler */
 } g_lamps;
 
 void gfx_lamps(const GfxWorldLight* l, uint32_t n)
@@ -5146,7 +5481,11 @@ void gfx_lamps(const GfxWorldLight* l, uint32_t n)
     g_lamps.n = n > 256 ? 256 : n;
     if (g_lamps.n)
         memcpy(g_lamps.l, l, g_lamps.n * sizeof *l);
+    g_lamps.set = g_serial;
 }
+
+static void lamp_shadows_draw(const GfxCharFrame* cf);
+static void lamp_zone_cubes(void);
 
 /* --- the scene renderer's sun and moon shadows (gfx_shadow_begin, gfx.h): gfx_metal.m's, on Vulkan ----------------
  * Two depth arrays a cascade a layer: the zone's, 32-bit and kept (a layer drawn again only when host/scene.c says),
@@ -5628,6 +5967,8 @@ static void shadow_frame_end(void)
     shadow_chars_pass(&g_shd.lc, f->cam, g_shd.cmap, (const float (*)[16])g_shd.lag.cm, n, reach);
     if (g_shd.lag.ttx > 0.0f)
         shadow_chars_pass(&g_shd.lc, f->cam, g_shd.cmt, (const float (*)[16])g_shd.lag.tm, 1, NULL);
+    lamp_shadows_draw(&g_shd.lc);
+    lamp_zone_cubes();
     g_shd.lag.serial = g_serial;
     g_shd.lserial = 0;
     g_shd.nitems = 0; /* (the handles were the frame's: the next takes its own) */
@@ -5760,6 +6101,978 @@ static int shadow_uniforms(VkDescriptorBufferInfo* bi)
     return 1;
 }
 
+/* A camera cut (gfx_metal.m's cam_cut_note, its note there): the view jumped (first person and back, a cutscene, a
+ * warp) - the camera moved more than two units or turned more than 25 degrees since the last frame that had a view.
+ * The scene renderer's occlusion starts afresh rather than show the last view's for a frame. */
+static uint64_t g_cam_cut;  /* the last frame found to be a cut */
+static uint64_t g_cam_seen; /* the last frame a view was noted */
+static float g_cam_last[16];
+static void cam_cut_note(const float* view)
+{
+    if (g_cam_seen == g_serial)
+        return;
+    int cut = !g_cam_seen || g_cam_seen + 1 < g_serial;
+    if (!cut)
+    {
+        float a[16], b[16];
+        if (gfx_mat_inverse(a, view) && gfx_mat_inverse(b, g_cam_last))
+        {
+            float dx = a[12] - b[12], dy = a[13] - b[13], dz = a[14] - b[14];
+            float f = a[8] * b[8] + a[9] * b[9] + a[10] * b[10]; /* the view's z axes' cosine */
+            cut = dx * dx + dy * dy + dz * dz > 4.0f || f < 0.906f;
+        }
+    }
+    if (cut)
+        g_cam_cut = g_serial;
+    memcpy(g_cam_last, view, 64);
+    g_cam_seen = g_serial;
+}
+static int cam_cut(void) { return g_cam_cut == g_serial; }
+
+/* --- the scene renderer's ambient occlusion (scene_ao): gfx_ao_metal.inc's, on Vulkan (its notes there) -------------
+ * Made once a frame at half size when the scene is done (gfx_scene_done, ahead of the effects), from the depth the
+ * zone and characters were drawn with: SAO_PREP the nearest of each 2x2 as distance along the view (0 the sky),
+ * SAO_GTAO ground-truth occlusion, SAO_RESOLVE a 3x3 blur that keeps to its own depth blended over frames with the last
+ * result reprojected (the result keeps its distance and count beside it). Full-screen passes into float targets as
+ * the effects' are (fx_pass), where Metal has compute kernels. The zone and characters read the last frame's result
+ * (AO_GLSL). The rays (scene_ao_q 3, 4) trace the bounce light's structure, which Vulkan does not build yet: GTAO high
+ * instead, as Metal does without one. */
+static const char SAO_GLSL[] =
+    /* vp: the viewport in the target (x, y, w, h); hs: the half size and its inverse; pr: P00, P11, P20, P21 (D3D's
+     * projection, row-major); pz: P22, P32, P23 (+-1), the depth's far end; prm: the reach, steps, slices, the reach's
+     * largest size in half pixels; tp: the blend's least weight, whether there is a last result, the frame, the frames
+     * it counts at most */
+    "layout(std140, set = 0, binding = 0) uniform AoUB { vec4 vp, hs, pr, pz, prm, tp; mat4 iv, pvp; } U;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
+    "layout(set = 0, binding = 3) uniform sampler2D t2;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "float ao_ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }\n"
+    "float ao_acos(float x) {\n" /* XeGTAO's, within some 0.001 */
+    "  float r = (-0.156583 * abs(x) + 1.5707963) * sqrt(clamp(1.0 - abs(x), 0.0, 1.0));\n"
+    "  return x >= 0.0 ? r : 3.14159265 - r;\n"
+    "}\n"
+    /* half pixel h (its corner) at distance z, in the view: x right, y up, z the distance */
+    "vec3 ao_vpos(vec2 h, float z) {\n"
+    "  vec2 ndc = vec2((h.x + 0.5) * 2.0 * U.hs.z - 1.0, 1.0 - (h.y + 0.5) * 2.0 * U.hs.w);\n"
+    "  float vz = z * U.pz.z;\n"
+    "  return vec3((ndc.x * z - vz * U.pr.z) / U.pr.x, (ndc.y * z - vz * U.pr.w) / U.pr.y, z);\n"
+    "}\n"
+    "vec3 ao_world(vec3 P) { return (U.iv * vec4(P.x, P.y, P.z * U.pz.z, 1.0)).xyz; }\n"
+    "float hz(ivec2 q) { return texelFetch(t0, q, 0).x; }\n"
+    /* the normal from the neighbours, each way the side whose depth is nearer this one's (edges stay sharp); toward the
+     * eye */
+    "vec3 ao_normal(ivec2 p, vec3 P) {\n"
+    "  ivec2 hi = ivec2(U.hs.xy) - 1;\n"
+    "  float zl = hz(clamp(p - ivec2(1, 0), ivec2(0), hi)), zr = hz(clamp(p + ivec2(1, 0), ivec2(0), hi));\n"
+    "  float zu = hz(clamp(p - ivec2(0, 1), ivec2(0), hi)), zd = hz(clamp(p + ivec2(0, 1), ivec2(0), hi));\n"
+    "  bool r = zr > 0.0 && (zl <= 0.0 || abs(zr - P.z) < abs(zl - P.z));\n"
+    "  bool d = zd > 0.0 && (zu <= 0.0 || abs(zd - P.z) < abs(zu - P.z));\n"
+    "  vec2 h = vec2(p);\n"
+    "  vec3 dx = r ? ao_vpos(h + vec2(1, 0), zr) - P : (zl > 0.0 ? P - ao_vpos(h - vec2(1, 0), zl) : vec3(1, 0, 0));\n"
+    "  vec3 dy = d ? ao_vpos(h + vec2(0, 1), zd) - P : (zu > 0.0 ? P - ao_vpos(h - vec2(0, 1), zu) : vec3(0, 1, 0));\n"
+    "  vec3 n = normalize(cross(dx, dy));\n"
+    "  return dot(n, P) > 0.0 ? -n : n;\n"
+    "}\n"
+    "void main() {\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+    "#if defined(SAO_PREP)\n" /* t0: the depth */
+    "  ivec2 b = ivec2(U.vp.xy + floor(vec2(p) * U.vp.zw * U.hs.zw)), hi = textureSize(t0, 0) - 1;\n"
+    "  float z = 1e30;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    float d = texelFetch(t0, min(b + ivec2(k & 1, k >> 1), hi), 0).x;\n"
+    "    if (d >= U.pz.w) continue;\n" /* the sky, or nothing drawn */
+    "    float vz = U.pz.y / (d * U.pz.z - U.pz.x);\n"
+    "    z = min(z, vz * U.pz.z);\n"
+    "  }\n"
+    "  oc = vec4(z < 1e29 && z > 0.0 ? z : 0.0);\n"
+    "#elif defined(SAO_GTAO)\n" /* t0: the half-size distances */
+    "  float z = hz(p);\n"
+    /* the reach in texels each way (the texels need not be square on screen), held to prm.w texels near the eye */
+    "  float R = U.prm.x;\n"
+    "  vec2 rpx = R / max(z, 1e-3) * vec2(U.pr.x, U.pr.y) * 0.5 * U.hs.xy;\n"
+    "  float big = max(rpx.x, rpx.y);\n"
+    "  if (z <= 0.0 || big < 1.0) { oc = vec4(1.0); return; }\n"
+    "  if (big > U.prm.w) { float k = U.prm.w / big; rpx *= k, R *= k; }\n"
+    "  vec2 px1 = rpx / max(rpx.x, rpx.y);\n" /* a texel's step, the long way */
+    "  vec3 P = ao_vpos(vec2(p), z), N = ao_normal(p, P), V = normalize(-P);\n"
+    "  int steps = int(U.prm.y), slices = int(U.prm.z);\n"
+    "  float fr = U.tp.z, n0 = ao_ign(vec2(p) + 5.588238 * fr), n1 = ao_ign(vec2(p) + vec2(37.0, 17.0) + 5.588238 * fr);\n"
+    "  vec2 hi = U.hs.xy - 1.0;\n"
+    "  float vis = 0.0;\n"
+    "  for (int s = 0; s < slices; ++s) {\n"
+    "    float phi = (float(s) + n0) * (3.14159265 / float(slices));\n"
+    "    vec2 om = vec2(cos(phi), -sin(phi));\n"
+    "    vec3 dv = vec3(cos(phi), sin(phi), 0.0), od = dv - dot(dv, V) * V, ax = normalize(cross(od, V));\n"
+    "    vec3 pn = N - ax * dot(N, ax);\n"
+    "    float pl = length(pn);\n"
+    "    float cn = clamp(dot(pn, V) / max(pl, 1e-4), 0.0, 1.0), n = (dot(od, pn) >= 0.0 ? 1.0 : -1.0) * ao_acos(cn);\n"
+    "    float lo0 = cos(n + 1.5707963), lo1 = cos(n - 1.5707963), h0c = lo0, h1c = lo1;\n"
+    "    for (int j = 0; j < steps; ++j) {\n"
+    "      float t = (float(j) + fract(n1 + float(j) * 0.618034)) / float(steps);\n"
+    "      vec2 off = om * (t * t * rpx + px1);\n"
+    "      for (int side = 0; side < 2; ++side) {\n"
+    "        vec2 q = vec2(p) + (side == 0 ? off : -off);\n"
+    "        if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, hi))) continue;\n"
+    "        float zq = hz(ivec2(q + 0.5));\n"
+    "        if (zq <= 0.0) continue;\n"
+    "        vec3 dd = ao_vpos(floor(q + 0.5), zq) - P;\n"
+    "        float l = length(dd);\n"
+    "        if (l < 1e-4) continue;\n"
+    "        float w = clamp((R - l) / (0.4 * R), 0.0, 1.0);\n"
+    "        float c = dot(dd, V) / l;\n"
+    "        if (side == 0) h0c = max(h0c, mix(lo0, c, w)); else h1c = max(h1c, mix(lo1, c, w));\n"
+    "      }\n"
+    "    }\n"
+    "    float h0 = -ao_acos(clamp(h1c, -1.0, 1.0)), h1 = ao_acos(clamp(h0c, -1.0, 1.0));\n"
+    "    h0 = n + clamp(h0 - n, -1.5707963, 1.5707963), h1 = n + clamp(h1 - n, -1.5707963, 1.5707963);\n"
+    "    float sn = sin(n);\n"
+    "    vis += pl * ((cn + 2.0 * h0 * sn - cos(2.0 * h0 - n)) + (cn + 2.0 * h1 * sn - cos(2.0 * h1 - n))) * 0.25;\n"
+    "  }\n"
+    "  oc = vec4(clamp(vis / float(slices), 0.0, 1.0));\n"
+    "#else\n" /* SAO_RESOLVE; t0 the distances, t1 this frame's occlusion, t2 the last result */
+    "  float z = hz(p);\n"
+    "  if (z <= 0.0) { oc = vec4(1.0, 0.0, 0.0, 0.0); return; }\n"
+    "  ivec2 hi = ivec2(U.hs.xy) - 1;\n"
+    "  float s = 0.0, ws = 0.0;\n"
+    "  for (int y = -1; y <= 1; ++y)\n"
+    "    for (int x = -1; x <= 1; ++x) {\n"
+    "      ivec2 q = clamp(p + ivec2(x, y), ivec2(0), hi);\n"
+    "      float zq = hz(q);\n"
+    "      float w = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0) * clamp(1.0 - abs(zq - z) / (0.03 * z), 0.0, 1.0);\n"
+    "      s += texelFetch(t1, q, 0).x * w, ws += w;\n"
+    "    }\n"
+    "  s = ws > 0.0 ? s / ws : texelFetch(t1, p, 0).x;\n"
+    "  float a = s, cnt = 1.0;\n"
+    "  if (U.tp.y > 0.5) {\n"
+    "    vec4 pc = U.pvp * vec4(ao_world(ao_vpos(vec2(p), z)), 1.0);\n"
+    "    if (pc.w > 1e-4) {\n"
+    "      vec2 uv = vec2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"
+    "      vec2 t = uv * U.hs.xy - 0.5, f = fract(t);\n"
+    "      ivec2 b = ivec2(floor(t));\n"
+    "      vec4 hv = vec4(0.0);\n"
+    "      float hw = 0.0;\n"
+    "      for (int k = 0; k < 4; ++k) {\n"
+    "        ivec2 o = b + ivec2(k & 1, k >> 1);\n"
+    "        if (any(lessThan(o, ivec2(0))) || any(greaterThan(o, hi))) continue;\n"
+    "        vec4 h = texelFetch(t2, o, 0);\n"
+    "        float w = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y) * clamp(1.0 - abs(h.y - pc.w) / (0.05 * pc.w), 0.0, 1.0);\n"
+    "        hv += h * w, hw += w;\n"
+    "      }\n"
+    "      if (hw > 0.05) {\n"
+    "        hv /= hw;\n"
+    "        cnt = min(hv.z + 1.0, U.tp.w);\n"
+    "        a = mix(hv.x, s, max(1.0 / cnt, U.tp.x));\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "  oc = vec4(a, z, cnt, 0.0);\n"
+    "#endif\n"
+    "}\n";
+
+/* AoUB of SAO_GLSL */
+typedef struct AoU
+{
+    float vp[4], hs[4], pr[4], pz[4], prm[4], tp[4];
+    float iv[16], pvp[16];
+} AoU;
+
+/* AUB of AO_GLSL */
+typedef struct AoShadeU
+{
+    float pvp[16];
+    float vp[4];
+    float k[4];
+} AoShadeU;
+
+static struct
+{
+    int tried, ok;
+    VkPipeline prep, gtao, resolve;
+    VkSampler near;
+    GfxTex *hz, *raw, *hist[2];
+    int cur; /* hist[cur] is the last result */
+    uint32_t hw, hh;
+    uint32_t frame;
+    /* the zone's draw this frame: its depth, target, camera and viewport (ao_note) */
+    GfxTex *depth, *rt;
+    uint64_t noted;
+    float view[16], proj[16];
+    uint32_t vp[4];
+    /* the last result's camera (row-major view x projection) and viewport; made: its frame */
+    float made_vp[16];
+    uint32_t made_view[4];
+    uint64_t made;
+    AoShadeU su;
+} g_sao;
+
+static void sao_forget(const GfxTex* t)
+{
+    if (g_sao.depth == t || g_sao.rt == t)
+        g_sao.depth = g_sao.rt = NULL, g_sao.noted = 0, g_sao.made = 0;
+}
+
+/* one of SAO_GLSL's passes, on the effects' layout (its uniforms, then samplers) and full-screen triangle */
+static VkPipeline sao_pipeline(const char* name, VkFormat fmt)
+{
+    size_t n = sizeof SAO_GLSL + 64;
+    char* src = (char*)malloc(n);
+    snprintf(src, n, "#define %s\n%s", name, SAO_GLSL);
+    VkShaderModule fs = compile_glsl(src, 1);
+    free(src);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (fs && g_fx.vs)
+    {
+        VkPipelineColorBlendAttachmentState b = { 0 };
+        b.colorWriteMask = 0xF;
+        static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        p = make_pipeline(g_fx.vs, fs, g_fx_layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            VK_POLYGON_MODE_FILL, dyn, 2, 0);
+    }
+    if (fs)
+        vkDestroyShaderModule(g_dev, fs, NULL);
+    return p;
+}
+
+static int sao_init(void)
+{
+    if (g_sao.tried)
+        return g_sao.ok;
+    g_sao.tried = 1;
+    if (!fx_init())
+        return 0;
+    g_sao.prep = sao_pipeline("SAO_PREP", VK_FORMAT_R32_SFLOAT);
+    g_sao.gtao = sao_pipeline("SAO_GTAO", VK_FORMAT_R16_SFLOAT);
+    g_sao.resolve = sao_pipeline("SAO_RESOLVE", VK_FORMAT_R16G16B16A16_SFLOAT);
+    VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_sao.near));
+    g_sao.ok = g_sao.prep && g_sao.gtao && g_sao.resolve && g_sao.near;
+    if (!g_sao.ok)
+    {
+        atomic_fetch_add(&g_failures, 1);
+        fprintf(stderr, "[recomp] gfx: scene occlusion: its passes failed\n");
+    }
+    return g_sao.ok;
+}
+
+/* one full-screen triangle into all of target, reading in[0..n) as t0.. through the nearest sampler; timed as pass */
+static void sao_pass(GfxTex* target, VkPipeline p, const VkDescriptorBufferInfo* ub, GfxTex* const* in, int n, int pass)
+{
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    ca.imageView = attachment_view(target, 0, 0);
+    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ target->w, target->h };
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    int ts = ts_begin(cb, pass);
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport v = { 0, 0, (float)target->w, (float)target->h, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { target->w, target->h } };
+    vkCmdSetViewport(cb, 0, 1, &v);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    VkWriteDescriptorSet w[4];
+    VkDescriptorImageInfo ii[3];
+    world_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ub, NULL);
+    for (int i = 0; i < n; ++i)
+    {
+        ii[i] = (VkDescriptorImageInfo){ g_sao.near, in[i]->view, VK_IMAGE_LAYOUT_GENERAL };
+        world_write(&w[1 + i], 1 + (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[i]);
+        in[i]->used = g_serial, in[i]->rec = g_cb_index;
+    }
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, 1 + (uint32_t)n, w);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+    ts_end(cb, ts);
+    g_dirty = 1;
+    g_bound = VK_NULL_HANDLE;
+    target->used = g_serial, target->rec = g_cb_index;
+}
+
+/* the quality's method: 1 GTAO low (2 slices of 4 steps each way), 2 GTAO high (3 of 6); 3 and 4 (the rays) GTAO high */
+
+/* the zone's draw (gfx_world_draw): its depth and camera, the first this frame into the main target */
+static void ao_note(const GfxWorldFrame* f, GfxTex* depth)
+{
+    if (g_fxs.scene_ao <= 0.0f || !depth || !g_rt || g_rt_face || g_rt_level || g_sao.noted == g_serial)
+        return;
+    g_sao.depth = depth, g_sao.rt = g_rt;
+    memcpy(g_sao.view, f->view, 64), memcpy(g_sao.proj, f->proj, 64);
+    uint32_t w = g_rt->w, h = g_rt->h;
+    uint32_t x = f->vp[0] < w ? f->vp[0] : 0, y = f->vp[1] < h ? f->vp[1] : 0;
+    uint32_t vw = f->vp[2] && x + f->vp[2] <= w ? f->vp[2] : w - x, vh = f->vp[3] && y + f->vp[3] <= h ? f->vp[3] : h - y;
+    g_sao.vp[0] = x, g_sao.vp[1] = y, g_sao.vp[2] = vw, g_sao.vp[3] = vh;
+    g_sao.noted = g_serial;
+}
+
+/* the scene done (gfx_scene_done): this frame's occlusion from the zone's depth, ahead of the effects */
+static void ao_make(GfxTex* color)
+{
+    if (g_fxs.scene_ao <= 0.0f || g_sao.noted != g_serial || !color || color != g_sao.rt || !g_sao.depth || !sao_init())
+        return;
+    flush_pass();
+    /* half the viewport across, and down as many as keep the texels square on screen (the scene's target can be a
+     * square stretched to the window: its projection says the window's shape) */
+    const float* P = g_sao.proj;
+    uint32_t hw = (g_sao.vp[2] + 1) / 2;
+    float sq = P[5] != 0.0f ? fabsf(P[0] / P[5]) : 1.0f;
+    uint32_t hh = (uint32_t)((float)hw * sq + 0.5f);
+    if (hh > g_sao.vp[3])
+        hh = g_sao.vp[3];
+    if (hw < 8 || hh < 8)
+        return;
+    int fresh = !g_sao.hist[0] || g_sao.hw != hw || g_sao.hh != hh;
+    if (!fx_tex(&g_sao.hz, VK_FORMAT_R32_SFLOAT, hw, hh, GFX_USE_RT, 1) || !fx_tex(&g_sao.raw, VK_FORMAT_R16_SFLOAT, hw, hh, GFX_USE_RT, 1) ||
+        !fx_tex(&g_sao.hist[0], VK_FORMAT_R16G16B16A16_SFLOAT, hw, hh, GFX_USE_RT, 1) ||
+        !fx_tex(&g_sao.hist[1], VK_FORMAT_R16G16B16A16_SFLOAT, hw, hh, GFX_USE_RT, 1))
+        return;
+    g_sao.hw = hw, g_sao.hh = hh;
+    float vpm[16], iv[16];
+    gfx_mat_mul(vpm, g_sao.view, g_sao.proj);
+    if (!gfx_mat_inverse(iv, g_sao.view))
+        return;
+    AoU u;
+    memset(&u, 0, sizeof u);
+    u.vp[0] = (float)g_sao.vp[0], u.vp[1] = (float)g_sao.vp[1], u.vp[2] = (float)g_sao.vp[2], u.vp[3] = (float)g_sao.vp[3];
+    u.hs[0] = (float)hw, u.hs[1] = (float)hh, u.hs[2] = 1.0f / (float)hw, u.hs[3] = 1.0f / (float)hh;
+    u.pr[0] = P[0], u.pr[1] = P[5], u.pr[2] = P[8], u.pr[3] = P[9];
+    u.pz[0] = P[10], u.pz[1] = P[14], u.pz[2] = P[11] < 0.0f ? -1.0f : 1.0f, u.pz[3] = 0.99999f;
+    int q = g_fxs.scene_ao_q >= 1.5f ? 2 : 1;
+    u.prm[0] = g_fxs.scene_ao_radius > 0.05f ? g_fxs.scene_ao_radius : 0.05f;
+    u.prm[1] = q == 1 ? 4.0f : 6.0f;
+    u.prm[2] = q == 1 ? 2.0f : 3.0f;
+    u.prm[3] = 0.06f * (float)hw;
+    cam_cut_note(g_sao.view);
+    int same = !fresh && g_sao.made + 1 >= g_serial && !memcmp(g_sao.made_view, g_sao.vp, sizeof g_sao.vp) && !cam_cut();
+    u.tp[0] = 0.08f, u.tp[1] = same ? 1.0f : 0.0f, u.tp[2] = (float)(g_sao.frame++ & 63), u.tp[3] = 16.0f;
+    memcpy(u.iv, iv, 64);
+    memcpy(u.pvp, g_sao.made_vp, 64);
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof u, RING_ALIGN, &buf, &off), &u, sizeof u);
+    VkDescriptorBufferInfo ub = { buf, off, sizeof u };
+    GfxTex* in[3] = { g_sao.depth, NULL, NULL };
+    sao_pass(g_sao.hz, g_sao.prep, &ub, in, 1, GFX_PASS_SCENE_AO);
+    in[0] = g_sao.hz;
+    sao_pass(g_sao.raw, g_sao.gtao, &ub, in, 1, GFX_PASS_SCENE_AO_TRACE);
+    int nx = g_sao.cur ^ 1;
+    in[1] = g_sao.raw, in[2] = g_sao.hist[g_sao.cur];
+    sao_pass(g_sao.hist[nx], g_sao.resolve, &ub, in, 3, GFX_PASS_SCENE_AO);
+    g_sao.cur = nx;
+    memcpy(g_sao.made_vp, vpm, 64);
+    memcpy(g_sao.made_view, g_sao.vp, sizeof g_sao.vp);
+    g_sao.made = g_serial;
+    /* what the next frame's shading reads */
+    AoShadeU* s = &g_sao.su;
+    memcpy(s->pvp, vpm, 64);
+    s->vp[0] = (float)g_sao.vp[2], s->vp[1] = (float)g_sao.vp[3];
+    s->vp[2] = s->vp[3] = 1.0f; /* the texture is the viewport */
+    static uint32_t told;
+    if (++told % 3000 == 1)
+        fprintf(stderr, "[recomp] gfx: scene occlusion: %s, %ux%u of a %ux%u viewport (projection %.3f %.3f), reach %.2f\n",
+            q == 2 ? "GTAO high" : "GTAO low", hw, hh, g_sao.vp[2], g_sao.vp[3], (double)P[0], (double)P[5], (double)u.prm[0]);
+}
+
+/* the occlusion for a batch's draws: its uniforms into the ring (*bi); 0 off */
+static int ao_uniforms(VkDescriptorBufferInfo* bi)
+{
+    if (g_fxs.scene_ao <= 0.0f || !g_sao.made || g_sao.made + 2 < g_serial || !g_sao.hist[g_sao.cur] || !g_rt || g_rt != g_sao.rt ||
+        g_rt_face || g_rt_level)
+        return 0;
+    AoShadeU* s = &g_sao.su;
+    s->k[0] = g_fxs.scene_ao, s->k[1] = g_fxs.scene_ao * g_fxs.scene_ao_chars, s->k[2] = g_fxs.scene_ao_debug, s->k[3] = 0.08f;
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof *s, RING_ALIGN, &buf, &off), s, sizeof *s);
+    *bi = (VkDescriptorBufferInfo){ buf, off, sizeof *s };
+    return 1;
+}
+
+static uint32_t ao_writes(VkWriteDescriptorSet* w, const VkDescriptorBufferInfo* bi, VkDescriptorImageInfo* ii)
+{
+    GfxTex* t = g_sao.hist[g_sao.cur];
+    *ii = (VkDescriptorImageInfo){ g_sao.near, t->view, VK_IMAGE_LAYOUT_GENERAL };
+    world_write(&w[0], W_AU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, bi, NULL);
+    world_write(&w[1], W_AOT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, ii);
+    t->used = g_serial, t->rec = g_cb_index;
+    return 2;
+}
+
+/* the highlights' settings for a batch's draws (*bi); 0 off (scene_spec 0, or no sun shadows to place them by) */
+static int spec_uniforms(int can, VkDescriptorBufferInfo* bi)
+{
+    if (!can || g_fxs.scene_spec <= 0.0f)
+        return 0;
+    float k[8] = { g_fxs.scene_spec, fmaxf(g_fxs.scene_spec_lamps, 0.0f), fminf(fmaxf(g_fxs.scene_spec_wet, 0.0f), 1.0f),
+        fmaxf(g_fxs.scene_spec_aa, 0.0f), g_rt && g_rt->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? 1.0f : 0.0f, 0, 0, 0 };
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof k, RING_ALIGN, &buf, &off), k, sizeof k);
+    *bi = (VkDescriptorBufferInfo){ buf, off, sizeof k };
+    return 1;
+}
+
+static void lamps_bin(const float* view, const float* proj, const uint32_t vp[6])
+{
+    float VP[16], iv[16];
+    gfx_mat_mul(VP, view, proj);
+    memcpy(g_lamps.vp, VP, 64);
+    if (gfx_mat_inverse(iv, view))
+        memcpy(g_lamps.cam, iv + 12, 12);
+    float x0 = (float)vp[0], y0 = (float)vp[1], w = (float)vp[2], h = (float)vp[3];
+    uint32_t tx = ((uint32_t)w + 63) / 64, ty = ((uint32_t)h + 63) / 64;
+    if (!tx || !ty || tx * ty > 4096)
+        return;
+    float k = fmaxf(g_fxs.scene_lamps, 0.0f), far2 = g_fxs.scene_lamp_far * g_fxs.scene_lamp_far;
+    g_lamps.lsz = (VkDeviceSize)g_lamps.n * 64 + 64, g_lamps.tsz = (VkDeviceSize)tx * ty * 64;
+    float* L = (float*)ring(g_lamps.lsz, RING_ALIGN, &g_lamps.lb, &g_lamps.lo);
+    uint16_t* T = (uint16_t*)ring(g_lamps.tsz, RING_ALIGN, &g_lamps.tb, &g_lamps.to);
+    memset(T, 0, g_lamps.tsz);
+    for (uint32_t i = 0; i < g_lamps.n; ++i)
+    {
+        const GfxWorldLight* l = &g_lamps.l[i];
+        float* o = L + 16 * i;
+        memcpy(o, l->pos, 16);
+        for (int c = 0; c < 3; ++c)
+            o[4 + c] = l->diffuse[c] * k, o[12 + c] = l->ambient[c] * k;
+        o[7] = o[15] = 0.0f;
+        memcpy(o + 8, l->att, 16);
+        o[11] = 0.0f;
+        if (g_lamps.sh_serial && g_lamps.sh_serial + 1 == g_serial)
+            for (uint32_t s = 0; s < g_lamps.nsh; ++s)
+            {
+                float ex = l->pos[0] - g_lamps.shpos[s][0], ey = l->pos[1] - g_lamps.shpos[s][1], ez = l->pos[2] - g_lamps.shpos[s][2];
+                if (ex * ex + ey * ey + ez * ez < 0.01f)
+                    o[11] = (float)(s + 1);
+            }
+        float r = l->pos[3];
+        float dx = l->pos[0] - g_lamps.cam[0], dy = l->pos[1] - g_lamps.cam[1], dz = l->pos[2] - g_lamps.cam[2];
+        if (dx * dx + dy * dy + dz * dz > far2 + r * r + 2.0f * r * sqrtf(far2))
+            continue;
+        /* the lamp's sphere wholly behind the camera: none */
+        {
+            float vz = l->pos[0] * view[2] + l->pos[1] * view[6] + l->pos[2] * view[10] + view[14];
+            float depth = proj[11] < 0.0f ? -vz : vz; /* along the view, toward what is seen */
+            if (depth < -r)
+                continue;
+        }
+        /* its box's corners on screen: the rectangle it can light (all of it when a corner is behind the camera) */
+        float sx0 = 1e30f, sy0 = 1e30f, sx1 = -1e30f, sy1 = -1e30f;
+        int behind = 0;
+        for (int c = 0; c < 8; ++c)
+        {
+            float p[3] = { l->pos[0] + ((c & 1) ? r : -r), l->pos[1] + ((c & 2) ? r : -r), l->pos[2] + ((c & 4) ? r : -r) };
+            float q[4];
+            for (int j = 0; j < 4; ++j)
+                q[j] = p[0] * VP[j] + p[1] * VP[4 + j] + p[2] * VP[8 + j] + VP[12 + j];
+            if (q[3] <= 0.05f)
+            {
+                behind = 1;
+                continue;
+            }
+            float sx = x0 + (q[0] / q[3] * 0.5f + 0.5f) * w, sy = y0 + (0.5f - q[1] / q[3] * 0.5f) * h;
+            sx0 = fminf(sx0, sx), sy0 = fminf(sy0, sy), sx1 = fmaxf(sx1, sx), sy1 = fmaxf(sy1, sy);
+        }
+        int ax = 0, ay = 0, bx = (int)tx - 1, by = (int)ty - 1;
+        if (!behind)
+        {
+            if (sx1 < x0 || sy1 < y0 || sx0 > x0 + w || sy0 > y0 + h)
+                continue;
+            ax = (int)fmaxf((sx0 - x0) / 64.0f, 0.0f), ay = (int)fmaxf((sy0 - y0) / 64.0f, 0.0f);
+            bx = (int)fminf((sx1 - x0) / 64.0f, (float)(tx - 1)), by = (int)fminf((sy1 - y0) / 64.0f, (float)(ty - 1));
+        }
+        for (int y = ay; y <= by; ++y)
+            for (int x = ax; x <= bx; ++x)
+            {
+                uint16_t* t = T + 32 * ((size_t)y * tx + x);
+                if (t[0] < 31)
+                    t[1 + t[0]++] = (uint16_t)i;
+            }
+    }
+    float lu[12] = { x0, y0, w, h, (float)tx, (float)ty, 0, 0, 0, 0, 0, 0 };
+    memcpy(g_lamps.lu, lu, sizeof lu);
+    g_lamps.binned = g_serial;
+}
+
+/* a batch's lamps: what its draws bind (lamps_writes) */
+typedef struct LampBind
+{
+    VkDescriptorBufferInfo bi[4]; /* the lamps, the tiles, LU, the cubes' faces */
+    VkDescriptorImageInfo ii[3];  /* the characters' cubes, the zone's, the comparing sampler */
+} LampBind;
+
+/* the lamps for a batch's draws: binned at the frame's first zone batch (view etc. given), then bound; 0 none */
+static int lamps_bind(LampBind* b, const float* view, const float* proj, const uint32_t* vp)
+{
+    if (g_fxs.scene_lamps <= 0.0f || !g_lamps.n || g_lamps.set != g_serial)
+        return 0;
+    if (g_lamps.binned != g_serial)
+    {
+        if (!view)
+            return 0;
+        lamps_bin(view, proj, vp);
+        if (g_lamps.binned != g_serial)
+            return 0;
+    }
+    if (!g_lamps.dummy)
+    {
+        VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.compareEnable = VK_TRUE;
+        si.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_lamps.cmp));
+        g_lamps.dummy = tex_array(VK_FORMAT_D16_UNORM, 1, 1);
+        if (!g_lamps.dummy || !g_lamps.cmp)
+            return 0;
+    }
+    int sh = g_lamps.lsm && g_lamps.nsh && g_lamps.sh_serial + 1 == g_serial;
+    g_lamps.lu[6] = sh ? 1.0f : 0.0f, g_lamps.lu[7] = g_fxs.scene_lamp_debug;
+    int zs = sh && g_lamps.zlsm && g_lamps.zn == g_lamps.nsh && !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
+    g_lamps.lu[8] = zs ? 1.0f : 0.0f;
+    g_lamps.lu[9] = fmaxf(g_fxs.lamp_size, 0.0f) * fmaxf(g_fxs.shadow_softness, 0.0f);
+    g_lamps.lu[10] = g_fxs.shadow_soft_q >= 1.5f ? 8.0f : 4.0f;
+    b->bi[0] = (VkDescriptorBufferInfo){ g_lamps.lb, g_lamps.lo, g_lamps.lsz };
+    b->bi[1] = (VkDescriptorBufferInfo){ g_lamps.tb, g_lamps.to, g_lamps.tsz };
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof g_lamps.lu, RING_ALIGN, &buf, &off), g_lamps.lu, sizeof g_lamps.lu);
+    b->bi[2] = (VkDescriptorBufferInfo){ buf, off, sizeof g_lamps.lu };
+    size_t msz = sh ? (size_t)64 * 6 * g_lamps.nsh : 64;
+    memcpy(ring(msz, RING_ALIGN, &buf, &off), g_lamps.shm, msz);
+    b->bi[3] = (VkDescriptorBufferInfo){ buf, off, msz };
+    GfxTex *cm = sh ? g_lamps.lsm : g_lamps.dummy, *zm = zs ? g_lamps.zlsm : g_lamps.dummy;
+    b->ii[0] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, cm->view, VK_IMAGE_LAYOUT_GENERAL };
+    b->ii[1] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, zm->view, VK_IMAGE_LAYOUT_GENERAL };
+    b->ii[2] = (VkDescriptorImageInfo){ g_lamps.cmp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+    cm->used = zm->used = g_serial;
+    cm->rec = zm->rec = g_cb_index;
+    return 1;
+}
+
+static uint32_t lamps_writes(VkWriteDescriptorSet* w, const LampBind* b)
+{
+    world_write(&w[0], W_LL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &b->bi[0], NULL);
+    world_write(&w[1], W_TL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &b->bi[1], NULL);
+    world_write(&w[2], W_LU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &b->bi[2], NULL);
+    world_write(&w[3], W_LSMM, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &b->bi[3], NULL);
+    world_write(&w[4], W_LSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &b->ii[0]);
+    world_write(&w[5], W_ZLSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &b->ii[1]);
+    world_write(&w[6], W_LCS, VK_DESCRIPTOR_TYPE_SAMPLER, NULL, &b->ii[2]);
+    return 7;
+}
+
+/* a zone batch's opaque items and their world matrices, kept for lamp_zone_cubes at the frame's end (a frame draws the
+ * zone in several batches) */
+static void lamp_zone_collect(const GfxWorldFrame* f)
+{
+    if (g_fxs.scene_lamp_zone <= 0.0f || g_fxs.scene_lamp_shadows <= 0.0f || !f->nitem || !f->ninst)
+        return;
+    if (g_lamps.zc_serial != g_serial)
+        g_lamps.nzi = g_lamps.nzw = 0, g_lamps.zc_serial = g_serial;
+    if (g_lamps.nzw + f->ninst > g_lamps.czw)
+    {
+        uint32_t c = g_lamps.czw ? g_lamps.czw : 256;
+        while (c < g_lamps.nzw + f->ninst)
+            c *= 2;
+        float (*w)[16] = (float (*)[16])realloc(g_lamps.zw, (size_t)c * sizeof *w);
+        if (!w)
+            return;
+        g_lamps.zw = w, g_lamps.czw = c;
+    }
+    if (g_lamps.nzi + f->nitem > g_lamps.czi)
+    {
+        uint32_t c = g_lamps.czi ? g_lamps.czi : 1024;
+        while (c < g_lamps.nzi + f->nitem)
+            c *= 2;
+        LampZoneItem* v = (LampZoneItem*)realloc(g_lamps.zi, (size_t)c * sizeof *v);
+        if (!v)
+            return;
+        g_lamps.zi = v, g_lamps.czi = c;
+    }
+    uint32_t base = g_lamps.nzw;
+    for (uint32_t i = 0; i < f->ninst; ++i)
+        memcpy(g_lamps.zw[base + i], f->inst[i].world, 64);
+    g_lamps.nzw += f->ninst;
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxWorldItem* it = &f->item[i];
+        if (!it->vb || !it->count || it->inst >= f->ninst || (it->flags & GFX_WORLD_BLEND))
+            continue;
+        LampZoneItem* o = &g_lamps.zi[g_lamps.nzi++];
+        int at = (it->flags & GFX_WORLD_ATEST) && it->tex && it->tex->type == GFX_TEX_2D;
+        o->vb = it->vb->b, o->tex = at ? it->tex->view : VK_NULL_HANDLE, o->samp = at ? sampler(&it->samp) : VK_NULL_HANDLE;
+        o->first = it->first, o->count = it->count, o->prim = it->prim, o->inst = base + it->inst;
+        it->vb->used = g_serial;
+        if (at)
+            it->tex->used = g_serial;
+    }
+}
+
+/* the characters' shadows from the nearest lamps (scene_lamp_shadows): a cube each (six layers of lsm) at the frame's
+ * end, of the frame's characters within its reach (gfx_metal.m's, a pass a layer as the cascades' are here) */
+static void lamp_shadows_draw(const GfxCharFrame* cf)
+{
+    g_lamps.nsh = 0;
+    int want = (int)g_fxs.scene_lamp_shadows;
+    want = want < 0 ? 0 : want > 4 ? 4 : want;
+    if (g_fxs.scene_lamps <= 0.0f || !want || g_lamps.set != g_serial || !g_lamps.n || !g_shd.nitems || !g_shd.chars || !cf->nbones)
+        return;
+    uint32_t size = (uint32_t)g_fxs.scene_lamp_shadow_size;
+    size = size < 64 ? 64 : size > 1024 ? 1024 : size;
+    if (!g_lamps.lsm || g_lamps.lsize != size)
+    {
+        end_pass();
+        gfx_tex_destroy(g_lamps.lsm);
+        g_lamps.lsm = tex_array(VK_FORMAT_D16_UNORM, size, 24);
+        g_lamps.lsize = size;
+        if (!g_lamps.lsm)
+            return;
+    }
+    /* the nearest lamps to the camera with a character within their reach */
+    float best[4] = { 1e30f, 1e30f, 1e30f, 1e30f };
+    int pick[4] = { -1, -1, -1, -1 };
+    for (uint32_t i = 0; i < g_lamps.n; ++i)
+    {
+        const GfxWorldLight* l = &g_lamps.l[i];
+        float r = l->pos[3] + 1.5f;
+        int near = 0;
+        for (uint32_t k = 0; k < g_shd.nitems && !near; ++k)
+        {
+            const float* a = g_shd.items[k].at;
+            float dx = a[0] - l->pos[0], dy = a[1] - l->pos[1], dz = a[2] - l->pos[2];
+            near = dx * dx + dy * dy + dz * dz < r * r;
+        }
+        if (!near)
+            continue;
+        float cx = l->pos[0] - g_lamps.cam[0], cy = l->pos[1] - g_lamps.cam[1], cz = l->pos[2] - g_lamps.cam[2];
+        float d = cx * cx + cy * cy + cz * cz;
+        for (int j = 0; j < want; ++j)
+            if (d < best[j])
+            {
+                for (int m = want - 1; m > j; --m)
+                    best[m] = best[m - 1], pick[m] = pick[m - 1];
+                best[j] = d, pick[j] = (int)i;
+                break;
+            }
+    }
+    static const float AX[6][3][3] = { /* each face: right, up, forward */
+        { { 0, 0, -1 }, { 0, -1, 0 }, { 1, 0, 0 } },  { { 0, 0, 1 }, { 0, -1, 0 }, { -1, 0, 0 } },
+        { { 1, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 } },    { { 1, 0, 0 }, { 0, 0, -1 }, { 0, -1, 0 } },
+        { { 1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } },   { { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, -1 } } };
+    uint32_t ns = 0;
+    for (int j = 0; j < want && pick[j] >= 0; ++j, ++ns)
+    {
+        const GfxWorldLight* l = &g_lamps.l[pick[j]];
+        memcpy(g_lamps.shpos[ns], l->pos, 16);
+        float n = 0.05f, f = fmaxf(l->pos[3], 0.5f), A = f / (f - n), B = -n * f / (f - n);
+        for (int fc = 0; fc < 6; ++fc)
+        {
+            const float* R = AX[fc][0];
+            const float* U = AX[fc][1];
+            const float* F = AX[fc][2];
+            float* M = g_lamps.shm[ns * 6 + fc];
+            memset(M, 0, 64);
+            float lr = R[0] * l->pos[0] + R[1] * l->pos[1] + R[2] * l->pos[2];
+            float lu = U[0] * l->pos[0] + U[1] * l->pos[1] + U[2] * l->pos[2];
+            float lf = F[0] * l->pos[0] + F[1] * l->pos[1] + F[2] * l->pos[2];
+            for (int a = 0; a < 3; ++a)
+                M[4 * a + 0] = R[a], M[4 * a + 1] = U[a], M[4 * a + 2] = F[a] * A, M[4 * a + 3] = F[a];
+            M[12] = -lr, M[13] = -lu, M[14] = -lf * A + B, M[15] = -lf;
+        }
+    }
+    if (!ns)
+        return;
+    VkBuffer pb, sb, buf;
+    VkDeviceSize po, so, off;
+    size_t psz = (size_t)cf->nbones * 64, ssz = (size_t)cf->nstate * sizeof(GfxCharState);
+    memcpy(ring(psz, RING_ALIGN, &pb, &po), cf->palette, psz);
+    memcpy(ring(ssz, RING_ALIGN, &sb, &so), cf->state, ssz);
+    uint32_t drawn = 0;
+    for (uint32_t layer = 0; layer < 6 * ns; ++layer)
+    {
+        const float* Lp = g_lamps.shpos[layer / 6];
+        float r = Lp[3] + 1.5f;
+        int ts = shadow_pass_begin(g_lamps.lsm, layer, GFX_PASS_LAMPS);
+        VkCommandBuffer cb = g_cb;
+        vkCmdSetDepthBias(cb, 2.0f, 0.0f, 2.0f);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shd.chars);
+        float cu[20];
+        memcpy(cu, g_lamps.shm[layer], 64);
+        cu[16] = cf->alpha_ref, cu[17] = cu[18] = cu[19] = 0.0f;
+        memcpy(ring(sizeof cu, RING_ALIGN, &buf, &off), cu, sizeof cu);
+        VkDescriptorBufferInfo bi[5];
+        bi[0] = (VkDescriptorBufferInfo){ buf, off, sizeof cu };
+        bi[1] = (VkDescriptorBufferInfo){ pb, po, psz };
+        bi[2] = (VkDescriptorBufferInfo){ sb, so, ssz };
+        int topo = -1;
+        for (uint32_t i = 0; i < g_shd.nitems; ++i)
+        {
+            const ShItem* it = &g_shd.items[i];
+            float dx = it->at[0] - Lp[0], dy = it->at[1] - Lp[1], dz = it->at[2] - Lp[2];
+            if (dx * dx + dy * dy + dz * dz > r * r)
+                continue;
+            int strip = it->prim == GFX_TRIANGLESTRIP;
+            if (strip != topo)
+                vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+            bi[3] = (VkDescriptorBufferInfo){ it->vb, 0, VK_WHOLE_SIZE };
+            bi[4] = (VkDescriptorBufferInfo){ it->uv, 0, VK_WHOLE_SIZE };
+            VkDescriptorImageInfo ii = { it->samp, it->tex, VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet w[6];
+            world_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+            world_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+            world_write(&w[2], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+            world_write(&w[3], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
+            world_write(&w[4], W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[4], NULL);
+            world_write(&w[5], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+            p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 6, w);
+            struct
+            {
+                float params[4];
+                uint32_t palette, state, mirror, pad;
+            } pc = { { cf->alpha_ref, 0.0f, 0.0f, 0.0f }, it->palette, it->state, it->mirror, 0 };
+            vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+            vkCmdBindIndexBuffer(cb, it->ib, 0, it->index_size == 4 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(cb, vertex_count(it->prim, it->count), 1, it->first, 0, 0);
+            ++drawn;
+        }
+        shadow_pass_end(ts);
+    }
+    g_cmd_draws += drawn;
+    g_lamps.nsh = ns, g_lamps.sh_serial = g_serial;
+}
+
+/* the frame's zone into the cubes of the lamps lamp_shadows_draw just took, when they changed or every 600 frames; read
+ * from the next frame on. The zone is what the game drew this frame: none of what lies out of its view */
+static void lamp_zone_cubes(void)
+{
+    if (!g_lamps.nsh || g_lamps.sh_serial != g_serial || g_lamps.zc_serial != g_serial || !g_lamps.nzi || !g_shd.zone[0] ||
+        !g_shd.zone[1])
+        return;
+    int same = g_lamps.zn == g_lamps.nsh && g_lamps.z_serial && g_serial - g_lamps.z_serial < 600 &&
+        !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
+    if (same)
+        return;
+    uint32_t size = g_lamps.lsize;
+    if (!g_lamps.zlsm || g_lamps.zlsm->w != size)
+    {
+        end_pass();
+        gfx_tex_destroy(g_lamps.zlsm);
+        g_lamps.zlsm = tex_array(VK_FORMAT_D32_SFLOAT, size, 24);
+        if (!g_lamps.zlsm)
+            return;
+    }
+    VkBuffer wb, buf;
+    VkDeviceSize wo, off;
+    size_t wsz = (size_t)g_lamps.nzw * 64;
+    memcpy(ring(wsz, RING_ALIGN, &wb, &wo), g_lamps.zw, wsz);
+    uint32_t drawn = 0;
+    for (uint32_t layer = 0; layer < 6 * g_lamps.nsh; ++layer)
+    {
+        const float* L = g_lamps.shpos[layer / 6];
+        float reach = L[3] + 40.0f;
+        int ts = shadow_pass_begin(g_lamps.zlsm, layer, GFX_PASS_LAMPS);
+        VkCommandBuffer cb = g_cb;
+        float cu[20];
+        memcpy(cu, g_lamps.shm[layer], 64);
+        cu[16] = cu[17] = cu[18] = cu[19] = 0.0f;
+        memcpy(ring(sizeof cu, RING_ALIGN, &buf, &off), cu, sizeof cu);
+        VkDescriptorBufferInfo bi[3];
+        bi[0] = (VkDescriptorBufferInfo){ buf, off, sizeof cu };
+        bi[1] = (VkDescriptorBufferInfo){ wb, wo, wsz };
+        int cur = -1, topo = -1;
+        for (uint32_t i = 0; i < g_lamps.nzi; ++i)
+        {
+            const LampZoneItem* it = &g_lamps.zi[i];
+            const float* w = g_lamps.zw[it->inst];
+            float dx = w[12] - L[0], dy = w[13] - L[1], dz = w[14] - L[2];
+            if (dx * dx + dy * dy + dz * dz > reach * reach)
+                continue;
+            int at = it->tex != VK_NULL_HANDLE;
+            if (at != cur)
+                vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shd.zone[at]), cur = at;
+            int strip = it->prim == GFX_TRIANGLESTRIP;
+            if (strip != topo)
+                vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+            bi[2] = (VkDescriptorBufferInfo){ it->vb, 0, VK_WHOLE_SIZE };
+            VkDescriptorImageInfo ii = { it->samp, it->tex, VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet wr[4];
+            world_write(&wr[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+            world_write(&wr[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+            world_write(&wr[2], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+            if (at)
+                world_write(&wr[3], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+            p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, at ? 4 : 3, wr);
+            vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &it->inst);
+            vkCmdDraw(cb, vertex_count(it->prim, it->count), 1, it->first, 0);
+            ++drawn;
+        }
+        shadow_pass_end(ts);
+    }
+    g_cmd_draws += drawn;
+    memcpy(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos);
+    g_lamps.zn = g_lamps.nsh, g_lamps.z_serial = g_serial;
+}
+
+/* the lamps' glows (scene_lamp_glow): a soft sprite at each lamp, its own colour, hidden by what stands in front of it
+ * (the scene's depth, softly), faded with distance; added to the scene (gfx_metal.m's lamp_glow_vs/fs). GLU in W_FRAME,
+ * the lamps in W_LL, the depth in W_TEX */
+static const char GLOW_GLSL[] =
+    "struct GLL { vec4 pos, col, att, amb; };\n"
+    "layout(std140, set = 0, binding = 0) uniform GLU { mat4 vp; vec4 p; vec4 cam; vec4 zp; vec4 vpr; vec4 pr; } G;\n"
+    "#ifdef GFX_VS\n"
+    "layout(std430, set = 0, binding = 15) readonly buffer LLB { GLL LS[]; };\n"
+    "layout(location = 0) out vec2 o_c;\n"
+    "layout(location = 1) flat out vec3 o_col;\n"
+    "layout(location = 2) flat out float o_lz;\n"
+    "void main() {\n"
+    "  GLL l = LS[gl_InstanceIndex];\n"
+    "  vec2 c = vec2((gl_VertexIndex & 1) != 0 ? 1.0 : -1.0, (gl_VertexIndex & 2) != 0 ? 1.0 : -1.0);\n"
+    "  vec4 q = G.vp * vec4(l.pos.xyz, 1.0);\n"
+    "  float dist = length(l.pos.xyz - G.cam.xyz);\n"
+    "  float fade = clamp(1.0 - dist / G.p.z, 0.0, 1.0) * step(0.3, q.w);\n"
+    "  float size = G.p.x * clamp(l.pos.w / 8.0, 0.5, 2.0);\n"
+    "  gl_Position = q + vec4(c * size * G.pr.xy, 0.0, 0.0);\n"
+    "  if (fade <= 0.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n" /* (off screen) */
+    "  o_c = c;\n"
+    "  o_col = l.col.rgb * (G.p.y * fade);\n"
+    "  o_lz = q.w;\n"
+    "}\n"
+    "#else\n"
+    "layout(set = 0, binding = 4) uniform sampler2D dt;\n"
+    "layout(location = 0) in vec2 i_c;\n"
+    "layout(location = 1) flat in vec3 i_col;\n"
+    "layout(location = 2) flat in float i_lz;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "void main() {\n"
+    "  float r2 = dot(i_c, i_c);\n"
+    "  if (r2 >= 1.0) discard;\n"
+    "  float d = texelFetch(dt, ivec2(gl_FragCoord.xy), 0).x;\n"
+    "  float dn = (d - G.zp.z) / max(G.zp.w - G.zp.z, 1e-6);\n"
+    "  float sz = dn >= 0.999999 ? 1e6 : abs(G.zp.y / (dn * G.pr.z - G.zp.x));\n" /* the scene's view depth here */
+    "  float vis = clamp((sz - i_lz) / max(G.p.x, 0.1) + 1.0, 0.0, 1.0);\n"
+    "  float f = exp(-r2 * 5.0) - 0.0067;\n"
+    "  oc = vec4(i_col * (f * vis), 1.0);\n"
+    "}\n"
+    "#endif\n";
+
+/* the lamps' glows onto the finished scene (color, its depth), before what takes the scene from here (the effects'
+ * bloom, as Metal's post effects do); the viewport in the target */
+static void post_lamp_glows(GfxTex* color, const GfxScene* s, GfxTex* depth, float vx, float vy, float vw, float vh)
+{
+    if (g_fxs.scene_lamps <= 0.0f || g_fxs.scene_lamp_glow <= 0.0f || g_lamps.binned != g_serial || !g_lamps.n || !g_lamps.lb ||
+        !world_init())
+        return;
+    int hdr = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (!g_world.glow[hdr])
+    {
+        static VkShaderModule vs, fs;
+        if (!vs)
+            vs = compile_glsl(GLOW_GLSL, 0), fs = compile_glsl(GLOW_GLSL, 1);
+        if (!vs || !fs)
+            return;
+        VkPipelineColorBlendAttachmentState b = { 0 };
+        b.colorWriteMask = 0xF;
+        b.blendEnable = VK_TRUE;
+        b.colorBlendOp = b.alphaBlendOp = VK_BLEND_OP_ADD;
+        b.srcColorBlendFactor = VK_BLEND_FACTOR_ONE, b.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        b.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, b.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        g_world.glow[hdr] = make_pipeline(vs, fs, g_world.layout, &b, color->vf, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_POLYGON_MODE_FILL, dyn, 2, 0);
+        if (!g_world.glow[hdr])
+        {
+            fprintf(stderr, "[recomp] gfx: lamp glows failed\n");
+            return;
+        }
+    }
+    float minz, maxz;
+    memcpy(&minz, &s->vp[4], 4);
+    memcpy(&maxz, &s->vp[5], 4);
+    if (maxz <= minz)
+        minz = 0, maxz = 1;
+    struct
+    {
+        float vp[16], p[4], cam[4], zp[4], vpr[4], pr[4];
+    } u = { { 0 } };
+    memcpy(u.vp, g_lamps.vp, 64);
+    u.p[0] = fmaxf(g_fxs.scene_lamp_glow_size, 0.05f), u.p[1] = g_fxs.scene_lamp_glow, u.p[2] = fmaxf(g_fxs.scene_lamp_far, 1.0f);
+    memcpy(u.cam, g_lamps.cam, 12);
+    u.zp[0] = s->proj[10], u.zp[1] = s->proj[14], u.zp[2] = minz, u.zp[3] = maxz;
+    u.vpr[0] = vx, u.vpr[1] = vy, u.vpr[2] = vw, u.vpr[3] = vh;
+    u.pr[0] = s->proj[0], u.pr[1] = s->proj[5], u.pr[2] = s->proj[11] < 0.0f ? -1.0f : 1.0f;
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    ca.imageView = attachment_view(color, 0, 0);
+    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ color->w, color->h };
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    int ts = ts_begin(cb, GFX_PASS_LAMPS);
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport v = { vx, vy + vh, vw, -vh, 0, 1 }; /* y up, as the game's draws (set_viewport) */
+    VkRect2D sc = { { 0, 0 }, { color->w, color->h } };
+    vkCmdSetViewport(cb, 0, 1, &v);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.glow[hdr]);
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof u, RING_ALIGN, &buf, &off), &u, sizeof u);
+    VkDescriptorBufferInfo bi[2] = { { buf, off, sizeof u }, { g_lamps.lb, g_lamps.lo, g_lamps.lsz } };
+    if (!g_sao.near)
+    {
+        VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_sao.near));
+    }
+    VkDescriptorImageInfo ii = { g_sao.near, depth->view, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w[3];
+    world_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+    world_write(&w[1], W_LL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+    world_write(&w[2], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 3, w);
+    vkCmdDraw(cb, 4, g_lamps.n, 0, 0);
+    vkCmdEndRendering(cb);
+    ts_end(cb, ts);
+    g_dirty = 1;
+    g_bound = VK_NULL_HANDLE;
+    color->used = depth->used = g_serial;
+    color->rec = depth->rec = g_cb_index;
+}
+
+/* the glows from the scene's own: its viewport and depth, as Metal's post effects take them */
+static void scene_lamp_glows(GfxTex* color, const GfxScene* s)
+{
+    if (g_fxs.scene_lamps <= 0.0f || g_fxs.scene_lamp_glow <= 0.0f || g_lamps.binned != g_serial)
+        return;
+    flush_pass();
+    GfxTex* depth = color->depth_world ? color->depth_world : color->depth_seen;
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > color->w || vy + vh > color->h)
+        vx = vy = 0, vw = (float)color->w, vh = (float)color->h;
+    if (depth && depth->w == color->w && depth->h == color->h && s->proj[11] != 0.0f)
+        post_lamp_glows(color, s, depth, vx, vy, vw, vh);
+}
+
 int gfx_world_draw(const GfxWorldFrame* f)
 {
     if (!g_dev || !f->nitem || !world_init())
@@ -5802,6 +7115,16 @@ int gfx_world_draw(const GfxWorldFrame* f)
     int shadow = shadow_uniforms(&bi[4]);
     world_state(depth);
     int pixel = f->mode == 2;
+    VkDescriptorBufferInfo abi, sbi;
+    VkDescriptorImageInfo aii;
+    ao_note(f, depth);
+    int ao = ao_uniforms(&abi);
+    int spec = spec_uniforms(shadow && pixel, &sbi);
+    LampBind lb;
+    int lamps = pixel && lamps_bind(&lb, f->view, f->proj, f->vp);
+    if (lamps)
+        lamp_zone_collect(f);
+    uint32_t wk = (pixel ? WK_PIXEL : 0) | (shadow ? WK_SHADOW : 0) | (ao ? WK_AO : 0) | (spec ? WK_SPEC : 0) | (lamps ? WK_LAMPS : 0);
     VkPipeline cur = VK_NULL_HANDLE;
     int cull = -1, bias = INT_MIN, write = -1, topo = -1;
     for (uint32_t i = 0; i < f->nitem; ++i)
@@ -5810,7 +7133,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
         if (!it->vb || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
             continue;
         int blend = (it->flags & GFX_WORLD_BLEND) != 0;
-        VkPipeline p = world_pipeline(0, pixel, (it->flags & GFX_WORLD_ATEST) != 0, blend, shadow, depth);
+        VkPipeline p = world_pipeline(0, wk | ((it->flags & GFX_WORLD_ATEST) ? WK_ATEST : 0), blend, depth);
         if (!p)
             continue;
         if (p != cur)
@@ -5833,13 +7156,19 @@ int gfx_world_draw(const GfxWorldFrame* f)
             sk.min = 3, sk.mip = 2, sk.max_aniso = (uint8_t)(g_fxs.aniso > 16.0f ? 16.0f : g_fxs.aniso);
         VkDescriptorImageInfo ii = { sampler(&sk), it->tex->view, VK_IMAGE_LAYOUT_GENERAL }, si[5];
         bi[3] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
-        VkWriteDescriptorSet w[11];
+        VkWriteDescriptorSet w[W_COUNT];
         world_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
         world_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
         world_write(&w[2], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
         world_write(&w[3], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
         world_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
         uint32_t nw = 5 + (shadow ? shadow_writes(&w[5], &bi[4], si) : 0);
+        if (ao)
+            nw += ao_writes(&w[nw], &abi, &aii);
+        if (spec)
+            world_write(&w[nw++], W_SP, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &sbi, NULL);
+        if (lamps)
+            nw += lamps_writes(&w[nw], &lb);
         p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
         uint32_t dc[2] = { it->inst, it->flags };
         vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof dc, dc);
@@ -5873,9 +7202,14 @@ int gfx_chars_draw(const GfxCharFrame* f)
     }
     GfxTex* depth = depth_attachment();
     int drew = 0;
-    VkDescriptorBufferInfo bi[5];
+    VkDescriptorBufferInfo bi[5], abi, sbi;
+    VkDescriptorImageInfo aii;
     int shadow = shadow_uniforms(&bi[4]);
-    VkPipeline p = world_pipeline(1, 0, 1, 0, shadow, depth);
+    int ao = ao_uniforms(&abi);
+    int spec = spec_uniforms(shadow, &sbi);
+    LampBind lb;
+    int lamps = lamps_bind(&lb, NULL, NULL, NULL);
+    VkPipeline p = world_pipeline(1, (shadow ? WK_SHADOW : 0) | (ao ? WK_AO : 0) | (spec ? WK_SPEC : 0) | (lamps ? WK_LAMPS : 0), 0, depth);
     if (!p || !set_viewport(f->vp))
         goto done;
     VkCommandBuffer cb = g_cb;
@@ -5909,13 +7243,19 @@ int gfx_chars_draw(const GfxCharFrame* f)
         VkDescriptorImageInfo ii = { sampler(&it->samp), it->tex->view, VK_IMAGE_LAYOUT_GENERAL }, si[5];
         bi[2] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
         bi[3] = (VkDescriptorBufferInfo){ it->uv->b, 0, VK_WHOLE_SIZE };
-        VkWriteDescriptorSet w[11];
+        VkWriteDescriptorSet w[W_COUNT];
         world_write(&w[0], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[0], NULL);
         world_write(&w[1], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
         world_write(&w[2], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
         world_write(&w[3], W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
         world_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
         uint32_t nw = 5 + (shadow ? shadow_writes(&w[5], &bi[4], si) : 0);
+        if (ao)
+            nw += ao_writes(&w[nw], &abi, &aii);
+        if (spec)
+            world_write(&w[nw++], W_SP, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &sbi, NULL);
+        if (lamps)
+            nw += lamps_writes(&w[nw], &lb);
         p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
         pc.palette = it->palette, pc.state = it->state, pc.mirror = it->mirror;
         if (shadow)
@@ -6542,8 +7882,10 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
         return;
+    ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
+    scene_lamp_glows(color, s);
     scene_aa(color, s);
 }
 
