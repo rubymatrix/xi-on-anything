@@ -32,7 +32,9 @@
  * (LAMP_GLSL: the tiles, the cubes at the frame's end beside the characters' shadow layers, the
  * glows) are Metal's as well, and so are the post effects on the finished scene - bloom (the scene's additive draws
  * recorded and drawn again: glow_new), depth of field and sun shafts (POST_GLSL, SHAFT_GLSL) - and the HDR scene
- * (scene_hdr: the world target made float in place, one tonemap). */
+ * (scene_hdr: the world target made float in place, one tonemap). Its bounce light (gfx_gi_zone, gfx_gi_frame) is
+ * Metal's probes as compute passes with ray queries (GI_KERNELS_GLSL), read by the zone and characters (GI_GLSL); the
+ * occlusion's rays trace the same structure. */
 #include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
 
 #include <SDL3/SDL.h>
@@ -4906,6 +4908,76 @@ int gfx_rt_supported(void) { return rt_init(); }
     "}\n"                                                                                                             \
     "#endif\n"
 
+/* the bounce light, the shading's side (gfx_gi_msl.h's GI_MSL and its notes; what the probes are: GI_KERNELS_GLSL),
+ * in the zone's and characters' functions and the probes' own kernels, which say where it is bound (GI_B_*) and
+ * whether PS is written (GI_PS_Q). gi_at: the probes at P (normal N): rgb the bounce light (not scaled by strength), a
+ * what the ambient is multiplied by (1 outside the grid). GLSL's % is undefined for negative operands: gi_slot wraps
+ * with floor */
+#define GI_OCT_GLSL                                                                                                   \
+    "float gi_sgn(float v) { return v >= 0.0 ? 1.0 : -1.0; }\n"                                                       \
+    "vec2 gi_oct(vec3 n) {\n"                                                                                         \
+    "  n /= abs(n.x) + abs(n.y) + abs(n.z);\n"                                                                        \
+    "  return n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(gi_sgn(n.x), gi_sgn(n.y));\n"                              \
+    "}\n"                                                                                                             \
+    "vec3 gi_unoct(vec2 e) {\n"                                                                                       \
+    "  vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));\n"                                                                \
+    "  if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(gi_sgn(v.x), gi_sgn(v.y));\n"                                   \
+    "  return normalize(v);\n"                                                                                        \
+    "}\n"
+#define GI_GLSL                                                                                                       \
+    "layout(std140, set = 0, binding = GI_B_GU) uniform GUB { vec4 org; ivec4 base; ivec4 dims; vec4 k; vec4 inv; vec4 tr; uvec4 n;\n" \
+    "  vec4 sun_dir, sun_col, sun2_dir, sun2_col, amb; mat4 rot; } G;\n"                                             \
+    "layout(std430, set = 0, binding = GI_B_PS) GI_PS_Q buffer GPSB { uint PS[]; };\n"                               \
+    "layout(set = 0, binding = GI_B_IR) uniform sampler2D gir;\n"                                                    \
+    "layout(set = 0, binding = GI_B_DS) uniform sampler2D gid;\n"                                                    \
+    GI_OCT_GLSL                                                                                                       \
+    "ivec3 gi_slot(ivec3 c) { return c - G.dims.xyz * ivec3(floor(vec3(c) / vec3(G.dims.xyz))); }\n"                  \
+    "uint gi_index(ivec3 s) { return uint(s.x + G.dims.x * (s.y + G.dims.y * s.z)); }\n"                              \
+    /* a probe's map (n texels inside a border of one) at direction d, in the atlas's uv */                           \
+    "vec2 gi_uv(ivec3 s, vec3 d, float n, vec2 inv) {\n"                                                              \
+    "  vec2 t = vec2(float(s.x + G.dims.x * s.y), float(s.z)) * (n + 2.0) + 1.0 + (gi_oct(d) * 0.5 + 0.5) * n;\n"     \
+    "  return t * inv;\n"                                                                                             \
+    "}\n"                                                                                                             \
+    "vec4 gi_at(vec3 P, vec3 N) {\n"                                                                                  \
+    "  float sp = G.org.w;\n"                                                                                         \
+    "  vec3 Pb = P + N * G.k.w;\n" /* off the surface, so its own probes' near hits don't shade it */                 \
+    "  vec3 g = Pb / sp, fl = floor(g), f = g - fl;\n"                                                                \
+    "  ivec3 i0 = ivec3(fl);\n"                                                                                       \
+    "  vec3 sum = vec3(0.0);\n"                                                                                       \
+    "  float sky = 0.0, ws = 0.0;\n"                                                                                  \
+    "  for (int c = 0; c < 8; ++c) {\n"                                                                               \
+    "    ivec3 o = ivec3(c & 1, (c >> 1) & 1, c >> 2), pc = i0 + o, rel = pc - G.base.xyz;\n"                         \
+    "    if (any(lessThan(rel, ivec3(0))) || any(greaterThanEqual(rel, G.dims.xyz))) continue;\n"                     \
+    "    ivec3 s = gi_slot(pc);\n"                                                                                    \
+    "    if ((PS[gi_index(s)] & 3u) != 1u) continue;\n" /* traced, and not inside something */                       \
+    "    vec3 tw = mix(1.0 - f, f, vec3(o));\n"                                                                       \
+    "    float w = tw.x * tw.y * tw.z;\n"                                                                             \
+    "    vec3 dv = vec3(pc) * sp - Pb;\n"                                                                             \
+    "    float dl = length(dv);\n"                                                                                    \
+    "    vec3 dn = dl > 1e-4 ? dv / dl : N;\n"                                                                        \
+    "    float wb = (dot(dn, N) + 1.0) * 0.5;\n" /* probes behind the surface count less */                          \
+    "    w *= wb * wb + 0.2;\n"                                                                                       \
+    "    vec2 m = textureLod(gid, gi_uv(s, -dn, 14.0, G.inv.zw), 0.0).rg;\n"                                         \
+    "    if (dl > m.x) {\n" /* the probe sees something nearer than this point that way: it is likely hidden */     \
+    "      float v = abs(m.y - m.x * m.x), t = dl - m.x, ch = v / (v + t * t);\n"                                     \
+    "      w *= max(ch * ch * ch, 0.05);\n"                                                                           \
+    "    }\n"                                                                                                         \
+    "    if (w < 0.2) w *= w * w * 25.0;\n"                                                                           \
+    "    vec4 e = textureLod(gir, gi_uv(s, N, 6.0, G.inv.xy), 0.0);\n"                                               \
+    "    sum += e.rgb * w;\n"                                                                                         \
+    "    sky += e.a * w;\n"                                                                                           \
+    "    ws += w;\n"                                                                                                  \
+    "  }\n"                                                                                                           \
+    "  if (ws <= 1e-5) return vec4(0.0, 0.0, 0.0, 1.0);\n"                                                            \
+    "  vec3 r = g - vec3(G.base.xyz), e3 = min(r, vec3(G.dims.xyz - 1) - r);\n"                                       \
+    "  float fade = clamp(min(e3.x, min(e3.y, e3.z)) * 0.5, 0.0, 1.0);\n" /* the grid's last two cells fade out */   \
+    "  return vec4(sum / ws * fade, mix(1.0, mix(1.0, sky / ws, G.k.y), fade));\n"                                    \
+    "}\n"
+
+/* where the zone's and characters' functions take the bounce light (W_GU..W_GID) */
+#define GI_SHADE_GLSL                                                                                                 \
+    "#define GI_B_GU 22\n#define GI_B_PS 23\n#define GI_B_IR 24\n#define GI_B_DS 25\n#define GI_PS_Q readonly\n" GI_GLSL
+
 /* --- the scene renderer's zone (gfx_world_draw, gfx.h) --------------------------------------------------------------
  * gfx_metal.m's WORLD_MSL: D3D's fixed function as the game lights its zone, COLORVERTEX with the vertex colour as
  * diffuse and ambient reflectance, the sun (and moon) and the instance's four point lights, then MODULATE2X and
@@ -4913,8 +4985,8 @@ int gfx_rt_supported(void) { return rt_init(); }
  * shades the directional light along the shadows' (the sun's or the moon's) with them. The vertices are the game's own
  * buffers, fetched as the generated functions fetch theirs (36 bytes: position, normal, D3DCOLOR, uv); the instance
  * (inst) and its flags are push constants. W_AO takes the occlusion from the ambient, W_SPEC adds the highlights (with
- * W_SHADOW), W_LAMPS lights every lamp per pixel in place of the instance's four point lights (with W_PIXEL); the bounce
- * light (Metal's last function constant) is not here yet. */
+ * W_SHADOW), W_LAMPS lights every lamp per pixel in place of the instance's four point lights (with W_PIXEL), W_GI adds
+ * the bounce light to the ambient (per vertex, or per pixel at its quality 3 in scene 2). */
 static const char WORLD_GLSL[] =
     "#define sat(x) clamp(x, 0.0, 1.0)\n"
     "layout(std140, set = 0, binding = 0) uniform WF { mat4 vp; vec4 params; } F;\n" /* params: alpha reference 0..255, the pixel-centre fixup */
@@ -4938,12 +5010,16 @@ static const char WORLD_GLSL[] =
     "#if W_LAMPS\n"
     LAMP_GLSL
     "#endif\n"
+    "#if W_GI\n"
+    GI_SHADE_GLSL
+    "#endif\n"
     /* saturate(vc * (ambient + each light's ambient) + vc * sum of N.L x diffuse) without the saturate, and without the
      * directional light along sd, which goes into sun: saturate(the two's sum) is D3D's. lmp: the point lights' share,
      * which fills the sun's (the moon's) shadow (shadow_fill); amb: the ambient's, which the occlusion scales. With
-     * W_LAMPS the point lights are the lamps', every one, per pixel (lamp_light) */
-    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, out vec3 sun, out vec3 amb, out vec3 lmp) {\n"
-    "  vec3 a = I[D.inst].ambient.rgb, d = vec3(0.0), s = vec3(0.0), pl = vec3(0.0);\n"
+     * W_LAMPS the point lights are the lamps', every one, per pixel (lamp_light). g: the bounce light, added to the
+     * ambient, and what the ambient is multiplied by ((0, 0, 0, 1) without it) */
+    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, vec4 g, out vec3 sun, out vec3 amb, out vec3 lmp) {\n"
+    "  vec3 a = I[D.inst].ambient.rgb * g.a + g.rgb, d = vec3(0.0), s = vec3(0.0), pl = vec3(0.0);\n"
     "  if (I[D.inst].sun_dir.w > 0.0) {\n"
     "    vec3 t = I[D.inst].sun_col.rgb * max(dot(N, I[D.inst].sun_dir.xyz), 0.0);\n"
     "    if (dot(I[D.inst].sun_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
@@ -4985,6 +5061,7 @@ static const char WORLD_GLSL[] =
     "layout(location = 6) out vec3 o_lmp;\n"
     "layout(location = 7) out vec3 o_amb;\n"
     "layout(location = 8) out vec4 o_aop;\n" /* where the occlusion was made: this point through last frame's camera */
+    "layout(location = 9) out vec4 o_gi;\n"
     "void main() {\n"
     "  uint b = uint(gl_VertexIndex) * 9u;\n"
     "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
@@ -5007,8 +5084,12 @@ static const char WORLD_GLSL[] =
     "#else\n"
     "  o_aop = vec4(0.0);\n"
     "#endif\n"
+    "  o_gi = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "#if W_GI\n"
+    "  if (!(W_PIXEL != 0 && G.org.x > 0.5)) { o_gi = gi_at(wp.xyz, normalize(n)); o_gi.rgb *= G.k.x; }\n"
+    "#endif\n"
     "#if !W_PIXEL\n"
-    "  vec3 rest = lit(wp.xyz, n, col.rgb, SD, o_sun, o_amb, o_lmp);\n"
+    "  vec3 rest = lit(wp.xyz, n, col.rgb, SD, o_gi, o_sun, o_amb, o_lmp);\n"
     "  o_col.rgb = W_SHADOW != 0 || W_AO != 0 ? rest : sat(rest + o_sun);\n"
     "#endif\n"
     "}\n"
@@ -5024,13 +5105,18 @@ static const char WORLD_GLSL[] =
     "layout(location = 6) in vec3 i_lmp;\n"
     "layout(location = 7) in vec3 i_amb;\n"
     "layout(location = 8) in vec4 i_aop;\n"
+    "layout(location = 9) in vec4 i_gi;\n"
     "layout(location = 0) out vec4 oc;\n"
     "void main() {\n"
     "  vec3 c = i_col.rgb, sun = i_sun, lmp = i_lmp, amb = i_amb;\n"
     "  float shv = 1.0;\n"
     "  vec3 N = (D.flags & 32u) != 0u ? normalize(i_nrm) : i_nrm;\n"
+    "  vec4 g = i_gi;\n"
+    "#if W_GI && W_PIXEL\n"
+    "  if (G.org.x > 0.5) { g = gi_at(i_wpos, normalize(N)); g.rgb *= G.k.x; }\n"
+    "#endif\n"
     "#if W_PIXEL\n"
-    "  c = lit(i_wpos, N, i_col.rgb, SD, sun, amb, lmp);\n"
+    "  c = lit(i_wpos, N, i_col.rgb, SD, g, sun, amb, lmp);\n"
     "#endif\n"
     "#if W_LAMPS && W_PIXEL\n"
     "  {\n"
@@ -5047,6 +5133,9 @@ static const char WORLD_GLSL[] =
     "    if (A.k.z > 0.5) { oc = vec4(vec3(ao), 1.0); return; }\n"
     "    c -= amb * (1.0 - ao);\n"
     "  }\n"
+    "#endif\n"
+    "#if W_GI\n" /* scene_gi_debug: 1 the bounce light on the vertex colour, 2 the ambient's factor, 3 the bounce x 8 */
+    "  if (G.k.z > 0.5) { oc = vec4(sat(G.k.z > 2.5 ? 8.0 * g.rgb : G.k.z > 1.5 ? vec3(g.a) : 2.0 * i_col.rgb * g.rgb), 1.0); return; }\n"
     "#endif\n"
     "#if W_SHADOW\n"
     "  if (S.cam.w > 1.5) {\n" /* scene_shadow_debug: the shadow, tinted by its cascade; dark facing away */
@@ -5107,8 +5196,9 @@ static const char WORLD_GLSL[] =
  * gfx_metal.m's CHARS_MSL: skinned from the frame's bone palettes (each vertex its bone-space position and normal for
  * two bones, weights applied, and their mirror bones), lit per vertex with D3D's fixed function as the game sets it
  * for a character, then its two texture stages; alpha tested, no culling. W_SHADOW: the sun's (the moon's) light
- * shaded with the shadows, looked up where the character stood when last frame's layers were drawn (lag); W_AO, W_SPEC
- * and W_LAMPS as the zone's (the lamps per pixel, in place of the state's point lights). The vertices (GfxCharVertex)
+ * shaded with the shadows, looked up where the character stood when last frame's layers were drawn (lag); W_AO, W_SPEC,
+ * W_LAMPS and W_GI as the zone's (the lamps per pixel, in place of the state's point lights; the bounce light per
+ * vertex). The vertices (GfxCharVertex)
  * and uvs are storage buffers, the indices the game's own; the palette, state, mirror, lag and the frame's parameters
  * are push constants. */
 static const char CHARS_GLSL[] =
@@ -5133,6 +5223,9 @@ static const char CHARS_GLSL[] =
     "#if W_LAMPS\n"
     LAMP_GLSL
     "#endif\n"
+    "#if W_GI\n"
+    GI_SHADE_GLSL
+    "#endif\n"
     "#ifdef GFX_VS\n"
     SKIN_GLSL
     "layout(location = 0) out vec2 o_uv;\n"
@@ -5155,6 +5248,9 @@ static const char CHARS_GLSL[] =
     "  gl_Position.y -= gl_Position.w * D.params.z;\n"
     "  o_uv = uvs[gl_VertexIndex];\n"
     "  vec3 amb = St[D.state].ambient.rgb, dif = vec3(0.0), sun = vec3(0.0);\n"
+    "#if W_GI\n" /* the bounce light */
+    "  { vec4 g = gi_at(wp, wn); amb = amb * g.a + g.rgb * G.k.x; }\n"
+    "#endif\n"
     "  for (int k = 0; k < 4; ++k) {\n"
     "    CL l = St[D.state].light[k];\n"
     "    if (l.dir.w == 0.0) continue;\n"
@@ -5342,7 +5438,11 @@ enum
     W_ZLSM = 19,
     W_LSMM = 20,
     W_LCS = 21,
-    W_COUNT = 22,
+    W_GU = 22, /* the bounce light (GI_SHADE_GLSL): its uniforms, the probes' states, the atlases */
+    W_GPS = 23,
+    W_GIR = 24,
+    W_GID = 25,
+    W_COUNT = 26,
 };
 
 static struct
@@ -5350,15 +5450,15 @@ static struct
     int tried, ok;
     VkDescriptorSetLayout dsl;
     VkPipelineLayout layout;
-    /* the zone's (by W_PIXEL, W_ATEST, W_SHADOW, W_AO, W_SPEC, W_LAMPS) and the characters' (by W_SHADOW, W_AO, W_SPEC,
-     * W_LAMPS) functions, made on first use: [stage][key] */
-    VkShaderModule mod[2][128];
+    /* the zone's (by W_PIXEL, W_ATEST, W_SHADOW, W_AO, W_SPEC, W_LAMPS, W_GI) and the characters' (by W_SHADOW, W_AO,
+     * W_SPEC, W_LAMPS, W_GI) functions, made on first use: [stage][key] */
+    VkShaderModule mod[2][256];
     VkShaderModule cast[2][2]; /* the casters': [stage][C_CHARS] */
     struct
     {
         uint32_t key[2];
         VkPipeline p;
-    } pipe[128];
+    } pipe[256];
     uint32_t npipe;
     VkPipeline glow[2]; /* the lamps' glows (post_lamp_glows): onto an 8-bit target, a float one */
 } g_world;
@@ -5404,6 +5504,10 @@ static int world_init(void)
     b[W_ZLSM] = (VkDescriptorSetLayoutBinding){ W_ZLSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     b[W_LSMM] = (VkDescriptorSetLayoutBinding){ W_LSMM, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
     b[W_LCS] = (VkDescriptorSetLayoutBinding){ W_LCS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_GU] = (VkDescriptorSetLayoutBinding){ W_GU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    b[W_GPS] = (VkDescriptorSetLayoutBinding){ W_GPS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL };
+    b[W_GIR] = (VkDescriptorSetLayoutBinding){ W_GIR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, both, NULL };
+    b[W_GID] = (VkDescriptorSetLayoutBinding){ W_GID, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, both, NULL };
     VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     dl.bindingCount = W_COUNT;
@@ -5440,6 +5544,7 @@ enum
     WK_AO = 8,
     WK_SPEC = 16,
     WK_LAMPS = 32,
+    WK_GI = 64,
 };
 
 /* one stage of the zone's (chars 0) or the characters' (1) functions, compiled on first use (k: WK_*; the characters'
@@ -5448,12 +5553,14 @@ static VkShaderModule world_module(int chars, uint32_t k, int fragment)
 {
     if (chars)
         k &= ~(uint32_t)(WK_PIXEL | WK_ATEST);
-    VkShaderModule* m = &g_world.mod[fragment][(chars ? 64u : 0u) | k];
+    VkShaderModule* m = &g_world.mod[fragment][(chars ? 128u : 0u) | k];
     if (*m)
         return *m;
-    char d[192];
-    snprintf(d, sizeof d, "#define W_PIXEL %d\n#define W_ATEST %d\n#define W_SHADOW %d\n#define W_AO %d\n#define W_SPEC %d\n#define W_LAMPS %d\n",
-        !!(k & WK_PIXEL), !!(k & WK_ATEST), !!(k & WK_SHADOW), !!(k & WK_AO), !!(k & WK_SPEC), !!(k & WK_LAMPS));
+    char d[224];
+    snprintf(d, sizeof d,
+        "#define W_PIXEL %d\n#define W_ATEST %d\n#define W_SHADOW %d\n#define W_AO %d\n#define W_SPEC %d\n#define W_LAMPS %d\n"
+        "#define W_GI %d\n",
+        !!(k & WK_PIXEL), !!(k & WK_ATEST), !!(k & WK_SHADOW), !!(k & WK_AO), !!(k & WK_SPEC), !!(k & WK_LAMPS), !!(k & WK_GI));
     *m = world_compile(d, chars ? CHARS_GLSL : WORLD_GLSL, fragment);
     if (!*m)
         fprintf(stderr, "[recomp] gfx: scene renderer %s functions failed\n", chars ? "characters'" : "zone's");
@@ -6222,14 +6329,87 @@ static void cam_cut_note(const float* view)
 }
 static int cam_cut(void) { return g_cam_cut == g_serial; }
 
+/* --- the scene renderer's bounce light: its state (gfx_gi_zone, gfx_gi_frame and the kernels further on, by the ray
+ * tracing's helpers), and what the zone's and characters' draws bind of it ---------------------------------------- */
+#define GI_IRR 6 /* texels across a probe's irradiance map, inside its border */
+#define GI_DIS 14 /* its distance map's */
+
+/* GU of GI_GLSL */
+typedef struct GiU
+{
+    float org[4];     /* x 1: looked up per pixel (scene 2), y 1: the shadows' zone layer is there, w: world units between
+                       * probes */
+    int32_t base[4];  /* the grid's lowest cell (world cells); w 1 when the grid is there */
+    int32_t dims[4];  /* cells each way; w all of them */
+    float k[4];       /* strength, the sky's share's hold on the ambient, debug, the shading's normal offset */
+    float inv[4];     /* 1 / the atlases' sizes: irradiance w, h, distance w, h */
+    float tr[4];      /* the rays' reach, hysteresis, the earlier bounces' weight, the ambient's weight at a hit */
+    uint32_t n[4];    /* rays a probe, 1 probe in this many traced an update, this update's phase, lamps */
+    float sun_dir[4], sun_col[4], sun2_dir[4], sun2_col[4], amb[4];
+    float rot[16];    /* this update's rays' rotation (columns) */
+} GiU;
+
+static struct
+{
+    int tried, ok;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkPipeline flatten, scroll, trace, birr, bdis;
+    VkQueryPool csize; /* the zone's structure's compacted size */
+    VkSampler lin, rep, pt; /* the atlases' (linear, clamped); the zone's textures' as they are flattened (repeated,
+                             * mips); the shadows' zone layer's (nearest: its texels read whole) */
+    GfxTex* nozm;       /* bound for the shadows' zone layer when there is none */
+    /* the zone: its triangles' colours and normals, one structure over them, one instance of it at the top */
+    RtBuf attr, blas_buf, tlas_buf, inst;
+    VkAccelerationStructureKHR blas, tlas;
+    uint32_t ntri;
+    /* the probes: the irradiance's and the distance's atlases, their states, cells, and an update's rays */
+    GfxTex *irr, *dis;
+    RtBuf ps, pc, rb;
+    int clear;        /* ps and pc to be zeroed before the next update (every probe afresh) */
+    uint32_t quality;
+    uint64_t updated; /* the frame they were last traced */
+    uint32_t phase;
+    uint32_t seed;
+    int on;           /* this batch's zone and characters take the bounce light */
+    GiU u;
+    VkDescriptorBufferInfo psbi;
+} g_gi;
+
+/* the bounce light for a batch's draws: its uniforms into the ring (*bi); 0 off */
+static int gi_uniforms(VkDescriptorBufferInfo* bi)
+{
+    if (!g_gi.on)
+        return 0;
+    VkBuffer buf;
+    VkDeviceSize off;
+    memcpy(ring(sizeof g_gi.u, RING_ALIGN, &buf, &off), &g_gi.u, sizeof g_gi.u);
+    *bi = (VkDescriptorBufferInfo){ buf, off, sizeof g_gi.u };
+    return 1;
+}
+
+/* its bindings (W_GU..W_GID): how many writes */
+static uint32_t gi_writes(VkWriteDescriptorSet* w, const VkDescriptorBufferInfo* bi, VkDescriptorImageInfo ii[2])
+{
+    g_gi.psbi = (VkDescriptorBufferInfo){ g_gi.ps.b, 0, VK_WHOLE_SIZE };
+    ii[0] = (VkDescriptorImageInfo){ g_gi.lin, g_gi.irr->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[1] = (VkDescriptorImageInfo){ g_gi.lin, g_gi.dis->view, VK_IMAGE_LAYOUT_GENERAL };
+    world_write(&w[0], W_GU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, bi, NULL);
+    world_write(&w[1], W_GPS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &g_gi.psbi, NULL);
+    world_write(&w[2], W_GIR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[0]);
+    world_write(&w[3], W_GID, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[1]);
+    g_gi.irr->used = g_gi.dis->used = g_serial;
+    return 4;
+}
+
 /* --- the scene renderer's ambient occlusion (scene_ao): gfx_ao_metal.inc's, on Vulkan (its notes there) -------------
  * Made once a frame at half size when the scene is done (gfx_scene_done, ahead of the effects), from the depth the
  * zone and characters were drawn with: SAO_PREP the nearest of each 2x2 as distance along the view (0 the sky),
  * SAO_GTAO ground-truth occlusion, SAO_RESOLVE a 3x3 blur that keeps to its own depth blended over frames with the last
  * result reprojected (the result keeps its distance and count beside it). Full-screen passes into float targets as
  * the effects' are (fx_pass), where Metal has compute kernels. The zone and characters read the last frame's result
- * (AO_GLSL). The rays (scene_ao_q 3, 4) trace the bounce light's structure, which Vulkan does not build yet: GTAO high
- * instead, as Metal does without one. */
+ * (AO_GLSL). The rays (scene_ao_q 3, 4: SAO_RAYS) trace the bounce light's structure (built while scene_gi or they are
+ * on); without it, or without ray queries, GTAO high instead, as on Metal. */
 static const char SAO_GLSL[] =
     /* vp: the viewport in the target (x, y, w, h); hs: the half size and its inverse; pr: P00, P11, P20, P21 (D3D's
      * projection, row-major); pz: P22, P32, P23 (+-1), the depth's far end; prm: the reach, steps, slices, the reach's
@@ -6239,6 +6419,11 @@ static const char SAO_GLSL[] =
     "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
     "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
     "layout(set = 0, binding = 3) uniform sampler2D t2;\n"
+    "#ifdef SAO_RAYS\n" /* the bounce light's structure and its triangles' colours and normals (GI_KERNELS_GLSL) */
+    "layout(set = 0, binding = 4) uniform accelerationStructureEXT gas;\n"
+    "layout(std430, set = 0, binding = 5) readonly buffer ATB { uvec2 gattr[]; };\n"
+    GI_OCT_GLSL
+    "#endif\n"
     "layout(location = 0) out vec4 oc;\n"
     "float ao_ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }\n"
     "float ao_acos(float x) {\n" /* XeGTAO's, within some 0.001 */
@@ -6323,6 +6508,31 @@ static const char SAO_GLSL[] =
     "    vis += pl * ((cn + 2.0 * h0 * sn - cos(2.0 * h0 - n)) + (cn + 2.0 * h1 * sn - cos(2.0 * h1 - n))) * 0.25;\n"
     "  }\n"
     "  oc = vec4(clamp(vis / float(slices), 0.0, 1.0));\n"
+    "#elif defined(SAO_RAYS)\n" /* t0: the half-size distances; rays against the bounce light's structure */
+    "  float z = hz(p);\n"
+    "  if (z <= 0.0) { oc = vec4(1.0); return; }\n"
+    "  vec3 P = ao_vpos(vec2(p), z), N = ao_normal(p, P);\n"
+    "  vec3 W = ao_world(P), Nw = normalize((U.iv * vec4(N.x, N.y, N.z * U.pz.z, 0.0)).xyz);\n"
+    "  vec3 T = normalize(abs(Nw.y) < 0.99 ? cross(Nw, vec3(0.0, 1.0, 0.0)) : cross(Nw, vec3(1.0, 0.0, 0.0))), B = cross(Nw, T);\n"
+    "  vec3 o = W + Nw * (0.03 + 0.002 * z);\n"
+    "  float R = U.prm.x, fr = U.tp.z;\n"
+    "  float n0 = ao_ign(vec2(p) + 5.588238 * fr), n1 = ao_ign(vec2(p) + vec2(37.0, 17.0) + 5.588238 * fr);\n"
+    "  int nr = int(U.prm.z);\n"
+    "  float occ = 0.0;\n"
+    "  for (int r = 0; r < nr; ++r) {\n"
+    "    float u1 = fract(n0 + float(r) / float(nr)), u2 = fract(n1 + float(r) * 0.618034);\n" /* cosine-weighted */
+    "    float sr = sqrt(u1), ph = 6.2831853 * u2;\n"
+    "    vec3 d = normalize(T * (sr * cos(ph)) + B * (sr * sin(ph)) + Nw * sqrt(max(1.0 - u1, 0.0)));\n"
+    "    rayQueryEXT q;\n"
+    "    rayQueryInitializeEXT(q, gas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, d, R);\n"
+    "    while (rayQueryProceedEXT(q)) {}\n"
+    "    if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) continue;\n"
+    "    uvec2 at = gattr[rayQueryGetIntersectionPrimitiveIndexEXT(q, true)];\n"
+    "    vec3 hn = gi_unoct(unpackUnorm2x16(at.y) * 2.0 - 1.0);\n"
+    "    if (dot(hn, d) > 0.0 && (at.x >> 24) == 0u) continue;\n" /* a backface: the coarse model under the drawn one */
+    "    occ += 1.0 - rayQueryGetIntersectionTEXT(q, true) / R;\n"
+    "  }\n"
+    "  oc = vec4(clamp(1.0 - occ / float(nr), 0.0, 1.0));\n"
     "#else\n" /* SAO_RESOLVE; t0 the distances, t1 this frame's occlusion, t2 the last result */
     "  float z = hz(p);\n"
     "  if (z <= 0.0) { oc = vec4(1.0, 0.0, 0.0, 0.0); return; }\n"
@@ -6383,6 +6593,11 @@ static struct
     int tried, ok;
     VkPipeline prep, gtao, resolve;
     VkSampler near;
+    /* the rays (SAO_RAYS): their layout (the effects' four, the structure and the triangles), made on first use */
+    int rtried;
+    VkDescriptorSetLayout rdsl;
+    VkPipelineLayout rlayout;
+    VkPipeline rays;
     GfxTex *hz, *raw, *hist[2];
     int cur; /* hist[cur] is the last result */
     uint32_t hw, hh;
@@ -6405,12 +6620,14 @@ static void sao_forget(const GfxTex* t)
         g_sao.depth = g_sao.rt = NULL, g_sao.noted = 0, g_sao.made = 0;
 }
 
-/* one of SAO_GLSL's passes, on the effects' layout (its uniforms, then samplers) and full-screen triangle */
+/* one of SAO_GLSL's passes, on the effects' layout (its uniforms, then samplers; the rays' own) and full-screen
+ * triangle */
 static VkPipeline sao_pipeline(const char* name, VkFormat fmt)
 {
-    size_t n = sizeof SAO_GLSL + 64;
+    int rays = !strcmp(name, "SAO_RAYS");
+    size_t n = sizeof SAO_GLSL + 96;
     char* src = (char*)malloc(n);
-    snprintf(src, n, "#define %s\n%s", name, SAO_GLSL);
+    snprintf(src, n, "%s#define %s\n%s", rays ? "#extension GL_EXT_ray_query : require\n" : "", name, SAO_GLSL);
     VkShaderModule fs = compile_glsl(src, 1);
     free(src);
     VkPipeline p = VK_NULL_HANDLE;
@@ -6419,8 +6636,8 @@ static VkPipeline sao_pipeline(const char* name, VkFormat fmt)
         VkPipelineColorBlendAttachmentState b = { 0 };
         b.colorWriteMask = 0xF;
         static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-        p = make_pipeline(g_fx.vs, fs, g_fx_layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            VK_POLYGON_MODE_FILL, dyn, 2, 0);
+        p = make_pipeline(g_fx.vs, fs, rays ? g_sao.rlayout : g_fx_layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, dyn, 2, 0);
     }
     if (fs)
         vkDestroyShaderModule(g_dev, fs, NULL);
@@ -6451,7 +6668,38 @@ static int sao_init(void)
     return g_sao.ok;
 }
 
-/* one full-screen triangle into all of target, reading in[0..n) as t0.. through the nearest sampler; timed as pass */
+/* the rays' pass (SAO_RAYS), made on first use where there are ray queries: 1 when it is there */
+static int sao_rays_init(void)
+{
+    if (g_sao.rtried)
+        return g_sao.rays != VK_NULL_HANDLE;
+    g_sao.rtried = 1;
+    if (!g_has_rt)
+        return 0;
+    VkDescriptorSetLayoutBinding b[6];
+    b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    for (uint32_t i = 1; i < 4; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[4] = (VkDescriptorSetLayoutBinding){ 4, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[5] = (VkDescriptorSetLayoutBinding){ 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dl.bindingCount = 6, dl.pBindings = b;
+    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_sao.rdsl));
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    pl.setLayoutCount = 1, pl.pSetLayouts = &g_sao.rdsl;
+    VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, &g_sao.rlayout));
+    g_sao.rays = g_sao.rlayout ? sao_pipeline("SAO_RAYS", VK_FORMAT_R16_SFLOAT) : VK_NULL_HANDLE;
+    if (!g_sao.rays)
+    {
+        atomic_fetch_add(&g_failures, 1);
+        fprintf(stderr, "[recomp] gfx: scene occlusion: its rays' pass failed\n");
+    }
+    return g_sao.rays != VK_NULL_HANDLE;
+}
+
+/* one full-screen triangle into all of target, reading in[0..n) as t0.. through the nearest sampler; timed as pass. The
+ * rays' (p g_sao.rays) take the bounce light's structure and triangles too */
 static void sao_pass(GfxTex* target, VkPipeline p, const VkDescriptorBufferInfo* ub, GfxTex* const* in, int n, int pass)
 {
     end_pass();
@@ -6474,7 +6722,7 @@ static void sao_pass(GfxTex* target, VkPipeline p, const VkDescriptorBufferInfo*
     vkCmdSetViewport(cb, 0, 1, &v);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    VkWriteDescriptorSet w[4];
+    VkWriteDescriptorSet w[6];
     VkDescriptorImageInfo ii[3];
     world_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ub, NULL);
     for (int i = 0; i < n; ++i)
@@ -6483,7 +6731,19 @@ static void sao_pass(GfxTex* target, VkPipeline p, const VkDescriptorBufferInfo*
         world_write(&w[1 + i], 1 + (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[i]);
         in[i]->used = g_serial, in[i]->rec = g_cb_index;
     }
-    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, 1 + (uint32_t)n, w);
+    uint32_t nw = 1 + (uint32_t)n;
+    int rays = p == g_sao.rays;
+    VkWriteDescriptorSetAccelerationStructureKHR wa = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+    VkDescriptorBufferInfo abi = { g_gi.attr.b, 0, VK_WHOLE_SIZE };
+    if (rays)
+    {
+        wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &g_gi.tlas;
+        w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w[nw].pNext = &wa, w[nw].dstBinding = 4, w[nw].descriptorCount = 1;
+        w[nw++].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        world_write(&w[nw++], 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &abi, NULL);
+    }
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, rays ? g_sao.rlayout : g_fx_layout, 0, nw, w);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
     ts_end(cb, ts);
@@ -6492,7 +6752,8 @@ static void sao_pass(GfxTex* target, VkPipeline p, const VkDescriptorBufferInfo*
     target->used = g_serial, target->rec = g_cb_index;
 }
 
-/* the quality's method: 1 GTAO low (2 slices of 4 steps each way), 2 GTAO high (3 of 6); 3 and 4 (the rays) GTAO high */
+/* the quality's method: 1 GTAO low (2 slices of 4 steps each way), 2 GTAO high (3 of 6), 3 rays low (1 a pixel), 4 rays
+ * high (2); the rays GTAO high while the bounce light's structure is not there */
 
 /* the zone's draw (gfx_world_draw): its depth and camera, the first this frame into the main target */
 static void ao_note(const GfxWorldFrame* f, GfxTex* depth)
@@ -6540,10 +6801,12 @@ static void ao_make(GfxTex* color)
     u.hs[0] = (float)hw, u.hs[1] = (float)hh, u.hs[2] = 1.0f / (float)hw, u.hs[3] = 1.0f / (float)hh;
     u.pr[0] = P[0], u.pr[1] = P[5], u.pr[2] = P[8], u.pr[3] = P[9];
     u.pz[0] = P[10], u.pz[1] = P[14], u.pz[2] = P[11] < 0.0f ? -1.0f : 1.0f, u.pz[3] = 0.99999f;
-    int q = g_fxs.scene_ao_q >= 1.5f ? 2 : 1;
+    int q = g_fxs.scene_ao_q >= 3.5f ? 4 : g_fxs.scene_ao_q >= 2.5f ? 3 : g_fxs.scene_ao_q >= 1.5f ? 2 : 1;
+    if (q >= 3 && !(g_gi.tlas && g_gi.attr.b && sao_rays_init()))
+        q = 2;
     u.prm[0] = g_fxs.scene_ao_radius > 0.05f ? g_fxs.scene_ao_radius : 0.05f;
     u.prm[1] = q == 1 ? 4.0f : 6.0f;
-    u.prm[2] = q == 1 ? 2.0f : 3.0f;
+    u.prm[2] = q == 1 ? 2.0f : q == 2 ? 3.0f : q == 3 ? 1.0f : 2.0f;
     u.prm[3] = 0.06f * (float)hw;
     cam_cut_note(g_sao.view);
     int same = !fresh && g_sao.made + 1 >= g_serial && !memcmp(g_sao.made_view, g_sao.vp, sizeof g_sao.vp) && !cam_cut();
@@ -6557,7 +6820,7 @@ static void ao_make(GfxTex* color)
     GfxTex* in[3] = { g_sao.depth, NULL, NULL };
     sao_pass(g_sao.hz, g_sao.prep, &ub, in, 1, GFX_PASS_SCENE_AO);
     in[0] = g_sao.hz;
-    sao_pass(g_sao.raw, g_sao.gtao, &ub, in, 1, GFX_PASS_SCENE_AO_TRACE);
+    sao_pass(g_sao.raw, q >= 3 ? g_sao.rays : g_sao.gtao, &ub, in, 1, GFX_PASS_SCENE_AO_TRACE);
     int nx = g_sao.cur ^ 1;
     in[1] = g_sao.raw, in[2] = g_sao.hist[g_sao.cur];
     sao_pass(g_sao.hist[nx], g_sao.resolve, &ub, in, 3, GFX_PASS_SCENE_AO);
@@ -6573,7 +6836,8 @@ static void ao_make(GfxTex* color)
     static uint32_t told;
     if (++told % 3000 == 1)
         fprintf(stderr, "[recomp] gfx: scene occlusion: %s, %ux%u of a %ux%u viewport (projection %.3f %.3f), reach %.2f\n",
-            q == 2 ? "GTAO high" : "GTAO low", hw, hh, g_sao.vp[2], g_sao.vp[3], (double)P[0], (double)P[5], (double)u.prm[0]);
+            q >= 3 ? (q == 4 ? "rays high" : "rays low") : (q == 2 ? "GTAO high" : "GTAO low"), hw, hh, g_sao.vp[2], g_sao.vp[3],
+            (double)P[0], (double)P[5], (double)u.prm[0]);
 }
 
 /* the occlusion for a batch's draws: its uniforms into the ring (*bi); 0 off */
@@ -7203,7 +7467,11 @@ int gfx_world_draw(const GfxWorldFrame* f)
     int lamps = pixel && lamps_bind(&lb, f->view, f->proj, f->vp);
     if (lamps)
         lamp_zone_collect(f);
-    uint32_t wk = (pixel ? WK_PIXEL : 0) | (shadow ? WK_SHADOW : 0) | (ao ? WK_AO : 0) | (spec ? WK_SPEC : 0) | (lamps ? WK_LAMPS : 0);
+    VkDescriptorBufferInfo gbi;
+    VkDescriptorImageInfo gii[2];
+    int gi = gi_uniforms(&gbi);
+    uint32_t wk = (pixel ? WK_PIXEL : 0) | (shadow ? WK_SHADOW : 0) | (ao ? WK_AO : 0) | (spec ? WK_SPEC : 0) | (lamps ? WK_LAMPS : 0) |
+        (gi ? WK_GI : 0);
     VkPipeline cur = VK_NULL_HANDLE;
     int cull = -1, bias = INT_MIN, write = -1, topo = -1;
     for (uint32_t i = 0; i < f->nitem; ++i)
@@ -7217,7 +7485,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
             continue;
         if (p != cur)
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p), cur = p;
-        if (!blend != write)
+        if ((!blend) != write)
             vkCmdSetDepthWriteEnable(cb, depth && !blend ? VK_TRUE : VK_FALSE), write = !blend;
         int c = (it->flags & GFX_WORLD_TWOSIDED) ? 0 : (it->flags & GFX_WORLD_MIRRORED) ? 1 : 2;
         if (c != cull)
@@ -7248,6 +7516,8 @@ int gfx_world_draw(const GfxWorldFrame* f)
             world_write(&w[nw++], W_SP, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &sbi, NULL);
         if (lamps)
             nw += lamps_writes(&w[nw], &lb);
+        if (gi)
+            nw += gi_writes(&w[nw], &gbi, gii);
         p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
         uint32_t dc[2] = { it->inst, it->flags };
         vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof dc, dc);
@@ -7288,7 +7558,11 @@ int gfx_chars_draw(const GfxCharFrame* f)
     int spec = spec_uniforms(shadow, &sbi);
     LampBind lb;
     int lamps = lamps_bind(&lb, NULL, NULL, NULL);
-    VkPipeline p = world_pipeline(1, (shadow ? WK_SHADOW : 0) | (ao ? WK_AO : 0) | (spec ? WK_SPEC : 0) | (lamps ? WK_LAMPS : 0), 0, depth);
+    VkDescriptorBufferInfo gbi;
+    VkDescriptorImageInfo gii[2];
+    int gi = gi_uniforms(&gbi);
+    VkPipeline p = world_pipeline(1, (shadow ? WK_SHADOW : 0) | (ao ? WK_AO : 0) | (spec ? WK_SPEC : 0) | (lamps ? WK_LAMPS : 0) | (gi ? WK_GI : 0), 0,
+        depth);
     if (!p || !set_viewport(f->vp))
         goto done;
     VkCommandBuffer cb = g_cb;
@@ -7335,6 +7609,8 @@ int gfx_chars_draw(const GfxCharFrame* f)
             world_write(&w[nw++], W_SP, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &sbi, NULL);
         if (lamps)
             nw += lamps_writes(&w[nw], &lb);
+        if (gi)
+            nw += gi_writes(&w[nw], &gbi, gii);
         p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
         pc.palette = it->palette, pc.state = it->state, pc.mirror = it->mirror;
         if (shadow)
@@ -7356,19 +7632,16 @@ done:
     return drew > 0;
 }
 
-/* the scene renderer's bounce light is Metal's only so far */
-void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
-void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
-
-/* a buffer of at least need bytes in *b (made again, half as large again, when smaller; the old one let go
- * once the GPU is past it): the GPU's own, or one the CPU writes (host) */
-static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host)
+/* a buffer of at least need bytes in *b (made again, half as large again - or as large, exact: one made once, as the
+ * bounce light's zone - when smaller; the old one let go once the GPU is past it): the GPU's own, or one the CPU
+ * writes (host) */
+static int rt_buffer_ex(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host, int exact)
 {
     if (b->b && b->size >= need)
         return 0;
     if (b->b)
         trash(2, (uint64_t)(uintptr_t)b->b, b->m), b->b = VK_NULL_HANDLE;
-    need = (need + need / 2 + 65535) & ~(VkDeviceSize)65535;
+    need = (need + (exact ? 0 : need / 2) + 65535) & ~(VkDeviceSize)65535;
     VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     bi.size = need;
     bi.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -7390,10 +7663,12 @@ static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int 
     return 1;
 }
 
-/* an acceleration structure of at least need bytes in *s, over its own buffer */
-static int rt_structure(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize need, VkAccelerationStructureTypeKHR type)
+static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host) { return rt_buffer_ex(b, need, usage, host, 0); }
+
+/* an acceleration structure of at least need bytes in *s, over its own buffer (exact: rt_buffer_ex's) */
+static int rt_structure_ex(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize need, VkAccelerationStructureTypeKHR type, int exact)
 {
-    int grown = rt_buffer(buf, need, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 0);
+    int grown = rt_buffer_ex(buf, need, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 0, exact);
     if (grown < 0)
         return 0;
     if (*s && !grown)
@@ -7403,6 +7678,759 @@ static int rt_structure(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize 
     VkAccelerationStructureCreateInfoKHR ci = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
     ci.buffer = buf->b, ci.size = buf->size, ci.type = type;
     return vkCreateAccelerationStructureKHR(g_dev, &ci, NULL, s) == VK_SUCCESS;
+}
+
+static int rt_structure(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize need, VkAccelerationStructureTypeKHR type)
+{
+    return rt_structure_ex(s, buf, need, type, 0);
+}
+
+static void rt_free(RtBuf* b)
+{
+    if (b->b)
+        trash(2, (uint64_t)(uintptr_t)b->b, b->m);
+    memset(b, 0, sizeof *b);
+}
+
+/* --- the scene renderer's bounce light (gfx_gi_zone, gfx_gi_frame, gfx.h): gfx_gi_metal.inc's, on Vulkan (its notes
+ * there; the shading's side is GI_GLSL, the state g_gi) -------------------------------------------------------------
+ * The same kernels as compute passes with ray queries: the zone flattened into world-space triangles (GI_FLATTEN) and
+ * built into one bottom-level structure, one instance of it at the top; each frame's share of the probes traced
+ * (GI_SCROLL, GI_TRACE) and blended into the two atlases (GI_BLEND, the distances' first), storage images the zone's
+ * and characters' functions sample (W_GI). Recorded into the frame's command buffer outside a pass, where Metal commits
+ * a command buffer of its own ahead of the frame's; the zone's structure is built and waited for once, as it loads.
+ * Without ray queries (g_has_rt) both calls do nothing. Both atlases are RGBA16F (the distances' RG16F on Metal: an
+ * extended storage format here). */
+static const char GI_KERNELS_GLSL[] =
+    "#if defined(GI_TRACE)\n"
+    "#extension GL_EXT_ray_query : require\n"
+    "#endif\n"
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "#if defined(GI_FLATTEN)\n"
+    GI_OCT_GLSL
+    /* the zone flattened: triangle t of an item into world space, with its albedo and its normal (faced as its vertex
+     * normals face, its corners turned to match); flags 1 textured, 2 two-sided. I: the item's world matrix and its
+     * inverse, a (first vertex, triangles, primitive, its first triangle in the list), b (flags, the texture's level) */
+    "layout(local_size_x = 64) in;\n"
+    "layout(std430, set = 0, binding = 10) readonly buffer VBB { uint vb[]; };\n"
+    "layout(set = 0, binding = 11) uniform sampler2D tx;\n"
+    "layout(std430, set = 0, binding = 12) writeonly buffer POSB { float pos[]; };\n"
+    "layout(std430, set = 0, binding = 3) writeonly buffer ATB { uvec2 attr[]; };\n"
+    "layout(std140, set = 0, binding = 13) uniform FIB { mat4 world, inv; uvec4 a; uvec4 b; } I;\n"
+    "void main() {\n"
+    "  uint t = gl_GlobalInvocationID.x;\n"
+    "  if (t >= I.a.y) return;\n"
+    "  uint v0 = I.a.x + (I.a.z == 5u ? t : 3u * t);\n"
+    "  uint vi[3] = uint[3](v0, v0 + 1u, v0 + 2u);\n"
+    "  if (I.a.z == 5u && (t & 1u) != 0u) { vi[0] = v0 + 1u; vi[1] = v0; }\n" /* a strip's odd triangles wind the other way */
+    "  vec3 p[3];\n"
+    "  vec3 n = vec3(0.0);\n"
+    "  vec4 vc = vec4(0.0), tc = vec4(0.0);\n"
+    "  vec2 uvc = vec2(0.0);\n"
+    "  bool tex = (I.b.x & 1u) != 0u;\n"
+    "  float lv = float(I.b.y);\n"
+    "  for (int k = 0; k < 3; ++k) {\n"
+    "    uint b = vi[k] * 9u;\n" /* 36-byte vertices: position, normal, D3DCOLOR, uv */
+    "    p[k] = (I.world * vec4(uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u])), 1.0)).xyz;\n"
+    "    n += (vec4(uintBitsToFloat(uvec3(vb[b + 3u], vb[b + 4u], vb[b + 5u])), 0.0) * I.inv).xyz;\n"
+    "    vc += unpackUnorm4x8(vb[b + 6u]).zyxw;\n"
+    "    vec2 uv = uintBitsToFloat(uvec2(vb[b + 7u], vb[b + 8u]));\n"
+    "    uvc += uv;\n"
+    "    if (tex) tc += textureLod(tx, uv, lv);\n"
+    "  }\n"
+    "  uvc /= 3.0;\n"
+    "  tc = tex ? (tc + textureLod(tx, uvc, lv)) * 0.25 : vec4(0.5);\n"
+    "  vc /= 3.0;\n"
+    "  vec3 fn = cross(p[1] - p[0], p[2] - p[0]);\n"
+    "  if (dot(fn, n) < 0.0) { vec3 x = p[1]; p[1] = p[2]; p[2] = x; fn = -fn; }\n"
+    "  float fl = length(fn);\n"
+    "  if (!(fl > 1e-12)) { p[1] = p[0]; p[2] = p[0]; }\n" /* nothing: a degenerate triangle no ray hits */
+    "  fn = fl > 1e-12 ? fn / fl : vec3(0.0, -1.0, 0.0);\n"
+    "  uint o = I.a.w + t;\n"
+    "  for (int k = 0; k < 3; ++k) {\n"
+    "    uint q = 9u * o + 3u * uint(k);\n"
+    "    pos[q] = p[k].x; pos[q + 1u] = p[k].y; pos[q + 2u] = p[k].z;\n"
+    "  }\n"
+    "  vec3 alb = min(2.0 * tc.rgb * vc.rgb, vec3(0.9));\n"
+    "  attr[o] = uvec2(packUnorm4x8(vec4(alb, float(I.b.x & 2u) / 255.0)), packUnorm2x16(gi_oct(fn) * 0.5 + 0.5));\n"
+    "}\n"
+    "#else\n"
+    "#define GI_B_GU 0\n#define GI_B_PS 1\n#define GI_B_IR 8\n#define GI_B_DS 9\n#define GI_PS_Q\n"
+    GI_GLSL
+    /* probe l's world cell */
+    "ivec3 gi_cell(uint l) {\n"
+    "  ivec3 s = ivec3(int(l) % G.dims.x, (int(l) / G.dims.x) % G.dims.y, int(l) / (G.dims.x * G.dims.y));\n"
+    "  return G.base.xyz + gi_slot(s - G.base.xyz);\n"
+    "}\n"
+    /* ray r of n: a spherical Fibonacci direction, turned by this update's rotation */
+    "vec3 gi_ray(uint r) {\n"
+    "  float n = float(G.n.x), z = 1.0 - (2.0 * float(r) + 1.0) / n, s = sqrt(sat(1.0 - z * z));\n"
+    "  float ph = 6.2831853 * fract(float(r) * 0.6180340);\n"
+    "  return normalize((G.rot * vec4(cos(ph) * s, sin(ph) * s, z, 0.0)).xyz);\n"
+    "}\n"
+    "#if defined(GI_SCROLL)\n" /* the cells new to the grid: cleared, not used till traced */
+    "layout(local_size_x = 64) in;\n"
+    "layout(std430, set = 0, binding = 2) buffer PCB { ivec4 PC[]; };\n"
+    "void main() {\n"
+    "  uint l = gl_GlobalInvocationID.x;\n"
+    "  if (l >= uint(G.dims.w)) return;\n"
+    "  ivec3 c = gi_cell(l);\n"
+    "  if (any(notEqual(PC[l].xyz, c)) || PC[l].w == 0) { PC[l] = ivec4(c, 1); PS[l] = 0u; }\n"
+    "}\n"
+    "#elif defined(GI_TRACE)\n"
+    /* ray x of this update's probe y: what it brings back (rgb) and how far it went (a; < 0 a backface, 1e4 the sky) */
+    "layout(local_size_x = 64) in;\n"
+    "struct GL { vec4 pos, diffuse, ambient, att; };\n" /* GfxWorldLight */
+    "layout(std430, set = 0, binding = 3) readonly buffer ATB { uvec2 attr[]; };\n"
+    "layout(std430, set = 0, binding = 4) readonly buffer LTB { GL LT[]; };\n"
+    "layout(std430, set = 0, binding = 5) writeonly buffer RBB { vec4 RB[]; };\n"
+    "layout(set = 0, binding = 6) uniform accelerationStructureEXT gas;\n"
+    /* the shadows' uniforms (SHADOW_GLSL's SH) and their zone layer */
+    "layout(std140, set = 0, binding = 7) uniform SHB { mat4 m[4]; vec4 cas[4]; vec4 cbox[4]; vec4 dir; vec4 cam; vec4 info;\n"
+    "  mat4 cm[4]; vec4 ctx; vec4 pk; } S;\n"
+    "layout(set = 0, binding = 14) uniform sampler2DArray zm;\n"
+    /* the sun's or moon's shadow at X (normal n) from the zone's cascades, one texel read: 1 lit, 0 not, -1 outside
+     * them (a ray then) */
+    "float gi_cascade(vec3 X, vec3 n) {\n"
+    "  float d = length(X - S.cam.xyz);\n"
+    "  for (uint c = 0u; c < uint(S.info.x); ++c) {\n"
+    "    if (S.cas[c].w == 0.0 || d > S.cas[c].x) continue;\n"
+    "    float t = S.cas[c].y;\n"
+    "    vec4 h = S.m[c] * vec4(X + n * (2.0 * t) + S.dir.xyz * t, 1.0);\n"
+    "    if (abs(h.x) > 0.99 || abs(h.y) > 0.99) continue;\n"
+    "    float w = float(textureSize(zm, 0).x);\n"
+    "    ivec2 px = ivec2(clamp(vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5) * w, 0.0, w - 1.0));\n"
+    "    return h.z <= texelFetch(zm, ivec3(px, int(c)), 0).r ? 1.0 : 0.0;\n"
+    "  }\n"
+    "  return -1.0;\n"
+    "}\n"
+    "void main() {\n"
+    "  uint r = gl_GlobalInvocationID.x, u = gl_GlobalInvocationID.y, l = u * G.n.y + G.n.z;\n"
+    "  if (r >= G.n.x || l >= uint(G.dims.w)) return;\n"
+    "  vec3 o = vec3(gi_cell(l)) * G.org.w, d = gi_ray(r);\n"
+    "  vec4 res = vec4(0.0, 0.0, 0.0, 1e4);\n"
+    "  rayQueryEXT q;\n"
+    "  rayQueryInitializeEXT(q, gas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, d, G.tr.x);\n"
+    "  while (rayQueryProceedEXT(q)) {}\n"
+    "  if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {\n"
+    "    uvec2 at = attr[rayQueryGetIntersectionPrimitiveIndexEXT(q, true)];\n"
+    "    vec4 alb = unpackUnorm4x8(at.x);\n"
+    "    vec3 n = gi_unoct(unpackUnorm2x16(at.y) * 2.0 - 1.0);\n"
+    "    float t = rayQueryGetIntersectionTEXT(q, true);\n"
+    "    res = vec4(0.0, 0.0, 0.0, -t);\n"
+    "    if (dot(n, d) > 0.0 && alb.a > 0.0) n = -n;\n" /* two-sided: lit from the side the ray came */
+    "    if (dot(n, d) <= 0.0) {\n"
+    "      vec3 X = o + d * t + n * 0.05;\n"
+    "      vec3 E = G.amb.rgb * G.tr.w;\n"
+    "      for (int k = 0; k < 2; ++k) {\n"
+    "        vec4 L = k != 0 ? G.sun2_dir : G.sun_dir;\n"
+    "        float nl = dot(n, L.xyz);\n"
+    "        if (L.w <= 0.0 || nl <= 0.0) continue;\n"
+    "        float v = G.org.y > 0.5 && dot(L.xyz, S.dir.xyz) > 0.98 ? gi_cascade(X, n) : -1.0;\n"
+    "        if (v < 0.0) {\n"
+    "          rayQueryEXT sq;\n"
+    "          rayQueryInitializeEXT(sq, gas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, X, 0.0, L.xyz, 2000.0);\n"
+    "          while (rayQueryProceedEXT(sq)) {}\n"
+    "          v = rayQueryGetIntersectionTypeEXT(sq, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;\n"
+    "        }\n"
+    "        E += (k != 0 ? G.sun2_col.rgb : G.sun_col.rgb) * (nl * v);\n"
+    "      }\n"
+    "      for (uint i = 0u; i < G.n.w; ++i) {\n"
+    "        GL lt = LT[i];\n"
+    "        vec3 v = lt.pos.xyz - X;\n"
+    "        float dist = length(v);\n"
+    "        if (dist >= lt.pos.w) continue;\n"
+    "        float qq = dist / lt.pos.w, win = sat(1.0 - qq * qq * qq * qq);\n" /* the range's edge, smoothed */
+    "        float a = win * win / max(lt.att.x + lt.att.y * dist + lt.att.z * dist * dist, 1e-6);\n"
+    "        E += lt.ambient.rgb * a + lt.diffuse.rgb * a * max(dot(n, v / max(dist, 1e-6)), 0.0);\n"
+    "      }\n"
+    "      if (G.tr.z > 0.0) E += gi_at(X, n).rgb * G.tr.z;\n" /* the bounces before */
+    "      res = vec4(alb.rgb * E, t);\n"
+    "    }\n"
+    "  }\n"
+    "  RB[u * G.n.x + r] = res;\n"
+    "}\n"
+    "#else\n"
+    /* GI_BLEND: a probe's map (GI_TS texels a side, a border of one round N inside) from its rays: texel tid of update
+     * slot gid; the border copied from the inside as the octahedron folds (bilinear lookups wrap across its edges).
+     * GI_DIS 1: the distance map (mean and square, sharp weights), else the irradiance (cosine-weighted, and the sky's
+     * share). The irradiance's pass also marks the probe traced, and inside something when a quarter of its rays hit
+     * backfaces */
+    "layout(local_size_x = GI_TS, local_size_y = GI_TS) in;\n"
+    "layout(std430, set = 0, binding = 5) readonly buffer RBB { vec4 RB[]; };\n"
+    "layout(set = 0, binding = 15, rgba16f) uniform image2D m;\n"
+    "shared vec4 tg[GI_TS * GI_TS];\n"
+    "void main() {\n"
+    "  const int N = GI_TS - 2;\n"
+    "  uvec2 tid = gl_LocalInvocationID.xy;\n"
+    "  uint u = gl_WorkGroupID.x, l = u * G.n.y + G.n.z;\n"
+    "  if (l >= uint(G.dims.w)) return;\n" /* (the whole group) */
+    "  ivec3 s = ivec3(int(l) % G.dims.x, (int(l) / G.dims.x) % G.dims.y, int(l) / (G.dims.x * G.dims.y));\n"
+    "  ivec2 org = ivec2(s.x + G.dims.x * s.y, s.z) * GI_TS;\n"
+    "  bool fresh = (PS[l] & 1u) == 0u;\n"
+    "  if (tid.x >= 1u && tid.y >= 1u && tid.x <= uint(N) && tid.y <= uint(N)) {\n"
+    "    vec3 dir = gi_unoct(((vec2(tid) - 0.5) / float(N)) * 2.0 - 1.0);\n"
+    "    vec4 sum = vec4(0.0);\n"
+    "    float ws = 0.0;\n"
+    "    for (uint r = 0u; r < G.n.x; ++r) {\n"
+    "      vec4 R = RB[u * G.n.x + r];\n"
+    "      float c = max(dot(dir, gi_ray(r)), 0.0);\n"
+    "#if GI_DIS\n"
+    "      float w = pow(c, 50.0), dd = min(abs(R.w), G.tr.x);\n"
+    "      sum += vec4(dd, dd * dd, 0.0, 0.0) * w;\n"
+    "      ws += w;\n"
+    "#else\n"
+    "      if (R.w < 0.0) continue;\n" /* backfaces bring nothing */
+    "      sum += vec4(R.rgb, R.w >= 1e3 ? 1.0 : 0.0) * c;\n"
+    "      ws += c;\n"
+    "#endif\n"
+    "    }\n"
+    "    vec4 nv = ws > 1e-6 ? sum / ws : vec4(0.0);\n"
+    "    vec4 old = imageLoad(m, org + ivec2(tid));\n"
+    "    tg[tid.y * uint(GI_TS) + tid.x] = fresh ? nv : mix(nv, old, G.tr.y);\n"
+    "  }\n"
+    "  barrier();\n"
+    "  uint x = tid.x, y = tid.y, e = uint(GI_TS - 1), sx = x, sy = y;\n"
+    "  if ((x == 0u || x == e) && (y == 0u || y == e)) { sx = x == 0u ? uint(N) : 1u; sy = y == 0u ? uint(N) : 1u; }\n"
+    "  else if (y == 0u || y == e) { sx = e - x; sy = y == 0u ? 1u : uint(N); }\n"
+    "  else if (x == 0u || x == e) { sx = x == 0u ? 1u : uint(N); sy = e - y; }\n"
+    "  imageStore(m, org + ivec2(tid), tg[sy * uint(GI_TS) + sx]);\n"
+    "#if !GI_DIS\n"
+    "  if (x == 0u && y == 0u) {\n"
+    "    uint bf = 0u;\n"
+    "    for (uint r = 0u; r < G.n.x; ++r) bf += RB[u * G.n.x + r].w < 0.0 ? 1u : 0u;\n"
+    "    PS[l] = 1u | (bf * 4u > G.n.x ? 2u : 0u);\n"
+    "  }\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n"
+    "#endif\n";
+
+/* the kernels' bindings (GI_KERNELS_GLSL), pushed */
+enum
+{
+    GB_GU = 0,
+    GB_PS = 1,
+    GB_PC = 2,
+    GB_ATTR = 3,
+    GB_LT = 4,
+    GB_RB = 5,
+    GB_AS = 6,
+    GB_SH = 7,
+    GB_IR = 8,
+    GB_DS = 9,
+    GB_VB = 10,
+    GB_TX = 11,
+    GB_POS = 12,
+    GB_FI = 13,
+    GB_ZM = 14,
+    GB_IMG = 15,
+    GB_COUNT = 16,
+};
+
+static VkPipeline gi_kernel(const char* defines)
+{
+    size_t n = sizeof GI_KERNELS_GLSL + 128;
+    char* src = (char*)malloc(n);
+    snprintf(src, n, "%s%s", defines, GI_KERNELS_GLSL);
+    VkShaderModule cs = compile_glsl(src, 2);
+    free(src);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (cs)
+    {
+        VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        ci.stage = (VkPipelineShaderStageCreateInfo){ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT, ci.stage.module = cs, ci.stage.pName = "main";
+        ci.layout = g_gi.layout;
+        if (vkCreateComputePipelines(g_dev, g_vkcache, 1, &ci, NULL, &p) != VK_SUCCESS)
+            p = VK_NULL_HANDLE;
+        vkDestroyShaderModule(g_dev, cs, NULL);
+    }
+    if (!p)
+        fprintf(stderr, "[recomp] gfx: scene bounce light: its kernel (%s) failed\n", defines);
+    return p;
+}
+
+static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags src_stage,
+    VkAccessFlags src, VkPipelineStageFlags dst_stage, VkAccessFlags dst);
+
+/* an atlas (or the stand-in for the shadows' zone layer: array 1): RGBA16F, sampled and stored, zeroed */
+static GfxTex* gi_image(uint32_t w, uint32_t h, int array)
+{
+    GfxTex* t = (GfxTex*)calloc(1, sizeof *t);
+    t->vf = VK_FORMAT_R16G16B16A16_SFLOAT, t->type = GFX_TEX_2D;
+    t->w = w, t->h = h, t->levels = t->mips = 1, t->nlayers = 1, t->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = t->vf;
+    ii.extent = (VkExtent3D){ w, h, 1 };
+    ii.mipLevels = ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo ai = { 0 };
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(g_vma, &ii, &ai, &t->img, &t->mem, NULL) != VK_SUCCESS)
+    {
+        fprintf(stderr, "[recomp] gfx: scene bounce light: an atlas %ux%u failed\n", w, h);
+        free(t);
+        return NULL;
+    }
+    t->view = make_view(t, array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, NULL, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkCommandBuffer cb = upcmd();
+    image_barrier(cb, t->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkClearColorValue z = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdClearColorImage(cb, t->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &r);
+    g_up_dirty = 1;
+    return t;
+}
+
+static int gi_init(void)
+{
+    if (g_gi.tried)
+        return g_gi.ok;
+    g_gi.tried = 1;
+    if (!g_has_rt || !rt_init())
+    {
+        fprintf(stderr, "[recomp] gfx: scene bounce light: this GPU has no ray queries\n");
+        return 0;
+    }
+    static const VkDescriptorType types[GB_COUNT] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+    };
+    VkDescriptorSetLayoutBinding b[GB_COUNT];
+    for (uint32_t i = 0; i < GB_COUNT; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+    VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dl.bindingCount = GB_COUNT, dl.pBindings = b;
+    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_gi.dsl));
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    pl.setLayoutCount = 1, pl.pSetLayouts = &g_gi.dsl;
+    VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, &g_gi.layout));
+    if (!g_gi.layout)
+        return 0;
+    VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_gi.lin));
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_gi.rep));
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = 0.0f;
+    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_gi.pt));
+    g_gi.flatten = gi_kernel("#define GI_FLATTEN\n");
+    g_gi.scroll = gi_kernel("#define GI_SCROLL\n");
+    g_gi.trace = gi_kernel("#define GI_TRACE\n");
+    g_gi.bdis = gi_kernel("#define GI_BLEND\n#define GI_DIS 1\n#define GI_TS 16\n");
+    g_gi.birr = gi_kernel("#define GI_BLEND\n#define GI_DIS 0\n#define GI_TS 8\n");
+    g_gi.nozm = gi_image(1, 1, 1);
+    VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+    qi.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, qi.queryCount = 1;
+    VK_CHECK(vkCreateQueryPool(g_dev, &qi, NULL, &g_gi.csize));
+    g_gi.ok = g_gi.flatten && g_gi.scroll && g_gi.trace && g_gi.bdis && g_gi.birr && g_gi.lin && g_gi.rep && g_gi.pt && g_gi.nozm;
+    if (!g_gi.ok)
+        atomic_fetch_add(&g_failures, 1);
+    return g_gi.ok;
+}
+
+static void gi_push(VkCommandBuffer cb, const VkWriteDescriptorSet* w, uint32_t n)
+{
+    p_push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.layout, 0, n, w);
+}
+
+/* the zone's structure let go (once the GPU is past it) */
+static void gi_drop(void)
+{
+    if (g_gi.blas)
+        trash(3, (uint64_t)(uintptr_t)g_gi.blas, VK_NULL_HANDLE), g_gi.blas = VK_NULL_HANDLE;
+    if (g_gi.tlas)
+        trash(3, (uint64_t)(uintptr_t)g_gi.tlas, VK_NULL_HANDLE), g_gi.tlas = VK_NULL_HANDLE;
+    rt_free(&g_gi.blas_buf), rt_free(&g_gi.tlas_buf), rt_free(&g_gi.attr), rt_free(&g_gi.inst);
+    g_gi.ntri = 0;
+}
+
+void gfx_gi_zone(const GfxGiZone* z)
+{
+    if (!g_dev)
+        return;
+    gi_drop();
+    g_gi.updated = 0;
+    g_gi.clear = 1; /* every probe afresh */
+    if (!z || !z->nitem || !gi_init())
+        return;
+    uint64_t t0 = gfx_now_ns();
+    uint32_t ntri = 0;
+    for (uint32_t i = 0; i < z->nitem; ++i)
+        if (z->item[i].vb && z->item[i].inst < z->nworld)
+            ntri += z->item[i].count;
+    if (!ntri)
+        return;
+    const VkBufferUsageFlags SB = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    RtBuf pos, scratch;
+    memset(&pos, 0, sizeof pos), memset(&scratch, 0, sizeof scratch);
+    if (rt_buffer_ex(&pos, (VkDeviceSize)ntri * 36, SB | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 0, 1) < 0 ||
+        rt_buffer_ex(&g_gi.attr, (VkDeviceSize)ntri * 8, SB, 0, 1) < 0)
+    {
+        rt_free(&pos), gi_drop();
+        return;
+    }
+    flush_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    /* the triangles, an item at a time */
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.flatten);
+    VkDescriptorBufferInfo pbi = { pos.b, 0, VK_WHOLE_SIZE }, abi = { g_gi.attr.b, 0, VK_WHOLE_SIZE };
+    struct
+    {
+        float world[16], inv[16];
+        uint32_t first, count, prim, tri, flags, level, pad[2];
+    } fi;
+    uint32_t at = 0;
+    for (uint32_t i = 0; i < z->nitem; ++i)
+    {
+        const GfxWorldItem* it = &z->item[i];
+        if (!it->vb || it->inst >= z->nworld)
+            continue;
+        memcpy(fi.world, z->world + 16 * (size_t)it->inst, 64);
+        memcpy(fi.inv, z->world_inv + 16 * (size_t)it->inst, 64);
+        fi.first = it->first, fi.count = it->count, fi.prim = it->prim, fi.tri = at;
+        fi.flags = (it->flags & GFX_WORLD_TWOSIDED) ? 2u : 0u, fi.level = 0, fi.pad[0] = fi.pad[1] = 0;
+        GfxTex* t = it->tex && it->tex->view && it->tex->type == GFX_TEX_2D ? it->tex : NULL;
+        if (t)
+        {
+            fi.flags |= 1u;
+            /* a level some 8 texels across, when the chain is all there */
+            uint32_t lv = 0, w = t->w < t->h ? t->w : t->h;
+            while (w > 8 && lv + 1 < t->levels)
+                w >>= 1, ++lv;
+            fi.level = t->levels > 1 && t->levels < 32 && t->filled == (1u << t->levels) - 1 ? lv : 0;
+            t->used = g_serial, t->rec = g_cb_index;
+        }
+        VkBuffer buf;
+        VkDeviceSize off;
+        memcpy(ring(sizeof fi, RING_ALIGN, &buf, &off), &fi, sizeof fi);
+        VkDescriptorBufferInfo fbi = { buf, off, sizeof fi }, vbi = { it->vb->b, 0, VK_WHOLE_SIZE };
+        VkDescriptorImageInfo ti = { g_gi.rep, t ? t->view : g_dummy2d->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w[5];
+        world_write(&w[0], GB_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &vbi, NULL);
+        world_write(&w[1], GB_TX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ti);
+        world_write(&w[2], GB_POS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pbi, NULL);
+        world_write(&w[3], GB_ATTR, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &abi, NULL);
+        world_write(&w[4], GB_FI, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &fbi, NULL);
+        gi_push(cb, w, 5);
+        vkCmdDispatch(cb, (it->count + 63) / 64, 1, 1);
+        it->vb->used = g_serial;
+        at += it->count;
+    }
+    full_barrier(cb);
+    /* one structure over them (compacted, as on Metal), one instance of it */
+    VkAccelerationStructureGeometryKHR g = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    VkAccelerationStructureGeometryTrianglesDataKHR* td = &g.geometry.triangles;
+    td->sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    td->vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    td->vertexData.deviceAddress = pos.addr;
+    td->vertexStride = 12;
+    td->maxVertex = 3 * ntri - 1;
+    td->indexType = VK_INDEX_TYPE_NONE_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR bl = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    bl.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bl.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | (g_gi.csize ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0);
+    bl.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bl.geometryCount = 1, bl.pGeometries = &g;
+    VkAccelerationStructureBuildSizesInfoKHR sz = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    vkGetAccelerationStructureBuildSizesKHR(g_dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bl, &ntri, &sz);
+    VkDeviceSize al = g_ray.scratch_align;
+    if (!rt_structure_ex(&g_gi.blas, &g_gi.blas_buf, sz.accelerationStructureSize, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, 1) ||
+        rt_buffer_ex(&scratch, sz.buildScratchSize + al, SB, 0, 1) < 0)
+    {
+        fprintf(stderr, "[recomp] gfx: scene bounce light: no room for the zone's structure (%u triangles)\n", ntri);
+        rt_free(&pos), rt_free(&scratch), gi_drop();
+        return;
+    }
+    bl.dstAccelerationStructure = g_gi.blas;
+    bl.scratchData.deviceAddress = (scratch.addr + al - 1) / al * al;
+    VkAccelerationStructureBuildRangeInfoKHR br = { ntri, 0, 0, 0 };
+    const VkAccelerationStructureBuildRangeInfoKHR* brp = &br;
+    vkCmdBuildAccelerationStructuresKHR(cb, 1, &bl, &brp);
+    full_barrier(cb);
+    if (g_gi.csize)
+    {
+        vkCmdResetQueryPool(cb, g_gi.csize, 0, 1);
+        vkCmdWriteAccelerationStructuresPropertiesKHR(cb, 1, &g_gi.blas, VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, g_gi.csize, 0);
+    }
+    g_dirty = 1;
+    g_bound = VK_NULL_HANDLE;
+    uint64_t t1 = gfx_now_ns();
+    submit(1); /* once a zone, while it loads: the corners and the scratch let go after, the compacted size read */
+    uint64_t t2 = gfx_now_ns();
+    rt_free(&pos), rt_free(&scratch);
+    VkDeviceSize full = g_gi.blas_buf.size, csize = 0;
+    if (g_gi.csize)
+        vkGetQueryPoolResults(g_dev, g_gi.csize, 0, 1, sizeof csize, &csize, sizeof csize, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    cb = cmd();
+    gpu_sync();
+    if (csize && csize < full)
+    {
+        VkAccelerationStructureKHR small = VK_NULL_HANDLE;
+        RtBuf sbuf;
+        memset(&sbuf, 0, sizeof sbuf);
+        if (rt_structure_ex(&small, &sbuf, csize, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, 1))
+        {
+            VkCopyAccelerationStructureInfoKHR ci = { VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR };
+            ci.src = g_gi.blas, ci.dst = small, ci.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+            vkCmdCopyAccelerationStructureKHR(cb, &ci);
+            full_barrier(cb);
+            trash(3, (uint64_t)(uintptr_t)g_gi.blas, VK_NULL_HANDLE), rt_free(&g_gi.blas_buf);
+            g_gi.blas = small, g_gi.blas_buf = sbuf;
+        }
+        else
+            rt_free(&sbuf);
+    }
+    if (rt_buffer_ex(&g_gi.inst, sizeof(VkAccelerationStructureInstanceKHR), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 1, 1) < 0)
+    {
+        gi_drop();
+        return;
+    }
+    VkAccelerationStructureInstanceKHR* inst = (VkAccelerationStructureInstanceKHR*)g_gi.inst.p;
+    memset(inst, 0, sizeof *inst);
+    inst->transform.matrix[0][0] = inst->transform.matrix[1][1] = inst->transform.matrix[2][2] = 1.0f;
+    inst->mask = 0xFF;
+    inst->flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    VkAccelerationStructureDeviceAddressInfoKHR ai = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+    ai.accelerationStructure = g_gi.blas;
+    inst->accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(g_dev, &ai);
+    VkAccelerationStructureGeometryKHR tg = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    tg.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    tg.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    tg.geometry.instances.data.deviceAddress = g_gi.inst.addr;
+    VkAccelerationStructureBuildGeometryInfoKHR tl = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    tl.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    tl.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    tl.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    tl.geometryCount = 1, tl.pGeometries = &tg;
+    uint32_t one = 1;
+    VkAccelerationStructureBuildSizesInfoKHR tsz = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    vkGetAccelerationStructureBuildSizesKHR(g_dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tl, &one, &tsz);
+    if (!rt_structure_ex(&g_gi.tlas, &g_gi.tlas_buf, tsz.accelerationStructureSize, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, 1) ||
+        rt_buffer_ex(&scratch, tsz.buildScratchSize + al, SB, 0, 1) < 0)
+    {
+        rt_free(&scratch), gi_drop();
+        return;
+    }
+    tl.dstAccelerationStructure = g_gi.tlas;
+    tl.scratchData.deviceAddress = (scratch.addr + al - 1) / al * al;
+    VkAccelerationStructureBuildRangeInfoKHR tr = { 1, 0, 0, 0 };
+    const VkAccelerationStructureBuildRangeInfoKHR* trp = &tr;
+    vkCmdBuildAccelerationStructuresKHR(cb, 1, &tl, &trp);
+    full_barrier(cb);
+    rt_free(&scratch); /* (let go once the GPU is past this frame) */
+    g_dirty = 1;
+    g_gi.ntri = ntri;
+    fprintf(stderr, "[recomp] gfx: scene bounce light: the zone's structure: %u items, %u triangles, %.1f MB (%.1f MB before "
+                    "compaction) + %.1f MB the triangles' colours and normals, %.1f ms recorded, %.1f ms to the build's end (with the "
+                    "frame's work before it), %.1f ms in all\n",
+        z->nitem, ntri, (double)g_gi.blas_buf.size / 1048576.0, (double)full / 1048576.0, (double)ntri * 8.0 / 1048576.0,
+        (double)(t1 - t0) / 1e6, (double)(t2 - t0) / 1e6, (double)(gfx_now_ns() - t0) / 1e6);
+}
+
+/* the grid for quality q: cells each way, world units between them, rays a probe, 1 in how many traced a frame,
+ * hysteresis */
+static void gi_preset(uint32_t q, int32_t d[3], float* sp, uint32_t* rays, uint32_t* stride, float* hyst)
+{
+    if (q >= 2)
+        d[0] = 32, d[1] = 12, d[2] = 32, *sp = 3.0f, *rays = 64, *stride = 12, *hyst = 0.9f;
+    else
+        d[0] = 24, d[1] = 8, d[2] = 24, *sp = 4.0f, *rays = 32, *stride = 16, *hyst = 0.85f;
+}
+
+static int gi_probes(uint32_t q)
+{
+    if (g_gi.irr && g_gi.quality == q)
+        return 1;
+    gfx_tex_destroy(g_gi.irr), gfx_tex_destroy(g_gi.dis);
+    g_gi.irr = g_gi.dis = NULL;
+    rt_free(&g_gi.ps), rt_free(&g_gi.pc), rt_free(&g_gi.rb);
+    int32_t d[3];
+    float sp, hyst;
+    uint32_t rays, stride;
+    gi_preset(q, d, &sp, &rays, &stride, &hyst);
+    uint32_t np = (uint32_t)(d[0] * d[1] * d[2]), slots = (np + stride - 1) / stride;
+    g_gi.irr = gi_image((uint32_t)(d[0] * d[1]) * (GI_IRR + 2), (uint32_t)d[2] * (GI_IRR + 2), 0);
+    g_gi.dis = gi_image((uint32_t)(d[0] * d[1]) * (GI_DIS + 2), (uint32_t)d[2] * (GI_DIS + 2), 0);
+    const VkBufferUsageFlags SB = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (!g_gi.irr || !g_gi.dis || rt_buffer(&g_gi.ps, np * 4, SB, 0) < 0 || rt_buffer(&g_gi.pc, np * 16, SB, 0) < 0 ||
+        rt_buffer(&g_gi.rb, (VkDeviceSize)slots * rays * 16, SB, 0) < 0)
+    {
+        gfx_tex_destroy(g_gi.irr), gfx_tex_destroy(g_gi.dis);
+        g_gi.irr = g_gi.dis = NULL;
+        return 0;
+    }
+    g_gi.quality = q, g_gi.updated = 0, g_gi.phase = 0, g_gi.clear = 1;
+    fprintf(stderr, "[recomp] gfx: scene bounce light: %dx%dx%d probes %.1f apart, %u rays, 1 in %u a frame, %.1f MB\n", d[0], d[1],
+        d[2], (double)sp, rays, stride,
+        (double)((d[0] * d[1] * (GI_IRR + 2)) * (d[2] * (GI_IRR + 2)) * 8 + (d[0] * d[1] * (GI_DIS + 2)) * (d[2] * (GI_DIS + 2)) * 8 +
+                    np * 20 + slots * rays * 16) / 1048576.0);
+    return 1;
+}
+
+static uint32_t gi_rand(void)
+{
+    g_gi.seed = g_gi.seed * 1664525u + 1013904223u;
+    return g_gi.seed;
+}
+
+/* a random rotation (a random unit quaternion) into m, as columns */
+static void gi_rotation(float* m)
+{
+    float r[3];
+    for (int i = 0; i < 3; ++i)
+        r[i] = (float)(gi_rand() >> 8) / 16777216.0f;
+    float a = sqrtf(1.0f - r[0]), b = sqrtf(r[0]), t1 = 6.2831853f * r[1], t2 = 6.2831853f * r[2];
+    float x = a * sinf(t1), y = a * cosf(t1), z = b * sinf(t2), w = b * cosf(t2);
+    float R[9] = { 1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+        2 * (y * z - x * w), 2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y) };
+    memset(m, 0, 64);
+    for (int c = 0; c < 3; ++c)
+        for (int rr = 0; rr < 3; ++rr)
+            m[c * 4 + rr] = R[rr * 3 + c];
+    m[15] = 1.0f;
+}
+
+void gfx_gi_frame(const GfxGiFrame* f)
+{
+    g_gi.on = 0;
+    if (!g_dev || !f || f->strength <= 0.0f || !g_gi.tlas || !gi_init())
+        return;
+    uint32_t q = f->quality >= 2 ? 2 : 1;
+    g_gi.u.org[0] = f->quality >= 3 ? 1.0f : 0.0f;
+    if (!gi_probes(q))
+        return;
+    GiU* u = &g_gi.u;
+    int32_t d[3];
+    float sp, hyst;
+    uint32_t rays, stride;
+    gi_preset(q, d, &sp, &rays, &stride, &hyst);
+    u->org[3] = sp;
+    for (int a = 0; a < 3; ++a)
+        u->dims[a] = d[a], u->base[a] = (int32_t)floorf(f->cam[a] / sp + 0.5f) - d[a] / 2;
+    u->base[3] = 1, u->dims[3] = d[0] * d[1] * d[2];
+    u->k[0] = f->strength, u->k[1] = f->sky, u->k[2] = f->debug, u->k[3] = 0.25f * sp;
+    u->inv[0] = 1.0f / (float)(d[0] * d[1] * (GI_IRR + 2)), u->inv[1] = 1.0f / (float)(d[2] * (GI_IRR + 2));
+    u->inv[2] = 1.0f / (float)(d[0] * d[1] * (GI_DIS + 2)), u->inv[3] = 1.0f / (float)(d[2] * (GI_DIS + 2));
+    if (g_gi.updated != g_serial) /* the probes traced once a frame, at its first batch */
+    {
+        u->tr[0] = 16.0f * sp, u->tr[1] = hyst, u->tr[2] = f->bounce, u->tr[3] = f->ambient_bounce;
+        /* the sun's visibility at a hit from the shadows' zone layer when it is there (one read), else a ray */
+        int zl = g_shd.on && g_shd.zmap;
+        u->org[1] = zl ? 1.0f : 0.0f;
+        uint32_t nl = f->nlight < 64 ? f->nlight : 64;
+        u->n[0] = rays, u->n[1] = stride, u->n[2] = g_gi.phase, u->n[3] = nl;
+        memcpy(u->sun_dir, f->sun_dir, 16), memcpy(u->sun_col, f->sun_col, 16);
+        memcpy(u->sun2_dir, f->sun2_dir, 16), memcpy(u->sun2_col, f->sun2_col, 16), memcpy(u->amb, f->ambient, 16);
+        gi_rotation(u->rot);
+        g_gi.phase = (g_gi.phase + 1) % stride;
+        g_gi.updated = g_serial;
+        static uint32_t told;
+        if (++told % 2000 == 1)
+            fprintf(stderr, "[recomp] gfx: scene bounce light: grid at (%d, %d, %d), %u lamps, sun %.2f %.2f %.2f, second %.2f %.2f %.2f, "
+                            "ambient %.2f %.2f %.2f, zone layer %s\n",
+                u->base[0], u->base[1], u->base[2], nl, u->sun_col[0] * u->sun_dir[3], u->sun_col[1] * u->sun_dir[3],
+                u->sun_col[2] * u->sun_dir[3], u->sun2_col[0] * u->sun2_dir[3], u->sun2_col[1] * u->sun2_dir[3],
+                u->sun2_col[2] * u->sun2_dir[3], u->amb[0], u->amb[1], u->amb[2], zl ? "read" : "not there");
+        uint32_t np = (uint32_t)u->dims[3], slots = (np + stride - 1) / stride;
+        VkBuffer buf;
+        VkDeviceSize off;
+        GfxWorldLight none;
+        memset(&none, 0, sizeof none);
+        size_t lsz = (nl ? nl : 1) * sizeof(GfxWorldLight);
+        memcpy(ring(lsz, RING_ALIGN, &buf, &off), nl ? f->light : &none, lsz);
+        VkDescriptorBufferInfo lbi = { buf, off, lsz };
+        memcpy(ring(sizeof *u, RING_ALIGN, &buf, &off), u, sizeof *u);
+        VkDescriptorBufferInfo ubi = { buf, off, sizeof *u };
+        VkDescriptorBufferInfo sbi;
+        if (!shadow_uniforms(&sbi))
+        {
+            memset(ring(sizeof g_shd.u, RING_ALIGN, &buf, &off), 0, sizeof g_shd.u);
+            sbi = (VkDescriptorBufferInfo){ buf, off, sizeof g_shd.u };
+        }
+        flush_pass();
+        gpu_sync();
+        VkCommandBuffer cb = g_cb;
+        if (g_gi.clear)
+        {
+            vkCmdFillBuffer(cb, g_gi.ps.b, 0, VK_WHOLE_SIZE, 0);
+            vkCmdFillBuffer(cb, g_gi.pc.b, 0, VK_WHOLE_SIZE, 0);
+            full_barrier(cb);
+            g_gi.clear = 0;
+        }
+        int ts = ts_begin(cb, GFX_PASS_GI);
+        VkDescriptorBufferInfo psbi = { g_gi.ps.b, 0, VK_WHOLE_SIZE }, pcbi = { g_gi.pc.b, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo abi = { g_gi.attr.b, 0, VK_WHOLE_SIZE }, rbi = { g_gi.rb.b, 0, VK_WHOLE_SIZE };
+        GfxTex* zm = zl ? g_shd.zmap : g_gi.nozm;
+        VkDescriptorImageInfo iri = { g_gi.lin, g_gi.irr->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo dsi = { g_gi.lin, g_gi.dis->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo zmi = { g_gi.pt, zm->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSetAccelerationStructureKHR wa = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+        wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &g_gi.tlas;
+        VkWriteDescriptorSet w[GB_COUNT];
+        /* the cells new to the grid */
+        world_write(&w[0], GB_GU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &ubi, NULL);
+        world_write(&w[1], GB_PS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &psbi, NULL);
+        world_write(&w[2], GB_PC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pcbi, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.scroll);
+        gi_push(cb, w, 3);
+        vkCmdDispatch(cb, (np + 63) / 64, 1, 1);
+        full_barrier(cb);
+        /* the rays */
+        world_write(&w[2], GB_ATTR, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &abi, NULL);
+        world_write(&w[3], GB_LT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &lbi, NULL);
+        world_write(&w[4], GB_RB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &rbi, NULL);
+        w[5] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w[5].pNext = &wa, w[5].dstBinding = GB_AS, w[5].descriptorCount = 1;
+        w[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        world_write(&w[6], GB_SH, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &sbi, NULL);
+        world_write(&w[7], GB_IR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &iri);
+        world_write(&w[8], GB_DS, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &dsi);
+        world_write(&w[9], GB_ZM, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &zmi);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.trace);
+        gi_push(cb, w, 10);
+        vkCmdDispatch(cb, (rays + 63) / 64, slots, 1);
+        full_barrier(cb);
+        /* the maps: the distances' first (the irradiance's pass marks the probes traced) */
+        VkDescriptorImageInfo mi[2] = { { VK_NULL_HANDLE, g_gi.dis->view, VK_IMAGE_LAYOUT_GENERAL },
+            { VK_NULL_HANDLE, g_gi.irr->view, VK_IMAGE_LAYOUT_GENERAL } };
+        VkPipeline bp[2] = { g_gi.bdis, g_gi.birr };
+        world_write(&w[2], GB_RB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &rbi, NULL);
+        for (int k = 0; k < 2; ++k)
+        {
+            world_write(&w[3], GB_IMG, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, NULL, &mi[k]);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, bp[k]);
+            gi_push(cb, w, 4);
+            vkCmdDispatch(cb, slots, 1, 1);
+            full_barrier(cb);
+        }
+        ts_end(cb, ts);
+        g_bound = VK_NULL_HANDLE;
+        g_gi.irr->used = g_gi.dis->used = zm->used = g_serial;
+        g_gi.irr->rec = g_gi.dis->rec = zm->rec = g_cb_index;
+    }
+    g_gi.on = 1;
 }
 
 /* one caster to capture: what it draws, through which matrix (clip space to this frame's view space) */
