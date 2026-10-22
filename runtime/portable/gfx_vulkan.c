@@ -30,8 +30,9 @@
  * passes between the game's and at the frame's end (CAST_GLSL), the receivers' SHADOW_GLSL. Its
  * occlusion (SAO_GLSL, made when the scene is done; AO_GLSL), highlights (SPEC_GLSL) and lamps
  * (LAMP_GLSL: the tiles, the cubes at the frame's end beside the characters' shadow layers, the
- * glows) are Metal's as well, and so are the post effects on the finished scene - bloom (the scene's additive draws
- * recorded and drawn again: glow_new), depth of field and sun shafts (POST_GLSL, SHAFT_GLSL) - and the HDR scene
+ * glows) are Metal's as well, and so are the modern fog (FOG_GLSL, or with the sun's cascades a volume in the shafts'
+ * march) and the post effects on the finished scene - bloom (the scene's additive draws recorded and drawn again:
+ * glow_new), depth of field and sun shafts (POST_GLSL, SHAFT_GLSL) - and the HDR scene
  * (scene_hdr: the world target made float in place, one tonemap). Its bounce light (gfx_gi_zone, gfx_gi_frame) is
  * Metal's probes as compute passes with ray queries (GI_KERNELS_GLSL), read by the zone and characters (GI_GLSL); the
  * occlusion's rays trace the same structure. */
@@ -483,7 +484,9 @@ enum
     FP_SHAFT_COMP,
     FP_SHAFT_ADD,
     FP_SHAFT_DBG,
-    FP_GLOW,     /* the lamps' glows */
+    FP_SHAFT_VOL, /* the shafts as the fog volume: premultiplied over (built on first use, as those after it) */
+    FP_FOG,       /* the modern fog: over by its alpha */
+    FP_GLOW,      /* the lamps' glows */
     FP_HDR_COPY, /* the world target into its other format */
     FP_COUNT,
 };
@@ -1668,9 +1671,10 @@ static VkBlendOp blend_op(uint32_t op)
 }
 
 /* a pipeline from two modules (fs may be null: depth alone) and the fixed state the key gives */
-static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, const VkPipelineColorBlendAttachmentState* blend,
-    VkFormat color, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill, const VkDynamicState* dyn,
-    uint32_t ndyn, int discard)
+/* make_pipeline into ncolor colour targets (blend one each) */
+static VkPipeline make_pipeline_n(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, const VkPipelineColorBlendAttachmentState* blend,
+    const VkFormat* color, uint32_t ncolor, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill,
+    const VkDynamicState* dyn, uint32_t ndyn, int discard)
 {
     /* discard: 1 the rasterizer discards (ray tracing's capture: the vertex function's writes alone), 2 the depth
      * clamped rather than clipped where the device can (the scene renderer's shadow casters) */
@@ -1696,14 +1700,14 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
     ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
     ds.front.compareOp = ds.back.compareOp = VK_COMPARE_OP_ALWAYS;
     VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-    cb.attachmentCount = color ? 1 : 0; /* none: depth alone (the sun's maps) */
+    cb.attachmentCount = ncolor; /* none: depth alone (the sun's maps) */
     cb.pAttachments = blend;
     VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
     dy.dynamicStateCount = ndyn;
     dy.pDynamicStates = dyn;
     VkPipelineRenderingCreateInfo ri = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-    ri.colorAttachmentCount = color ? 1 : 0;
-    ri.pColorAttachmentFormats = &color;
+    ri.colorAttachmentCount = ncolor;
+    ri.pColorAttachmentFormats = color;
     ri.depthAttachmentFormat = depth;
     ri.stencilAttachmentFormat = stencil;
     VkGraphicsPipelineCreateInfo pi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
@@ -1727,6 +1731,13 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
         return VK_NULL_HANDLE;
     }
     return p;
+}
+
+static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, const VkPipelineColorBlendAttachmentState* blend,
+    VkFormat color, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill, const VkDynamicState* dyn,
+    uint32_t ndyn, int discard)
+{
+    return make_pipeline_n(vs, fs, layout, blend, &color, color ? 1 : 0, depth, stencil, topo, fill, dyn, ndyn, discard);
 }
 
 static const VkDynamicState DRAW_DYNAMIC[] = {
@@ -3409,8 +3420,8 @@ static VkShaderModule compile_with(const char* defines, const char* text, int st
     return m;
 }
 
-/* the blend of a full-screen pass: 0 none, 1 added, 2 screen (src (1 - dst) + dst), 3 over by the source's alpha; the
- * target's alpha kept where blended */
+/* the blend of a full-screen pass: 0 none, 1 added, 2 screen (src (1 - dst) + dst), 3 over by the source's alpha, 4 over
+ * premultiplied; the target's alpha kept where blended */
 static VkPipelineColorBlendAttachmentState fs_blend(int blend)
 {
     VkPipelineColorBlendAttachmentState b = { 0 };
@@ -3419,8 +3430,10 @@ static VkPipelineColorBlendAttachmentState fs_blend(int blend)
     {
         b.blendEnable = VK_TRUE;
         b.colorBlendOp = b.alphaBlendOp = VK_BLEND_OP_ADD;
-        b.srcColorBlendFactor = blend == 1 ? VK_BLEND_FACTOR_ONE : blend == 2 ? VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR : VK_BLEND_FACTOR_SRC_ALPHA;
-        b.dstColorBlendFactor = blend == 3 ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
+        b.srcColorBlendFactor = blend == 1 || blend == 4 ? VK_BLEND_FACTOR_ONE
+            : blend == 2                                ? VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR
+                                                        : VK_BLEND_FACTOR_SRC_ALPHA;
+        b.dstColorBlendFactor = blend >= 3 ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
         b.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, b.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
     }
     return b;
@@ -3480,20 +3493,21 @@ static void push_layout(const VkDescriptorSetLayoutBinding* b, uint32_t n, const
 }
 
 /* the full-screen passes' layout - their uniforms, six textures, the two sun maps with a compare sampler, a seventh
- * texture, a push constant - and vertex function: the effects', the scene renderer's occlusion's and the post
- * effects' */
+ * texture, the lamps' list and tiles (the modern fog's halos), a push constant - and vertex function: the effects', the
+ * scene renderer's occlusion's and the post effects' */
 static int fs_init(void)
 {
     static int tried;
     if (!tried)
     {
         tried = 1;
-        VkDescriptorSetLayoutBinding b[10];
+        VkDescriptorSetLayoutBinding b[12];
         b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-        for (uint32_t i = 1; i < 10; ++i)
-            b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+        for (uint32_t i = 1; i < 12; ++i)
+            b[i] = (VkDescriptorSetLayoutBinding){ i, i < 10 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
         VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8 };
-        push_layout(b, 10, &pcr, &g_fx_dsl, &g_fx_layout);
+        push_layout(b, 12, &pcr, &g_fx_dsl, &g_fx_layout);
         g_fx.vs = compile_glsl(FX_GLSL, 0);
     }
     return g_fx_layout && g_fx.vs;
@@ -3588,27 +3602,30 @@ static void image_copy(GfxTex* src, GfxTex* dst, VkImageAspectFlags aspect)
     src->rec = dst->rec = g_cb_index;
 }
 
-/* a pass of the effects' own, after what came before it, into one layer and level of t: its colour, or its depth for a
- * depth texture; load LOAD, CLEAR (depth 1, colour 0) or DONT_CARE; within v (NULL: all of it); timed as pass. Its
- * timestamp's index, for pass_close */
-static int pass_open(GfxTex* t, uint32_t layer, uint32_t level, VkAttachmentLoadOp load, const VkViewport* v, int pass)
+/* a pass of the effects' own, after what came before it, into one layer and level of t (and t2, a second colour target
+ * the same size; NULL none): its colour, or its depth for a depth texture; load LOAD, CLEAR (depth 1, colour 0) or
+ * DONT_CARE; within v (NULL: all of it); timed as pass. Its timestamp's index, for pass_close */
+static int pass_open2(GfxTex* t, GfxTex* t2, uint32_t layer, uint32_t level, VkAttachmentLoadOp load, const VkViewport* v, int pass)
 {
     end_pass();
     gpu_sync();
     uint32_t tw, th;
     level_size(t, level, &tw, &th);
-    VkRenderingAttachmentInfo a = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    a.imageView = attachment_view(t, layer, level);
-    a.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    a.loadOp = load;
-    a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo a[2] = { { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO } };
+    a[0].imageView = attachment_view(t, layer, level);
+    a[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    a[0].loadOp = load;
+    a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    a[1] = a[0];
     VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
     ri.renderArea.extent = (VkExtent2D){ tw, th };
     ri.layerCount = 1;
+    if (t2)
+        a[1].imageView = attachment_view(t2, layer, level), t2->used = g_serial, t2->rec = g_cb_index;
     if (t->use == GFX_USE_DEPTH)
-        a.clearValue.depthStencil.depth = 1.0f, ri.pDepthAttachment = &a;
+        a[0].clearValue.depthStencil.depth = 1.0f, ri.pDepthAttachment = &a[0];
     else
-        ri.colorAttachmentCount = 1, ri.pColorAttachments = &a;
+        ri.colorAttachmentCount = t2 ? 2 : 1, ri.pColorAttachments = a;
     int ts = ts_begin(g_cb, pass);
     vkCmdBeginRendering(g_cb, &ri);
     VkViewport all = { 0, 0, (float)tw, (float)th, 0, 1 };
@@ -3617,6 +3634,11 @@ static int pass_open(GfxTex* t, uint32_t layer, uint32_t level, VkAttachmentLoad
     vkCmdSetScissor(g_cb, 0, 1, &sc);
     t->used = g_serial, t->rec = g_cb_index;
     return ts;
+}
+
+static int pass_open(GfxTex* t, uint32_t layer, uint32_t level, VkAttachmentLoadOp load, const VkViewport* v, int pass)
+{
+    return pass_open2(t, NULL, layer, level, load, v, pass);
 }
 
 static void pass_close(int ts)
@@ -5869,9 +5891,10 @@ void gfx_lamps(const GfxWorldLight* l, uint32_t n)
     g_lamps.set = g_serial;
 }
 
-/* the modern fog (fog_modern) is Metal's only so far */
-void gfx_set_fixed_light(int fixed) { (void)fixed; }
-void gfx_set_weather(int weather) { (void)weather; }
+static int g_fixed_light; /* the zone's light is fixed (scene.c, the weather record): the modern fog a light dust */
+void gfx_set_fixed_light(int fixed) { g_fixed_light = fixed != 0; }
+static int g_weather = -1; /* the zone's weather (host64, the server's packets): the ground mist and its drift */
+void gfx_set_weather(int weather) { g_weather = weather; }
 
 static void lamp_shadows_draw(const GfxCharFrame* cf, VkDescriptorBufferInfo pal, VkDescriptorBufferInfo st);
 static void lamp_zone_cubes(void);
@@ -9054,6 +9077,85 @@ static const char POST_GLSL[] =
     "}\n"
     "#endif\n";
 
+/* the air the modern fog (fog_modern) and its volume share (gfx_metal.m's fog_tau/su_tau, fog_lamp/su_lamp): the lamps'
+ * list and tiles (lamps_bin's) at 10 and 11 of the post's layout, the air's optical depth along a ray in closed form, and
+ * the lamps' light it scatters toward the eye */
+#define AIR_GLSL                                                                                                      \
+    "struct LL { vec4 pos, col, att, amb; };\n"                                                                       \
+    "layout(std430, set = 0, binding = 10) readonly buffer LLB { LL LS[]; };\n"                                       \
+    "layout(std430, set = 0, binding = 11) readonly buffer TLB { uint TL[]; };\n"                                     \
+    "uint tl_at(uint i) { uint w = TL[i >> 1]; return (i & 1u) != 0u ? w >> 16 : w & 0xffffu; }\n"                   \
+    /* along [0, d] of dir from the camera: density rho at the camera's height, falling as exp(-k * rise) (y down) */  \
+    "float air_tau(float rho, float k, vec3 dir, float d) {\n"                                                        \
+    "  float rise = -dir.y * d * k;\n"                                                                                \
+    "  float f = abs(rise) < 1e-3 ? 1.0 - 0.5 * rise : (1.0 - exp(-rise)) / rise;\n"                                  \
+    "  return rho * d * f;\n"                                                                                         \
+    "}\n"                                                                                                             \
+    /* a point light's light scattered toward the eye along the ray inside its reach: the integral of 1 / r^2 */      \
+    "float air_lamp(vec3 Lp, float range, vec3 dir, float d) {\n"                                                     \
+    "  float tc = dot(Lp, dir), h2 = max(dot(Lp, Lp) - tc * tc, 0.0), r2 = range * range;\n"                          \
+    "  if (h2 >= r2) return 0.0;\n"                                                                                   \
+    "  float w = sqrt(r2 - h2), a = max(tc - w, 0.0), b = min(tc + w, d);\n"                                          \
+    "  if (b <= a) return 0.0;\n"                                                                                     \
+    "  float h = sqrt(max(h2, 0.09));\n"                                                                              \
+    "  return (atan((b - tc) / h) - atan((a - tc) / h)) / h;\n"                                                       \
+    "}\n"                                                                                                             \
+    /* the lamps of fp's tile (lt: the tiles' origin, across, down) along dir to d from cam: halos of strength s round \
+     * a point lift above each light, dimmed by the air (rho, k) between */                                            \
+    "vec3 air_lamps(vec4 lt, vec2 fp, vec3 cam, vec3 dir, float d, float s, float lift, float rho, float k) {\n"      \
+    "  ivec2 tq = ivec2((fp - lt.xy) / 64.0);\n"                                                                      \
+    "  if (any(lessThan(tq, ivec2(0))) || tq.x >= int(lt.z) || tq.y >= int(lt.w)) return vec3(0.0);\n"               \
+    "  uint b = (uint(tq.y) * uint(lt.z) + uint(tq.x)) * 32u, n = tl_at(b);\n"                                        \
+    "  vec3 I = vec3(0.0);\n"                                                                                         \
+    "  for (uint i = 0u; i < n; ++i) {\n"                                                                             \
+    "    LL l = LS[tl_at(b + 1u + i)];\n"                                                                             \
+    "    vec3 Lp = l.pos.xyz - cam - vec3(0.0, lift, 0.0);\n"                                                         \
+    "    I += l.col.rgb * (s * air_lamp(Lp, l.pos.w, dir, d) * exp(-air_tau(rho, k, dir, max(dot(Lp, dir), 0.0))));\n" \
+    "  }\n"                                                                                                           \
+    "  return I;\n"                                                                                                   \
+    "}\n"                                                                                                             \
+    "float air_dither(vec2 fp) { return fract(sin(dot(fp, vec2(12.9898, 78.233))) * 43758.5453) - 0.5; }\n"
+
+/* the modern fog (fog_modern; gfx_metal.m's fog_comp and its notes): light scattered by the air between the eye and
+ * each point, and the point's light dimmed by it - not a fade to grey. Over the scene by its own alpha (the colour times
+ * what gets through, plus what is scattered in); t0 the scene's depth */
+static const char FOG_GLSL[] =
+    "layout(std140, set = 0, binding = 0) uniform FU {\n"
+    "  mat4 ivp;  // the scene's clip space to the world round the camera (the view's turn alone)\n"
+    "  vec4 cam;  // the camera, world; w: how far the fog goes (beyond: the sky)\n"
+    "  vec4 sun;  // toward the sun (or moon), world; w: the forward lobe's g\n"
+    "  vec4 sunc; // its scattered colour (0 with the shafts on: theirs)\n"
+    "  vec4 airc; // the air's own colour (the game's fog colour, cooled)\n"
+    "  vec4 p;    // density at the camera's height, its falloff with height, the lamps' halo strength, the 8-bit dither\n"
+    "  vec4 vp;   // the scene's viewport in its target\n"
+    "  vec4 lt;   // the lamps' tiles: origin x, y, tiles across, down (0: no lamps)\n"
+    "  vec4 dbg;  // x: fog_debug; y: how far above the game's light its lantern hangs (the halo's centre)\n"
+    "} u;\n"
+    "layout(location = 0) in vec2 vuv;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    AIR_GLSL
+    "void main() {\n"
+    "  vec2 fp = gl_FragCoord.xy;\n"
+    "  float d0 = texelFetch(t0, ivec2(fp), 0).r;\n"
+    "  if (d0 >= 0.99999) { oc = vec4(0.0); return; } // the sky: the game's own, with its own haze\n"
+    "  vec2 n = vec2((fp.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (fp.y - u.vp.y) / u.vp.w * 2.0);\n"
+    "  vec4 w = u.ivp * vec4(n, d0, 1.0);\n"
+    "  vec3 v = w.xyz / w.w;\n"
+    "  float l = length(v), d = min(l, u.cam.w);\n"
+    "  vec3 dir = v / max(l, 1e-4);\n"
+    "  float T = exp(-air_tau(u.p.x, u.p.y, dir, d));\n"
+    "  float g = u.sun.w, mu = dot(dir, u.sun.xyz);\n"
+    "  float mie = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float ray = 0.75 * (1.0 + mu * mu); // (Rayleigh: a little more toward and away from the sun than across)\n"
+    "  vec3 I = (u.airc.rgb * ray + u.sunc.rgb * mie) * (1.0 - T);\n"
+    "  if (u.lt.z > 0.0 && u.p.z > 0.0) I += air_lamps(u.lt, fp, u.cam.xyz, dir, d, u.p.z, u.dbg.y, u.p.x, u.p.y);\n"
+    "  if (u.dbg.x > 0.5) { oc = vec4(u.dbg.x > 1.5 ? I : vec3(1.0 - T), 1.0); return; } // fog_debug: 1 how much it takes, 2 what it adds\n"
+    "  float a = 1.0 - T;\n"
+    "  if (a < 1e-4 && all(lessThan(I, vec3(1e-4)))) { oc = vec4(0.0); return; }\n"
+    "  oc = vec4(max(I / max(a, 1e-4) + air_dither(fp) * u.p.w / max(a, 1e-4), 0.0), a); // over: I / a * a + scene * T; dithered at 8 bits\n"
+    "}\n";
+
 /* the sun shafts' passes (gfx_metal.m's shaft_march, shaft_resolve, shaft_comp), on the same layout with SU for PU */
 static const char SHAFT_GLSL[] =
     "layout(std140, set = 0, binding = 0) uniform SU {\n"
@@ -9069,12 +9171,21 @@ static const char SHAFT_GLSL[] =
     "  vec4 lo;     // the small textures' size, 1 / size\n"
     "  vec4 hist;   // x: last frame's history is there and lines up; y: its weight; z: shafts_debug; w: an HDR scene\n"
     "  vec4 pcam;   // last frame's camera, world\n"
+    "  // the fog volume (fog_modern with fog_volume): the air's own colour; x the lamps' halo density, y how far above the\n"
+    "  // game's light its lantern hangs, z the ground fog's strength, w its noise's scale; the noise's drift (xyz) and w 1\n"
+    "  // in the volume; the lamps' tiles (origin x, y, across, down; 0 none)\n"
+    "  vec4 airc;\n"
+    "  vec4 fv;\n"
+    "  vec4 wind;\n"
+    "  vec4 lt;\n"
     "} u;\n"
     "layout(location = 0) in vec2 vuv;\n"
     "layout(location = 0) out vec4 oc;\n"
     "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
     "#ifdef SHAFT_MARCH\n"
+    "layout(location = 1) out float ot; // what gets through (the fog volume's)\n"
     "layout(set = 0, binding = 2) uniform sampler2DArrayShadow t1;\n"
+    AIR_GLSL
     "#else\n"
     "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
     "#endif\n"
@@ -9089,21 +9200,34 @@ static const char SHAFT_GLSL[] =
     "  return v / max(l, 1e-4);\n"
     "}\n"
     "#if defined(SHAFT_MARCH)\n"
-    "const float SU_BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);\n"
+    "// low, smooth noise for the ground fog: value noise, two octaves, 0..1\n"
+    "float su_hash(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }\n"
+    "float su_vnoise(vec3 x) {\n"
+    "  vec3 i = floor(x), f = x - i; f = f * f * (3.0 - 2.0 * f);\n"
+    "  return mix(mix(mix(su_hash(i), su_hash(i + vec3(1, 0, 0)), f.x), mix(su_hash(i + vec3(0, 1, 0)), su_hash(i + vec3(1, 1, 0)), f.x), f.y),\n"
+    "             mix(mix(su_hash(i + vec3(0, 0, 1)), su_hash(i + vec3(1, 0, 1)), f.x), mix(su_hash(i + vec3(0, 1, 1)), su_hash(i + vec3(1, 1, 1)), f.x), f.y), f.z);\n"
+    "}\n"
+    "float su_ground(vec3 x) {\n"
+    "  vec3 q = (x + u.wind.xyz) * u.fv.w;\n"
+    "  return 0.65 * su_vnoise(q) + 0.35 * su_vnoise(q * 2.7 + 13.1);\n"
+    "}\n"
+    "float su_depth(vec2 fp) { return texelFetch(t0, ivec2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0)), 0).r; }\n"
     "// the ray to the surface (or as far as the rays go): steps spread as the square of their order, the first by this\n"
-    "// pixel's jitter; the light in-scattered, each step lit where the cascades see the sun\n"
+    "// pixel's jitter; the light in-scattered, each step lit where the cascades see the sun. In the fog volume the air's\n"
+    "// own light too, the ground mist over the surface the ray ends on and the lamps' halos; ot what gets through\n"
     "void main() {\n"
     "  vec2 lp = floor(gl_FragCoord.xy);\n"
     "  vec2 fp = u.vp.xy + (lp + 0.5) * (u.vp.zw * u.lo.zw);\n"
-    "  ivec2 q = ivec2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0));\n"
-    "  float dist;\n"
-    "  vec3 dir = su_dir(fp, texelFetch(t0, q, 0).r, dist);\n"
-    "  int bi = (int(lp.y) & 3) * 4 + (int(lp.x) & 3);\n"
-    "  float j = fract((SU_BAYER[bi] + 0.5) / 16.0 + u.p.w);\n"
+    "  float dist, d0 = su_depth(fp);\n"
+    "  vec3 dir = su_dir(fp, d0, dist);\n"
+    "  bool vol = u.wind.w > 0.5, sky = d0 >= 0.99999;\n"
+    "  // this texel's jitter: interleaved gradient noise (near blue), turned a golden ratio each frame\n"
+    "  float j = fract(fract(52.9829189 * fract(dot(lp, vec2(0.06711056, 0.00583715)))) + u.p.w);\n"
     "  int n = int(u.p.z);\n"
     "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
     "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
-    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0;\n"
+    "  float ray = 0.75 * (1.0 + mu * mu);\n"
+    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0, llast = 1.0, A = 0.0;\n"
     "  for (int i = 0; i < n; ++i) {\n"
     "    float f = (float(i) + j) / float(n), t = dist * f * f, seg = 2.0 * dist * f / float(n);\n"
     "    vec3 x = u.cam.xyz + dir * t;\n"
@@ -9116,13 +9240,37 @@ static const char SHAFT_GLSL[] =
     "        lit = texture(t1, vec4(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5, float(c), h.z - 2e-4)), inr = 1.0;\n"
     "      break;\n"
     "    }\n"
-    "    ls += lit, lin += inr;\n"
+    "    ls += lit, lin += inr, llast = lit;\n"
     "    float a = rho * seg;\n"
     "    L += T * a * lit;\n"
+    "    if (vol && !sky) A += T * a; // the air's own light: the sky's, unshadowed\n"
     "    T *= exp(-a);\n"
     "  }\n"
+    "  ot = sky ? 1.0 : T;\n"
     "  if (u.hist.z < 0.0) { oc = vec4(ls / float(n), lin / float(n), 0.0, dist); return; } // shafts_debug < 0\n"
     "  vec3 o = u.sunc.rgb * (L * ph);\n"
+    "  if (vol && !sky) {\n"
+    "    o += u.airc.rgb * (A * ray);\n"
+    "    if (u.fv.z > 0.0) {\n"
+    "      // the ground mist: a layer some 1.5 units deep over the surface this ray ends on (the ground taken as level\n"
+    "      // there), in drifting patches; its depth along the ray in closed form, lit as the surface is - only over\n"
+    "      // ground (the surface's facing from the depths beside it; up, y down: -y), not characters or walls\n"
+    "      float sl = max(abs(dir.y), 0.2), H = 1.5;\n"
+    "      vec3 P = u.cam.xyz + dir * dist;\n"
+    "      vec2 fx = fp + vec2(u.vp.z * u.lo.z, 0.0), fy = fp + vec2(0.0, u.vp.w * u.lo.w);\n"
+    "      float d1, d2;\n"
+    "      vec3 r1 = su_dir(fx, su_depth(fx), d1), r2 = su_dir(fy, su_depth(fy), d2);\n"
+    "      vec3 nn = cross(r1 * d1 - dir * dist, r2 * d2 - dir * dist);\n"
+    "      float up = length(nn) > 1e-6 ? abs(normalize(nn).y) : 0.0;\n"
+    "      float edge = clamp(1.0 - max(abs(d1 - dist), abs(d2 - dist)) / (0.05 * dist + 0.3), 0.0, 1.0); // (a silhouette's edge: no facing to trust)\n"
+    "      float tm = u.fv.z * 0.12 * smoothstep(0.75, 0.95, up) * edge * smoothstep(0.3, 0.65, su_ground(P)) * (H / sl) * (1.0 - exp(-dist * sl / H));\n"
+    "      float am = 1.0 - exp(-tm);\n"
+    "      o += (u.airc.rgb * ray + u.sunc.rgb * (ph * llast)) * (T * am);\n"
+    "      T *= 1.0 - am;\n"
+    "      ot = T;\n"
+    "    }\n"
+    "    if (u.lt.z > 0.0 && u.fv.x > 0.0) o += air_lamps(u.lt, fp, u.cam.xyz, dir, dist, u.fv.x, u.fv.y, u.p.x, u.p.y);\n"
+    "  }\n"
     "  oc = vec4(any(isnan(o)) || any(isinf(o)) ? vec3(0.0) : o, dist);\n"
     "}\n"
     "#elif defined(SHAFT_RESOLVE)\n"
@@ -9150,7 +9298,7 @@ static const char SHAFT_GLSL[] =
     "}\n"
     "#else\n"
     "// onto the scene (screen-blended): the four small texels round each pixel, weighted by how near they are and how\n"
-    "// alike in distance; t0 the scene's depth, t1 the resolved shafts\n"
+    "// alike in distance; t0 the scene's depth, t1 the resolved shafts, t2 what got through (the fog volume's)\n"
     "void main() {\n"
     "  vec2 fp = gl_FragCoord.xy;\n"
     "  float dist;\n"
@@ -9158,16 +9306,23 @@ static const char SHAFT_GLSL[] =
     "  vec2 h = (fp - u.vp.xy) * (u.lo.xy / u.vp.zw) - 0.5;\n"
     "  ivec2 b = ivec2(floor(h)), hi = ivec2(u.lo.xy) - 1;\n"
     "  vec2 fr = h - vec2(b);\n"
-    "  vec3 sum = vec3(0.0); float ws = 0.0;\n"
+    "  vec3 sum = vec3(0.0); float ws = 0.0, tsum = 0.0;\n"
     "  for (int k = 0; k < 4; ++k) {\n"
-    "    ivec2 o = ivec2(k & 1, k >> 1);\n"
-    "    vec4 t = texelFetch(t1, clamp(b + o, ivec2(0), hi), 0);\n"
+    "    ivec2 o = ivec2(k & 1, k >> 1), q = clamp(b + o, ivec2(0), hi);\n"
+    "    vec4 t = texelFetch(t1, q, 0);\n"
     "    float w = (o.x != 0 ? fr.x : 1.0 - fr.x) * (o.y != 0 ? fr.y : 1.0 - fr.y) + 1e-3;\n"
     "    w *= exp(-abs(t.a - dist) / (0.05 * dist + 0.5));\n"
     "    sum += t.rgb * w, ws += w;\n"
+    "    if (u.wind.w > 0.5) tsum += texelFetch(t2, q, 0).r * w;\n"
     "  }\n"
     "  vec3 c = ws > 1e-6 ? sum / ws : vec3(0.0);\n"
     "  if (u.hist.z != 0.0) { oc = vec4(clamp(c * abs(u.hist.z), 0.0, 1.0), 1.0); return; } // shafts_debug: the term alone\n"
+    "  if (u.wind.w > 0.5) { // the fog volume: the scene dimmed by the air, what it scatters added (premultiplied over)\n"
+    "    float a = texelFetch(t0, ivec2(fp), 0).r >= 0.99999 ? 0.0 : clamp(1.0 - (ws > 1e-6 ? tsum / ws : 1.0), 0.0, 1.0);\n"
+    "    float r = u.hist.w > 0.0 ? 0.0 : (fract(sin(dot(fp, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;\n"
+    "    oc = vec4(max(c + r, 0.0), a);\n"
+    "    return;\n"
+    "  }\n"
     "  oc = u.hist.w > 0.0 ? vec4(max(c, 0.0), 1.0) : vec4(1.0 - exp(-max(c, 0.0)), 1.0); // an HDR scene: added as it is\n"
     "}\n"
     "#endif\n";
@@ -9181,7 +9336,15 @@ typedef struct PostU
 typedef struct ShaftU
 {
     float ivp[16], pvp[16], m[4][16], cas[4][4], cam[4], sun[4], sunc[4], p[4], vp[4], lo[4], hist[4], pcam[4];
+    float airc[4], fv[4], wind[4], lt[4];
 } ShaftU;
+
+/* the modern fog's uniforms: FU in FOG_GLSL */
+typedef struct FogU
+{
+    float ivp[16];
+    float cam[4], sun[4], sunc[4], airc[4], p[4], vp[4], lt[4], dbg[4];
+} FogU;
 
 enum
 {
@@ -9197,6 +9360,7 @@ static struct
     GfxTex* glow;             /* the glow's draws, as the scene's target */
     GfxTex *h0, *h1;          /* the depth of field at half size: colour and circle; gathered */
     GfxTex *sh, *shist[2];    /* the shafts at a third or a fifth of the size: this frame's march, the resolved two */
+    GfxTex* sht;              /* what gets through, as marched (the fog volume's) */
     int shist_at;             /* which of shist[] the last frame wrote */
     uint64_t sh_serial;       /* that frame (0: none) */
     float sh_pvp[16], sh_pcam[3]; /* its view's turn times projection, its camera */
@@ -9204,14 +9368,15 @@ static struct
     uint64_t focus_ns;
 } g_post;
 
-/* one pass's pipeline: the post's vertex function and POST_<name> (or SHAFT_<name> from SHAFT_GLSL) into fmt; blend 1
- * added, 2 screen (src (1 - dst) + dst), 3 over by the source's alpha (the colour only) */
+/* one pass's pipeline: the post's vertex function and POST_<name> (or SHAFT_<name> from SHAFT_GLSL, FOG FOG_GLSL) into
+ * fmt; blended as fs_blend says */
 static VkPipeline post_pipeline(const char* name, VkFormat fmt, int blend)
 {
-    int shaft = !strncmp(name, "SHAFT_", 6);
+    int shaft = !strncmp(name, "SHAFT_", 6), fog = !strcmp(name, "FOG");
     char d[64];
-    snprintf(d, sizeof d, "#define %s%s\n", shaft ? "" : "POST_", name);
-    VkPipeline p = fs_pipeline(g_fx.vs, d, shaft ? SHAFT_GLSL : POST_GLSL, g_fx_layout, fmt, blend, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    snprintf(d, sizeof d, "#define %s%s\n", shaft || fog ? "" : "POST_", name);
+    VkPipeline p = fs_pipeline(g_fx.vs, d, shaft ? SHAFT_GLSL : fog ? FOG_GLSL : POST_GLSL, g_fx_layout, fmt, blend,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     if (!p)
         atomic_fetch_add(&g_failures, 1), fprintf(stderr, "[recomp] gfx: post effect %s failed\n", name);
     return p;
@@ -9236,7 +9401,19 @@ static int post_init(VkFormat scene_fmt)
             g_post.up = post_pipeline("BLOOM_UP", g_post.lvl_fmt, 1);
             g_post.coc = post_pipeline("DOF_COC", F16, 0);
             g_post.gather = post_pipeline("DOF_GATHER", F16, 0);
-            g_post.smarch = post_pipeline("SHAFT_MARCH", F16, 0);
+            /* the march: two targets, the in-scatter and distance, and what gets through */
+            VkShaderModule fs = compile_with("#define SHAFT_MARCH\n", SHAFT_GLSL, 1);
+            if (fs)
+            {
+                static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+                const VkFormat mf[2] = { F16, VK_FORMAT_R16_SFLOAT };
+                VkPipelineColorBlendAttachmentState b[2] = { fs_blend(0), fs_blend(0) };
+                g_post.smarch = make_pipeline_n(g_fx.vs, fs, g_fx_layout, b, mf, 2, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED,
+                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, dyn, 2, 0);
+                vkDestroyShaderModule(g_dev, fs, NULL);
+            }
+            if (!g_post.smarch)
+                atomic_fetch_add(&g_failures, 1), fprintf(stderr, "[recomp] gfx: post effect SHAFT_MARCH failed\n");
             g_post.sresolve = post_pipeline("SHAFT_RESOLVE", F16, 0);
         }
         g_post.ok = g_post.pre && g_post.down && g_post.up && g_post.coc && g_post.gather && g_post.smarch &&
@@ -9262,6 +9439,8 @@ static VkPipeline fmt_build(VkFormat f, int which)
     case FP_SHAFT_COMP: return post_pipeline("SHAFT_COMP", f, 2);
     case FP_SHAFT_ADD: return post_pipeline("SHAFT_COMP", f, 1);
     case FP_SHAFT_DBG: return post_pipeline("SHAFT_COMP", f, 0);
+    case FP_SHAFT_VOL: return post_pipeline("SHAFT_COMP", f, 4);
+    case FP_FOG: return post_pipeline("FOG", f, 3);
     case FP_HDR_COPY: return post_pipeline("HDR_COPY", f, 0);
     case FP_GLOW:
     {
@@ -9277,19 +9456,20 @@ static VkPipeline fmt_build(VkFormat f, int which)
     return VK_NULL_HANDLE;
 }
 
-/* one full-screen triangle into the first level of target within vp (x y w h), its uniforms u (un bytes) and t0..t2
- * (NULL: none) each through its sampler (VK_NULL_HANDLE: the linear one); load keeps what is there; timed as pass */
-static void post_pass(GfxTex* target, int load, VkPipeline p, const float* vp, const void* u, size_t un, GfxTex* const* in,
-    const VkSampler* samp, int pass)
+/* one full-screen triangle into the first level of target (and target2, NULL none) within vp (x y w h), its uniforms u
+ * (un bytes) and t0..t2 (NULL: none) each through its sampler (VK_NULL_HANDLE: the linear one), with lamps (AIR_GLSL's
+ * buffers: this frame's binned lamps, or with none an empty list); load keeps what is there; timed as pass */
+static void post_pass_x(GfxTex* target, GfxTex* target2, int load, VkPipeline p, const float* vp, const void* u, size_t un,
+    GfxTex* const* in, const VkSampler* samp, int lamps, int pass)
 {
     VkViewport v = { vp[0], vp[1], vp[2], vp[3], 0, 1 };
-    int ts = pass_open(target, 0, 0, load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE, &v, pass);
+    int ts = pass_open2(target, target2, 0, 0, load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE, &v, pass);
     VkCommandBuffer cb = g_cb;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    VkDescriptorBufferInfo bi = ring_put(u, un);
+    VkDescriptorBufferInfo bi[3] = { ring_put(u, un) };
     VkDescriptorImageInfo ii[3];
-    VkWriteDescriptorSet w[4];
-    desc_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi, NULL);
+    VkWriteDescriptorSet w[6];
+    desc_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
     for (int i = 0; i < 3; ++i)
     {
         GfxTex* t = in[i] ? in[i] : g_dummy2d;
@@ -9298,17 +9478,154 @@ static void post_pass(GfxTex* target, int load, VkPipeline p, const float* vp, c
         desc_write(&w[1 + i], 1 + (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[i]);
         t->used = g_serial, t->rec = g_cb_index;
     }
-    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, 4, w);
+    uint32_t nw = 4;
+    if (lamps)
+    {
+        int have = g_lamps.binned == g_serial && g_lamps.lb && g_lamps.tb;
+        static const uint32_t none[16];
+        bi[1] = have ? (VkDescriptorBufferInfo){ g_lamps.lb, g_lamps.lo, g_lamps.lsz } : ring_put(none, sizeof none);
+        bi[2] = have ? (VkDescriptorBufferInfo){ g_lamps.tb, g_lamps.to, g_lamps.tsz } : bi[1];
+        desc_write(&w[nw++], 10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+        desc_write(&w[nw++], 11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+    }
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, nw, w);
     vkCmdDraw(cb, 3, 1, 0, 0);
     pass_close(ts);
 }
 
+static void post_pass(GfxTex* target, int load, VkPipeline p, const float* vp, const void* u, size_t un, GfxTex* const* in,
+    const VkSampler* samp, int pass)
+{
+    post_pass_x(target, NULL, load, p, vp, u, un, in, samp, 0, pass);
+}
+
+/* The modern fog (fog_modern; FOG_GLSL, gfx_metal.m's scene_fog and its notes): over the finished scene before the
+ * shafts, depth of field and bloom. Its density from the game's fog end (some 4% of a point's light left there) times
+ * fog_density, thinning with height by fog_thin; indoors (a zone's fixed light) a light dust. With the sun's cascades
+ * (fog_volume) it is the shafts' march instead: one volume, shadowed. */
+
+/* the fog's fixed height in the world (y down): the player's feet as they arrived in a zone, kept until they jump far
+ * (a zone change, a teleport), so the haze and the ground mist stay put as the player climbs or descends */
+static float fog_ref(void)
+{
+    static float ref, last[3];
+    static int set;
+    if (g_fx.has_focus)
+    {
+        float dx = g_fx.focus[0] - last[0], dy = g_fx.focus[1] - last[1], dz = g_fx.focus[2] - last[2];
+        if (!set || dx * dx + dy * dy + dz * dz > 60.0f * 60.0f)
+            ref = g_fx.focus[1], set = 1;
+        memcpy(last, g_fx.focus, sizeof last);
+    }
+    return set ? ref : 0.0f;
+}
+
+/* the haze's density at the camera's height, from its density at the fixed height and its thinning upward */
+static float fog_at_cam(float sigma, float cam_y)
+{
+    float e = fminf(fmaxf(g_fxs.fog_thin * (cam_y - fog_ref()), -3.0f), 3.0f);
+    return sigma * expf(e);
+}
+
+/* the haze's density at the fixed height */
+static float fog_sigma(const GfxScene* s)
+{
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
+    fog_end = fminf(fmaxf(fog_end, 20.0f), 3000.0f);
+    float k = fmaxf(g_fxs.fog_density, 0.0f) * 3.2f / fog_end; /* exp(-3.2): 4% */
+    return k * (g_fixed_light ? 0.15f : 1.0f);
+}
+
+/* the air's own colour: the game's fog colour, a little cooler and brighter where the sky lights it */
+static void fog_air(const GfxScene* s, float* airc)
+{
+    const float* fc = s->fogcolor;
+    float lum = 0.2126f * fc[0] + 0.7152f * fc[1] + 0.0722f * fc[2];
+    static const float cool[3] = { 0.88f, 0.97f, 1.18f };
+    for (int c = 0; c < 3; ++c)
+        airc[c] = fmaxf(fc[c] * 0.7f + lum * cool[c] * 0.3f, 0.0f);
+}
+
+/* the lamps' tiles for the fog's halos (origin x, y, across, down), 0 none */
+static int fog_lamp_tiles(float* lt)
+{
+    if (g_fxs.scene_lamps <= 0.0f || g_lamps.binned != g_serial || !g_lamps.lb || !g_lamps.tb)
+        return 0;
+    lt[0] = g_lamps.lu[0], lt[1] = g_lamps.lu[1], lt[2] = g_lamps.lu[4], lt[3] = g_lamps.lu[5];
+    return 1;
+}
+
+/* the sun's cascades this frame, to shade the shafts and the fog volume by */
+static int sun_cascades(void)
+{
+    return g_shd.zmap && g_shd.cframe == g_serial && g_shd.u.dir[3] > 0.0f && g_shd.u.info[0] > 0.0f && g_shd.u.info[2] > 0.0f;
+}
+
+/* whether the fog is the shafts' volume this frame (fog_modern, fog_volume and the cascades); else scene_fog's pass */
+static int fog_volume_on(void)
+{
+    return g_fxs.fog_modern > 0.0f && g_fxs.fog_volume > 0.0f && sun_cascades();
+}
+
+static void scene_fog(GfxTex* color, const GfxScene* s)
+{
+    if (g_fxs.fog_modern <= 0.0f || s->proj[11] == 0.0f || fog_volume_on())
+        return;
+    GfxTex *ct = color, *depth = color->depth_world ? color->depth_world : color->depth_seen;
+    if (!depth || depth->w != ct->w || depth->h != ct->h || !post_init(ct->vf))
+        return;
+    VkPipeline pipe = fmt_pipe(ct->vf, FP_FOG);
+    if (!pipe)
+        return;
+    int hdr = ct->vf == VK_FORMAT_R16G16B16A16_SFLOAT;
+    float Vr[16], VP[16], iv[16];
+    memcpy(Vr, s->view, 64);
+    Vr[12] = Vr[13] = Vr[14] = 0.0f;
+    gfx_mat_mul(VP, Vr, s->proj);
+    FogU u;
+    memset(&u, 0, sizeof u);
+    if (!gfx_mat_inverse(u.ivp, VP) || !gfx_mat_inverse(iv, s->view))
+        return;
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > ct->w || vy + vh > ct->h)
+        vx = vy = 0, vw = (float)ct->w, vh = (float)ct->h;
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
+    u.cam[0] = iv[12], u.cam[1] = iv[13], u.cam[2] = iv[14], u.cam[3] = fminf(fmaxf(fog_end, 20.0f), 3000.0f) * 1.5f;
+    /* the sun (or moon) toward it, world: the scene's is in camera space */
+    float sd[3] = { 0, -1, 0 };
+    if (s->sun_dir[3] != 0.0f)
+        for (int j = 0; j < 3; ++j)
+            sd[j] = s->sun_dir[0] * iv[j] + s->sun_dir[1] * iv[4 + j] + s->sun_dir[2] * iv[8 + j];
+    float sl = sqrtf(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]);
+    for (int j = 0; j < 3; ++j)
+        u.sun[j] = sl > 1e-4f ? sd[j] / sl : 0.0f;
+    u.sun[3] = 0.6f;
+    /* the sun's forward scattering in its own colour, none with the shafts on (theirs is shadowed) */
+    fog_air(s, u.airc);
+    int shafts = g_fxs.post_shafts > 0.0f && g_shd.zmap && g_shd.cframe == g_serial && g_shd.u.dir[3] > 0.0f;
+    float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
+    for (int c = 0; c < 3; ++c)
+        u.sunc[c] = shafts || s->sun_dir[3] == 0.0f ? 0.0f : fmaxf(s->sun_color[c], 0.0f) * (0.15f + 0.6f * low * low);
+    /* (the mist round a lamp: its own, not the haze's) */
+    u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f), u.p[2] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f;
+    u.p[3] = hdr ? 0.0f : 1.0f / 255.0f;
+    u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+    fog_lamp_tiles(u.lt);
+    u.dbg[0] = g_fxs.fog_debug, u.dbg[1] = g_fxs.fog_lamp_lift;
+    flush_pass();
+    GfxTex* in[3] = { depth, NULL, NULL };
+    VkSampler ns[3] = { g_near_samp, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    float fv[4] = { vx, vy, vw, vh };
+    post_pass_x(ct, NULL, 1, pipe, fv, &u, sizeof u, in, ns, 1, GFX_PASS_POST_SHAFTS);
+}
+
 /* The sun shafts (post_shafts; gfx_metal.m's note): the sun's or moon's light scattered toward the eye along each
  * pixel's ray, through haze as thick as the game's fog says, where the scene renderer's zone shadow cascades see the
- * light. Needs the scene renderer's shadows (scene 1 or 2, scene_shadows): without them, or indoors, the pass stays off. */
+ * light; with the modern fog's volume (fog_volume_on) the fog itself, marched the same way. Needs the scene renderer's
+ * shadows (scene 1 or 2, scene_shadows): without them, or indoors, the pass stays off. */
 static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float vx, float vy, float vw, float vh)
 {
-    if (!g_shd.zmap || g_shd.cframe != g_serial || g_shd.u.dir[3] <= 0.0f || g_shd.u.info[0] <= 0.0f || g_shd.u.info[2] <= 0.0f)
+    if (!sun_cascades())
     {
         g_post.sh_serial = 0;
         return;
@@ -9325,8 +9642,8 @@ static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float v
     uint32_t lw = (uint32_t)(vw / div), lh = (uint32_t)(vh / div);
     lw = lw ? lw : 1, lh = lh ? lh : 1;
     const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
-    if (!fx_tex(&g_post.sh, F16, lw, lh, GFX_USE_RT, 1) || !fx_tex(&g_post.shist[0], F16, lw, lh, GFX_USE_RT, 1) ||
-        !fx_tex(&g_post.shist[1], F16, lw, lh, GFX_USE_RT, 1))
+    if (!fx_tex(&g_post.sh, F16, lw, lh, GFX_USE_RT, 1) || !fx_tex(&g_post.sht, VK_FORMAT_R16_SFLOAT, lw, lh, GFX_USE_RT, 1) ||
+        !fx_tex(&g_post.shist[0], F16, lw, lh, GFX_USE_RT, 1) || !fx_tex(&g_post.shist[1], F16, lw, lh, GFX_USE_RT, 1))
         return;
     memcpy(u.m, g_shd.u.m, sizeof u.m), memcpy(u.cas, g_shd.u.cas, sizeof u.cas);
     /* the haze: as thick as the game's fog, the nearer its end the thicker */
@@ -9345,6 +9662,31 @@ static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float v
         u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
     u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
     u.p[0] = fmaxf(g_fxs.shafts_density, 0.0f) * 2.0f / fog_end, u.p[1] = 0.02f, u.p[2] = q == 2 ? 16.0f : 10.0f;
+    if (g_fxs.fog_modern > 0.0f) /* one air: the modern fog's density and falloff */
+        u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]) * fmaxf(g_fxs.shafts_density, 0.0f), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f);
+    int vol = fog_volume_on();
+    if (vol)
+    {
+        /* the fog volume: the air's own light, the ground fog's drift, the lamps; the sun's in-scatter the fog's when the
+         * shafts are off; to the fog's far limit, not the shafts' reach */
+        fog_air(s, u.airc);
+        if (g_fxs.post_shafts <= 0.0f)
+            for (int c = 0; c < 3; ++c)
+                u.sunc[c] = fmaxf(sc[c], 0.0f) * g_shd.u.info[2] * (0.15f + 0.6f * low * low);
+        u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]);
+        u.cam[3] = fog_end * 1.5f;
+        u.fv[0] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f, u.fv[1] = g_fxs.fog_lamp_lift;
+        /* the weather: fog lies thick on the ground, rain and snow raise some, wind and gales thin it and blow it on */
+        float wm = g_weather == 3 ? 2.0f : g_weather == 6 || g_weather == 7 || g_weather == 12 ? 1.8f : g_weather == 10 ? 0.6f
+                 : g_weather == 11 || g_weather == 13 ? 0.35f : 1.0f;
+        float ws = g_weather == 10 ? 3.0f : g_weather == 11 || g_weather == 13 || g_weather == 7 ? 6.0f : 1.0f;
+        u.fv[2] = fmaxf(g_fxs.fog_ground, 0.0f) * wm, u.fv[3] = 1.0f / fmaxf(g_fxs.fog_ground_size, 1.0f);
+        static double drift, last_t; /* the noise's offset, carried frame to frame (a speed change doesn't jump it) */
+        double t = (double)gfx_now_ns() * 1e-9, dt = last_t > 0.0 ? fmin(t - last_t, 0.25) : 0.0;
+        last_t = t, drift = fmod(drift + dt * fmaxf(g_fxs.fog_drift, 0.0f) * ws, 4096.0);
+        u.wind[0] = (float)drift, u.wind[1] = 0.0f, u.wind[2] = (float)(drift * 0.6), u.wind[3] = 1.0f;
+        fog_lamp_tiles(u.lt);
+    }
     u.p[3] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
     u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
     u.lo[0] = (float)lw, u.lo[1] = (float)lh, u.lo[2] = 1.0f / (float)lw, u.lo[3] = 1.0f / (float)lh;
@@ -9359,15 +9701,16 @@ static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float v
     float lv[4] = { 0, 0, (float)lw, (float)lh };
     GfxTex* march_in[3] = { depth, g_shd.zmap, NULL };
     VkSampler march_s[3] = { g_near_samp, g_cmp_samp, VK_NULL_HANDLE };
-    post_pass(g_post.sh, 0, g_post.smarch, lv, &u, sizeof u, march_in, march_s, GFX_PASS_POST_SHAFTS);
+    post_pass_x(g_post.sh, g_post.sht, 0, g_post.smarch, lv, &u, sizeof u, march_in, march_s, 1, GFX_PASS_POST_SHAFTS);
     GfxTex* res_in[3] = { depth, g_post.sh, prev };
     VkSampler res_s[3] = { g_near_samp, g_near_samp, VK_NULL_HANDLE };
     post_pass(out, 0, g_post.sresolve, lv, &u, sizeof u, res_in, res_s, GFX_PASS_POST_SHAFTS);
-    GfxTex* comp_in[3] = { depth, out, NULL };
-    VkSampler comp_s[3] = { g_near_samp, g_near_samp, VK_NULL_HANDLE };
+    GfxTex* comp_in[3] = { depth, out, g_post.sht };
+    VkSampler comp_s[3] = { g_near_samp, g_near_samp, g_near_samp };
     float fv[4] = { vx, vy, vw, vh };
-    post_pass(color, 1, fmt_pipe(color->vf, u.hist[2] != 0.0f ? FP_SHAFT_DBG : u.hist[3] > 0.0f ? FP_SHAFT_ADD : FP_SHAFT_COMP), fv, &u, sizeof u,
-        comp_in, comp_s, GFX_PASS_POST_SHAFTS);
+    VkPipeline comp = fmt_pipe(color->vf, u.hist[2] != 0.0f ? FP_SHAFT_DBG : vol ? FP_SHAFT_VOL : u.hist[3] > 0.0f ? FP_SHAFT_ADD : FP_SHAFT_COMP);
+    if (comp)
+        post_pass(color, 1, comp, fv, &u, sizeof u, comp_in, comp_s, GFX_PASS_POST_SHAFTS);
     g_post.shist_at ^= 1, g_post.sh_serial = g_serial;
     memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
 }
@@ -9473,16 +9816,17 @@ static void post_release(int bloom, int dof, int shafts)
     if (!dof)
         gfx_tex_destroy(g_post.h0), gfx_tex_destroy(g_post.h1), g_post.h0 = g_post.h1 = NULL;
     if (!shafts)
-        gfx_tex_destroy(g_post.sh), gfx_tex_destroy(g_post.shist[0]), gfx_tex_destroy(g_post.shist[1]),
-            g_post.sh = g_post.shist[0] = g_post.shist[1] = NULL;
+        gfx_tex_destroy(g_post.sh), gfx_tex_destroy(g_post.sht), gfx_tex_destroy(g_post.shist[0]), gfx_tex_destroy(g_post.shist[1]),
+            g_post.sh = g_post.sht = g_post.shist[0] = g_post.shist[1] = NULL;
 }
 
 static void post_effects(GfxTex* color, const GfxScene* s)
 {
     int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f, shafts = g_fxs.post_shafts > 0.0f;
     int glows = g_fxs.scene_lamps > 0.0f && g_fxs.scene_lamp_glow > 0.0f && g_lamps.binned == g_serial;
-    post_release(bloom, dof, shafts);
-    if (!bloom && !dof && !shafts && !glows)
+    int vol = fog_volume_on();
+    post_release(bloom, dof, shafts || (g_fxs.fog_modern > 0.0f && g_fxs.fog_volume > 0.0f)); /* (the volume: the shafts' textures) */
+    if (!bloom && !dof && !shafts && !glows && !vol)
     {
         g_post.sh_serial = 0;
         return;
@@ -9510,8 +9854,8 @@ static void post_effects(GfxTex* color, const GfxScene* s)
     float fv[4] = { vx, vy, vw, vh };
     if (glows && full_depth && s->proj[11] != 0.0f)
         post_lamp_glows(color, s, depth, vx, vy, vw, vh);
-    if (shafts && full_depth && s->proj[11] != 0.0f)
-        post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it) */
+    if ((shafts || vol) && full_depth && s->proj[11] != 0.0f)
+        post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it; the fog volume too) */
     else
         g_post.sh_serial = 0;
     const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -9710,6 +10054,7 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
     ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
+    scene_fog(color, s);
     post_effects(color, s); /* (the lamps' glows among them, ahead of the bloom) */
     hdr_tone(color, s);
     scene_aa(color, s);
