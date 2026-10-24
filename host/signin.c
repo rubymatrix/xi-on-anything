@@ -1493,6 +1493,7 @@ static void pad_button(Ui* u, SDL_Window* win, int button)
     memset(&k, 0, sizeof k);
     k.type = SDL_EVENT_KEY_DOWN;
     k.down = true;
+    fprintf(stderr, "[signin] controller button %d on control %d\n", button, u->focus);
     switch (button)
     {
     case SDL_GAMEPAD_BUTTON_DPAD_UP: k.key = SDLK_UP; break;

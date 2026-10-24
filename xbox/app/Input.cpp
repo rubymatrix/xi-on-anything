@@ -173,6 +173,9 @@ void Input::Attach(CoreWindow const& w)
         uwp_text(to_string(wc).c_str());
     });
     w.PointerMoved([scale](CoreWindow const&, PointerEventArgs const& e) {
+        static bool logged;
+        if (!logged)
+            logged = true, fprintf(stderr, "[app] first pointer event: device type %d\n", (int)e.CurrentPoint().PointerDevice().PointerDeviceType());
         auto p = e.CurrentPoint().Position();
         uwp_mouse_move(p.X * scale, p.Y * scale);
     });
