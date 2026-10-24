@@ -105,6 +105,9 @@ void TextInput::Attach(CoreWindow const& window)
         CoreTextRange range = clamped(e.Range());
         g_text.replace((size_t)range.StartCaretPosition, (size_t)(range.EndCaretPosition - range.StartCaretPosition), e.Text());
         g_selection = e.NewSelection();
+        // lengths only: it may be a password
+        fprintf(stderr, "[app] keyboard text: %d..%d replaced by %u character(s), %zu in all\n", range.StartCaretPosition,
+            range.EndCaretPosition, e.Text().size(), g_text.size());
         uwp_replace_text(to_string(g_text).c_str());
     });
     // where the text is, for the keyboard to stay clear of: the whole window (the screen draws it)
