@@ -3,7 +3,8 @@
  * Two windows drawn as the game's Config pages are: Sign in (the LandSandBoat username, the
  * password, the one-time code, Sign in and Settings) and Settings (the server, remembering the
  * password, trusting this computer, the window theme, full screen). Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
- * picks, Escape goes back or quits; the mouse clicks.
+ * picks, Escape goes back or quits; the mouse clicks. A controller: the D-pad moves, A picks or opens
+ * the on-screen keyboard over a field, B goes back, Start signs in.
  *
  * What it remembers is in signin.cfg (key=value lines) beside settings.reg, the password in the
  * keychain (keychain.h). The sign-in runs on a worker thread so the window keeps drawing. */
@@ -1453,6 +1454,59 @@ static void mouse(Ui* u, const SDL_Event* e, float d)
 }
 
 static void key_act(Ui* u, const SDL_KeyboardEvent* e);
+static void key(Ui* u, const SDL_KeyboardEvent* e);
+
+/* The on-screen keyboard over the focused field (a console's, a Steam Deck's), given the field's
+ * text so far: what comes back replaces all of it ("xi.textinput.text", sdl_uwp.c). */
+static void screen_keyboard(Ui* u, SDL_Window* win)
+{
+    Widget* f = field(u);
+    if (!f || busy())
+        return;
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_SetNumberProperty(p, SDL_PROP_TEXTINPUT_TYPE_NUMBER,
+        f->kind == W_SECRET ? SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN
+        : f->id == ID_USER  ? SDL_TEXTINPUT_TYPE_TEXT_USERNAME
+        : f->id == ID_OTP   ? SDL_TEXTINPUT_TYPE_NUMBER
+                            : SDL_TEXTINPUT_TYPE_TEXT);
+    SDL_SetStringProperty(p, "xi.textinput.text", f->text);
+    SDL_StopTextInput(win);
+    SDL_StartTextInputWithProperties(win, p);
+    SDL_DestroyProperties(p);
+    sound(u, SND_CONFIRM);
+}
+
+/* A controller's button, as the keys it stands for: the D-pad moves, A picks (over a field, it opens
+ * the on-screen keyboard), B goes back, Start signs in. */
+static void pad_button(Ui* u, SDL_Window* win, int button)
+{
+    SDL_KeyboardEvent k;
+    memset(&k, 0, sizeof k);
+    k.type = SDL_EVENT_KEY_DOWN;
+    k.down = true;
+    switch (button)
+    {
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: k.key = SDLK_UP; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: k.key = SDLK_DOWN; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: k.key = SDLK_LEFT; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: k.key = SDLK_RIGHT; break;
+    case SDL_GAMEPAD_BUTTON_EAST: k.key = SDLK_ESCAPE; break;
+    case SDL_GAMEPAD_BUTTON_SOUTH:
+        if (field(u))
+        {
+            screen_keyboard(u, win);
+            return;
+        }
+        k.key = SDLK_RETURN;
+        break;
+    case SDL_GAMEPAD_BUTTON_START:
+        if (u->screen == SCREEN_SIGNIN && !busy())
+            sound(u, SND_CONFIRM), start_signin(u);
+        return;
+    default: return;
+    }
+    key(u, &k);
+}
 
 /* a key; the cursor's moving sounds as the game's does */
 static void key(Ui* u, const SDL_KeyboardEvent* e)
@@ -1609,7 +1663,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, c->space ? "1" : "0");
     /* a held key repeats, not macOS's accent menu; read when SDL starts, so the game's window too */
     SDL_SetHint(SDL_HINT_MAC_PRESS_AND_HOLD, "0");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD))
     {
         fprintf(stderr, "[signin] SDL_Init: %s\n", SDL_GetError());
         free(u);
@@ -1744,12 +1798,16 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         {
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                 done = 1;
+            else if (e.type == SDL_EVENT_GAMEPAD_ADDED)
+                SDL_OpenGamepad(e.gdevice.which); /* for its buttons' events; left open for the game's input */
             else if (u->closing || open_progress(u) < 1)
                 continue; /* nothing to act on while the window opens or closes */
             else if (e.type == SDL_EVENT_TEXT_INPUT)
                 type(u, e.text.text);
             else if (e.type == SDL_EVENT_KEY_DOWN)
                 key(u, &e.key);
+            else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN)
+                pad_button(u, win, e.gbutton.button);
             else if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                      e.type == SDL_EVENT_MOUSE_BUTTON_UP)
                 mouse(u, &e, SDL_GetWindowPixelDensity(win));
