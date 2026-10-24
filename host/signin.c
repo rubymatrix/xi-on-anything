@@ -502,6 +502,7 @@ typedef struct Ui
     SDL_Gamepad* pad;           /* the controller, for its left stick */
     int stick;                  /* the D-pad button the stick stands for, plus 1; 0 when centred */
     Uint64 stick_at;            /* when it repeats */
+    int keyboard_id;            /* the field an on-screen keyboard was opened over, else -1 */
 } Ui;
 
 /* The menus' sounds, as the game's menus play them: their effect ids (ROM/0/0.DAT's "0001".."0004") */
@@ -1466,12 +1467,14 @@ static void key_act(Ui* u, const SDL_KeyboardEvent* e);
 static void key(Ui* u, const SDL_KeyboardEvent* e);
 
 /* The on-screen keyboard over the focused field (a console's, a Steam Deck's), given the field's
- * text so far: what comes back replaces all of it ("xi.textinput.text", sdl_uwp.c). */
+ * text so far ("xi.textinput.text"): a host that can sends the whole text back as it changes
+ * (SIGNIN_KEYBOARD_TEXT, keyboard_text), others type it as keys. */
 static void screen_keyboard(Ui* u, SDL_Window* win)
 {
     Widget* f = field(u);
     if (!f || busy())
         return;
+    u->keyboard_id = f->id;
     SDL_PropertiesID p = SDL_CreateProperties();
     SDL_SetNumberProperty(p, SDL_PROP_TEXTINPUT_TYPE_NUMBER,
         f->kind == W_SECRET ? SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN
@@ -1483,6 +1486,26 @@ static void screen_keyboard(Ui* u, SDL_Window* win)
     SDL_StartTextInputWithProperties(win, p);
     SDL_DestroyProperties(p);
     sound(u, SND_CONFIRM);
+}
+
+/* All of the text of the field the on-screen keyboard was opened over, wherever the cursor is now */
+static void keyboard_text(Ui* u, const char* s)
+{
+    for (int i = 0; i < u->nw; ++i)
+    {
+        Widget* w = &u->w[i];
+        if (w->id != u->keyboard_id || !w->text || busy())
+            continue;
+        size_t n = 0;
+        for (; *s && n + 1 < w->cap; ++s)
+            if (*s >= ' ' && *s <= '~') /* the font's ASCII */
+                w->text[n++] = *s;
+        w->text[n] = 0;
+        if (i == u->focus)
+            u->caret = u->anchor = (int)n;
+        u->focus_time = SDL_GetTicks();
+        return;
+    }
 }
 
 /* A controller's button, as the keys it stands for: the D-pad moves, A picks (over a field, it opens
@@ -1656,6 +1679,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     if (!u)
         return -1;
     u->host_game = setup->host_game;
+    u->keyboard_id = -1;
     /* where it keeps its files */
     char dir[1024], cfg_path[1100];
     if (setup->data_dir)
@@ -1837,6 +1861,12 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             }
             else if (e.type == SDL_EVENT_GAMEPAD_REMOVED && u->pad && SDL_GetGamepadFromID(e.gdevice.which) == u->pad)
                 u->pad = NULL, u->stick = 0;
+            else if (e.type == SDL_EVENT_USER && e.user.code == SIGNIN_KEYBOARD_TEXT)
+            {
+                if (!u->closing)
+                    keyboard_text(u, (const char*)e.user.data1);
+                SDL_free(e.user.data1);
+            }
             else if (u->closing || open_progress(u) < 1)
                 continue; /* nothing to act on while the window opens or closes */
             else if (e.type == SDL_EVENT_TEXT_INPUT)

@@ -434,15 +434,20 @@ void uwp_text(const char* utf8)
     }
 }
 
-/* The on-screen keyboard's text, for the field it was opened over: the caret to the end, everything
- * before it erased (Ctrl+Backspace), then the text typed in. */
+/* The on-screen keyboard's text, all of it, for the field it was opened over: the sign-in screen's
+ * SDL_EVENT_USER (host/signin.h's SIGNIN_KEYBOARD_TEXT), the text malloc'd for it to free. Setting
+ * the whole text each time, rather than typing the change, cannot type anything twice. */
+#define SIGNIN_KEYBOARD_TEXT 0x5849
 void uwp_replace_text(const char* utf8)
 {
-    key_event(SDL_SCANCODE_END, 1, 0, SDL_KMOD_NONE);
-    key_event(SDL_SCANCODE_END, 0, 0, SDL_KMOD_NONE);
-    key_event(SDL_SCANCODE_BACKSPACE, 1, 0, SDL_KMOD_LCTRL);
-    key_event(SDL_SCANCODE_BACKSPACE, 0, 0, SDL_KMOD_LCTRL);
-    uwp_text(utf8);
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    e.type = SDL_EVENT_USER;
+    e.user.windowID = WINDOW_ID;
+    e.user.code = SIGNIN_KEYBOARD_TEXT;
+    e.user.data1 = _strdup(utf8);
+    if (e.user.data1 && !push(&e))
+        free(e.user.data1);
 }
 
 void uwp_mouse_move(float x, float y)
