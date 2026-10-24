@@ -151,7 +151,11 @@ void Input::Attach(CoreWindow const& w)
     w.SizeChanged([scale](CoreWindow const&, WindowSizeChangedEventArgs const& e) {
         uwp_view_size((int)(e.Size().Width * scale), (int)(e.Size().Height * scale));
     });
+    // While the on-screen keyboard is up its text comes through TextInput alone: the console also
+    // sends its keys to the window, and passing those on as well would type everything twice.
     w.KeyDown([](CoreWindow const&, KeyEventArgs const& e) {
+        if (TextInput::IsUp())
+            return;
         if (int sc = scancode_of(e.VirtualKey()))
         {
             uwp_key(sc, 1, e.KeyStatus().WasKeyDown);
@@ -166,6 +170,8 @@ void Input::Attach(CoreWindow const& w)
         }
     });
     w.CharacterReceived([](CoreWindow const&, CharacterReceivedEventArgs const& e) {
+        if (TextInput::IsUp())
+            return;
         uint32_t c = e.KeyCode();
         if (c < 32 || c == 127)
             return; // Enter, Backspace, Tab, Escape arrive as keys

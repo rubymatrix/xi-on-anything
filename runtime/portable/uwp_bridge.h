@@ -47,7 +47,8 @@ void* uwp_core_window(void);
 
 /* The on-screen keyboard, for a text field of the sign-in screen: show (1) with the field's text
  * so far, or hide (0). Called from the game's thread. While it is up, the app hands the field's whole
- * text back with uwp_replace_text as the player types. */
+ * text back with uwp_replace_text as the player types, and passes none of the window's own keys or
+ * characters on. */
 enum
 {
     UWP_TEXT,        /* plain text */
