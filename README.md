@@ -24,8 +24,8 @@ XI on Anything runs on Apple silicon Macs today, with more platforms planned.
 username, password and one-time code, or a server launcher's token; pick the server in the
 sign-in screen's Settings.
 
-Experimental: an [Android build](docs/android.md), tested on a Pixel Fold. Desktop defaults are
-unchanged.
+Experimental: an [Android build](docs/android.md), tested on a Pixel Fold, and an
+[Xbox build](xbox/README.md) for consoles in developer mode. Desktop defaults are unchanged.
 
 Experimental: a [browser build](docs/web.md) (WebAssembly and WebGPU) that you host for yourself from
 your own install; there is no public instance.
@@ -92,6 +92,10 @@ windows, text and images over the game's frame.
   translated variants of the patched functions, chosen while the addon's bytes are in place.
 - **Native plugins** (Ashita and Windower DLLs) don't run: they're 32-bit Windows code. Addons that
   need one (Windower's Timers-based ones, for example) won't either.
+- **Which addon makes the game stutter**: `/addon prof` lists the addons by the time they take per
+  second of play (`/addon prof <name>` for one addon's events, `/addon prof reset` to start
+  counting again). Frames that come late are logged with the addons' share of them; see
+  [the design notes](docs/addon-compat-design.md#64-errors-crashes-threads).
 
 See [docs/addon-compat-design.md](docs/addon-compat-design.md) for how it works.
 
@@ -183,6 +187,7 @@ reuses one (`--help`).
   | --- | --- | --- | --- |
   | 2026-08-22 | `6f8844eb…3c3b` | `30260805_0` | a retail install |
   | 2026-09-03 | `f2245d1c…23e4` | `30260903_0` | a private-server install (no `patch.ver`) |
+  | 2026-10-05 | `04288488…e872` | `30261006_0` | a private-server install's `FFXiMain.dll`, `FFXi.dll` and `patch.ver` |
   | 2025-12-26 | `f5ed4c3b…a7f6` | `30251226_0` | loose `FFXiMain.dll`/`FFXi.dll`, an older client than 2026-08-22 (no `patch.ver`) |
   | 2025-11-12 | `bda769e2…0d9a` | `30251101_2` | a private-server install (`patch.ver` present) |
 

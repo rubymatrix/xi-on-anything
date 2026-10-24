@@ -1101,6 +1101,55 @@ static void (*g_present_hook)(void);
 
 void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
 
+/* the scene renderer (host/scene.c): its batch goes out before anything that comes after it draws, clears,
+ * changes the targets, copies from them or shows them */
+static void (*g_world_flush)(void);
+void d3d8_set_world_flush(void (*fn)(void)) { g_world_flush = fn; }
+/* the game's own draws inside its zone walk and its character mesh draws (what the scene renderer leaves to the game)
+ * don't send the batch out: told apart by where they return to (d3d8_world_ranges: the drawing functions' code).
+ * Timing the game's own draws of those for comparison (scene = -1): each run of them goes into a timed pass of its own
+ * (gfx_world_time), which the next other piece of work ends */
+static uint32_t g_world_range[2][2];
+static int g_world_time_on, g_world_timing, g_draw_zone; /* 0 other, 1 the zone's, 2 a character's */
+void d3d8_world_ranges(uint32_t zone_lo, uint32_t zone_hi, uint32_t char_lo, uint32_t char_hi, int time)
+{
+    g_world_range[0][0] = zone_lo, g_world_range[0][1] = zone_hi, g_world_range[1][0] = char_lo, g_world_range[1][1] = char_hi;
+    g_world_time_on = time && (zone_lo || char_lo);
+}
+
+/* the game's DrawPrimitive and DrawIndexedPrimitive wrappers (1000cb20, 1000cc00 in 2026-09-03) leave their caller's
+ * return 0x20 and 0x28 up the stack at the device's call */
+static int world_site(Guest* g)
+{
+    for (int k = 0; k < 2; ++k)
+    {
+        uint32_t lo = g_world_range[k][0] + RD, hi = g_world_range[k][1] + RD;
+        if (!g_world_range[k][0])
+            continue;
+        uint32_t a = rd32(g->esp + 0x20), b = rd32(g->esp + 0x28);
+        if ((a >= lo && a < hi) || (b >= lo && b < hi))
+            return k + 1;
+    }
+    return 0;
+}
+
+static void world_draw_begin(Guest* g)
+{
+    g_draw_zone = world_site(g);
+    if (g_world_timing && g_draw_zone != g_world_timing)
+        gfx_world_time(0), g_world_timing = 0;
+    if (g_draw_zone && g_world_time_on && !g_world_timing)
+        gfx_world_time(g_draw_zone), g_world_timing = g_draw_zone;
+}
+#define WORLD_FLUSH() \
+    do \
+    { \
+        if (g_world_flush && !g_draw_zone) \
+            g_world_flush(); \
+        if (g_world_timing && !g_draw_zone) \
+            gfx_world_time(0), g_world_timing = 0; \
+    } while (0)
+
 void d3d8_set_occlusion(int mode)
 {
 #if defined(FFXI_ANDROID_VULKAN)
@@ -1162,6 +1211,7 @@ static void capture_frame(Obj* bb)
 
 static void IDirect3DDevice8_Present(Guest* g)
 {
+    WORLD_FLUSH();
     cap_present();
     scene_present();
     ui_present();
@@ -1488,6 +1538,7 @@ static void IDirect3DDevice8_CreateImageSurface(Guest* g)
  * destination is uploaded: at once if the GPU owns it, before its next draw if not. */
 static void IDirect3DDevice8_CopyRects(Guest* g)
 {
+    WORLD_FLUSH();
     Obj* s = obj(ARG(1));
     Obj* d = obj(ARG(4));
     if (!s || !d || s->format != d->format)
@@ -1548,6 +1599,7 @@ static void IDirect3DDevice8_CopyRects(Guest* g)
 /* SetRenderTarget(pRenderTarget, pNewZStencil): NULL render target keeps the current one */
 static void IDirect3DDevice8_SetRenderTarget(Guest* g)
 {
+    WORLD_FLUSH();
     if (ARG(1))
     {
         bind(&g_dev.rt, ARG(1));
@@ -1585,6 +1637,7 @@ static void apply_targets(void);
 /* Clear(Count, pRects, Flags, Color, Z, Stencil): D3DRECTs are x1, y1, x2, y2 */
 static void IDirect3DDevice8_Clear(Guest* g)
 {
+    WORLD_FLUSH();
     apply_targets();
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
@@ -1941,7 +1994,9 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
 static void IDirect3DDevice8_DrawPrimitive(Guest* g)
 {
     g_cap_esp = g->esp;
+    world_draw_begin(g);
     draw(ARG(1), ARG(3), ARG(2), 0, 0, 0, 0);
+    g_draw_zone = 0;
     RET(D3D_OK, 4);
 }
 
@@ -1950,6 +2005,7 @@ static void IDirect3DDevice8_DrawPrimitive(Guest* g)
 static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
 {
     g_cap_esp = g->esp;
+    world_draw_begin(g);
     Obj* ib = obj(g_dev.cur.ib);
     if (ib && ib->mem)
     {
@@ -1958,6 +2014,7 @@ static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
     }
     else
         gfx_prof_skip(GFX_SKIP_NO_INDICES);
+    g_draw_zone = 0;
     RET(D3D_OK, 6);
 }
 
@@ -2532,6 +2589,28 @@ static int merge_streams(GfxDraw* d, uint32_t first, uint32_t count)
 }
 
 /* The keys and uniforms for the current state; 0 when the state cannot be drawn. */
+/* The game's water models lifted water_lift units up their own vertical (y up the model is down the world), in front of
+ * the zone surfaces laid at the water's level. Bastok Markets' harbour has untextured zone tiles at y 8.00 and the sea's
+ * model at 8.10, ten centimetres under them; the game draws the water with its near plane 0.3% out (D3DTS_PROJECTION
+ * [14] -0.1003 for -0.1), which puts it in front only from some 33 units away: nearer, the tiles hid it and the sea
+ * was a flat grey wherever the camera came close to it. */
+static void water_lift(GfxDraw* d, const State* s)
+{
+    float lift = gfx_fx_get("water_lift");
+    if (lift <= 0.0f)
+        return;
+    const float* W = s->xf[24];
+    float n = sqrtf(W[4] * W[4] + W[5] * W[5] + W[6] * W[6]);
+    if (n <= 0.0f)
+        return;
+    float o[4] = { -lift * W[4] / n, -lift * W[5] / n, -lift * W[6] / n, 0.0f }, vp[16], r[4];
+    mat_mul(vp, s->xf[2], s->xf[3]);
+    for (int j = 0; j < 4; ++j)
+        r[j] = o[0] * vp[j] + o[1] * vp[4 + j] + o[2] * vp[8 + j];
+    for (int j = 0; j < 4; ++j)
+        d->u.wvp[12 + j] += r[j];
+}
+
 static int build_draw(GfxDraw* d)
 {
     State* s = &g_dev.cur;
@@ -2759,6 +2838,8 @@ static int build_draw(GfxDraw* d)
     {
         Obj* vb = obj(s->stream[0]);
         d->water = vb && vb->water;
+        if (d->water && !d->vs.prog)
+            water_lift(d, s);
     }
     return 1;
 }
@@ -3569,6 +3650,7 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
 static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size, uint32_t up_data,
     uint32_t up_stride)
 {
+    WORLD_FLUSH();
     uint32_t n = prim_vertices(prim, count);
     if (!n)
         return;
@@ -4071,6 +4153,7 @@ static void unlock_rect(Obj* s)
 /* LockRect(Level, pLockedRect, pRect, Flags) */
 static void Texture_LockRect(Guest* g)
 {
+    WORLD_FLUSH();
     Obj* s = sub(ARG(0), 0, ARG(1));
     if (!s)
         RET(D3DERR_INVALIDCALL, 5);
@@ -4183,6 +4266,7 @@ static void Surface_GetDesc(Guest* g)
 /* LockRect(pLockedRect, pRect, Flags) */
 static void Surface_LockRect(Guest* g)
 {
+    WORLD_FLUSH();
     Obj* s = obj(ARG(0));
     if (!s)
         RET(D3DERR_INVALIDCALL, 4);
@@ -4449,4 +4533,70 @@ void d3d8_setup(void)
     g_vtbl[O_VB] = make_vtbl("IDirect3DVertexBuffer8", kVB);
     g_vtbl[O_IB] = make_vtbl("IDirect3DIndexBuffer8", kIB);
     g_vtbl[O_SURFACE] = make_vtbl("IDirect3DSurface8", kSurface);
+}
+
+/* --- the scene renderer's view of the device (host/scene.c) ------------------------------------------------- */
+GfxTex* d3d8_world_texture(uint32_t iface)
+{
+    int kind = 0;
+    GfxTex* t = texture_for_draw(iface, &kind);
+    return kind == 1 ? t : NULL;
+}
+
+/* stage 0's sampler as a draw now would have it with this texture (build_draw's) */
+int d3d8_world_sampler(uint32_t iface, GfxSampler* out)
+{
+    Obj* to = obj(iface);
+    if (!to)
+        return 0;
+    const uint32_t* t = g_dev.cur.tss[0];
+    uint32_t maxlevel = t[20] > to->lod ? t[20] : to->lod;
+    *out = (GfxSampler){ (uint8_t)t[13], (uint8_t)t[14], (uint8_t)t[25], (uint8_t)t[16], (uint8_t)t[17], (uint8_t)t[18], (uint8_t)t[21],
+        (uint8_t)maxlevel, 0, { 0 }, t[15] };
+    if (to->repl) /* a texture pack's: as build_draw draws it */
+        out->mag = out->min = out->mip = 2, out->max_level = 0, out->lod_cap = 2;
+    return 1;
+}
+
+GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size)
+{
+    Obj* b = obj(iface);
+    if (!b || b->kind != O_VB)
+        return NULL;
+    if (size)
+        *size = b->size;
+    return static_buffer(b);
+}
+
+uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size)
+{
+    Obj* b = obj(iface);
+    if (!b || (b->kind != O_VB && b->kind != O_IB) || !b->mem)
+        return 0;
+    if (size)
+        *size = b->size;
+    return b->mem;
+}
+
+GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size)
+{
+    Obj* b = obj(iface);
+    if (!b || b->kind != O_IB)
+        return NULL;
+    if (size)
+        *size = b->size;
+    if (index_size)
+        *index_size = b->format == FMT_INDEX32 ? 4 : 2;
+    return static_buffer(b);
+}
+
+int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
+{
+    if (!g_dev.rt)
+        return 0;
+    apply_targets();
+    memcpy(game_vp, g_dev.cur.vp, 6 * sizeof *game_vp);
+    memcpy(vp, g_dev.cur.vp, 6 * sizeof *vp);
+    scale_to_target(vp, NULL, 0);
+    return 1;
 }

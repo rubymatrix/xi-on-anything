@@ -19,6 +19,10 @@
 static uint8_t* g_snap; /* the code as last seen */
 static uint32_t g_text, g_size;
 static uint32_t g_pending_lo = 0xFFFFFFFFu, g_pending_hi; /* written through xi.memory: variants to check */
+static uint32_t g_changes; /* code changes seen (xi_code_changes) */
+
+uint32_t xi_code_changes(void) { return g_changes; }
+int xi_code_watched(void) { return g_snap != NULL; }
 
 static void snapshot(void)
 {
@@ -96,6 +100,7 @@ void xi_code_patch(Addon* a, uint32_t addr, const uint8_t* bytes, uint32_t n)
     if (!memcmp(old, bytes + (lo - addr), hi - lo))
         return; /* the same bytes again */
     report(a ? a->name : "?", lo, old, bytes + (lo - addr), hi - lo);
+    ++g_changes;
     /* the snapshot follows, so the watcher doesn't report it a second time */
     memcpy(g_snap + (lo - g_text), bytes + (lo - addr), hi - lo);
     g_pending_lo = lo < g_pending_lo ? lo : g_pending_lo;
@@ -130,6 +135,7 @@ void xi_patch_watch(void)
         while (j < g_size && (now[j] != g_snap[j] || (j + 1 < g_size && now[j + 1] != g_snap[j + 1])))
             ++j;
         report("?", g_text + i, g_snap + i, now + i, j - i);
+        ++g_changes;
         memcpy(g_snap + i, now + i, j - i);
         update_variants(g_text + i, g_text + j);
         i = j;

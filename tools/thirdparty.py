@@ -29,6 +29,9 @@ CXX = shlex.split(os.environ.get('XI_CXX', 'clang++'))
 AR = shlex.split(os.environ.get('XI_AR', 'ar'))
 # where the archives go: XI_TP_DIR for another target's (the browser build's: build/web/third_party)
 OUT = os.environ.get('XI_TP_DIR') or os.path.join(ROOT, 'build', 'third_party')
+# Linux: everything position-independent, so host64 links as a PIE and lies above 4 GB, where its addresses
+# can't be taken for the guest's (#74: zig cc, the kit's compiler, makes position-dependent code by default)
+PIE = ['-fPIE'] if sys.platform.startswith('linux') and 'emcc' not in CC[0] else []
 
 
 def manifest(name):
@@ -87,7 +90,7 @@ def build_make(name, m, out, stamp, key):
         shutil.rmtree(work)
     shutil.copytree(os.path.join(ROOT, 'third_party', name), work)
     env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET=MIN_MACOS)
-    r = subprocess.run(['make', '-C', 'src', '-j%d' % (os.cpu_count() or 4), 'BUILDMODE=static', 'CC=' + ' '.join(CC),
+    r = subprocess.run(['make', '-C', 'src', '-j%d' % (os.cpu_count() or 4), 'BUILDMODE=static', 'CC=' + ' '.join(CC + PIE),
                         'XCFLAGS=-DLUAJIT_ENABLE_LUA52COMPAT', 'libluajit.a'],
                        cwd=work, env=env, capture_output=True, text=True)
     if r.returncode:
@@ -107,7 +110,7 @@ def build(name, progress=None):
     out = archive(name)
     stamp = out + '.stamp'
     key = hashlib.sha256(json.dumps(m, sort_keys=True).encode() + MIN_MACOS.encode() + tree_stamp(name).encode() +
-                         ' '.join(CC + CXX).encode()).hexdigest()
+                         ' '.join(CC + CXX + PIE).encode()).hexdigest()
     if os.path.exists(out) and os.path.exists(stamp) and open(stamp).read() == key:
         return out
     os.makedirs(OUT, exist_ok=True)
@@ -117,7 +120,7 @@ def build(name, progress=None):
     os.makedirs(objdir, exist_ok=True)
     jobs = []
     for n, g in enumerate(m['groups']):
-        base = (CC + ['-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' and 'emcc' not in CC[0] else [])
+        base = (CC + PIE + ['-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' and 'emcc' not in CC[0] else [])
                 + shlex.split(os.environ.get('XI_TP_CFLAGS', ''))
                 + g['flags']
                 + ['-I' + os.path.join(lib, d) for d in g['include']]

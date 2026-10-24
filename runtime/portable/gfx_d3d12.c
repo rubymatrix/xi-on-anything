@@ -4298,6 +4298,21 @@ static int rt_init(void)
 
 int gfx_rt_supported(void) { return rt_init(); }
 
+/* the scene renderer is Metal's only so far: the game's own draws stay */
+int gfx_world_supported(void) { return 0; }
+int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
+void gfx_world_time(int pass) { (void)pass; }
+void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
+void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
+void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
+int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
+void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
+void gfx_set_fixed_light(int fixed) { (void)fixed; }
+void gfx_set_weather(int weather) { (void)weather; }
+/* no time per pass here: the profile has the whole frame's GPU time */
+void gfx_pass_timing(int on) { (void)on; }
+int gfx_pass_report(char (*out)[96], int max) { return (void)out, (void)max, 0; }
+
 /* a buffer of the GPU's own of at least need bytes in *r (made again, half as large again, when it is
  * smaller), in state; uav: the acceleration structures' and scratch's */
 static int rt_buffer(ID3D12Resource** r, uint64_t* size, uint64_t need, D3D12_RESOURCE_STATES state, int uav)
@@ -5403,9 +5418,16 @@ static int make_device(void)
 }
 
 #if defined(FFXI_UWP)
-/* UWP: no window handle; the swap chain is for composition, and the app shows it in a SwapChainPanel */
+/* UWP: no window handle; the swap chain is on the app's CoreWindow (no XAML). It is made once, by the
+ * sign-in screen, and the game draws on into it. */
 static void make_swap_chain(SDL_Window* win)
 {
+    IUnknown* core = (IUnknown*)uwp_core_window();
+    if (!core || !g_factory)
+    {
+        fprintf(stderr, "[recomp] gfx: no CoreWindow for the swap chain\n");
+        return;
+    }
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(win, &pw, &ph);
     DXGI_SWAP_CHAIN_DESC1 sd;
@@ -5418,15 +5440,14 @@ static void make_swap_chain(SDL_Window* win)
     sd.Scaling = DXGI_SCALING_STRETCH;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-    g_tearing = 0; /* composition swap chains cannot tear */
+    g_tearing = 0; /* presented in time with the TV, as the console wants */
     IDXGISwapChain1* sc1 = NULL;
-    HRESULT hr = IDXGIFactory4_CreateSwapChainForComposition(g_factory, (IUnknown*)g_queue, &sd, NULL, &sc1);
+    HRESULT hr = IDXGIFactory4_CreateSwapChainForCoreWindow(g_factory, (IUnknown*)g_queue, core, &sd, NULL, &sc1);
     if (FAILED(hr))
     {
         fprintf(stderr, "[recomp] gfx: swap chain failed (%08lx)\n", (unsigned long)hr);
         return;
     }
-    uwp_attach_swapchain(sc1);
     IDXGISwapChain1_QueryInterface(sc1, &IID_IDXGISwapChain3, (void**)&g_swap);
     IDXGISwapChain1_Release(sc1);
     g_swap_w = sd.Width, g_swap_h = sd.Height;

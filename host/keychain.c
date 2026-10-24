@@ -71,7 +71,7 @@ void keychain_delete(const char* key)
     CFRelease(q);
 }
 
-#else
+#elif !defined(FFXI_UWP) /* the UWP app has its own, over the credential locker (xbox/app/Keychain.cpp) */
 
 int keychain_get(const char* key, char* out, size_t n)
 {

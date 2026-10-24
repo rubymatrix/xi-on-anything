@@ -92,6 +92,7 @@
 #include "frame.h"
 #include "addons/addons.h"
 #include "addons/game.h"
+#include "addons/host.h"
 #if defined(_WIN32)
 #include "sampler.h"
 #endif
@@ -107,6 +108,7 @@
 #include "vfs.h"
 #include "geometry_guest.h"
 #include "watermark.h"
+#include "scene.h"
 #include "build.h" /* FFXI_VERSION */
 #if defined(FFXI_ANDROID_VULKAN)
 #include "benchmark.h"
@@ -525,7 +527,8 @@ static uint32_t lod_pick_model(uint32_t obj, uint32_t model)
 
 static void lod_pick(Guest* g)
 {
-    g->ebx = lod_pick_model(g->ecx, g->ebx);
+    /* then the scene renderer may take the instance (the light list and moving flag are the walk's arguments) */
+    g->ebx = scene_zone_pick(g->ecx, lod_pick_model(g->ecx, g->ebx), rd32(g->esp + 0x1d8), (int)rd32(g->esp + 0x1e0));
 }
 
 static void lod_pick2(Guest* g)
@@ -734,6 +737,19 @@ static void shadow_focus(void)
     uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0;
     float p[3];
     gfx_set_focus(e && xi_game_rd(e + 4, p, sizeof p) && isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]) ? p : NULL);
+    /* the weather, from the newer of the zone-in (0x00A, +0x68) and the weather change (0x057, +0x08), as the addon host
+     * keeps them (none without it) */
+    if (g_addons_on)
+    {
+        uint8_t b[0x200];
+        uint64_t ta = 0, tb = 0;
+        size_t na = xi_packet_last(0, 0x00A, b, sizeof b, &ta);
+        int w = na > 0x69 ? b[0x68] | b[0x69] << 8 : -1;
+        size_t nb = xi_packet_last(0, 0x057, b, sizeof b, &tb);
+        if (nb > 0x08 && (!na || tb >= ta))
+            w = b[0x08];
+        gfx_set_weather(w);
+    }
 }
 
 static void present_hook(void)
@@ -754,6 +770,7 @@ static void present_hook(void)
     fix_aspect();
     fix_draw_distance();
     lod_frame();
+    scene_frame();
     modern_frame();
     cexi_frame();
     shadow_focus();
@@ -1345,6 +1362,7 @@ int main(int argc, char** argv)
     setup_nameplates();
     setup_water();
     setup_lod();
+    scene_setup();
     frame_setup();
     setup_cull_prime();
     cexi_init(cexi, game);

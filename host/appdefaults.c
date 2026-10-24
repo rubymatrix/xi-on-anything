@@ -42,7 +42,7 @@ int app_resource(const char* name, char* out, size_t n)
     return ok;
 }
 
-#else
+#elif !defined(FFXI_UWP) /* the UWP app has its own (xbox/app/Options.cpp) */
 
 int app_default(const char* key, char* out, size_t n)
 {

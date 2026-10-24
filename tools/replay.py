@@ -7,14 +7,19 @@ frame log, and tools/replayreport.py's report.
   python3 tools/replay.py run suite.txt --play "weather crowd"  some
   python3 tools/replay.py play suite.txt                        a session to watch: !replay in chat
   python3 tools/replay.py shots suite.txt                       a frame capture at each scene's READY
+  python3 tools/replay.py prof suite.txt                        a capture and the GPU's ms per effects pass
+                                                                at each scene's READY (markets, noon, midnight)
   python3 tools/replay.py record all --server <yours> --user <a GM>   the addon's scenes, recorded
   python3 tools/replay.py keep generated/replay/*.jsonl --lsb <commit> --build <build>
                                                                 the recordings, as the reference set
 
 Results go to --out (default generated/runs/<date>-<suite>/): server.log, client.log, frames.csv,
-report.txt, report.json, and for shots the captures. The addon (tools/replay/xireplay) is copied into
+report.txt, report.json, for shots the captures, and for prof the captures with each scene's
+NN-<scene>.prof.json beside them and prof.txt / prof.json for the whole run. The addon (tools/replay/xireplay) is copied into
 the data folder's ashita/addons and loaded through the control port; the game's settings are its own.
---huffman (or FFXI_HUFFMAN) as for replayserver.py; arguments after "--" go to host64.
+--huffman (or FFXI_HUFFMAN) as for replayserver.py; arguments after "--" go to host64. --auth-port,
+--data-port, --view-port and --zone-port move the replay server off LandSandBoat's ports (and another
+replay or static server's); --control-port moves host64's control port.
 """
 import argparse
 import glob
@@ -137,6 +142,10 @@ def install_addon(data):
     dest = os.path.join(data, 'ashita', 'addons', 'xireplay')
     os.makedirs(dest, exist_ok=True)
     shutil.copy2(os.path.join(TOOLS, 'replay', 'xireplay', 'xireplay.lua'), dest)
+    # a data folder of its own has no Ashita libs (the addon needs them): the default folder's, if it has them
+    libs, own = os.path.join(data, 'ashita', 'addons', 'libs'), os.path.join(default_data_dir(), 'ashita', 'addons', 'libs')
+    if not os.path.isdir(libs) and os.path.isdir(own) and os.path.realpath(libs) != os.path.realpath(own):
+        shutil.copytree(own, libs)
 
 
 def launch(a, data, log_path, login, env=None):
@@ -209,14 +218,16 @@ def session(a, autoplay, on_event=None, wait_done=True):
     started = time.time()
     with open(os.path.join(out, 'server.log'), 'w') as server_log:
         server = subprocess.Popen([sys.executable, '-u', os.path.join(TOOLS, 'replayserver.py'), '--huffman', a.huffman,
-                                   '--suite', a.suite, '--autoplay', autoplay], stdout=server_log, stderr=subprocess.STDOUT)
+                                   '--suite', a.suite, '--autoplay', autoplay, '--auth-port', str(a.auth_port),
+                                   '--data-port', str(a.data_port), '--view-port', str(a.view_port),
+                                   '--zone-port', str(a.zone_port)], stdout=server_log, stderr=subprocess.STDOUT)
     client = ctl = None
     try:
         wait_server(server, os.path.join(out, 'server.log'))
         client, ctl = launch(a, data, os.path.join(out, 'client.log'),
                              ['--server', '127.0.0.1', '--user', 'replay', '--pass', 'replay',
-                              '--authport', str(replayserver.AUTH_PORT), '--dataport', str(replayserver.DATA_PORT),
-                              '--viewport', str(replayserver.VIEW_PORT)])
+                              '--authport', str(a.auth_port), '--dataport', str(a.data_port),
+                              '--viewport', str(a.view_port)])
         for line in ('/addon load xireplay', '/xireplay record off', '/xireplay quiet on', '/xireplay frames on'):
             ctl('chat_send', line=line)
         through_lobby(ctl)
@@ -297,22 +308,157 @@ class Shots:
             self.pending = True
         elif f[0] == 'mark' and self.pending and len(f) > 3 and f[3] != 'end':
             self.pending = False
-            path = os.path.join(os.path.abspath(out), f'{int(f[1]):02d}-{f[2]}')
             time.sleep(SETTLE)
-            ctl('capture', path=path + '.raw')
-            for _ in range(20):  # written on a later frame
-                if os.path.exists(path + '.raw') and os.path.getsize(path + '.raw') > 16:
-                    break
-                time.sleep(0.25)
+            self.capture(ctl, os.path.join(os.path.abspath(out), f'{int(f[1]):02d}-{f[2]}'))
+
+    @staticmethod
+    def capture(ctl, path):
+        """A frame capture to path.png (or path.raw, if not a format png() converts)."""
+        ctl('capture', path=path + '.raw')
+        for _ in range(20):  # written on a later frame
+            if os.path.exists(path + '.raw') and os.path.getsize(path + '.raw') > 16:
+                break
+            time.sleep(0.25)
+        else:
+            print(f'  no capture for {os.path.basename(path)}', flush=True)
+            return
+        time.sleep(0.5)
+        if png(path + '.raw', path + '.png'):
+            os.remove(path + '.raw')
+            print(f'  captured {path}.png', flush=True)
+        else:
+            print(f'  captured {path}.raw (not a format this converts)', flush=True)
+
+
+PASSES = ('sun maps', 'linz/zmip', 'ao', 'ao rays', 'blur', 'temporal', 'gi', 'bloom', 'rays', 'comp', 'fxaa',
+          'present', 'world', 'chars', 'shadow zone', 'shadow chars', 'post bloom', 'post dof',
+          'scene ao', 'scene ao trace', 'post shafts', 'hdr', 'lamps')  # gfx_fx.c's k_pass_name, in its order (world .. shadow
+# chars: the scene renderer's)
+PROF_SCENES = 'markets noon midnight'  # prof's scenes when --play isn't given: a city, and the sun up and down
+PROF_WINDOW = 2.05  # seconds between /fx prof calls: the client sums two-second windows (gfx_pass_tick)
+PROF_HEAD = re.compile(r'fx prof: GPU ms a frame over ([\d.]+) s \((\d+) frames\): frame ([\d.]+), '
+                       r'sun maps ([\d.]+), effects ([\d.]+)')
+
+
+def prof_parse(lines):
+    """The windows in /fx prof's lines in a log (gfx_pass_report's, as cmd.c logs them): a header, then
+    the passes that ran, a few to a line. Each a dict: secs, frames, frame (the command buffers' GPU time,
+    which overcounts), effects, and passes {name: ms}."""
+    windows = []
+    for line in lines:
+        m = PROF_HEAD.search(line)
+        if m:
+            secs, frames, frame, sun, effects = m.groups()
+            windows.append({'secs': float(secs), 'frames': int(frames), 'frame': float(frame),
+                            'effects': float(effects), 'passes': {'sun maps': float(sun)} if float(sun) else {}})
+        elif windows and 'fx prof:   ' in line:
+            for item in line.split('fx prof:   ', 1)[1].split(', '):
+                name, _, ms = item.strip().rpartition(' ')
+                try:
+                    windows[-1]['passes'][name] = float(ms)
+                except ValueError:
+                    pass
+    return windows
+
+
+def prof_mean(windows):
+    """Windows' ms a frame averaged, weighted by their frames: fps, frame, effects and every pass."""
+    frames = sum(w['frames'] for w in windows)
+    if not frames:
+        return {}
+    names = [p for p in PASSES if any(p in w['passes'] for w in windows)]
+    names += sorted({p for w in windows for p in w['passes']} - set(names))
+    mean = {'fps': frames / sum(w['secs'] for w in windows)}
+    for key in ('frame', 'effects'):
+        mean[key] = sum(w[key] * w['frames'] for w in windows) / frames
+    mean['passes'] = {p: sum(w['passes'].get(p, 0.0) * w['frames'] for w in windows) / frames for p in names}
+    return mean
+
+
+class Prof(Shots):
+    """At each scene's READY: the GPU's ms a frame per effects pass (/fx prof, from host64's log), then a
+    frame capture. The first /fx prof (at the first scene's BEGIN) turns the timing on; at READY, after
+    SETTLE, it is asked windows + 1 times, PROF_WINDOW apart, the first dropped (it may hold frames from
+    before READY), and the windows saved as NN-<scene>.prof.json beside the capture."""
+
+    def __init__(self, windows):
+        super().__init__()
+        self.windows = windows
+        self.on = False
+        self.scenes = []
+
+    def ask(self, ctl, log):
+        """One /fx prof: the window it logs, or None if none came within two seconds."""
+        start = os.path.getsize(log)
+        ctl('chat_send', line='/fx prof')
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            time.sleep(0.2)
+            with open(log, encoding='utf-8', errors='replace') as f:
+                f.seek(start)
+                found = prof_parse(f.read().splitlines())
+            if found:
+                time.sleep(0.1)  # the rest of the report's lines
+                with open(log, encoding='utf-8', errors='replace') as f:
+                    f.seek(start)
+                    return prof_parse(f.read().splitlines())[0]
+        return None
+
+    def __call__(self, ctl, event, out):
+        f = event.split('|')
+        if f[0] == 'begin':
+            self.pending = True
+            if not self.on:
+                ctl('chat_send', line='/fx prof')
+                self.on = True
+        elif f[0] == 'mark' and self.pending and len(f) > 3 and f[3] != 'end':
+            self.pending = False
+            time.sleep(SETTLE)
+            path = os.path.join(os.path.abspath(out), f'{int(f[1]):02d}-{f[2]}')
+            windows, last = [], None
+            for i in range(self.windows + 1):
+                time.sleep(PROF_WINDOW)
+                w = self.ask(ctl, os.path.join(out, 'client.log'))
+                if i and w and w != last:
+                    windows.append(w)
+                last = w or last
+            scene = {'index': int(f[1]), 'scene': f[2], 'windows': windows, 'mean': prof_mean(windows)}
+            with open(path + '.prof.json', 'w') as fp:
+                json.dump(scene, fp, indent=2)
+            self.scenes.append(scene)
+            m = scene['mean']
+            if m:
+                print(f"  {f[2]}: {len(windows)} windows, {m['fps']:.1f} fps, effects {m['effects']:.2f} ms, "
+                      + ', '.join(f'{p} {v:.2f}' for p, v in m['passes'].items()), flush=True)
             else:
-                print(f'  no capture for {f[2]}', flush=True)
-                return
-            time.sleep(0.5)
-            if png(path + '.raw', path + '.png'):
-                os.remove(path + '.raw')
-                print(f'  captured {path}.png', flush=True)
-            else:
-                print(f'  captured {path}.raw (not a format this converts)', flush=True)
+                print(f'  {f[2]}: no GPU pass timing in the log (FFXI_FX=0, or a back end without it?)', flush=True)
+            self.capture(ctl, path)
+
+
+def prof_table(scenes):
+    """Passes down, scenes across: ms a frame on the GPU, averaged over each scene's windows."""
+    names = [p for p in PASSES if any(p in s['mean'].get('passes', {}) for s in scenes)]
+    names += sorted({p for s in scenes for p in s['mean'].get('passes', {})} - set(names))
+    cols = [f"{s['index']:02d}-{s['scene']}" for s in scenes]
+    width = max([10] + [len(c) for c in cols]) + 2
+    rows = [('pass (GPU ms a frame)', cols)]
+
+    def row(label, get, fmt='{:.2f}'):
+        rows.append((label, [fmt.format(get(s['mean'])) if s['mean'] else '-' for s in scenes]))
+    for p in names:
+        row(p, lambda m, p=p: m['passes'].get(p, 0.0))
+    row('effects (sum)', lambda m: m['effects'])
+    row('frame (CB sum)', lambda m: m['frame'])
+    row('fps', lambda m: m['fps'], '{:.1f}')
+    rows.append(('windows', [str(len(s['windows'])) for s in scenes]))
+    lines = []
+    for i, (label, vals) in enumerate(rows):
+        lines.append(f'{label:<22}' + ''.join(f'{v:>{width}}' for v in vals))
+        if i == 0 or i == len(names):  # under the header, and under the passes
+            lines.append('-' * (22 + width * len(cols)))
+    lines.append('effects is linz/zmip..fxaa (not sun maps or present); frame is the command buffers\' GPU time summed '
+                 '(it overcounts on Apple GPUs: read the passes)')
+    return '\n'.join(lines)
 
 
 def revive(container, user):
@@ -417,7 +563,7 @@ def main():
         i = argv.index('--')
         argv, client_args = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('what', choices=['run', 'play', 'shots', 'record', 'keep'])
+    ap.add_argument('what', choices=['run', 'play', 'shots', 'prof', 'record', 'keep'])
     ap.add_argument('suite', nargs='+', metavar='SUITE|SCENE',
                     help='a suite file; for record, the addon scenes to record (or all); for keep, recordings')
     ap.add_argument('--server', help='with record: your LandSandBoat server')
@@ -425,12 +571,18 @@ def main():
     ap.add_argument('--password', default=os.environ.get('FFXI_PASSWORD'), help='with record: its password (or FFXI_PASSWORD)')
     ap.add_argument('--revive-container',
                     help="with record: the server's database container (Docker), to revive a K.O. character first")
-    ap.add_argument('--play', default='all', help='with run and shots: what to play, as !replay words')
+    ap.add_argument('--play', help=f'with run, shots and prof: what to play, as !replay words (default all; prof: {PROF_SCENES})')
+    ap.add_argument('--windows', type=int, default=3, help='with prof: two-second windows to average at each scene')
     ap.add_argument('--client', default=os.path.join(ROOT, 'build', 'host64'), help='host64')
     ap.add_argument('--game', default=os.environ.get('FFXI_GAME'), help='the FINAL FANTASY XI folder (or FFXI_GAME)')
     ap.add_argument('--data-dir', default=default_data_dir(), help="the client's data folder")
     ap.add_argument('--huffman', default=os.environ.get('FFXI_HUFFMAN'), help='folder with compress.dat')
-    ap.add_argument('--control-port', type=int, default=54300)
+    ap.add_argument('--control-port', type=int, default=54300,
+                    help="host64's control port (FFXI_CONTROL); a WorldSim map server's xi_agents bridge also has 54300")
+    ap.add_argument('--auth-port', type=int, default=replayserver.AUTH_PORT, help="the replay server's sign-in port")
+    ap.add_argument('--data-port', type=int, default=replayserver.DATA_PORT, help="the replay server's lobby data port")
+    ap.add_argument('--view-port', type=int, default=replayserver.VIEW_PORT, help="the replay server's lobby view port")
+    ap.add_argument('--zone-port', type=int, default=replayserver.ZONE_PORT, help="the replay server's zone port")
     ap.add_argument('--out', help='where the results go (keep: default tools/replay/scenes/)')
     ap.add_argument('--lsb', help='with keep: the LandSandBoat commit the recordings were made on')
     ap.add_argument('--build', help='with keep: the game build they were made with, as meta/builds.json names it')
@@ -452,10 +604,23 @@ def main():
     a.suite = a.suite[0]
     if not a.huffman:
         ap.error('--huffman (or FFXI_HUFFMAN): the folder holding compress.dat')
+    if a.play is None:
+        a.play = PROF_SCENES if a.what == 'prof' else 'all'
     if a.what == 'run':
         session(a, a.play)
     elif a.what == 'shots':
         session(a, a.play, on_event=Shots())
+    elif a.what == 'prof':
+        os.environ.setdefault('FFXI_FX', '1')  # the scene effects are what it times
+        p = Prof(a.windows)
+        out = session(a, a.play, on_event=p)
+        with open(os.path.join(out, 'prof.json'), 'w') as f:
+            json.dump({'fx': os.environ.get('FFXI_FX'), 'fx_file': os.environ.get('FFXI_FX_FILE'),
+                       'client_args': a.client_args, 'scenes': p.scenes}, f, indent=2)
+        text = prof_table(p.scenes)
+        with open(os.path.join(out, 'prof.txt'), 'w') as f:
+            f.write(text + '\n')
+        print(text)
     else:
         session(a, '', wait_done=False)
 

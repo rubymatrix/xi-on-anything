@@ -310,6 +310,209 @@ int gfx_sun_shadows_on(void); /* the setting: effects, sun > 0, characters cast 
  * before were let go (a zone-in) and as the camera moves on, so what stands behind it casts. */
 float gfx_sun_prime(float* center);
 
+/* The scene renderer (host/scene.c, the scene setting): the zone drawn from the game's own data rather
+ * than from its D3D8 draws, into the current targets (the game's world target and its depth), with
+ * the game's lighting equation - 2 x texture x vertex colour x (ambient + sun + points), table fog -
+ * per vertex (mode 1, as the game's fixed function lights it) or per pixel (mode 2). Positions,
+ * normals and directions are in world space; matrices are D3D's (row vectors, row-major). */
+enum
+{
+    GFX_WORLD_BLEND = 1,     /* alpha blended (SRCALPHA, INVSRCALPHA), no depth write */
+    GFX_WORLD_TWOSIDED = 2,  /* no culling */
+    GFX_WORLD_MIRRORED = 4,  /* placed mirrored: the other faces culled (D3D's CULL_CW) */
+    GFX_WORLD_ATEST = 8,     /* alpha test, GREATER the frame's alpha reference */
+    GFX_WORLD_CLAMP = 16,    /* texture addressing clamped (else wrapped) */
+    GFX_WORLD_NORMALIZE = 32 /* the instance's normals renormalised after the transform (NORMALIZENORMALS) */
+};
+#define GFX_WORLD_LIGHTS 4
+typedef struct GfxWorldLight
+{
+    float pos[4];     /* world; w = range */
+    float diffuse[4];
+    float ambient[4];
+    float att[4];     /* attenuation 0, 1, 2 */
+} GfxWorldLight;
+typedef struct GfxWorldInst
+{
+    float wvp[16];      /* world x view x projection, multiplied as d3d8.c does for the game's draws */
+    float world[16];
+    float world_inv[16];
+    float sun_dir[4];   /* toward the light; w = 1 when there is one */
+    float sun_col[4];
+    float sun2_dir[4];  /* a second directional, w = 1 when there is one */
+    float sun2_col[4];
+    float ambient[4];   /* D3DRS_AMBIENT */
+    float fog[4];       /* start, end, on */
+    float fog_col[4];
+    int32_t light[GFX_WORLD_LIGHTS]; /* into GfxWorldFrame.light; -1 none */
+} GfxWorldInst;
+typedef struct GfxWorldItem
+{
+    GfxBuf* vb;         /* 36-byte vertices: position, normal, D3DCOLOR, uv (FVF 0x152) */
+    GfxTex* tex;
+    uint32_t first, count, prim; /* first vertex, primitive count, GFX_TRIANGLELIST or GFX_TRIANGLESTRIP */
+    uint32_t inst;      /* into GfxWorldFrame.inst */
+    uint32_t flags;     /* GFX_WORLD_* */
+    GfxSampler samp;    /* as the game set stage 0 (its addressing from flags) */
+} GfxWorldItem;
+typedef struct GfxWorldFrame
+{
+    float view[16], proj[16];
+    uint32_t vp[6];        /* D3DVIEWPORT8 */
+    float pixel[2];        /* 1 / the viewport's width and height in the game's pixels: D3D's pixel centres (the
+                            * generated functions' position fixup, gfx_msl.c) */
+    uint32_t mode;         /* 1 per vertex, 2 per pixel */
+    float alpha_ref;       /* 0..255 */
+    int32_t zbias_opaque, zbias_blend;
+    const GfxWorldInst* inst;
+    uint32_t ninst;
+    const GfxWorldItem* item; /* drawn in order: the caller puts the opaque ones first */
+    uint32_t nitem;
+    const GfxWorldLight* light;
+    uint32_t nlight;
+} GfxWorldFrame;
+/* Whether this back end has the scene renderer (asked once, before the game's draws are dropped). */
+int gfx_world_supported(void);
+/* Draws one batch into the current targets; 0 when it drew nothing (no target). */
+int gfx_world_draw(const GfxWorldFrame* f);
+/* Characters (the scene renderer, host/scene.c): skinned on the GPU from the game's bone palettes and its meshes'
+ * bone-space vertices (Os2), lit with the game's fixed function per vertex (its per-actor directional lights,
+ * ambient and material), then its two texture stages: 2 x texture x light, then 2 x that x the texture factor, alpha
+ * 4 x 2 x texture alpha x factor alpha twice, alpha tested GREATER the reference; no culling, table fog. */
+typedef struct GfxCharVertex
+{
+    float a[4], b[4];   /* position x, y, z, weight for the first and second bone (the weight pre-applied) */
+    float na[4], nb[4]; /* normal, likewise */
+    uint32_t bones;     /* first bone, second, first's mirror bone, second's mirror bone: a byte each */
+    uint32_t mirror;    /* the mirror's axis for each (0 none, 1 x, 2 y, 3 z): bits 0-1 and 2-3 */
+} GfxCharVertex;
+typedef struct GfxCharLight
+{
+    float pos[4];      /* point lights: world, w = range */
+    float dir[4];      /* toward the light (directional); w = 1 directional, 2 point, 0 off */
+    float diffuse[4];
+    float ambient[4];
+    float att[4];
+} GfxCharLight;
+typedef struct GfxCharState /* per mesh and material */
+{
+    float wvp[16];      /* (the game's WORLD, identity but in its cached-skin frames) x view x projection */
+    float world[16];
+    GfxCharLight light[4];
+    float ambient[4];   /* D3DRS_AMBIENT */
+    float mat_diffuse[4], mat_ambient[4], mat_emissive[4];
+    float tfactor[4];   /* D3DRS_TEXTUREFACTOR */
+    float fog[4];       /* start, end, on */
+    float fog_col[4];
+} GfxCharState;
+typedef struct GfxCharItem
+{
+    GfxBuf* vb;         /* GfxCharVertex, the order of the game's skinned buffers */
+    GfxBuf* uv;         /* float2 per vertex (the game's own buffer) */
+    GfxBuf* ib;         /* the game's index buffer */
+    uint32_t index_size;
+    uint32_t first, count, prim; /* first index, primitive count, GFX_TRIANGLELIST or GFX_TRIANGLESTRIP */
+    uint32_t palette;   /* first bone in GfxCharFrame.palette */
+    uint32_t state;     /* into GfxCharFrame.state */
+    uint32_t mirror;    /* the mirrored copy: mirror bones and axes */
+    GfxTex* tex;
+    GfxSampler samp;
+} GfxCharItem;
+typedef struct GfxCharFrame
+{
+    uint32_t vp[6];
+    float pixel[2];
+    float alpha_ref;    /* 0..255 */
+    const float* palette; /* 16 floats a bone (D3D row-major, world space) */
+    uint32_t nbones;
+    const GfxCharState* state;
+    uint32_t nstate;
+    const GfxCharItem* item;
+    uint32_t nitem;
+} GfxCharFrame;
+/* Draws a batch of characters into the current targets; 0 when it drew nothing. */
+int gfx_chars_draw(const GfxCharFrame* f);
+/* The lamps lit this frame (the light pool's point lights, world space), for the clustered lamps (scene_lamps): set
+ * once a frame before its batches; n 0 none. */
+void gfx_lamps(const GfxWorldLight* l, uint32_t n);
+/* Whether the zone's light is fixed (its weather record says so: no sky, a dungeon or a room), from the scene
+ * renderer each batch, for the modern fog's indoor dust. */
+void gfx_set_fixed_light(int fixed);
+/* The zone's weather as the server last sent it (0x00A, 0x057: 0 none, 3 fog, 6 rain, 10 wind, 11 gales, ...; -1 not
+ * known), for the modern fog's ground mist and its drift. */
+void gfx_set_weather(int weather);
+
+/* While the GPU's passes are timed: the draws from here on are a timed pass of their own, 1 as the scene renderer's
+ * zone (GFX_PASS_WORLD), 2 its characters (GFX_PASS_CHARS); 0 that pass ends here (the game's own draws, timed for
+ * comparison). */
+void gfx_world_time(int pass);
+
+/* The scene renderer's sun and moon shadows (host/scene.c, the scene_shadows setting): stabilised cascades, each a
+ * square of the same size round a centre that moves only in whole texels and only when the camera has gone a margin
+ * from it, in a light space that turns only in the light's steps. The zone's layer is kept from frame to frame and
+ * drawn again a cascade at a time (redraw); the characters' layer is drawn every frame from the batch's characters,
+ * into the first nchar cascades. gfx_world_draw and gfx_chars_draw then shade the directional light that points
+ * along dir (the sun's or the moon's term, nothing else) with it, until the next gfx_shadow_begin. */
+#define GFX_SHADOW_CASCADES 4
+typedef struct GfxShadowCascade
+{
+    float lmat[16];  /* world -> map: x, y -1..1 across it, z 0 (toward the light) .. 1 (D3D row vectors) */
+    float radius;    /* the camera's distance it serves (the next one's beyond) */
+    float texel;     /* world units a texel */
+    float depth;     /* world units over z 0..1 */
+    uint32_t valid;  /* drawn at least once */
+} GfxShadowCascade;
+typedef struct GfxShadowFrame
+{
+    uint32_t size;      /* texels across each map */
+    uint32_t ncascades, nchar; /* cascades in use; how many of the first take the characters */
+    float dir[4];       /* toward the light, world; w = 1 when shadows are on this frame */
+    float cam[4];       /* the camera, world (the cascades are chosen by the distance from it) */
+    float strength;     /* 0..1: how much of the light the shadow takes */
+    float soft;         /* the penumbra's width, times the day's (1; the moon's wider) */
+    float soft_tan;     /* contact-hardening soft shadows: tan of the light's angular radius (0: off, the fixed filter) */
+    GfxShadowCascade c[GFX_SHADOW_CASCADES];
+    int32_t redraw;     /* the zone's layer of this cascade drawn again from the items below; -1 none */
+    const float* world; /* 16 floats an instance (the items' inst indexes it) */
+    uint32_t nworld;
+    const GfxWorldItem* item; /* GFX_WORLD_ATEST: alpha tested with tex; GFX_WORLD_BLEND ones are not given */
+    uint32_t nitem;
+    const GfxCharFrame* chars; /* this batch's characters, NULL none */
+} GfxShadowFrame;
+/* Before the batch's gfx_world_draw: the shadows' layers drawn as the frame says; f NULL or dir.w 0 ends them. */
+void gfx_shadow_begin(const GfxShadowFrame* f);
+
+/* The scene renderer's bounce light (host/scene.c, the scene_gi setting; gfx_gi_metal.inc): a grid of light probes
+ * round the camera, traced against the zone's static geometry. gfx_gi_zone gives the zone once it is loaded (NULL
+ * drops it): every static instance's world matrix and its inverse (D3D row-major, 16 floats each) and the submeshes to
+ * trace (GfxWorldItem, opaque ones, tex for their colour). gfx_gi_frame, before each batch's gfx_world_draw, traces a
+ * share of the probes (once a frame) and has the batch's zone and characters lit by them; NULL or strength 0 ends it. */
+typedef struct GfxGiZone
+{
+    const float* world;
+    const float* world_inv;
+    uint32_t nworld;
+    const GfxWorldItem* item;
+    uint32_t nitem;
+} GfxGiZone;
+typedef struct GfxGiFrame
+{
+    float cam[4];                       /* world */
+    float sun_dir[4], sun_col[4];       /* toward the light, w = 1 when there is one (as GfxWorldInst) */
+    float sun2_dir[4], sun2_col[4];
+    float ambient[4];
+    const GfxWorldLight* light;         /* the lamps lit now (the light pool's) */
+    uint32_t nlight;
+    float strength;                     /* how much of the bounce light the surfaces take */
+    float sky;                          /* how far the share of the sky a probe sees darkens the ambient (0 not) */
+    float bounce;                       /* the earlier bounces' weight in a ray's hit (0 one bounce) */
+    float ambient_bounce;               /* the ambient's weight at a ray's hit */
+    float debug;                        /* 1 the bounce light alone, 2 the ambient's factor */
+    uint32_t quality;                   /* 1 low, 2 high (both sampled per vertex), 3 high sampled per pixel in scene 2 */
+} GfxGiFrame;
+void gfx_gi_zone(const GfxGiZone* z);
+void gfx_gi_frame(const GfxGiFrame* f);
+
 /* Whether the scene effects can trace rays here (the rt setting: the GPU's ray queries, and on
  * Direct3D 12 the shaders built with dxc); the first call asks the device. */
 int gfx_rt_supported(void);
@@ -326,6 +529,13 @@ uint32_t gfx_failures(void);
 /* Frame profile (FFXI_PROFILE=1): the front end adds the time it spends turning a D3D call into
  * back-end work; the back end logs the breakdown every two seconds from Present. */
 extern int gfx_profiling;
+/* GPU time per scene-effects pass (sun maps, linz/zmip, ao, blur, temporal, gi, bloom, rays, comp,
+ * fxaa, present), from timestamps at each pass's start and end: on with FFXI_PROFILE=1 (the log, every
+ * two seconds) or gfx_pass_timing(1) (/fx prof). Back ends without timestamps time nothing.
+ * gfx_pass_report writes the last two seconds' averages, ms a frame, a line each into out (max lines
+ * at most): how many, 0 while nothing was timed. */
+void gfx_pass_timing(int on);
+int gfx_pass_report(char (*out)[96], int max);
 uint64_t gfx_now_ns(void);
 void gfx_prof_front(uint64_t ns);
 /* A draw dropped, and why (the profile line counts each reason). */
