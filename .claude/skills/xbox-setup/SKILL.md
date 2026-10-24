@@ -24,7 +24,7 @@ copy, the with-game package) doesn't work or is much worse on this console.
 1. `python3 xbox/tools/xbox.py status`, and act on what it says:
    - **Installed from a package** (e.g. after `deploy-xbox.ps1` or the with-game package): a loose app can't
      replace it (`0x80073CFB`). Tell the user it will be uninstalled, then run `python3 xbox/tools/xbox.py uninstall`.
-     It backs LocalState up to `build/localstate-backup-*` first. On this console LocalState survived the
+     It backs LocalState up to `build/xbox/localstate-backup-*` first. On this console LocalState survived the
      uninstall anyway (settings, the game's `USER` folder, the shader cache).
    - **`game.txt` in LocalState:** it would override the game beside the app. Ask, then
      `python3 xbox/tools/xbox.py rm local:\LocalState game.txt`.

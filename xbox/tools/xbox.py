@@ -3,7 +3,7 @@
 computer on its network (written on a Mac). Standard library only. docs/xbox-install.md says why each
 step is the way it is.
 
-  XBOX=<console address> python3 tools/xbox.py <command> ...
+  XBOX=<console address> python3 xbox/tools/xbox.py <command> ...
 
 The app runs as a loose app: its files, and the game beside them, in D:\\DevelopmentFiles\\LooseApps\\XIonXbox
 on the console. An update replaces the exe and its catalog there; the 14 GB of game data stays put.
@@ -16,13 +16,13 @@ on the console. An update replaces the exe and its catalog there; the 14 GB of g
   logs <local dir>                copy LocalState's logs and samples.bin to <local dir>
   launch | stop                   start or stop the app
   install <package.msix> [deps]   install a signed package the ordinary way (NOT for the loose app)
-  uninstall [--no-backup]         remove the XIonXbox package; backs LocalState up to build/ first
+  uninstall [--no-backup]         remove the XIonXbox package; backs LocalState up to build/xbox/ first
 
 Lower level (<folder> is dev:<path> for DevelopmentFiles, local: for the app's LocalState):
   ls <folder> | pull <folder> <dir> | push <dir> <folder> [--all] | rm <folder> <name> | rmdir <folder> <name>
   register <LooseApps subfolder>
 
-Environment: XBOX (required; remembered in build/xbox-address after the first use), and XBOX_USER /
+Environment: XBOX (required; remembered in build/xbox/xbox-address after the first use), and XBOX_USER /
 XBOX_PASS if Device Portal's authentication is on.
 """
 import base64
@@ -40,8 +40,8 @@ import urllib.parse
 import uuid
 import zipfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUILD = os.path.join(ROOT, 'build')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repo
+BUILD = os.path.join(ROOT, 'build', 'xbox')
 STAGE = os.path.join(BUILD, 'xbox-loose')  # the loose app's files, as last sent to the console
 NAME = 'XIonXbox'  # the manifest's Identity Name
 LOOSE = 'XIonXbox'  # its folder under DevelopmentFiles\LooseApps
@@ -146,7 +146,7 @@ def installed():
 def need_installed():
     p = installed()
     if not p:
-        sys.exit('XI on Xbox is not on the console. First time: tools/xbox.py setup <app.msix> <game folder>')
+        sys.exit('XI on Xbox is not on the console. First time: xbox/tools/xbox.py setup <app.msix> <game folder>')
     return p
 
 
@@ -298,7 +298,7 @@ def cmd_uninstall(*flags):
 # --- the loose app -------------------------------------------------------------------------------------------
 
 def stage(msix, registered_version=None):
-    """Unpack the app's files from a built package into build/xbox-loose: everything but the package's own
+    """Unpack the app's files from a built package into build/xbox/xbox-loose: everything but the package's own
     signature, block map, and content types. Its catalog (AppxMetadata/CodeIntegrity.cat) stays: without it the
     console won't start the exe. The manifest keeps the registered version, so a rebuild re-registers in place
     (the build's own version may be lower than one registered before)."""
@@ -330,7 +330,7 @@ def cmd_deploy(msix):
     p = need_installed()
     if not is_loose(p):
         sys.exit('XI on Xbox is installed from a package, not as a loose app. Set it up once with '
-                 'tools/xbox.py setup <app.msix> <game folder> (docs/xbox-install.md).')
+                 'xbox/tools/xbox.py setup <app.msix> <game folder> (docs/xbox-install.md).')
     stage(msix, version_of(p))
     cmd_stop(quiet=True)
     # every file, whatever its size: a rebuilt CodeIntegrity.cat is the same size as the old one
@@ -346,13 +346,13 @@ def cmd_setup(msix, game):
     p = installed()
     if p and not is_loose(p):
         sys.exit('XI on Xbox %s is installed from a package. A loose app cannot replace it: run '
-                 'tools/xbox.py uninstall first (it backs LocalState up; the console keeps LocalState anyway).'
+                 'xbox/tools/xbox.py uninstall first (it backs LocalState up; the console keeps LocalState anyway).'
                  % version_of(p))
     stage(msix, version_of(p) if p else None)
     if push(STAGE, dev(), '\\LooseApps\\' + LOOSE, send_all=True):
         sys.exit('some app files did not reach the console; run setup again')
     cmd_register(LOOSE)
-    print('app registered; now the game (resumable: run "tools/xbox.py game <folder>" again if it stops)')
+    print('app registered; now the game (resumable: run "xbox/tools/xbox.py game <folder>" again if it stops)')
     cmd_game(game)
 
 
@@ -365,7 +365,7 @@ def cmd_game(game):
     p = installed()
     if p and 'game.txt' in listing(localstate(p), '\\LocalState'):
         print('note: LocalState\\game.txt overrides the game beside the app; remove it with\n'
-              '  tools/xbox.py rm local:\\LocalState game.txt')
+              '  xbox/tools/xbox.py rm local:\\LocalState game.txt')
     print('the game is beside the app. Launch XI on Xbox.')
 
 
