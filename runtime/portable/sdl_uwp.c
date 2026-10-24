@@ -190,28 +190,73 @@ const bool* SDL_GetKeyboardState(int* numkeys)
 
 bool SDL_OpenURL(const char* url) { (void)url; return false; } /* no browser from the game on the console */
 
-void uwp_key(int scancode, int down, int repeat)
+/* The key a scancode is on a US layout, as SDL would report it: the game reads scancodes, the
+ * sign-in screen keys. */
+static SDL_Keycode keycode_of(int sc)
 {
-    if (scancode >= 0 && scancode < SDL_SCANCODE_COUNT)
-        g_keystate[scancode] = down != 0;
+    static const char PUNCT[] = "-=[]\\\0;'`,./"; /* SDL_SCANCODE_MINUS (45) to SLASH (56); 50 is non-US */
+    if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z)
+        return (SDL_Keycode)('a' + sc - SDL_SCANCODE_A);
+    if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9)
+        return (SDL_Keycode)('1' + sc - SDL_SCANCODE_1);
+    if (sc >= SDL_SCANCODE_MINUS && sc <= SDL_SCANCODE_SLASH && PUNCT[sc - SDL_SCANCODE_MINUS])
+        return (SDL_Keycode)PUNCT[sc - SDL_SCANCODE_MINUS];
+    switch (sc)
+    {
+    case SDL_SCANCODE_0: return SDLK_0;
+    case SDL_SCANCODE_RETURN: return SDLK_RETURN;
+    case SDL_SCANCODE_ESCAPE: return SDLK_ESCAPE;
+    case SDL_SCANCODE_BACKSPACE: return SDLK_BACKSPACE;
+    case SDL_SCANCODE_TAB: return SDLK_TAB;
+    case SDL_SCANCODE_SPACE: return SDLK_SPACE;
+    default: return SDL_SCANCODE_TO_KEYCODE(sc);
+    }
+}
+
+static void key_event(int scancode, int down, int repeat, SDL_Keymod mod)
+{
     SDL_Event e;
     memset(&e, 0, sizeof e);
     e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
     e.key.windowID = WINDOW_ID;
     e.key.scancode = (SDL_Scancode)scancode;
+    e.key.key = keycode_of(scancode);
+    e.key.mod = mod;
     e.key.down = down != 0;
     e.key.repeat = repeat != 0;
     push(&e);
 }
 
+void uwp_key(int scancode, int down, int repeat)
+{
+    if (scancode >= 0 && scancode < SDL_SCANCODE_COUNT)
+        g_keystate[scancode] = down != 0;
+    key_event(scancode, down, repeat, SDL_GetModState());
+}
+
 void uwp_text(const char* utf8)
 {
-    SDL_Event e;
-    memset(&e, 0, sizeof e);
-    e.type = SDL_EVENT_TEXT_INPUT;
-    e.text.windowID = WINDOW_ID;
-    e.text.text = utf8; /* copied by push */
-    push(&e);
+    /* in pieces that fit the queue's text slots, whole UTF-8 characters each */
+    while (*utf8)
+    {
+        char piece[sizeof g_text[0]];
+        size_t n = strlen(utf8);
+        if (n >= sizeof piece)
+        {
+            n = sizeof piece - 1;
+            while (n && ((unsigned char)utf8[n] & 0xC0) == 0x80)
+                --n;
+        }
+        memcpy(piece, utf8, n);
+        piece[n] = 0;
+        utf8 += n;
+        SDL_Event e;
+        memset(&e, 0, sizeof e);
+        e.type = SDL_EVENT_TEXT_INPUT;
+        e.text.windowID = WINDOW_ID;
+        e.text.text = piece; /* copied by push */
+        push(&e);
+    }
 }
 
 void uwp_mouse_move(float x, float y)
@@ -330,6 +375,7 @@ void uwp_gamepad(const UwpPad* p)
 {
     AcquireSRWLockExclusive(&g_plock);
     int was = g_padstate.connected;
+    uint32_t held = g_padstate.buttons;
     g_padstate = *p;
     ReleaseSRWLockExclusive(&g_plock);
     if (!was != !p->connected)
@@ -340,6 +386,19 @@ void uwp_gamepad(const UwpPad* p)
         e.gdevice.which = PAD_ID;
         push(&e);
     }
+    /* the buttons that changed, as events (the sign-in screen's); the game polls their state */
+    uint32_t now = p->connected ? p->buttons : 0, changed = (was ? held : 0) ^ now;
+    for (int b = 0; changed; ++b, changed >>= 1)
+        if (changed & 1)
+        {
+            SDL_Event e;
+            memset(&e, 0, sizeof e);
+            e.type = (now >> b) & 1 ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
+            e.gbutton.which = PAD_ID;
+            e.gbutton.button = (Uint8)b;
+            e.gbutton.down = e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+            push(&e);
+        }
 }
 void uwp_set_rumble(UwpRumble rumble) { g_rumble = rumble; }
 
