@@ -146,6 +146,7 @@ bool SDL_HideWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_SetWindowFullscreen(SDL_Window* w, bool on) { (void)w, (void)on; return true; } /* the view is the screen */
 bool SDL_SyncWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_RaiseWindow(SDL_Window* w) { (void)w; return true; }
+SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* w) { (void)w; return 0; } /* shown, and the view is all there is */
 bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; }
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window* w) { (void)w; return 0; }
 void* SDL_GetPointerProperty(SDL_PropertiesID props, const char* name, void* default_value)
@@ -375,6 +376,10 @@ void SDL_CloseGamepad(SDL_Gamepad* p)
 SDL_Gamepad* SDL_GetGamepadFromID(SDL_JoystickID id) { return id == PAD_ID && pad_connected() ? &g_pad : NULL; }
 const char* SDL_GetGamepadNameForID(SDL_JoystickID id) { (void)id; return "Xbox controller"; }
 const char* SDL_GetGamepadName(SDL_Gamepad* p) { (void)p; return "Xbox controller"; }
+/* input.c lays the buttons out by the pad's kind: an Xbox One controller's */
+SDL_GamepadType SDL_GetGamepadType(SDL_Gamepad* p) { (void)p; return SDL_GAMEPAD_TYPE_XBOXONE; }
+Uint16 SDL_GetGamepadVendor(SDL_Gamepad* p) { (void)p; return 0x045E; }  /* Microsoft */
+Uint16 SDL_GetGamepadProduct(SDL_Gamepad* p) { (void)p; return 0x02EA; } /* Xbox One S controller */
 bool SDL_GetGamepadButton(SDL_Gamepad* p, SDL_GamepadButton b)
 {
     if (!p || b < 0 || b >= 32)
