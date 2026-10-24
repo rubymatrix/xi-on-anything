@@ -10,3 +10,6 @@ void dinput_setup(void);
 /* Set by the addon host: sees each XInput read the game makes (pad `user`) and may change it (a
  * button an addon took stays up for the game). */
 extern void (*dinput_xpad_hook)(uint32_t user, XPad* pad);
+/* host64 --controller-primary: X on pad 0 opens the soft keyboard while the chat line is typing.
+ * 0 off, 1 on, 2 auto (on while a gamepad is connected: the XInput reads it acts in need one). */
+extern int dinput_controller_primary;

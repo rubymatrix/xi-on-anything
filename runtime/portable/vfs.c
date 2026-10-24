@@ -137,12 +137,15 @@ static int to_utf8(const char* in, char* out, size_t n)
 /* --- DAT overlays --------------------------------------------------------------------------------- */
 
 /* One file an overlay supplies: its key (lower case, from the ROM or sound folder on, '\'
- * separators: "rom2\12\34.dat") and its host path. Open addressing over a power-of-two table. */
+ * separators: "rom2\12\34.dat"), its host path, and when it applies (NULL: always). Open
+ * addressing over a power-of-two table. */
 typedef struct
 {
     char* key;
     char* host;
+    int (*when)(void);
 } Overlay;
+static int (*g_ov_when)(void); /* the condition of the overlay being added */
 static Overlay* g_ov;
 static unsigned g_ov_cap, g_ov_n;
 static int g_ov_trace = -1;
@@ -189,6 +192,7 @@ static int ov_add(const char* key, const char* host)
         return 0;
     s->key = dup(key);
     s->host = dup(host);
+    s->when = g_ov_when;
     g_ov_n++;
     return 1;
 }
@@ -277,6 +281,21 @@ static int by_name(const void* a, const void* b)
 
 unsigned vfs_add_overlay(const char* host_dir, void (*report)(const char* name, unsigned files))
 {
+    return vfs_add_overlay_when(host_dir, report, NULL);
+}
+
+static unsigned add_overlay(const char* host_dir, void (*report)(const char* name, unsigned files));
+
+unsigned vfs_add_overlay_when(const char* host_dir, void (*report)(const char* name, unsigned files), int (*when)(void))
+{
+    g_ov_when = when;
+    unsigned n = add_overlay(host_dir, report);
+    g_ov_when = NULL;
+    return n;
+}
+
+static unsigned add_overlay(const char* host_dir, void (*report)(const char* name, unsigned files))
+{
     long direct = ov_add_one(host_dir);
     if (direct >= 0)
     {
@@ -347,7 +366,7 @@ int vfs_overlay_path(const char* guest, char* host, size_t n)
     Overlay* s = ov_slot(key);
     if (g_ov_trace < 0)
         g_ov_trace = getenv("FFXI_DATS_TRACE") && getenv("FFXI_DATS_TRACE")[0] == '1';
-    if (!s->key || strlen(s->host) + 1 > n)
+    if (!s->key || strlen(s->host) + 1 > n || (s->when && !s->when()))
         return 0;
     if (g_ov_trace)
         fprintf(stderr, "[dats] %s -> %s\n", full, s->host);

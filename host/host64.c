@@ -55,6 +55,12 @@
  * job-ability ids up to 0xFFF. They need the server's DATs in a --dats overlay. An app bundle's
  * FFXICexi key is the default.
  *
+ * --controller-primary on|off|auto: play from the gamepad as on the PS2 (off by default). X while the
+ * chat line is typing opens the soft keyboard (runtime/portable/dinput.c), and the soft keyboard is on
+ * (FsConfig 0xc9, Config item 12) whenever X asks for it; that needs a build with text_input and
+ * config_ptr. --pad-dats <folder>: a DAT overlay of gamepad prompts (tools/controller_dats.py) that
+ * counts while the mode is on, or with auto while a gamepad is connected (asked as each file opens).
+ *
  * Two ways in:
  *   - a session value V the lobby checks (--session), from a launcher that signed in elsewhere
  *     and keeps that sign-in open while the game runs. --auth is the 0x34-byte authCode block the
@@ -842,6 +848,12 @@ static void log_flusher(void* unused)
 }
 #endif
 
+/* --pad-dats counts while controller primary is on: always, or with auto while a gamepad is connected */
+static int pad_prompts(void)
+{
+    return dinput_controller_primary == 1 || (dinput_controller_primary == 2 && input_pad_count() > 0);
+}
+
 int main(int argc, char** argv)
 {
 #if defined(_WIN32) && !defined(_MSC_VER)
@@ -887,6 +899,7 @@ int main(int argc, char** argv)
     const char* finals[8];
     unsigned nfinals = 0;
     const char* dats[8];
+    const char* pad_dats = NULL; /* --pad-dats: gamepad prompts, while controller primary is on */
     unsigned ndats = 0;
     const char* packs[8];
     unsigned npacks = 0;
@@ -1061,6 +1074,17 @@ int main(int argc, char** argv)
             }
             cexi_given = 1;
         }
+        else if (!strcmp(argv[i], "--controller-primary"))
+        {
+            if (strcmp(argv[i + 1], "on") && strcmp(argv[i + 1], "off") && strcmp(argv[i + 1], "auto"))
+            {
+                fprintf(stderr, "--controller-primary: on (X opens the soft keyboard while typing), auto (on while a gamepad is connected) or off\n");
+                return 2;
+            }
+            dinput_controller_primary = !strcmp(argv[i + 1], "on") ? 1 : !strcmp(argv[i + 1], "auto") ? 2 : 0;
+        }
+        else if (!strcmp(argv[i], "--pad-dats"))
+            pad_dats = argv[i + 1];
         else if (!strcmp(argv[i], "--authport") || !strcmp(argv[i], "--dataport") || !strcmp(argv[i], "--viewport"))
         {
             long port = strtol(argv[i + 1], NULL, 10);
@@ -1095,7 +1119,7 @@ int main(int argc, char** argv)
     {
         fprintf(stderr, "usage: host64 --game <FINAL FANTASY XI folder> [--reg f.reg]... [--reg-overlay f.reg] [--reg-final f.reg]... [--data-dir folder] "
                         "[--server name] [--session V [--auth block] | --user name [--pass p] [--otp code] [--authport n] "
-                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--cexi off|items|full]\n");
+                        "[--dataport n] [--viewport n] [--trust on|off]] [--loader-version a.b.c] [--dats folder]... [--nameplates fix|off] [--nameplate-scale s] [--draw-distance k] [--lod near|game] [--cexi off|items|full] [--controller-primary on|off|auto] [--pad-dats folder]\n");
         return 2;
     }
     if (!lsb.password)
@@ -1267,6 +1291,8 @@ int main(int argc, char** argv)
         if (!vfs_add_overlay(dats[i], report_overlay))
             rt_log("[recomp] dats: no ROM or sound files in %s\n", dats[i]);
     }
+    if (pad_dats && dinput_controller_primary && !vfs_add_overlay_when(pad_dats, report_overlay, pad_prompts))
+        rt_log("[recomp] pad dats: no ROM files in %s\n", pad_dats);
     {
         /* texture packs: --textures, else <data dir>/textures if there is one; then the bundled
          * ones (the first pack with an entry for a texture wins) */

@@ -31,6 +31,8 @@ void vfs_match_case(char* host_path);
  * child folder's, in name order. Returns the number of files it adds (0 if none or no folder);
  * each child folder taken is reported through report(name, files), when given. */
 unsigned vfs_add_overlay(const char* host_dir, void (*report)(const char* name, unsigned files));
+/* The same, for an overlay whose files count only while when() is nonzero (asked at each open). */
+unsigned vfs_add_overlay_when(const char* host_dir, void (*report)(const char* name, unsigned files), int (*when)(void));
 /* The overlay's host file for a guest path, or 0 if no overlay has it. */
 int vfs_overlay_path(const char* guest, char* host, size_t n);
 

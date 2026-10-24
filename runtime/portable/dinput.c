@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "build.h" /* FFXI_TEXT_INPUT, FFXI_CONFIG_PTR, per retail build */
 #include "dinput.h"
 #include "gthread.h"
 #include "gwin.h"
@@ -822,6 +823,49 @@ void (*dinput_xpad_hook)(uint32_t user, XPad* pad);
 static int g_xseen[4] = { -1, -1, -1, -1 }; /* connected at the last poll: -1 never polled */
 static int g_xinput_seen[4];
 
+/* --- Controller primary (host64 --controller-primary) --------------------------------------------------
+ * On the PS2 the soft keyboard came up from the pad. Retail PC still has it: input action 0x24 (pad bit
+ * 0x1000, padsin000's 26th value: DirectInput button 11, which the game's XInput table at 10329818 makes
+ * RB) calls the text input's onSoftKeyTrigger (101b13f0), which opens the keyboard when FsConfig option
+ * 0xc9 (Config item 12: 1 standard, 2 compact) is set. Here X does it while the chat line is typing: it
+ * reaches the game as RB until it is let go, and turns 0xc9 on if it is off. Once the keyboard is up X is
+ * X again. ffxi-pc client/systems/soft-keyboard.md. */
+int dinput_controller_primary;
+
+#define XPAD_X 0x4000
+#define XPAD_RB 0x0200
+
+static void controller_primary(XPad* x)
+{
+#if defined(FFXI_TEXT_INPUT) && defined(FFXI_CONFIG_PTR)
+    static int held; /* X went to the game as RB when pressed: it stays RB until released */
+    if (!(x->buttons & XPAD_X))
+    {
+        held = 0;
+        return;
+    }
+    if (!held)
+    {
+        /* g_fsTextInput: +0xf108 the line's state (3 idle, 4 and 5 typing), +0xf100 the keyboard is up */
+        uint32_t t = rd32(FFXI_TEXT_INPUT);
+        uint32_t state = t ? rd32(t + 0xf108) : 0;
+        if ((state != 4 && state != 5) || rd8(t + 0xf100))
+            return;
+        held = 1;
+        /* FsConfig: [config_ptr]+4 the options, 44 bytes each, the value at +8 */
+        uint32_t c = rd32(FFXI_CONFIG_PTR), opts = c ? rd32(c + 4) : 0;
+        if (opts && rd32(opts + 0xc9 * 44 + 8) == 0)
+        {
+            wr32(opts + 0xc9 * 44 + 8, 1);
+            rt_log("[recomp] controller primary: soft keyboard turned on (FsConfig 0xc9 = 1)\n");
+        }
+    }
+    x->buttons = (uint16_t)((x->buttons & ~XPAD_X) | XPAD_RB);
+#else
+    (void)x;
+#endif
+}
+
 /* XInputGetState_(dwUserIndex, XINPUT_STATE* pState) */
 static void XI_GetState(Guest* g)
 {
@@ -848,6 +892,8 @@ static void XI_GetState(Guest* g)
     }
     if (dinput_xpad_hook)
         dinput_xpad_hook(user, &x); /* the addon host: button events, and buttons it keeps from the game */
+    if (dinput_controller_primary && user == 0)
+        controller_primary(&x);
     if (memcmp(&x, &g_xlast[user], sizeof x))
         g_xlast[user] = x, g_xpacket[user]++;
     /* XINPUT_STATE: dwPacketNumber, then XINPUT_GAMEPAD {wButtons, bLeftTrigger, bRightTrigger,
