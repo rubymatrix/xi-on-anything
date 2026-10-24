@@ -27,12 +27,17 @@ namespace
         return r;
     }
 
-    void hidden()
+    bool g_away; // the window lost focus while the keyboard was up (the console's keyboard takes it)
+    bool g_seen; // ... or the keyboard said it covers part of the window: either way it is there
+    unsigned g_shown; // counts the keyboards opened, so a late check knows which one it is for
+
+    void hidden(char const* why)
     {
         if (!g_up.exchange(false))
             return;
+        g_away = g_seen = false;
         g_context.NotifyFocusLeave();
-        fprintf(stderr, "[app] on-screen keyboard closed\n");
+        fprintf(stderr, "[app] on-screen keyboard closed (%s)\n", why);
     }
 
     // On the UI thread: the keyboard over a field holding text.
@@ -48,7 +53,19 @@ namespace
         bool shown = CoreInputView::GetForCurrentView().TryShow(CoreInputViewKind::Keyboard);
         fprintf(stderr, "[app] on-screen keyboard %s\n", shown ? "opened" : "did not open");
         if (!shown)
-            hidden();
+        {
+            hidden("not shown");
+            return;
+        }
+        // If nothing says it is there within 2 s, it is not: the controller goes back to the screen.
+        unsigned which = ++g_shown;
+        std::thread([which] {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            g_ui.RunAsync(CoreDispatcherPriority::Normal, [which] {
+                if (which == g_shown && g_up && !g_seen && !g_away)
+                    hidden("never seen");
+            });
+        }).detach();
     }
 
     // From the game's thread: the sign-in screen's request.
@@ -63,7 +80,7 @@ namespace
             else
             {
                 CoreInputView::GetForCurrentView().TryHide();
-                hidden();
+                hidden("the screen asked");
             }
         });
     }
@@ -96,8 +113,25 @@ void TextInput::Attach(CoreWindow const& window)
         e.Request().LayoutBounds().ControlBounds(b);
         e.Request().LayoutBounds().TextBounds(b);
     });
-    g_context.FocusRemoved([](auto&&, auto&&) { hidden(); });
-    CoreInputView::GetForCurrentView().PrimaryViewHiding([](auto&&, auto&&) { hidden(); });
+    // Which of these the console sends when its keyboard closes is not known, so any of them will do
+    g_context.FocusRemoved([](auto&&, auto&&) { hidden("focus removed"); });
+    CoreInputView view = CoreInputView::GetForCurrentView();
+    view.PrimaryViewHiding([](auto&&, auto&&) { hidden("hiding"); });
+    view.OcclusionsChanged([](auto&&, CoreInputViewOcclusionsChangedEventArgs const& e) {
+        fprintf(stderr, "[app] on-screen keyboard occlusions: %u\n", e.Occlusions().Size());
+        if (e.Occlusions().Size())
+            g_seen = true;
+        else
+            hidden("no occlusions");
+    });
+    // the window back in focus after the keyboard had it
+    window.Activated([](CoreWindow const&, WindowActivatedEventArgs const& e) {
+        bool active = e.WindowActivationState() != CoreWindowActivationState::Deactivated;
+        if (g_up && !active)
+            g_away = true;
+        else if (g_up && active && g_away)
+            hidden("window back in focus");
+    });
 
     uwp_set_text_input(request);
 }
