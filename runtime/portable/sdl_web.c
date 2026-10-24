@@ -178,6 +178,12 @@ bool SDL_SyncWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_RaiseWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; }
 bool SDL_StopTextInput(SDL_Window* w) { (void)w; return true; }
+/* the sign-in's keyboard hints (the field's kind, its text): the page's keyboard needs none of them */
+bool SDL_StartTextInputWithProperties(SDL_Window* w, SDL_PropertiesID props) { (void)props; return SDL_StartTextInput(w); }
+SDL_PropertiesID SDL_CreateProperties(void) { return 1; }
+void SDL_DestroyProperties(SDL_PropertiesID props) { (void)props; }
+bool SDL_SetNumberProperty(SDL_PropertiesID props, const char* name, Sint64 value) { (void)props, (void)name, (void)value; return true; }
+bool SDL_SetStringProperty(SDL_PropertiesID props, const char* name, const char* value) { (void)props, (void)name, (void)value; return true; }
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window* w) { (void)w; return 0; }
 void* SDL_GetPointerProperty(SDL_PropertiesID props, const char* name, void* default_value)
 {

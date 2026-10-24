@@ -15,6 +15,11 @@ int addons_harness(const char* script)
 }
 void addons_packet_tap(void (*tap)(const uint8_t* p, size_t n)) { (void)tap; }
 void addons_packet_send(const uint8_t* p, size_t n) { (void)p, (void)n; }
+size_t xi_packet_last(int outgoing, uint16_t id, uint8_t* out, size_t cap, uint64_t* when_ms)
+{
+    (void)outgoing, (void)id, (void)out, (void)cap, (void)when_ms;
+    return 0;
+}
 
 /* What host64 takes from the addon host's game-struct reader (game.c) and DAT reader (res.c), and
  * Discord's presence, which rides on both: none of them in this build. The sun shadows then follow

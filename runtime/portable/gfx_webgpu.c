@@ -1824,6 +1824,18 @@ int gfx_sun_shadows_shown(void) { return 0; }
 float gfx_sun_prime(float* center) { (void)center; return 0.0f; }
 /* the passes (gfx_webgpu_fx.h) are written; their driver comes next */
 void gfx_scene_done(GfxTex* color, const GfxScene* s) { (void)color, (void)s; }
+/* the scene renderer is Metal's only so far: the game's own draws stay */
+int gfx_rt_supported(void) { return 0; }
+int gfx_world_supported(void) { return 0; }
+int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
+void gfx_world_time(int pass) { (void)pass; }
+void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
+void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
+void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
+int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
+void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
+void gfx_set_fixed_light(int fixed) { (void)fixed; }
+void gfx_set_weather(int weather) { (void)weather; }
 void gfx_trace_dump(const char* path) { (void)path; }
 void gfx_finish(void) { submit(); }
 uint32_t gfx_failures(void) { return g_failures; }
