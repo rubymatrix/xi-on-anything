@@ -499,6 +499,9 @@ typedef struct Ui
     SeWave snd[4];
     float se_gain;              /* at the player's volume */
     float mouse_x, mouse_y;     /* where the pointer last was: only a move hovers */
+    SDL_Gamepad* pad;           /* the controller, for its left stick */
+    int stick;                  /* the D-pad button the stick stands for, plus 1; 0 when centred */
+    Uint64 stick_at;            /* when it repeats */
 } Ui;
 
 /* The menus' sounds, as the game's menus play them: their effect ids (ROM/0/0.DAT's "0001".."0004") */
@@ -1514,6 +1517,26 @@ static void pad_button(Ui* u, SDL_Window* win, int button)
     key(u, &k);
 }
 
+/* The left stick as the D-pad: pushed past half way it moves once, then again every 150 ms after
+ * it has been held for 400 ms. */
+static void stick(Ui* u, SDL_Window* win)
+{
+    if (!u->pad)
+        return;
+    int x = SDL_GetGamepadAxis(u->pad, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(u->pad, SDL_GAMEPAD_AXIS_LEFTY);
+    int ax = abs(x), ay = abs(y), past = u->stick ? 8000 : 16000; /* it lets go nearer the centre */
+    int dir = ay >= ax && ay > past ? (y < 0 ? SDL_GAMEPAD_BUTTON_DPAD_UP : SDL_GAMEPAD_BUTTON_DPAD_DOWN)
+            : ax > ay && ax > past  ? (x < 0 ? SDL_GAMEPAD_BUTTON_DPAD_LEFT : SDL_GAMEPAD_BUTTON_DPAD_RIGHT)
+                                    : -1;
+    Uint64 now = SDL_GetTicks();
+    if (dir < 0)
+        u->stick = 0;
+    else if (dir + 1 != u->stick)
+        u->stick = dir + 1, u->stick_at = now + 400, pad_button(u, win, dir);
+    else if (now >= u->stick_at)
+        u->stick_at = now + 150, pad_button(u, win, dir);
+}
+
 /* a key; the cursor's moving sounds as the game's does */
 static void key(Ui* u, const SDL_KeyboardEvent* e)
 {
@@ -1805,7 +1828,14 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                 done = 1;
             else if (e.type == SDL_EVENT_GAMEPAD_ADDED)
-                SDL_OpenGamepad(e.gdevice.which); /* for its buttons' events; left open for the game's input */
+            {
+                /* for its buttons' events and its stick; left open for the game's input */
+                SDL_Gamepad* p = SDL_OpenGamepad(e.gdevice.which);
+                if (p && !u->pad)
+                    u->pad = p;
+            }
+            else if (e.type == SDL_EVENT_GAMEPAD_REMOVED && u->pad && SDL_GetGamepadFromID(e.gdevice.which) == u->pad)
+                u->pad = NULL, u->stick = 0;
             else if (u->closing || open_progress(u) < 1)
                 continue; /* nothing to act on while the window opens or closes */
             else if (e.type == SDL_EVENT_TEXT_INPUT)
@@ -1819,6 +1849,8 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
                 mouse(u, &e, SDL_GetWindowPixelDensity(win));
             build(u);
         }
+        if (!u->closing && open_progress(u) >= 1)
+            stick(u, win), build(u);
 
         /* the saved password, when macOS has let us read it: into an empty field */
         if (SDL_GetAtomicInt(&g_keyread.state) == 2)
