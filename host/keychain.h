@@ -1,6 +1,6 @@
 /* Saved sign-in passwords in the OS's credential store: the macOS keychain (generic passwords
- * under one service). Elsewhere nothing is saved yet: every call fails and the player types the
- * password each time. */
+ * under one service), or the credential locker in the UWP app (xbox/app/Keychain.cpp). Elsewhere nothing
+ * is saved yet: every call fails and the player types the password each time. */
 #pragma once
 
 #include <stddef.h>

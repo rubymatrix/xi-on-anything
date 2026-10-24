@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+  IgnorableNamespaces="uap mp">
+
+  <Identity Name="XIonXbox" Publisher="CN=XIonXbox" Version="0.4.0.0" />
+
+  <mp:PhoneIdentity PhoneProductId="05aec10a-b923-458e-a4d2-383b6e7a1330" PhonePublisherId="00000000-0000-0000-0000-000000000000" />
+
+  <Properties>
+    <DisplayName>XI on Xbox</DisplayName>
+    <PublisherDisplayName>XI on Xbox</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="x-generate" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="XIonXbox.App">
+      <uap:VisualElements
+        DisplayName="XI on Xbox"
+        Description="FINAL FANTASY XI, recompiled, on your own install"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#101218" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- the game read from a network share (LocalState\game.txt names it): SMB needs it -->
+    <uap:Capability Name="enterpriseAuthentication" />
+    <Capability Name="internetClient" />
+    <!-- servers on the local network (a LandSandBoat server at home) -->
+    <Capability Name="privateNetworkClientServer" />
+  </Capabilities>
+</Package>
