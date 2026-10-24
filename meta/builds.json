@@ -45,6 +45,8 @@
       },
       "version": "30260903_0",
       "addresses": {
+        "text_input": "0x10662d40",
+        "config_ptr": "0x106626cc",
         "chars_ptr": "0x104df770",
         "present_site": "0x100035cb",
         "cexi_item_ranges": "0x10372150",
