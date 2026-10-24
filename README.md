@@ -24,8 +24,9 @@ XI on Anything runs on Apple silicon Macs today, with more platforms planned.
 username, password and one-time code, or a server launcher's token; pick the server in the
 sign-in screen's Settings.
 
-Experimental: an [Android build](docs/android.md), tested on a Pixel Fold, and an
-[Xbox build](xbox/README.md) for consoles in developer mode. Desktop defaults are unchanged.
+Experimental: an [Android build](docs/android.md), tested on a Pixel Fold, an
+[Xbox build](xbox/README.md) for consoles in developer mode, and an [iPhone build](docs/ios.md)
+in progress. Desktop defaults are unchanged.
 
 ## What's better than the original
 
