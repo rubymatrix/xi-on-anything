@@ -1481,6 +1481,8 @@ static void screen_keyboard(Ui* u, SDL_Window* win)
         : f->id == ID_USER  ? SDL_TEXTINPUT_TYPE_TEXT_USERNAME
         : f->id == ID_OTP   ? SDL_TEXTINPUT_TYPE_NUMBER
                             : SDL_TEXTINPUT_TYPE_TEXT);
+    SDL_SetNumberProperty(p, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
+    SDL_SetBooleanProperty(p, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
     SDL_SetStringProperty(p, "xi.textinput.text", f->text);
     SDL_StopTextInput(win);
     SDL_StartTextInputWithProperties(win, p);
@@ -1814,7 +1816,12 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     /* start where there is something to type */
     build(u);
     focus_on(u, !c->user[0] ? 0 : !u->password[0] ? 1 : 3);
-    SDL_StartTextInput(win);
+    /* names and passwords: no capital first letter and no corrections, which iOS's keyboard makes */
+    SDL_PropertiesID tp = SDL_CreateProperties();
+    SDL_SetNumberProperty(tp, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
+    SDL_SetBooleanProperty(tp, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
+    SDL_StartTextInputWithProperties(win, tp);
+    SDL_DestroyProperties(tp);
     if (read_keychain)
     {
         SDL_SetAtomicInt(&g_keyread.state, 1);

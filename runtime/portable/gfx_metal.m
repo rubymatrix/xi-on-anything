@@ -18,6 +18,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <SDL3/SDL.h>
+#include <TargetConditionals.h>
 #include <limits.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -79,6 +80,7 @@ struct GfxTex
     int type, use, conv;
     uint32_t fmt, w, h, levels;
     uint32_t block;  /* bytes per 4x4 block for the compressed formats, else 0 */
+    uint32_t bc;     /* a DXT format kept decoded, as BGRA8, on a GPU without BC (iPhones), else 0 */
     uint32_t texel;  /* bytes per texel in Metal's layout */
     uint64_t used;   /* the last frame serial that referenced it */
     int has_stencil, x8;
@@ -112,6 +114,18 @@ static id<MTLDevice> g_dev;
 static id<MTLCommandQueue> g_queue;
 static CAMetalLayer* g_layer;
 static SDL_MetalView g_view;
+static int g_bc; /* the GPU samples BC (DXT) textures: every Mac; on iOS, M-series iPads */
+
+/* Whether a depth format carries stencil. iOS has no 24-bit depth. */
+static int format_has_stencil(MTLPixelFormat df)
+{
+#if TARGET_OS_OSX
+    if (df == MTLPixelFormatDepth24Unorm_Stencil8)
+        return 1;
+#endif
+    return df == MTLPixelFormatDepth32Float_Stencil8 || df == MTLPixelFormatX32_Stencil8;
+}
+
 static SDL_Window* g_window;
 static id<MTLCommandBuffer> g_cmd;
 static id<MTLRenderCommandEncoder> g_enc;
@@ -453,6 +467,73 @@ static MTLPixelFormat pixel_format(uint32_t fmt, int use, int* conv, uint32_t* b
     return MTLPixelFormatBGRA8Unorm;
 }
 
+/* One DXT1-5 block into 16 pixels, BGRA8 (as gfx_vulkan.cpp's decode_block). */
+static uint32_t expand5(uint32_t v) { return (v << 3) | (v >> 2); }
+static uint32_t expand6(uint32_t v) { return (v << 2) | (v >> 4); }
+static uint32_t color565(uint16_t p) { return 0xff000000u | expand5(p >> 11) << 16 | expand6((p >> 5) & 63) << 8 | expand5(p & 31); }
+
+static void decode_dxt_block(const uint8_t* data, uint32_t fmt, uint32_t px[16])
+{
+    int dxt1 = fmt == FOURCC('D', 'X', 'T', '1');
+    int explicit_alpha = fmt == FOURCC('D', 'X', 'T', '2') || fmt == FOURCC('D', 'X', 'T', '3');
+    int interp_alpha = fmt == FOURCC('D', 'X', 'T', '4') || fmt == FOURCC('D', 'X', 'T', '5');
+    const uint8_t* c = data + (dxt1 ? 0 : 8);
+    uint16_t c0 = (uint16_t)(c[0] | c[1] << 8), c1 = (uint16_t)(c[2] | c[3] << 8);
+    uint32_t pal[4] = { color565(c0), color565(c1), 0, 0 };
+    int four = !dxt1 || c0 > c1;
+    for (unsigned shift = 0; shift < 24; shift += 8)
+    {
+        unsigned a = (pal[0] >> shift) & 255, b = (pal[1] >> shift) & 255;
+        pal[2] |= (four ? (2 * a + b) / 3 : (a + b) / 2) << shift;
+        if (four)
+            pal[3] |= ((a + 2 * b) / 3) << shift;
+    }
+    pal[2] |= 0xff000000u;
+    if (four)
+        pal[3] |= 0xff000000u;
+    uint32_t idx = (uint32_t)c[4] | (uint32_t)c[5] << 8 | (uint32_t)c[6] << 16 | (uint32_t)c[7] << 24;
+    uint8_t alpha[8] = { 0 };
+    uint64_t abits = 0;
+    if (interp_alpha)
+    {
+        alpha[0] = data[0], alpha[1] = data[1];
+        if (alpha[0] > alpha[1])
+            for (unsigned i = 2; i < 8; ++i)
+                alpha[i] = (uint8_t)(((8 - i) * alpha[0] + (i - 1) * alpha[1]) / 7);
+        else
+        {
+            for (unsigned i = 2; i < 6; ++i)
+                alpha[i] = (uint8_t)(((6 - i) * alpha[0] + (i - 1) * alpha[1]) / 5);
+            alpha[6] = 0, alpha[7] = 255;
+        }
+        for (unsigned i = 0; i < 6; ++i)
+            abits |= (uint64_t)data[2 + i] << (8 * i);
+    }
+    for (unsigned i = 0; i < 16; ++i)
+    {
+        px[i] = pal[(idx >> (2 * i)) & 3];
+        if (explicit_alpha)
+            px[i] = (px[i] & 0xffffffu) | (uint32_t)(((data[i / 2] >> ((i % 2) * 4)) & 15) * 17) << 24;
+        else if (interp_alpha)
+            px[i] = (px[i] & 0xffffffu) | (uint32_t)alpha[(abits >> (3 * i)) & 7] << 24;
+    }
+}
+
+/* A w x h region of DXT blocks (rows of blocks pitch bytes apart) into tightly packed BGRA8. */
+static void decode_dxt(uint32_t fmt, const uint8_t* src, uint32_t pitch, uint32_t w, uint32_t h, uint8_t* out)
+{
+    uint32_t block = fmt == FOURCC('D', 'X', 'T', '1') ? 8 : 16;
+    for (uint32_t by = 0; by < (h + 3) / 4; ++by)
+        for (uint32_t bx = 0; bx < (w + 3) / 4; ++bx)
+        {
+            uint32_t px[16];
+            decode_dxt_block(src + (size_t)by * pitch + (size_t)bx * block, fmt, px);
+            for (uint32_t yy = 0; yy < 4 && by * 4 + yy < h; ++yy)
+                for (uint32_t xx = 0; xx < 4 && bx * 4 + xx < w; ++xx)
+                    memcpy(out + ((size_t)(by * 4 + yy) * w + bx * 4 + xx) * 4, &px[yy * 4 + xx], 4);
+        }
+}
+
 static uint32_t d3d_bpp(uint32_t fmt)
 {
     switch (fmt)
@@ -560,6 +641,8 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
         int swizzled;
         MTLPixelFormat pf = pixel_format(fmt, use, &t->conv, &t->block, &t->texel, &sw, &swizzled);
         t->type = type, t->use = use, t->fmt = fmt, t->w = w ? w : 1, t->h = h ? h : 1, t->levels = levels ? levels : 1;
+        if (t->block && !g_bc)
+            t->bc = fmt, t->block = 0, t->texel = 4, pf = MTLPixelFormatBGRA8Unorm;
         t->has_stencil = pf == MTLPixelFormatDepth32Float_Stencil8;
         t->x8 = fmt == F_X8R8G8B8;
         MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
@@ -654,6 +737,19 @@ void gfx_tex_upload_rect(GfxTex* t, uint32_t face, uint32_t level, uint32_t x, u
             w = lw - x;
         if (y + h > lh)
             h = lh - y;
+        if (t->bc) /* blocks to BGRA8 first; then an upload like any other */
+        {
+            static uint8_t* decoded;
+            static size_t decoded_cap;
+            if ((size_t)w * h * 4 > decoded_cap)
+            {
+                free(decoded);
+                decoded_cap = (size_t)w * h * 4;
+                decoded = (uint8_t*)malloc(decoded_cap);
+            }
+            decode_dxt(t->bc, (const uint8_t*)src, pitch, w, h, decoded);
+            src = decoded, pitch = w * 4;
+        }
         uint32_t rows = t->block ? (h + 3) / 4 : h;
         uint32_t row_bytes = t->block ? ((w + 3) / 4) * t->block : w * t->texel;
         /* the bytes in Metal's layout: as given, or widened (16-bit formats) - into the ring when they go
@@ -750,7 +846,7 @@ static void queue_readback(GfxTex* t, uint32_t face, uint32_t level, uint32_t w,
 
 void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch)
 {
-    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block)
+    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block || t->bc)
         return;
     @autoreleasepool
     {
@@ -774,7 +870,7 @@ void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t 
  * another probe's pixels. */
 void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch)
 {
-    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block)
+    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block || t->bc)
         return;
     @autoreleasepool
     {
@@ -7385,7 +7481,7 @@ static int post_glow(GfxTex* color)
         rp.depthAttachment.loadAction = MTLLoadActionLoad;
         rp.depthAttachment.storeAction = MTLStoreActionDontCare;
         MTLPixelFormat df = depth.pixelFormat;
-        if (df == MTLPixelFormatDepth32Float_Stencil8 || df == MTLPixelFormatDepth24Unorm_Stencil8 || df == MTLPixelFormatX32_Stencil8)
+        if (format_has_stencil(df))
         {
             rp.stencilAttachment.texture = depth;
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
@@ -8180,13 +8276,23 @@ void gfx_resize(uint32_t w, uint32_t h)
 
 uint64_t gfx_window_flags(void) { return 0; }
 
+/* The present interval. iOS has no switch: its layer always waits for the display (docs/ios.md). */
+static void layer_vsync(int vsync)
+{
+#if TARGET_OS_OSX
+    g_layer.displaySyncEnabled = vsync ? YES : NO;
+#else
+    (void)vsync;
+#endif
+}
+
 int gfx_init(void* window, int vsync)
 {
     if (g_dev)
     {
         /* up already (host64's sign-in screen, on this same window): the game's present interval */
         if (g_layer)
-            g_layer.displaySyncEnabled = vsync ? YES : NO;
+            layer_vsync(vsync);
         return 1;
     }
     @autoreleasepool
@@ -8198,6 +8304,10 @@ int gfx_init(void* window, int vsync)
             return 0;
         }
         g_queue = [g_dev newCommandQueue];
+        const char* bc = getenv("FFXI_BC"); /* 0: decode DXT as an iPhone must (to test that on a Mac) */
+        g_bc = g_dev.supportsBCTextureCompression && !(bc && bc[0] == '0');
+        if (!g_bc)
+            fprintf(stderr, "[recomp] gfx: no BC textures on this GPU: DXT decoded on upload\n");
         g_frames_sem = dispatch_semaphore_create(FRAMES);
         g_dummy = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
         g_util = compile(CLEAR_MSL);
@@ -8252,7 +8362,7 @@ int gfx_init(void* window, int vsync)
                 g_layer.device = g_dev;
                 g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
                 g_layer.framebufferOnly = YES;
-                g_layer.displaySyncEnabled = vsync ? YES : NO;
+                layer_vsync(vsync);
                 int pw = 0, ph = 0;
                 SDL_GetWindowSizeInPixels(g_window, &pw, &ph);
                 if (pw > 0 && ph > 0)
