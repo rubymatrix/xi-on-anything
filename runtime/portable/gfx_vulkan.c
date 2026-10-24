@@ -23,7 +23,19 @@
  *
  * The scene effects (gfx_scene_done), the sun's shadow maps and the water are gfx_metal.m's, ported:
  * the same passes in GLSL (FX_GLSL), the same CPU side (gfx_scene.c). The GPU's time per pass
- * (gfx_pass_timing) is timestamp queries around each pass, read when the frame's slot comes round. */
+ * (gfx_pass_timing) is timestamp queries around each pass, read when the frame's slot comes round.
+ * The scene renderer's zone and characters (gfx_world_draw, gfx_chars_draw; host/scene.c) are
+ * gfx_metal.m's WORLD_MSL and CHARS_MSL as GLSL (WORLD_GLSL, CHARS_GLSL), drawn into the game's
+ * targets in its pass, and its sun and moon shadows (gfx_shadow_begin) Metal's too: the casters'
+ * passes between the game's and at the frame's end (CAST_GLSL), the receivers' SHADOW_GLSL. Its
+ * occlusion (SAO_GLSL, made when the scene is done; AO_GLSL), highlights (SPEC_GLSL) and lamps
+ * (LAMP_GLSL: the tiles, the cubes at the frame's end beside the characters' shadow layers, the
+ * glows) are Metal's as well, and so are the modern fog (FOG_GLSL, or with the sun's cascades a volume in the shafts'
+ * march) and the post effects on the finished scene - bloom (the scene's additive draws recorded and drawn again:
+ * glow_new), depth of field and sun shafts (POST_GLSL, SHAFT_GLSL) - and the HDR scene
+ * (scene_hdr: the world target made float in place, one tonemap). Its bounce light (gfx_gi_zone, gfx_gi_frame) is
+ * Metal's probes as compute passes with ray queries (GI_KERNELS_GLSL), read by the zone and characters (GI_GLSL); the
+ * occlusion's rays trace the same structure. */
 #include "volk.h" /* Vulkan's functions, loaded at run time: nothing links against the system's loader */
 
 #include <SDL3/SDL.h>
@@ -85,6 +97,7 @@ enum
     CONV_X555,
     CONV_1555,
     CONV_4444,
+    CONV_F16, /* an 8-bit color target made RGBA16F (scene_hdr): D3D's BGRA8 to and from half floats */
 };
 
 /* the bindings of the draw functions' set (gfx_msl.h) */
@@ -144,6 +157,7 @@ struct GfxTex
     uint32_t rb_face[GFX_READBACKS], rb_level[GFX_READBACKS], rb_index[GFX_READBACKS];
     uint64_t rb_frame;
     uint32_t rb_count;
+    uint32_t nlayers; /* a 2D array's layers (the scene renderer's shadow maps; tex_make's array), else 0 */
 };
 
 struct GfxBuf
@@ -200,6 +214,7 @@ static uint32_t g_qfam;
 static VmaAllocator g_vma;
 static VkPhysicalDeviceProperties g_props;
 static int g_has_bc, g_has_aniso, g_has_lines, g_has_mirror_once, g_has_large_points;
+static int g_has_clamp; /* depth clamped rather than clipped (the scene renderer's shadow casters) */
 static int g_has_rt; /* ray queries and acceleration structures, and what rt_capture needs besides (gfx_init) */
 static float g_max_aniso;
 static VkFormat g_depth_format; /* D24S8 and D24X8: D32_SFLOAT_S8_UINT where the device has it */
@@ -224,6 +239,8 @@ static uint8_t g_ts_state[FRAMES];        /* 0 untimed, 1 the pool reset and the
 static uint64_t g_ts_mask;                /* the queue's valid timestamp bits; 0: no timestamps */
 static double g_ts_period;                /* ns a tick */
 static int g_pass = GFX_PASS_COMP;        /* what the next fx_pass or rt_pass times as */
+static int g_pass_next = -1;              /* the next render pass of the game's targets is timed as this (the scene renderer's) */
+static int g_pass_ts = -1;                /* the open pass's ts_begin, for its ts_end */
 static VkCommandBuffer g_upcb; /* uploads to submit ahead of g_cb */
 static uint64_t g_cb_index = 1;
 static int g_in_pass, g_dirty;
@@ -236,7 +253,7 @@ static VkPipelineCache g_vkcache;
 static VkBuffer g_dummy;
 static VmaAllocation g_dummy_mem;
 static GfxTex *g_dummy2d, *g_dummycube;
-static VkSampler g_present_samp;
+static VkSampler g_lin_samp, g_near_samp, g_cmp_samp; /* the fixed samplers (gfx_init) */
 
 static GfxTex* g_rt;
 static uint32_t g_rt_face, g_rt_level;
@@ -454,6 +471,51 @@ static void trash(int kind, uint64_t h, VmaAllocation mem)
     f->trash[f->ntrash++] = (Trash){ kind, h, mem };
 }
 
+/* the pipelines built for a target's format (fmt_build), each on first use; two formats kept (the world target 8-bit
+ * and float, scene_hdr, so turning it on and off builds nothing again): a third replaces the older, its pipelines
+ * destroyed once the frame is done */
+enum
+{
+    FP_FX_COMP, /* the effects' composite and anti-aliasing */
+    FP_FX_AA,
+    FP_BLOOM_COMP, /* the post effects': screened, added (an HDR scene) */
+    FP_BLOOM_ADD,
+    FP_DOF_COMP,
+    FP_SHAFT_COMP,
+    FP_SHAFT_ADD,
+    FP_SHAFT_DBG,
+    FP_SHAFT_VOL, /* the shafts as the fog volume: premultiplied over (built on first use, as those after it) */
+    FP_FOG,       /* the modern fog: over by its alpha */
+    FP_GLOW,      /* the lamps' glows */
+    FP_HDR_COPY, /* the world target into its other format */
+    FP_COUNT,
+};
+static struct
+{
+    VkFormat fmt[2];
+    VkPipeline p[2][FP_COUNT];
+    uint32_t tried[2], next;
+} g_fmtp;
+static VkPipeline fmt_build(VkFormat f, int which);
+
+/* the pipeline which (FP_*) into format f; VK_NULL_HANDLE when it failed (not tried again) */
+static VkPipeline fmt_pipe(VkFormat f, int which)
+{
+    uint32_t i = 0;
+    while (i < 2 && !(g_fmtp.fmt[i] == f && f))
+        ++i;
+    if (i == 2)
+    {
+        i = g_fmtp.next, g_fmtp.next ^= 1;
+        for (int k = 0; k < FP_COUNT; ++k)
+            trash(4, (uint64_t)(uintptr_t)g_fmtp.p[i][k], NULL), g_fmtp.p[i][k] = VK_NULL_HANDLE;
+        g_fmtp.fmt[i] = f, g_fmtp.tried[i] = 0;
+    }
+    if (!(g_fmtp.tried[i] >> which & 1))
+        g_fmtp.tried[i] |= 1u << which, g_fmtp.p[i][which] = fmt_build(f, which);
+    return g_fmtp.p[i][which];
+}
+
 static void empty_trash(Frame* f)
 {
     for (uint32_t i = 0; i < f->ntrash; ++i)
@@ -465,6 +527,8 @@ static void empty_trash(Frame* f)
             vkDestroyImageView(g_dev, (VkImageView)(uintptr_t)t->h, NULL);
         else if (t->kind == 3)
             vkDestroyAccelerationStructureKHR(g_dev, (VkAccelerationStructureKHR)(uintptr_t)t->h, NULL);
+        else if (t->kind == 4)
+            vkDestroyPipeline(g_dev, (VkPipeline)(uintptr_t)t->h, NULL);
         else
             vmaDestroyBuffer(g_vma, (VkBuffer)(uintptr_t)t->h, t->mem);
     }
@@ -689,6 +753,32 @@ static void* ring(size_t n, size_t align, VkBuffer* buf, VkDeviceSize* off)
     }
 }
 
+/* n bytes of p into the ring, as a uniform or storage binding takes them */
+static VkDescriptorBufferInfo ring_put(const void* p, size_t n)
+{
+    VkDescriptorBufferInfo bi = { VK_NULL_HANDLE, 0, n };
+    memcpy(ring(n, RING_ALIGN, &bi.buffer, &bi.offset), p, n);
+    return bi;
+}
+
+/* the same, put once a frame while the bytes stay the same (the scene renderer's uniforms, which its zone and character
+ * batches share): k the last put and its bytes */
+typedef struct RingSame
+{
+    uint64_t serial;
+    VkDescriptorBufferInfo bi;
+    uint8_t last[1536];
+} RingSame;
+
+static VkDescriptorBufferInfo ring_same(RingSame* k, const void* p, size_t n)
+{
+    if (n > sizeof k->last)
+        return ring_put(p, n);
+    if (k->serial != g_serial || k->bi.range != n || memcmp(k->last, p, n))
+        k->bi = ring_put(p, n), memcpy(k->last, p, n), k->serial = g_serial;
+    return k->bi;
+}
+
 static void end_pass(void)
 {
     if (g_in_pass)
@@ -696,6 +786,8 @@ static void end_pass(void)
         vkCmdEndRendering(g_cb);
         g_in_pass = 0;
         g_dirty = 1;
+        if (g_pass_ts >= 0)
+            ts_end(g_cb, g_pass_ts), g_pass_ts = -1;
     }
 }
 
@@ -820,9 +912,42 @@ static uint32_t expand(uint32_t v, int bits)
     return bits == 1 ? (v ? 255u : 0u) : (v << (8 - bits)) | (v >> (2 * bits - 8 > 0 ? 2 * bits - 8 : 0));
 }
 
-/* one row of a 16-bit D3D format into BGRA8 */
+static uint16_t f16_from_unit(uint32_t v) /* 0..255 / 255 as a half float */
+{
+    if (!v)
+        return 0;
+    float f = (float)v / 255.0f;
+    int e;
+    float m = frexpf(f, &e); /* f = m * 2^e, m in [0.5, 1) */
+    if (e < -13) /* (a subnormal half; 1/255 isn't one) */
+        return (uint16_t)lrintf(f * 16777216.0f);
+    return (uint16_t)(((uint32_t)(e + 14) << 10) + ((uint32_t)lrintf(m * 2048.0f) - 1024u)); /* (a carry: the next exponent) */
+}
+
+static uint8_t unit_from_f16(uint16_t h) /* a half float saturated to 0..1, as a byte */
+{
+    uint32_t e = h >> 10 & 31, m = h & 1023;
+    if (h & 0x8000)
+        return 0;
+    if (e == 31)
+        return m ? 0 : 255;
+    float f = e ? ldexpf((float)(m | 1024), (int)e - 25) : ldexpf((float)m, -24);
+    return f >= 1.0f ? 255 : (uint8_t)lrintf(f * 255.0f);
+}
+
+/* one row of a 16-bit D3D format into BGRA8 (CONV_F16: BGRA8 into RGBA16F) */
 static void convert_row(int conv, const uint8_t* src, uint8_t* dst, uint32_t w)
 {
+    if (conv == CONV_F16)
+    {
+        for (uint32_t x = 0; x < w; ++x)
+        {
+            const uint8_t* p = src + 4 * x;
+            uint16_t* d = (uint16_t*)(dst + 8 * x);
+            d[0] = f16_from_unit(p[2]), d[1] = f16_from_unit(p[1]), d[2] = f16_from_unit(p[0]), d[3] = f16_from_unit(p[3]);
+        }
+        return;
+    }
     for (uint32_t x = 0; x < w; ++x)
     {
         uint32_t p = (uint32_t)src[2 * x] | ((uint32_t)src[2 * x + 1] << 8), r, g, b, a;
@@ -902,7 +1027,7 @@ static void level_size(const GfxTex* t, uint32_t level, uint32_t* w, uint32_t* h
         *h = 1;
 }
 
-static uint32_t layers(const GfxTex* t) { return t->type == GFX_TEX_CUBE ? 6 : 1; }
+static uint32_t layers(const GfxTex* t) { return t->nlayers ? t->nlayers : t->type == GFX_TEX_CUBE ? 6 : 1; }
 
 static VkImageView make_view(const GfxTex* t, VkImageViewType type, uint32_t level0, uint32_t nlevels, uint32_t layer0,
     uint32_t nlayers, const VkComponentMapping* sw, VkImageAspectFlags aspect)
@@ -921,16 +1046,24 @@ static VkImageView make_view(const GfxTex* t, VkImageViewType type, uint32_t lev
 
 static GfxTex* g_rts; /* the render targets (GfxTex.rt_next) */
 
-/* force: the format (the effects' own targets), else the D3D format's; plain: no mip chain for a
- * large render target (the effects' own) */
-static GfxTex* tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t levels, int use, VkFormat force, int plain)
+/* force: the format (the effects' own targets, the float world target), else the D3D format's; plain: no mip chain
+ * for a large render target (the effects' own); array: a 2D array of that many layers (its view one), else 0; usage:
+ * more than use's (a storage image) */
+static GfxTex* tex_make(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t levels, int use, VkFormat force, int plain,
+    uint32_t array, VkImageUsageFlags usage)
 {
     GfxTex* t = (GfxTex*)calloc(1, sizeof *t);
     VkComponentMapping sw;
     t->vf = vk_format(fmt, use, &t->conv, &t->block, &t->texel, &sw);
-    if (force)
+    if (force && force != t->vf)
+    {
         t->vf = force;
+        /* a target made float keeps the game's reads and writes BGRA8, converted (its readbacks sized by texel) */
+        if (force == VK_FORMAT_R16G16B16A16_SFLOAT && use == GFX_USE_RT && t->texel == 4)
+            t->texel = 8, t->conv = CONV_F16;
+    }
     t->type = type, t->use = use, t->fmt = fmt, t->w = w ? w : 1, t->h = h ? h : 1, t->levels = levels ? levels : 1;
+    t->nlayers = array;
     t->has_stencil = use == GFX_USE_DEPTH && (t->vf == VK_FORMAT_D32_SFLOAT_S8_UINT || t->vf == VK_FORMAT_D24_UNORM_S8_UINT);
     t->x8 = fmt == F_X8R8G8B8;
     t->aspect = use == GFX_USE_DEPTH ? VK_IMAGE_ASPECT_DEPTH_BIT | (t->has_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)
@@ -961,6 +1094,7 @@ static GfxTex* tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32
     else if (use == GFX_USE_DEPTH)
         ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
             VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ii.usage |= usage;
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo ai = { 0 };
     ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -970,7 +1104,7 @@ static GfxTex* tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32
         free(t);
         return NULL;
     }
-    VkImageViewType vt = type == GFX_TEX_CUBE ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
+    VkImageViewType vt = array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : type == GFX_TEX_CUBE ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
     if (use == GFX_USE_DEPTH) /* sampled (the scene effects): depth alone */
         t->view = make_view(t, vt, 0, t->mips, 0, layers(t), NULL, VK_IMAGE_ASPECT_DEPTH_BIT);
     else
@@ -1014,6 +1148,11 @@ static GfxTex* tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32
     return t;
 }
 
+static GfxTex* tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t levels, int use, VkFormat force, int plain)
+{
+    return tex_make(type, fmt, w, h, levels, use, force, plain, 0, 0);
+}
+
 GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t levels, int use)
 {
     if (!g_dev)
@@ -1023,6 +1162,19 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
 
 static void sun_cache_forget_tex(const GfxTex* t);
 static void water_forget(const GfxTex* t);
+static void sao_forget(const GfxTex* t);
+static void glows_forget(const GfxTex* t);
+static void hdr_forget(const GfxTex* t);
+
+/* what the effects keep of t (their caches and history) let go: t goes, or its image changes */
+static void tex_forget(const GfxTex* t)
+{
+    sun_cache_forget_tex(t);
+    glows_forget(t);
+    hdr_forget(t);
+    water_forget(t);
+    sao_forget(t);
+}
 
 void gfx_tex_destroy(GfxTex* t)
 {
@@ -1049,8 +1201,7 @@ void gfx_tex_destroy(GfxTex* t)
             if (r->depth_world == t)
                 r->depth_world = NULL;
         }
-    sun_cache_forget_tex(t);
-    water_forget(t);
+    tex_forget(t);
     if (t->levelv)
         for (uint32_t i = 0; i < t->mips; ++i)
             trash(1, (uint64_t)(uintptr_t)t->levelv[i], NULL);
@@ -1141,6 +1292,13 @@ static void copy_out(const GfxTex* t, const uint8_t* s, uint32_t w, uint32_t h, 
         uint8_t* d = (uint8_t*)dst + (size_t)y * pitch;
         if (!t->conv)
             memcpy(d, s + (size_t)y * row, (size_t)w * bpp);
+        else if (t->conv == CONV_F16) /* the float world target: its colors saturated, as the tonemap's input */
+            for (uint32_t x = 0; x < w; ++x)
+            {
+                const uint16_t* p = (const uint16_t*)(s + (size_t)y * row + 8 * x);
+                d[4 * x] = unit_from_f16(p[2]), d[4 * x + 1] = unit_from_f16(p[1]), d[4 * x + 2] = unit_from_f16(p[0]);
+                d[4 * x + 3] = unit_from_f16(p[3]);
+            }
         else /* 16-bit color targets: back from BGRA8 */
             for (uint32_t x = 0; x < w; ++x)
             {
@@ -1344,6 +1502,8 @@ static int begin_pass(void)
             g_rt->depth_seen = depth;
     }
     g_pending_clear = 0;
+    if (g_pass_next >= 0)
+        g_pass_ts = ts_begin(g_cb, g_pass_next), g_pass_next = -1;
     vkCmdBeginRendering(g_cb, &ri);
     g_in_pass = 1;
     g_bound = VK_NULL_HANDLE;
@@ -1511,10 +1671,13 @@ static VkBlendOp blend_op(uint32_t op)
 }
 
 /* a pipeline from two modules (fs may be null: depth alone) and the fixed state the key gives */
-static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, const VkPipelineColorBlendAttachmentState* blend,
-    VkFormat color, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill, const VkDynamicState* dyn,
-    uint32_t ndyn, int discard)
+/* make_pipeline into ncolor colour targets (blend one each) */
+static VkPipeline make_pipeline_n(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, const VkPipelineColorBlendAttachmentState* blend,
+    const VkFormat* color, uint32_t ncolor, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill,
+    const VkDynamicState* dyn, uint32_t ndyn, int discard)
 {
+    /* discard: 1 the rasterizer discards (ray tracing's capture: the vertex function's writes alone), 2 the depth
+     * clamped rather than clipped where the device can (the scene renderer's shadow casters) */
     VkPipelineShaderStageCreateInfo st[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT, st[0].module = vs, st[0].pName = "main";
@@ -1526,7 +1689,8 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
     vp.viewportCount = vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     rs.polygonMode = fill;
-    rs.rasterizerDiscardEnable = discard ? VK_TRUE : VK_FALSE; /* (ray tracing's capture: the vertex function's writes alone) */
+    rs.rasterizerDiscardEnable = (discard & 1) ? VK_TRUE : VK_FALSE;
+    rs.depthClampEnable = (discard & 2) && g_has_clamp ? VK_TRUE : VK_FALSE;
     rs.cullMode = VK_CULL_MODE_NONE;
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rs.lineWidth = 1.0f;
@@ -1536,14 +1700,14 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
     ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
     ds.front.compareOp = ds.back.compareOp = VK_COMPARE_OP_ALWAYS;
     VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-    cb.attachmentCount = color ? 1 : 0; /* none: depth alone (the sun's maps) */
+    cb.attachmentCount = ncolor; /* none: depth alone (the sun's maps) */
     cb.pAttachments = blend;
     VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
     dy.dynamicStateCount = ndyn;
     dy.pDynamicStates = dyn;
     VkPipelineRenderingCreateInfo ri = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-    ri.colorAttachmentCount = color ? 1 : 0;
-    ri.pColorAttachmentFormats = &color;
+    ri.colorAttachmentCount = ncolor;
+    ri.pColorAttachmentFormats = color;
     ri.depthAttachmentFormat = depth;
     ri.stencilAttachmentFormat = stencil;
     VkGraphicsPipelineCreateInfo pi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
@@ -1567,6 +1731,13 @@ static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipeline
         return VK_NULL_HANDLE;
     }
     return p;
+}
+
+static VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, const VkPipelineColorBlendAttachmentState* blend,
+    VkFormat color, VkFormat depth, VkFormat stencil, VkPrimitiveTopology topo, VkPolygonMode fill, const VkDynamicState* dyn,
+    uint32_t ndyn, int discard)
+{
+    return make_pipeline_n(vs, fs, layout, blend, &color, color ? 1 : 0, depth, stencil, topo, fill, dyn, ndyn, discard);
 }
 
 static const VkDynamicState DRAW_DYNAMIC[] = {
@@ -1980,6 +2151,9 @@ static VkStencilOp stencil_op(uint32_t op)
 
 /* D3D's viewport, clamped to the target, as Vulkan's with y flipped (a negative height: D3D's clip
  * space has y up, Vulkan's down). 0 when nothing of it is left. */
+static VkViewport g_set_vp; /* the last viewport and scissor the draws set (a glow keeps them: glow_new) */
+static VkRect2D g_set_sc;
+
 static int set_viewport(const uint32_t vp[6])
 {
     float zmin, zmax;
@@ -2000,6 +2174,7 @@ static int set_viewport(const uint32_t vp[6])
         return 0;
     VkViewport v = { (float)x, (float)(y + vh), (float)vw, (float)-vh, zmin, zmax };
     vkCmdSetViewport(g_cb, 0, 1, &v);
+    g_set_vp = v;
     return 1;
 }
 
@@ -2026,6 +2201,7 @@ static void set_scissor(const int32_t sc[4])
     }
     VkRect2D r = { { (int32_t)x0, (int32_t)y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
     vkCmdSetScissor(g_cb, 0, 1, &r);
+    g_set_sc = r;
 }
 
 /* index count for a D3D primitive count */
@@ -2130,6 +2306,99 @@ static uint32_t g_ncasters, g_casters_cap;
 static GfxU* g_caster_u;
 
 static void casters_clear(void) { g_ncasters = 0; }
+
+/* --- the glow: the scene's additive draws, drawn again for the post bloom (post_bloom; gfx_metal.m's glow_new) ---
+ * The world's lamps, spell effects and the sun's halo are additive draws (the destination blended by ONE). Each one into
+ * a 3D scene's target is recorded as it is encoded - its pipeline, dynamic state and bindings, all alive until the
+ * frame ends - and when the scene is done they are drawn again onto black over the scene's depth (post_glow): what
+ * glows, as bright as it was added. */
+typedef struct Glow
+{
+    const GfxTex* rt;   /* the target (compared only: gfx_tex_destroy drops its glows) */
+    VkFormat fmt;       /* its format, which the pipeline was built for */
+    VkImageView depth;  /* the depth attachment it was tested against (VK_NULL_HANDLE: none) */
+    int stencil;        /* that attachment has stencil */
+    VkPipeline pipe;
+    VkViewport vp;
+    VkRect2D sc;
+    VkCompareOp zfunc;
+    VkCullModeFlags cull;
+    VkPrimitiveTopology topo;
+    uint8_t ztest, nw, indexed;
+    int32_t zbias;
+    uint32_t bind; /* its nw bindings, from here in g_glow_binds */
+    VkBuffer ib;
+    VkDeviceSize ioff;
+    VkIndexType itype;
+    uint32_t n, vstart;
+} Glow;
+
+static Glow* g_glows;
+static uint32_t g_nglows, g_glows_cap;
+/* a glow's binding: a write of one buffer or one image */
+typedef struct GlowBind
+{
+    uint32_t binding;
+    VkDescriptorType type;
+    union
+    {
+        VkDescriptorBufferInfo b;
+        VkDescriptorImageInfo i;
+    };
+} GlowBind;
+static GlowBind* g_glow_binds;
+static uint32_t g_nglow_binds, g_glow_binds_cap;
+
+static void glows_clear(void) { g_nglows = g_nglow_binds = 0; }
+
+/* the draw's writes kept for its glow */
+static void glow_binds(Glow* g, const VkWriteDescriptorSet* w, uint32_t nw)
+{
+    if (g_nglow_binds + nw > g_glow_binds_cap)
+    {
+        while (g_nglow_binds + nw > g_glow_binds_cap)
+            g_glow_binds_cap = g_glow_binds_cap ? g_glow_binds_cap * 2 : 4096;
+        g_glow_binds = (GlowBind*)realloc(g_glow_binds, g_glow_binds_cap * sizeof *g_glow_binds);
+    }
+    g->bind = g_nglow_binds, g->nw = (uint8_t)nw;
+    for (uint32_t k = 0; k < nw; ++k)
+    {
+        GlowBind* b = &g_glow_binds[g_nglow_binds++];
+        b->binding = w[k].dstBinding, b->type = w[k].descriptorType;
+        if (w[k].pBufferInfo)
+            b->b = *w[k].pBufferInfo;
+        else
+            b->i = *w[k].pImageInfo;
+    }
+}
+
+/* a target going: its glows go too */
+static void glows_forget(const GfxTex* t)
+{
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < g_nglows; ++i)
+        if (g_glows[i].rt != t)
+            g_glows[k++] = g_glows[i];
+    g_nglows = k;
+}
+
+/* a record for this draw when it glows: post bloom on, an additive 3D draw into the target's first level */
+static Glow* glow_new(const GfxDraw* d, int water)
+{
+    if (g_fxs.post_bloom <= 0.0f || g_fxs.bloom_emissive_fx <= 0.0f || water || d->vs.rhw || !d->pipe.blend || d->pipe.dst != 2 ||
+        d->depth.stencil || g_rt_face || g_rt_level || !g_rt || g_nglows >= 4096)
+        return NULL;
+    /* not the sky's own layers (drawn round the camera: no translation in world x view), which would haze all of it;
+     * the sun and a bright sky glow by the threshold instead */
+    if (!d->vs.prog && fabsf(d->u.wv[12]) + fabsf(d->u.wv[13]) + fabsf(d->u.wv[14]) < 1e-3f)
+        return NULL;
+    if (g_nglows == g_glows_cap)
+        g_glows_cap = g_glows_cap ? g_glows_cap * 2 : 256, g_glows = (Glow*)realloc(g_glows, g_glows_cap * sizeof(Glow));
+    Glow* g = &g_glows[g_nglows++];
+    memset(g, 0, sizeof *g);
+    g->rt = g_rt, g->fmt = g_rt->vf, g->zbias = d->zbias;
+    return g;
+}
 
 /* clip-space position of the draw's first vertex in out (gfx_clip0); 0 when it cannot be had */
 static int draw_clip0(const GfxDraw* d, float out[4])
@@ -2374,6 +2643,16 @@ static void draw_encode(const GfxDraw* d)
     VkDeviceSize off;
     if (rec)
         rec->prim = vk_prim(d->prim), rec->n = n, rec->vstart = d->vertex_start;
+    Glow* gl = glow_new(d, water);
+    if (gl)
+    {
+        gl->depth = depth ? attachment_view(depth, 0, 0) : VK_NULL_HANDLE, gl->stencil = depth && depth->has_stencil;
+        gl->pipe = p, gl->vp = g_set_vp, gl->sc = g_set_sc;
+        gl->ztest = dk.zenable != 0, gl->zfunc = dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS;
+        gl->cull = d->cull == 3 ? VK_CULL_MODE_BACK_BIT : d->cull == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+        gl->topo = vk_prim(d->prim), gl->n = n, gl->vstart = d->vertex_start;
+        glow_binds(gl, w, nw);
+    }
     if (d->prim == GFX_TRIANGLEFAN)
     {
         /* a list with the same vertices, as on Metal */
@@ -2396,6 +2675,8 @@ static void draw_encode(const GfxDraw* d)
         if (rec)
             rec->prim = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, rec->ib = buf, rec->ioff = off, rec->ibp = g_ring_base,
             rec->iblen = g_ring_size, rec->itype = 4;
+        if (gl)
+            gl->indexed = 1, gl->ib = buf, gl->ioff = off, gl->itype = VK_INDEX_TYPE_UINT32;
     }
     else if (d->ibuf)
     {
@@ -2409,6 +2690,9 @@ static void draw_encode(const GfxDraw* d)
         }
         vkCmdBindIndexBuffer(cb, d->ibuf->b, d->ibuf_off, d->index_size == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cb, n, 1, 0, 0, 0);
+        if (gl)
+            gl->indexed = 1, gl->ib = d->ibuf->b, gl->ioff = d->ibuf_off,
+            gl->itype = d->index_size == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     }
     else if (d->indices)
     {
@@ -2419,6 +2703,8 @@ static void draw_encode(const GfxDraw* d)
         if (rec)
             rec->ib = buf, rec->ioff = off, rec->ibp = g_ring_base, rec->iblen = g_ring_size,
             rec->itype = (uint8_t)(d->index_size == 2 ? 2 : 4);
+        if (gl)
+            gl->indexed = 1, gl->ib = buf, gl->ioff = off, gl->itype = d->index_size == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     }
     else
         vkCmdDraw(cb, n, 1, d->vertex_start, 0);
@@ -3044,7 +3330,6 @@ static struct
     VkShaderModule vs;
     VkPipeline ao_pipe, blur_pipe, bright_pipe, down_pipe, gauss_pipe, raymask_pipe, rays_pipe, comp_pipe, temporal_pipe, aa_pipe,
         linz_pipe, zmip_pipe, gi_pipe, gitemp_pipe, mip_pipe;
-    VkFormat comp_fmt, aa_fmt;
     GfxTex* lz;     /* the occlusion's depth: view z at its size and three levels below (FX_LINZ, FX_ZMIP) */
     GfxTex* aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
     GfxTex *src, *ao0, *ao1, *b1a, *b1b, *b2a, *b2b, *ra, *rb;
@@ -3053,7 +3338,6 @@ static struct
     uint64_t hist_serial; /* the frame it was written (0: none) */
     float prev_view[16], prev_proj[16], prev_cam[3];
     float last_cam[3]; /* where the camera was at the last scene (a jump is a new place) */
-    VkSampler samp, cmp;
     GfxTex *smap, *smapn, *sdummy; /* the sun's shadow maps (far, near), a stand-in */
     /* the bounce light: the casters near the camera as the sun sees them, depth and colour (with three
      * levels below); the gather at half the occlusion's size; after the temporal pass, this frame's and
@@ -3125,25 +3409,116 @@ void gfx_set_focus(const float* pos)
         memcpy(g_fx.focus, pos, sizeof g_fx.focus);
 }
 
-/* one pass's pipeline: the shared vertex function, FX_<name>, into a target of format fmt */
-static VkPipeline fx_pipeline(const char* name, VkFormat fmt)
+/* defines and then text, compiled as one module (stage as compile_glsl's) */
+static VkShaderModule compile_with(const char* defines, const char* text, int stage)
 {
-    size_t n = sizeof FX_GLSL + 64;
+    size_t n = strlen(defines) + strlen(text) + 1;
     char* src = (char*)malloc(n);
-    snprintf(src, n, "#define FX_%s\n%s", name, FX_GLSL);
-    VkShaderModule fs = compile_glsl(src, 1);
+    snprintf(src, n, "%s%s", defines, text);
+    VkShaderModule m = compile_glsl(src, stage);
     free(src);
-    VkPipeline p = VK_NULL_HANDLE;
-    if (fs && g_fx.vs)
+    return m;
+}
+
+/* the blend of a full-screen pass: 0 none, 1 added, 2 screen (src (1 - dst) + dst), 3 over by the source's alpha, 4 over
+ * premultiplied; the target's alpha kept where blended */
+static VkPipelineColorBlendAttachmentState fs_blend(int blend)
+{
+    VkPipelineColorBlendAttachmentState b = { 0 };
+    b.colorWriteMask = 0xF;
+    if (blend)
     {
-        VkPipelineColorBlendAttachmentState b = { 0 };
-        b.colorWriteMask = 0xF;
+        b.blendEnable = VK_TRUE;
+        b.colorBlendOp = b.alphaBlendOp = VK_BLEND_OP_ADD;
+        b.srcColorBlendFactor = blend == 1 || blend == 4 ? VK_BLEND_FACTOR_ONE
+            : blend == 2                                ? VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR
+                                                        : VK_BLEND_FACTOR_SRC_ALPHA;
+        b.dstColorBlendFactor = blend >= 3 ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
+        b.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, b.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    }
+    return b;
+}
+
+/* a pass's pipeline, only its viewport and scissor dynamic, into one colour target of format fmt: vs, and the fragment
+ * functions defines + text (compiled here); blended as fs_blend says */
+static VkPipeline fs_pipeline(VkShaderModule vs, const char* defines, const char* text, VkPipelineLayout layout, VkFormat fmt,
+    int blend, VkPrimitiveTopology topo)
+{
+    VkShaderModule fs = compile_with(defines, text, 1);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (fs && vs)
+    {
         static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-        p = make_pipeline(g_fx.vs, fs, g_fx_layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            VK_POLYGON_MODE_FILL, dyn, 2, 0);
+        VkPipelineColorBlendAttachmentState b = fs_blend(blend);
+        p = make_pipeline(vs, fs, layout, &b, fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, topo, VK_POLYGON_MODE_FILL, dyn, 2, 0);
     }
     if (fs)
         vkDestroyShaderModule(g_dev, fs, NULL);
+    return p;
+}
+
+/* a compute pipeline: defines + text on layout */
+static VkPipeline compute_pipeline(const char* defines, const char* text, VkPipelineLayout layout)
+{
+    VkShaderModule cs = compile_with(defines, text, 2);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (cs)
+    {
+        VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        ci.stage = (VkPipelineShaderStageCreateInfo){ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT, ci.stage.module = cs, ci.stage.pName = "main";
+        ci.layout = layout;
+        if (vkCreateComputePipelines(g_dev, g_vkcache, 1, &ci, NULL, &p) != VK_SUCCESS)
+            p = VK_NULL_HANDLE;
+        vkDestroyShaderModule(g_dev, cs, NULL);
+    }
+    return p;
+}
+
+/* a push-descriptor set layout of n bindings, and a pipeline layout of it with pcr (NULL: no push constants) */
+static void push_layout(const VkDescriptorSetLayoutBinding* b, uint32_t n, const VkPushConstantRange* pcr, VkDescriptorSetLayout* dsl,
+    VkPipelineLayout* layout)
+{
+    VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dl.bindingCount = n;
+    dl.pBindings = b;
+    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, dsl));
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = dsl;
+    pl.pushConstantRangeCount = pcr ? 1 : 0;
+    pl.pPushConstantRanges = pcr;
+    VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, layout));
+}
+
+/* the full-screen passes' layout - their uniforms, six textures, the two sun maps with a compare sampler, a seventh
+ * texture, the lamps' list and tiles (the modern fog's halos), a push constant - and vertex function: the effects', the
+ * scene renderer's occlusion's and the post effects' */
+static int fs_init(void)
+{
+    static int tried;
+    if (!tried)
+    {
+        tried = 1;
+        VkDescriptorSetLayoutBinding b[12];
+        b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+        for (uint32_t i = 1; i < 12; ++i)
+            b[i] = (VkDescriptorSetLayoutBinding){ i, i < 10 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+        VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8 };
+        push_layout(b, 12, &pcr, &g_fx_dsl, &g_fx_layout);
+        g_fx.vs = compile_glsl(FX_GLSL, 0);
+    }
+    return g_fx_layout && g_fx.vs;
+}
+
+/* one pass's pipeline: the shared vertex function, FX_<name>, into a target of format fmt */
+static VkPipeline fx_pipeline(const char* name, VkFormat fmt)
+{
+    char d[64];
+    snprintf(d, sizeof d, "#define FX_%s\n", name);
+    VkPipeline p = fs_pipeline(g_fx.vs, d, FX_GLSL, g_fx_layout, fmt, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     if (!p)
         fprintf(stderr, "[recomp] gfx: scene effect %s failed\n", name);
     return p;
@@ -3154,24 +3529,8 @@ static int fx_init(void)
     if (g_fx.tried)
         return g_fx.ao_pipe != VK_NULL_HANDLE;
     g_fx.tried = 1;
-    /* the passes' bindings: their uniforms, six textures, the two sun maps with a compare sampler */
-    VkDescriptorSetLayoutBinding b[10];
-    b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-    for (uint32_t i = 1; i < 10; ++i)
-        b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-    VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    dl.bindingCount = 10;
-    dl.pBindings = b;
-    VK_CHECK(vkCreateDescriptorSetLayout(g_dev, &dl, NULL, &g_fx_dsl));
-    VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8 };
-    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    pl.setLayoutCount = 1;
-    pl.pSetLayouts = &g_fx_dsl;
-    pl.pushConstantRangeCount = 1;
-    pl.pPushConstantRanges = &pcr;
-    VK_CHECK(vkCreatePipelineLayout(g_dev, &pl, NULL, &g_fx_layout));
-    g_fx.vs = compile_glsl(FX_GLSL, 0);
+    if (!fs_init())
+        return 0;
     const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT, F32 = VK_FORMAT_R32_SFLOAT;
     g_fx.ao_pipe = fx_pipeline("AO", F16);
     g_fx.blur_pipe = fx_pipeline("BLUR", F16);
@@ -3192,17 +3551,6 @@ static int fx_init(void)
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     si.maxLod = VK_LOD_CLAMP_NONE;
     VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.mipsamp));
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.maxLod = 0.25f;
-    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.samp));
-    /* 1 where the point is no deeper than the map; filtered where the device filters depth */
-    VkFormatProperties fp;
-    vkGetPhysicalDeviceFormatProperties(g_phys, VK_FORMAT_D32_SFLOAT, &fp);
-    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
-        si.magFilter = si.minFilter = VK_FILTER_NEAREST;
-    si.compareEnable = VK_TRUE;
-    si.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_fx.cmp));
     g_fx.sdummy = tex_create(GFX_TEX_2D, F_D16, 1, 1, 1, GFX_USE_DEPTH, VK_FORMAT_D32_SFLOAT, 1);
     if (!g_fx.ao_pipe || !g_fx.blur_pipe || !g_fx.bright_pipe || !g_fx.down_pipe || !g_fx.gauss_pipe || !g_fx.raymask_pipe ||
         !g_fx.rays_pipe || !g_fx.temporal_pipe || !g_fx.linz_pipe || !g_fx.zmip_pipe || !g_fx.gi_pipe || !g_fx.gitemp_pipe ||
@@ -3254,33 +3602,61 @@ static void image_copy(GfxTex* src, GfxTex* dst, VkImageAspectFlags aspect)
     src->rec = dst->rec = g_cb_index;
 }
 
+/* a pass of the effects' own, after what came before it, into one layer and level of t (and t2, a second colour target
+ * the same size; NULL none): its colour, or its depth for a depth texture; load LOAD, CLEAR (depth 1, colour 0) or
+ * DONT_CARE; within v (NULL: all of it); timed as pass. Its timestamp's index, for pass_close */
+static int pass_open2(GfxTex* t, GfxTex* t2, uint32_t layer, uint32_t level, VkAttachmentLoadOp load, const VkViewport* v, int pass)
+{
+    end_pass();
+    gpu_sync();
+    uint32_t tw, th;
+    level_size(t, level, &tw, &th);
+    VkRenderingAttachmentInfo a[2] = { { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO } };
+    a[0].imageView = attachment_view(t, layer, level);
+    a[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    a[0].loadOp = load;
+    a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    a[1] = a[0];
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ tw, th };
+    ri.layerCount = 1;
+    if (t2)
+        a[1].imageView = attachment_view(t2, layer, level), t2->used = g_serial, t2->rec = g_cb_index;
+    if (t->use == GFX_USE_DEPTH)
+        a[0].clearValue.depthStencil.depth = 1.0f, ri.pDepthAttachment = &a[0];
+    else
+        ri.colorAttachmentCount = t2 ? 2 : 1, ri.pColorAttachments = a;
+    int ts = ts_begin(g_cb, pass);
+    vkCmdBeginRendering(g_cb, &ri);
+    VkViewport all = { 0, 0, (float)tw, (float)th, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { tw, th } };
+    vkCmdSetViewport(g_cb, 0, 1, v ? v : &all);
+    vkCmdSetScissor(g_cb, 0, 1, &sc);
+    t->used = g_serial, t->rec = g_cb_index;
+    return ts;
+}
+
+static int pass_open(GfxTex* t, uint32_t layer, uint32_t level, VkAttachmentLoadOp load, const VkViewport* v, int pass)
+{
+    return pass_open2(t, NULL, layer, level, load, v, pass);
+}
+
+static void pass_close(int ts)
+{
+    vkCmdEndRendering(g_cb);
+    ts_end(g_cb, ts);
+    g_dirty = 1;
+}
+
 /* one full-screen triangle into a level of target (within vp, x y w h; NULL: all of it), reading
  * in[0..n) as t0.. (up to seven), and the sun maps sh[0..2) through the compare sampler; load keeps
  * what is there */
 static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, const float* vp, const VkImageView* in, int n,
     const VkImageView* sh, const int32_t* dir)
 {
-    end_pass();
-    gpu_sync();
+    VkViewport v = vp ? (VkViewport){ vp[0], vp[1], vp[2], vp[3], 0, 1 } : (VkViewport){ 0 };
+    int ts = pass_open(target, 0, level, load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE, vp ? &v : NULL, g_pass);
     VkCommandBuffer cb = g_cb;
-    uint32_t tw, th;
-    level_size(target, level, &tw, &th);
-    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    ca.imageView = attachment_view(target, 0, level);
-    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    ca.loadOp = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
-    ri.renderArea.extent = (VkExtent2D){ tw, th };
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &ca;
-    int ts = ts_begin(cb, g_pass);
-    vkCmdBeginRendering(cb, &ri);
-    VkViewport v = vp ? (VkViewport){ vp[0], vp[1], vp[2], vp[3], 0, 1 } : (VkViewport){ 0, 0, (float)tw, (float)th, 0, 1 };
-    VkRect2D sc = { { 0, 0 }, { tw, th } };
-    vkCmdSetViewport(cb, 0, 1, &v);
-    vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     VkWriteDescriptorSet w[10];
     VkDescriptorBufferInfo bi = { g_fx.ub, g_fx.uoff, sizeof(FxU) };
@@ -3294,10 +3670,10 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
     {
         int t = i < 6 ? i : i == 8 ? 6 : -1; /* bindings 1..6 are t0..t5, 9 is t6; 7 and 8 the sun maps */
         if (t >= 0)
-            ii[i] = (VkDescriptorImageInfo){ (g_fx.mip_in >> t) & 1 ? g_fx.mipsamp : g_fx.samp, t < n && in[t] ? in[t] : g_dummy2d->view,
+            ii[i] = (VkDescriptorImageInfo){ (g_fx.mip_in >> t) & 1 ? g_fx.mipsamp : g_lin_samp, t < n && in[t] ? in[t] : g_dummy2d->view,
                 VK_IMAGE_LAYOUT_GENERAL };
         else
-            ii[i] = (VkDescriptorImageInfo){ g_fx.cmp, sh && sh[i - 6] ? sh[i - 6] : g_fx.sdummy->view, VK_IMAGE_LAYOUT_GENERAL };
+            ii[i] = (VkDescriptorImageInfo){ g_cmp_samp, sh && sh[i - 6] ? sh[i - 6] : g_fx.sdummy->view, VK_IMAGE_LAYOUT_GENERAL };
         w[1 + i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w[1 + i].dstBinding = 1 + (uint32_t)i;
         w[1 + i].descriptorCount = 1;
@@ -3308,11 +3684,7 @@ static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, cons
     int32_t d2[2] = { dir ? dir[0] : 0, dir ? dir[1] : 0 };
     vkCmdPushConstants(cb, g_fx_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8, d2);
     vkCmdDraw(cb, 3, 1, 0, 0);
-    vkCmdEndRendering(cb);
-    ts_end(cb, ts);
-    g_dirty = 1;
-    g_bound = VK_NULL_HANDLE;
-    target->used = g_serial, target->rec = g_cb_index;
+    pass_close(ts);
 }
 
 /* the occlusion's depth texture at w x h, four levels; made again when the size changes */
@@ -4448,23 +4820,9 @@ static VkPipeline rt_fx_pipeline(const char* name, VkFormat fmt)
 
 static VkPipeline rt_compute(const char* pass)
 {
-    size_t n = sizeof RT_NORMALS_GLSL + 64;
-    char* src = (char*)malloc(n);
-    snprintf(src, n, "#define %s\n%s", pass, RT_NORMALS_GLSL);
-    VkShaderModule cs = compile_glsl(src, 2);
-    free(src);
-    VkPipeline p = VK_NULL_HANDLE;
-    if (cs)
-    {
-        VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
-        ci.stage = (VkPipelineShaderStageCreateInfo){ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT, ci.stage.module = cs, ci.stage.pName = "main";
-        ci.layout = g_ray.clayout;
-        if (vkCreateComputePipelines(g_dev, g_vkcache, 1, &ci, NULL, &p) != VK_SUCCESS)
-            p = VK_NULL_HANDLE;
-        vkDestroyShaderModule(g_dev, cs, NULL);
-    }
-    return p;
+    char d[64];
+    snprintf(d, sizeof d, "#define %s\n", pass);
+    return compute_pipeline(d, RT_NORMALS_GLSL, g_ray.clayout);
 }
 
 /* whether rays can be traced here (asking once; after fx_init) */
@@ -4541,27 +4899,2735 @@ static int rt_init(void)
 
 int gfx_rt_supported(void) { return rt_init(); }
 
-/* the scene renderer is Metal's only so far: the game's own draws stay */
-int gfx_world_supported(void) { return 0; }
-int gfx_world_draw(const GfxWorldFrame* f) { (void)f; return 0; }
-void gfx_world_time(int pass) { (void)pass; }
-void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
-void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
-void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
-int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
-void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
-void gfx_set_fixed_light(int fixed) { (void)fixed; }
-void gfx_set_weather(int weather) { (void)weather; }
+/* the soft shadows' disc (the sun's and moon's, SHADOW_GLSL, and the lamps', LAMP_GLSL): sixteen points on a Vogel
+ * spiral, n of them turned by r; sh_turn, a turn from a hash of the place, so neighbouring pixels' taps differ */
+#define SHDISC_GLSL                                                                                                   \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "vec2 sh_turn(vec3 p) {\n"                                                                                        \
+    "  float a = 6.2831853 * fract(52.9829189 * fract(dot(floor(p * 40.0), vec3(0.06711056, 0.00583715, 0.1234567))));\n" \
+    "  return vec2(cos(a), sin(a));\n"                                                                                \
+    "}\n"                                                                                                             \
+    "const vec2 sh_disc[16] = vec2[16](vec2(0.1768, 0.0000), vec2(-0.2258, 0.2068), vec2(0.0346, -0.3938), vec2(0.2846, 0.3712),\n" \
+    "  vec2(-0.5222, -0.0924), vec2(0.4947, -0.3147), vec2(-0.1655, 0.6155), vec2(-0.3156, -0.6076),\n"               \
+    "  vec2(0.6846, 0.2500), vec2(-0.7123, 0.2940), vec2(0.3434, -0.7337), vec2(0.2537, 0.8089),\n"                   \
+    "  vec2(-0.7647, -0.4432), vec2(0.8971, -0.1972), vec2(-0.5475, 0.7788), vec2(-0.1265, -0.9761));\n"              \
+    "vec2 sh_vogel(int i, int n, vec2 r) {\n"                                                                         \
+    "  vec2 q = sh_disc[i * (16 / n) + (16 / n - 1)];\n"                                                              \
+    "  return vec2(q.x * r.x - q.y * r.y, q.x * r.y + q.y * r.x);\n"                                                  \
+    "}\n"                                                                                                             \
+    "#endif\n"
 
-/* a buffer of at least need bytes in *b (made again, half as large again, when smaller; the old one let go
- * once the GPU is past it): the GPU's own, or one the CPU writes (host) */
-static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host)
+/* --- the scene renderer's sun and moon shadows, the receivers' side (gfx_metal.m's SHADOW_MSL) ----------------------
+ * SH is ShU: the cascades' matrices and ranges, the characters' layers (last frame's), the light, the camera, the
+ * filters. The maps are depth arrays a cascade a layer, compared through cs (LESS_OR_EQUAL, linear) and gathered
+ * through ps (nearest); their rows run down from the map's +y, as the casters' viewport draws them. */
+#define SHADOW_GLSL                                                                                                   \
+    "layout(std140, set = 0, binding = 6) uniform SHB { mat4 m[4]; vec4 cas[4]; vec4 cbox[4]; vec4 dir; vec4 cam; vec4 info;\n" \
+    "  mat4 cm[4]; vec4 ctx; vec4 pk; } S;\n"                                                                        \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "layout(set = 0, binding = 7) uniform texture2DArray zm;\n"                                                       \
+    "layout(set = 0, binding = 8) uniform texture2DArray cm;\n"                                                       \
+    "layout(set = 0, binding = 9) uniform texture2DArray ct;\n"                                                       \
+    "layout(set = 0, binding = 10) uniform samplerShadow cs;\n"                                                       \
+    "layout(set = 0, binding = 11) uniform sampler ps;\n"                                                             \
+    "float sh_cmp(texture2DArray t, vec2 uv, uint l, float z) { return texture(sampler2DArrayShadow(t, cs), vec4(uv, float(l), z)); }\n" \
+    "float sh_pcf(texture2DArray t, vec2 uv, uint c, float z, float tx) {\n"                                         \
+    "  if (c >= 2u) return sh_cmp(t, uv, c, z);\n" /* far: the hardware's 2x2 alone */                                \
+    "  return 0.25 * (sh_cmp(t, uv + vec2(-0.5, -0.5) * tx, c, z) + sh_cmp(t, uv + vec2(0.5, -0.5) * tx, c, z) +\n"  \
+    "                 sh_cmp(t, uv + vec2(-0.5, 0.5) * tx, c, z) + sh_cmp(t, uv + vec2(0.5, 0.5) * tx, c, z));\n"     \
+    "}\n"                                                                                                             \
+    /* the characters' layers: nine of the hardware's 2x2 compares a texel apart (a 4x4 footprint, smooth edges) */   \
+    "float sh_cpcf(texture2DArray t, vec2 uv, uint l, float z, float tx) {\n"                                        \
+    "  float v = 0.0;\n"                                                                                              \
+    "  for (int y = -1; y <= 1; ++y)\n"                                                                               \
+    "    for (int x = -1; x <= 1; ++x) v += sh_cmp(t, uv + vec2(x, y) * tx, l, z);\n"                                 \
+    "  return v * (1.0 / 9.0);\n"                                                                                     \
+    "}\n"                                                                                                             \
+    /* contact-hardening soft shadows (shadow_softness), as gfx_metal.m's sh_pcss: the blockers' mean depth round the \
+     * point (gathers on a disc turned by SHDISC_GLSL's hash of the place), then that far from them times the light's \
+     * size wide */                                                                                                   \
+    "float sh_pcss(texture2DArray t, mat4 M, uint l, vec2 uv, float z, float tx, float tl, int nb, int nf, vec2 rot, float nl) {\n" \
+    "  float wpt = 2.0 * tx / length(vec3(M[0][0], M[1][0], M[2][0]));\n"                                            \
+    "  float wpd = 1.0 / length(vec3(M[0][2], M[1][2], M[2][2]));\n"                                                 \
+    "  float rs = clamp(tl * 6.0 / wpt, 1.0, 12.0);\n"                                                                \
+    "  float sl = sqrt(1.0 - nl * nl) / max(nl, 0.2), zs = z - min(rs * wpt * sl, 1.0) / wpd;\n"                      \
+    "  float sum = 0.0, n = 0.0;\n"                                                                                   \
+    "  for (int i = 0; i < nb; ++i) {\n"                                                                              \
+    "    vec4 d = textureGather(sampler2DArray(t, ps), vec3(uv + sh_vogel(i, 4, rot) * (rs * tx), float(l)));\n"      \
+    "    vec4 b = vec4(lessThan(d, vec4(zs)));\n"                                                                     \
+    "    sum += dot(d, b), n += b.x + b.y + b.z + b.w;\n"                                                             \
+    "  }\n"                                                                                                           \
+    "  if (n == 0.0) return 1.0;\n"                                                                                   \
+    "  float pen = clamp((z - sum / n) * wpd * tl / wpt, 0.5, 12.0);\n"                                               \
+    "  float zb = z - min(pen * wpt * sl, 0.5) / wpd;\n"                                                              \
+    "  if (n == 4.0 * float(nb) && pen < 1.5) return sh_cmp(t, uv, l, zb);\n"                                         \
+    "  float v = 0.0;\n"                                                                                              \
+    "  for (int i = 0; i < nf; ++i) v += sh_cmp(t, uv + sh_vogel(i, nf, rot) * (pen * tx), l, zb);\n"                 \
+    "  return v / float(nf);\n"                                                                                       \
+    "}\n"                                                                                                             \
+    "float sh_char(uint c, vec3 wp, vec3 n, float nl, bool soft) {\n"                                                 \
+    "  float off = 1.0 + 4.0 * sqrt(1.0 - nl * nl);\n"                                                                \
+    "  float t = S.ctx.x;\n" /* the fitted layer, when there is one and the point is in it */                         \
+    "  if (t > 0.0) {\n"                                                                                              \
+    "    vec4 h = S.cm[0] * vec4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                         \
+    "    vec2 u0 = vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                         \
+    "    if (all(lessThan(abs(h.xy), vec2(0.995))))\n"                                                                \
+    "      return soft && S.pk.x > 0.0 ? sh_pcss(ct, S.cm[0], 0u, u0, h.z, S.ctx.y, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl)\n" \
+    "                                  : sh_cpcf(ct, u0, 0u, h.z, S.ctx.y * (soft ? max(S.ctx.z, 1.0) : 1.0));\n"    \
+    "  }\n"                                                                                                           \
+    "  if (c >= uint(S.info.y)) return 1.0;\n" /* the cascade's characters' layer, half size, only round them */       \
+    "  t = 2.0 * S.cas[c].y;\n"                                                                                       \
+    "  vec4 h = S.cm[1u + c] * vec4(wp + n * (t * off) + S.dir.xyz * t, 1.0);\n"                                      \
+    "  vec4 b = S.cbox[c];\n"                                                                                         \
+    "  if (any(greaterThan(abs(h.xy), vec2(0.995))) || any(lessThan(h.xy, b.xy)) || any(greaterThan(h.xy, b.zw))) return 1.0;\n" \
+    "  vec2 u1 = vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                           \
+    "  if (soft && S.pk.x > 0.0) return sh_pcss(cm, S.cm[1u + c], c, u1, h.z, 2.0 * S.info.w, S.pk.x, max(int(S.pk.y) / 2, 1), int(S.pk.z) / 2, sh_turn(wp), nl);\n" \
+    "  return sh_cpcf(cm, u1, c, h.z, 2.0 * S.info.w * (soft ? max(S.ctx.z, 1.0) : 1.0));\n"                         \
+    "}\n"                                                                                                             \
+    "float sh_at(uint c, vec3 wp, vec3 n, bool soft) {\n"                                                             \
+    "  float nl = sat(dot(n, S.dir.xyz)), t = S.cas[c].y;\n" /* more the more the surface turns from it */            \
+    "  vec4 h = S.m[c] * vec4(wp + n * (t * (1.0 + 4.0 * sqrt(1.0 - nl * nl))) + S.dir.xyz * t, 1.0);\n"              \
+    "  if (abs(h.x) > 0.995 || abs(h.y) > 0.995) return -1.0;\n"                                                      \
+    "  vec2 uv = vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5);\n"                                                           \
+    "  float v;\n"                                                                                                    \
+    "  if (soft && S.pk.x > 0.0) {\n" /* soft: all the taps in the nearest cascade, half in the next, a quarter beyond */ \
+    "    int k = c == 0u ? 1 : c == 1u ? 2 : 4;\n"                                                                    \
+    "    v = sh_pcss(zm, S.m[c], c, uv, h.z, S.info.w, S.pk.x, max(int(S.pk.y) / k, 1), max(int(S.pk.z) / k, 4), sh_turn(wp), nl);\n" \
+    "  } else\n"                                                                                                      \
+    "    v = soft && S.ctx.z > 1.01 && c < 2u ? sh_cpcf(zm, uv, c, h.z, S.info.w * S.ctx.z) : sh_pcf(zm, uv, c, h.z, S.info.w);\n" /* the moon's wider */ \
+    "  if (v > 0.0 && S.info.y > 0.0) v = min(v, sh_char(c, wp, n, nl, soft));\n"                                     \
+    "  return v;\n"                                                                                                   \
+    "}\n"                                                                                                             \
+    "float shadow(vec3 wp, vec3 n, bool soft) {\n" /* soft: PCSS (the zone); a character's own the fixed filter */    \
+    "  float d = length(wp - S.cam.xyz);\n"                                                                           \
+    "  uint nc = uint(S.info.x);\n"                                                                                   \
+    "  for (uint c = 0u; c < nc; ++c) {\n"                                                                            \
+    "    if (S.cas[c].w == 0.0 || d > S.cas[c].x) continue;\n"                                                        \
+    "    float v = sh_at(c, wp, n, soft);\n"                                                                          \
+    "    if (v < 0.0) continue;\n"                                                                                    \
+    "    float r = S.cas[c].x, f = sat((d - 0.9 * r) / (0.1 * r));\n"                                                 \
+    "    if (f > 0.0) {\n"                                                                                            \
+    "      float w = c + 1u < nc && S.cas[c + 1u].w != 0.0 ? sh_at(c + 1u, wp, n, soft) : 1.0;\n"                     \
+    "      v = mix(v, w < 0.0 ? 1.0 : w, f);\n"                                                                       \
+    "    }\n"                                                                                                         \
+    "    return mix(1.0, v, S.info.z);\n"                                                                             \
+    "  }\n"                                                                                                           \
+    "  return 1.0;\n"                                                                                                 \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
+/* a character's vertex in the game's skinned space (CHARS_GLSL, CAST_GLSL): two bones, or their mirror bones mirrored;
+ * GfxCharVertex is 18 words */
+#define SKIN_GLSL                                                                                                     \
+    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"                                       \
+    "layout(std430, set = 0, binding = 5) readonly buffer UB { vec2 uvs[]; };\n"                                      \
+    "const vec3 SIGN[4] = vec3[4](vec3(1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(1.0, 1.0, -1.0));\n"    \
+    "vec4 word4(uint b) { return uintBitsToFloat(uvec4(vb[b], vb[b + 1u], vb[b + 2u], vb[b + 3u])); }\n"              \
+    "vec3 skin(out vec3 n) {\n"                                                                                       \
+    "  uint b = uint(gl_VertexIndex) * 18u;\n"                                                                        \
+    "  vec4 va = word4(b), vb4 = word4(b + 4u);\n"                                                                    \
+    "  vec3 na = word4(b + 8u).xyz, nb = word4(b + 12u).xyz;\n"                                                       \
+    "  uint bones = vb[b + 16u], mir = vb[b + 17u];\n"                                                                \
+    "  uint ba = bones & 0xffu, bb = (bones >> 8) & 0xffu;\n"                                                         \
+    "  if (D.mirror != 0u) {\n"                                                                                       \
+    "    ba = (bones >> 16) & 0xffu, bb = bones >> 24;\n"                                                             \
+    "    vec3 sa = SIGN[mir & 3u], sb = SIGN[(mir >> 2) & 3u];\n"                                                     \
+    "    va.xyz *= sa; vb4.xyz *= sb; na *= sa; nb *= sb;\n"                                                          \
+    "  }\n"                                                                                                           \
+    "  mat4 MA = P[D.palette + ba], MB = P[D.palette + bb];\n"                                                        \
+    "  n = (MA * vec4(na, 0.0)).xyz + (MB * vec4(nb, 0.0)).xyz;\n"                                                    \
+    "  return (MA * va + MB * vb4).xyz;\n"                                                                            \
+    "}\n"
+
+/* the scene renderer's occlusion, the shading's side (gfx_ao_msl.h's AO_MSL; how it is made: SAO_GLSL): AU the last
+ * result's view and projection (pvp), its viewport's size and the share of the texture it fills (vp), the zone's
+ * strength, the characters', debug and the depth test's tolerance (k). ao_at: a bilinear gather of the half-size result
+ * (x the occlusion, y the distance it was made at), each tap weighted by how near its distance is to the point's; 1
+ * where nothing matches */
+#define AO_GLSL                                                                                                       \
+    "layout(std140, set = 0, binding = 12) uniform AUB { mat4 pvp; vec4 vp; vec4 k; } A;\n"                           \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "layout(set = 0, binding = 13) uniform sampler2D aot;\n"                                                          \
+    "float ao_at(vec4 pc) {\n"                                                                                        \
+    "  if (pc.w <= 1e-4) return 1.0;\n"                                                                               \
+    "  vec2 uv = vec2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"                                          \
+    "  if (any(lessThanEqual(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) return 1.0;\n"                  \
+    "  vec2 tc = uv * A.vp.zw;\n"                                                                                     \
+    "  vec2 sz = vec2(textureSize(aot, 0)), t = tc * sz - 0.5, f = fract(t);\n"                                       \
+    "  vec2 g = (floor(t) + 1.0) / sz;\n"                                                                             \
+    "  vec4 o = textureGather(aot, g, 0), d = textureGather(aot, g, 1);\n"                                            \
+    /* gather's order: (0,1) (1,1) (1,0) (0,0) */                                                                     \
+    "  vec4 w = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));\n"                 \
+    "  w *= sat(1.0 - abs(d - pc.w) / (A.k.w * pc.w));\n"                                                             \
+    "  float ws = w.x + w.y + w.z + w.w;\n"                                                                           \
+    "  return ws > 1e-3 ? dot(o, w) / ws : 1.0;\n"                                                                    \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
+/* the highlights (scene_spec, gfx_metal.m's SPEC_MSL and its notes): GGX with Schlick's Fresnel and Smith-Schlick
+ * visibility; the roughness widened by how fast the normal turns across the pixel. SP: k (strength, the lamps' share,
+ * wetness, anti-aliasing), pad.x 1 on an HDR target */
+#define SPEC_GLSL                                                                                                     \
+    "layout(std140, set = 0, binding = 14) uniform SPB { vec4 k; vec4 pad; } SPc;\n"                                  \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "float spec_ggx(vec3 N, vec3 V, vec3 L, float a2, float f0) {\n"                                                  \
+    "  vec3 H = normalize(V + L);\n"                                                                                  \
+    "  float nl = sat(dot(N, L)), nv = max(dot(N, V), 1e-3), nh = sat(dot(N, H)), vh = sat(dot(V, H));\n"             \
+    "  float d = nh * nh * (a2 - 1.0) + 1.0;\n"                                                                       \
+    "  float D = a2 / (3.14159265 * d * d);\n"                                                                        \
+    "  float k = 0.5 * sqrt(a2);\n"                                                                                   \
+    "  float vis = 0.25 / ((nl * (1.0 - k) + k) * (nv * (1.0 - k) + k));\n"                                           \
+    "  float F = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);\n"                                                             \
+    "  return min(D * vis * F * nl, 16.0);\n"                                                                         \
+    "}\n"                                                                                                             \
+    "float spec_a2(float rough, vec3 N, float aa) {\n"                                                                \
+    "  vec3 dx = dFdx(N), dy = dFdy(N);\n"                                                                            \
+    "  float var = 0.5 * (dot(dx, dx) + dot(dy, dy)) * aa;\n"                                                         \
+    "  float a = rough * rough;\n"                                                                                    \
+    "  return clamp(a * a + min(2.0 * var, 0.18), 0.002, 1.0);\n"                                                     \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
+/* the lamps (scene_lamps, gfx_metal.m's LAMP_MSL and its notes): every lit point light of the pool, binned into 64-pixel
+ * tiles once a frame (lamps_bin); a pixel takes its tile's, each faded to nothing at its range. LS the lamps, TL the
+ * tiles (32 16-bit words each: the count, the lamps), LU the viewport (vp), tiles across and down, shadows on and debug
+ * (t), the zone's cubes, the lamp's size and the taps (k). The characters' shadows from the nearest lamps are cubes
+ * (lsm, a lamp six layers, LM their faces' matrices), the zone's in zlsm, compared through lcs */
+#define LAMP_GLSL                                                                                                     \
+    "struct LL { vec4 pos, col, att, amb; };\n"                                                                       \
+    "#ifdef GFX_FS\n"                                                                                                 \
+    "layout(std430, set = 0, binding = 15) readonly buffer LLB { LL LS[]; };\n"                                       \
+    "layout(std430, set = 0, binding = 16) readonly buffer TLB { uint TL[]; };\n"                                     \
+    "layout(std140, set = 0, binding = 17) uniform LUB { vec4 vp; vec4 t; vec4 k; } LU;\n"                            \
+    "layout(set = 0, binding = 18) uniform texture2DArray lsm;\n"                                                     \
+    "layout(set = 0, binding = 19) uniform texture2DArray zlsm;\n"                                                    \
+    "layout(std430, set = 0, binding = 20) readonly buffer LMB { mat4 LM[]; };\n"                                     \
+    "layout(set = 0, binding = 21) uniform samplerShadow lcs;\n"                                                      \
+    "uint tl_at(uint i) { uint w = TL[i >> 1]; return (i & 1u) != 0u ? w >> 16 : w & 0xffffu; }\n"                   \
+    "float lamp_cmp(texture2DArray t, vec2 uv, uint l, float z) { return texture(sampler2DArrayShadow(t, lcs), vec4(uv, float(l), z)); }\n" \
+    /* the lamp's shadow at P: the cube face its direction falls in, the point pushed toward the lamp a little */      \
+    "float lamp_shadow(uint s, vec3 P, vec3 Lp, vec3 N, bool zone, float ls, int nt) {\n"                             \
+    "  vec3 d = P - Lp, a = abs(d);\n"                                                                                \
+    "  uint f = a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0u : 1u) : a.y >= a.z ? (d.y > 0.0 ? 2u : 3u) : (d.z > 0.0 ? 4u : 5u);\n" \
+    "  float dl = length(d);\n"                                                                                       \
+    "  uint l = s * 6u + f;\n"                                                                                        \
+    "  vec4 h = LM[l] * vec4(P - d * (0.08 / max(dl, 0.5)) * min(dl, 2.0) + N * 0.06, 1.0);\n"                        \
+    "  if (h.w <= 1e-4) return 1.0;\n"                                                                                \
+    "  vec2 uv = vec2(h.x / h.w * 0.5 + 0.5, 0.5 - h.y / h.w * 0.5);\n"                                               \
+    "  float z = h.z / h.w;\n"                                                                                        \
+    "  if (ls <= 0.0) {\n"                                                                                            \
+    "    float v = lamp_cmp(lsm, uv, l, z);\n"                                                                        \
+    "    return zone ? min(v, lamp_cmp(zlsm, uv, l, z)) : v;\n"                                                       \
+    "  }\n"                                                                                                           \
+    /* soft (lamp_size): a disc as wide as the lamp seen from here, a face spanning twice the distance, one to six    \
+     * texels */                                                                                                      \
+    "  float tx = 1.0 / float(textureSize(sampler2DArrayShadow(lsm, lcs), 0).x), r = clamp(ls / (4.0 * max(dl, 0.3)), tx, 6.0 * tx);\n" \
+    "  vec2 a0 = sh_turn(P);\n"                                                                                       \
+    "  float v = 0.0;\n"                                                                                              \
+    "  for (int i = 0; i < nt; ++i) {\n"                                                                              \
+    "    vec2 q = uv + sh_vogel(i, nt, a0) * r;\n"                                                                    \
+    "    float w = lamp_cmp(lsm, q, l, z);\n"                                                                         \
+    "    v += zone ? min(w, lamp_cmp(zlsm, q, l, z)) : w;\n"                                                          \
+    "  }\n"                                                                                                           \
+    "  return v / float(nt);\n"                                                                                       \
+    "}\n"                                                                                                             \
+    "void lamp_light(vec2 fp, vec3 P, vec3 N, inout vec3 dif, inout vec3 amb, vec3 Ps, bool soft) {\n"                \
+    "  ivec2 t = ivec2((fp - LU.vp.xy) / 64.0);\n"                                                                    \
+    "  if (any(lessThan(t, ivec2(0))) || t.x >= int(LU.t.x) || t.y >= int(LU.t.y)) return;\n"                        \
+    "  uint b = (uint(t.y) * uint(LU.t.x) + uint(t.x)) * 32u;\n"                                                      \
+    "  uint n = tl_at(b);\n"                                                                                          \
+    "  for (uint k = 0u; k < n; ++k) {\n"                                                                             \
+    "    LL l = LS[tl_at(b + 1u + k)];\n"                                                                             \
+    "    vec3 v = l.pos.xyz - P;\n"                                                                                   \
+    "    float d = length(v), q = d / l.pos.w;\n"                                                                     \
+    "    if (q >= 1.0) continue;\n"                                                                                   \
+    "    float w = sat(1.0 - q * q * q * q);\n"                                                                       \
+    "    float at = w * w / max(l.att.x + l.att.y * d + l.att.z * d * d, 1e-3);\n"                                    \
+    "    amb += l.amb.rgb * at;\n"                                                                                    \
+    "    float sh = l.att.w > 0.5 && LU.t.z > 0.5 ? lamp_shadow(uint(l.att.w) - 1u, Ps, l.pos.xyz, N, LU.k.x > 0.5, soft ? LU.k.y : 0.0, int(LU.k.z)) : 1.0;\n" \
+    "    dif += l.col.rgb * at * sh * max(dot(N, v / max(d, 1e-4)), 0.0);\n"                                         \
+    "    if (LU.t.w > 0.5 && l.att.w > 0.5) amb += vec3(1.0 - sh, sh, 0.0) * 4.0 * w;\n" /* scene_lamp_debug: red shadowed, green lit */ \
+    "  }\n"                                                                                                           \
+    "}\n"                                                                                                             \
+    "#endif\n"
+
+/* the bounce light, the shading's side (gfx_gi_msl.h's GI_MSL and its notes; what the probes are: GI_KERNELS_GLSL),
+ * in the zone's and characters' functions and the probes' own kernels, which say where it is bound (GI_B_*) and
+ * whether PS is written (GI_PS_Q). gi_at: the probes at P (normal N): rgb the bounce light (not scaled by strength), a
+ * what the ambient is multiplied by (1 outside the grid). GLSL's % is undefined for negative operands: gi_slot wraps
+ * with floor */
+#define GI_OCT_GLSL                                                                                                   \
+    "float gi_sgn(float v) { return v >= 0.0 ? 1.0 : -1.0; }\n"                                                       \
+    "vec2 gi_oct(vec3 n) {\n"                                                                                         \
+    "  n /= abs(n.x) + abs(n.y) + abs(n.z);\n"                                                                        \
+    "  return n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(gi_sgn(n.x), gi_sgn(n.y));\n"                              \
+    "}\n"                                                                                                             \
+    "vec3 gi_unoct(vec2 e) {\n"                                                                                       \
+    "  vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));\n"                                                                \
+    "  if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(gi_sgn(v.x), gi_sgn(v.y));\n"                                   \
+    "  return normalize(v);\n"                                                                                        \
+    "}\n"
+#define GI_GLSL                                                                                                       \
+    "layout(std140, set = 0, binding = GI_B_GU) uniform GUB { vec4 org; ivec4 base; ivec4 dims; vec4 k; vec4 inv; vec4 tr; uvec4 n;\n" \
+    "  vec4 sun_dir, sun_col, sun2_dir, sun2_col, amb; mat4 rot; } G;\n"                                             \
+    "layout(std430, set = 0, binding = GI_B_PS) GI_PS_Q buffer GPSB { uint PS[]; };\n"                               \
+    "layout(set = 0, binding = GI_B_IR) uniform sampler2D gir;\n"                                                    \
+    "layout(set = 0, binding = GI_B_DS) uniform sampler2D gid;\n"                                                    \
+    GI_OCT_GLSL                                                                                                       \
+    "ivec3 gi_slot(ivec3 c) { return c - G.dims.xyz * ivec3(floor(vec3(c) / vec3(G.dims.xyz))); }\n"                  \
+    "uint gi_index(ivec3 s) { return uint(s.x + G.dims.x * (s.y + G.dims.y * s.z)); }\n"                              \
+    /* a probe's map (n texels inside a border of one) at direction d, in the atlas's uv */                           \
+    "vec2 gi_uv(ivec3 s, vec3 d, float n, vec2 inv) {\n"                                                              \
+    "  vec2 t = vec2(float(s.x + G.dims.x * s.y), float(s.z)) * (n + 2.0) + 1.0 + (gi_oct(d) * 0.5 + 0.5) * n;\n"     \
+    "  return t * inv;\n"                                                                                             \
+    "}\n"                                                                                                             \
+    "vec4 gi_at(vec3 P, vec3 N) {\n"                                                                                  \
+    "  float sp = G.org.w;\n"                                                                                         \
+    "  vec3 Pb = P + N * G.k.w;\n" /* off the surface, so its own probes' near hits don't shade it */                 \
+    "  vec3 g = Pb / sp, fl = floor(g), f = g - fl;\n"                                                                \
+    "  ivec3 i0 = ivec3(fl);\n"                                                                                       \
+    "  vec3 sum = vec3(0.0);\n"                                                                                       \
+    "  float sky = 0.0, ws = 0.0;\n"                                                                                  \
+    "  for (int c = 0; c < 8; ++c) {\n"                                                                               \
+    "    ivec3 o = ivec3(c & 1, (c >> 1) & 1, c >> 2), pc = i0 + o, rel = pc - G.base.xyz;\n"                         \
+    "    if (any(lessThan(rel, ivec3(0))) || any(greaterThanEqual(rel, G.dims.xyz))) continue;\n"                     \
+    "    ivec3 s = gi_slot(pc);\n"                                                                                    \
+    "    if ((PS[gi_index(s)] & 3u) != 1u) continue;\n" /* traced, and not inside something */                       \
+    "    vec3 tw = mix(1.0 - f, f, vec3(o));\n"                                                                       \
+    "    float w = tw.x * tw.y * tw.z;\n"                                                                             \
+    "    vec3 dv = vec3(pc) * sp - Pb;\n"                                                                             \
+    "    float dl = length(dv);\n"                                                                                    \
+    "    vec3 dn = dl > 1e-4 ? dv / dl : N;\n"                                                                        \
+    "    float wb = (dot(dn, N) + 1.0) * 0.5;\n" /* probes behind the surface count less */                          \
+    "    w *= wb * wb + 0.2;\n"                                                                                       \
+    "    vec2 m = textureLod(gid, gi_uv(s, -dn, 14.0, G.inv.zw), 0.0).rg;\n"                                         \
+    "    if (dl > m.x) {\n" /* the probe sees something nearer than this point that way: it is likely hidden */     \
+    "      float v = abs(m.y - m.x * m.x), t = dl - m.x, ch = v / (v + t * t);\n"                                     \
+    "      w *= max(ch * ch * ch, 0.05);\n"                                                                           \
+    "    }\n"                                                                                                         \
+    "    if (w < 0.2) w *= w * w * 25.0;\n"                                                                           \
+    "    vec4 e = textureLod(gir, gi_uv(s, N, 6.0, G.inv.xy), 0.0);\n"                                               \
+    "    sum += e.rgb * w;\n"                                                                                         \
+    "    sky += e.a * w;\n"                                                                                           \
+    "    ws += w;\n"                                                                                                  \
+    "  }\n"                                                                                                           \
+    "  if (ws <= 1e-5) return vec4(0.0, 0.0, 0.0, 1.0);\n"                                                            \
+    "  vec3 r = g - vec3(G.base.xyz), e3 = min(r, vec3(G.dims.xyz - 1) - r);\n"                                       \
+    "  float fade = clamp(min(e3.x, min(e3.y, e3.z)) * 0.5, 0.0, 1.0);\n" /* the grid's last two cells fade out */   \
+    "  return vec4(sum / ws * fade, mix(1.0, mix(1.0, sky / ws, G.k.y), fade));\n"                                    \
+    "}\n"
+
+/* where the zone's and characters' functions take the bounce light (W_GU..W_GID) */
+#define GI_SHADE_GLSL                                                                                                 \
+    "#define GI_B_GU 22\n#define GI_B_PS 23\n#define GI_B_IR 24\n#define GI_B_DS 25\n#define GI_PS_Q readonly\n" GI_GLSL
+
+/* the effects' functions the zone's and the characters' draws take, as their W_* defines say */
+#define WFX_GLSL                                                                                                      \
+    "#if W_SHADOW || W_LAMPS\n" SHDISC_GLSL "#endif\n"                                                                 \
+    "#if W_SHADOW\n" SHADOW_GLSL "#endif\n"                                                                            \
+    "#if W_AO\n" AO_GLSL "#endif\n"                                                                                    \
+    "#if W_SPEC\n" SPEC_GLSL "#endif\n"                                                                                \
+    "#if W_LAMPS\n" LAMP_GLSL "#endif\n"                                                                               \
+    "#if W_GI\n" GI_SHADE_GLSL "#endif\n"
+
+/* --- the scene renderer's zone (gfx_world_draw, gfx.h) --------------------------------------------------------------
+ * gfx_metal.m's WORLD_MSL: D3D's fixed function as the game lights its zone, COLORVERTEX with the vertex colour as
+ * diffuse and ambient reflectance, the sun (and moon) and the instance's four point lights, then MODULATE2X and
+ * MODULATE4X and table fog. W_PIXEL lights per pixel (scene 2), W_ATEST alpha tests GREATER the reference, W_SHADOW
+ * shades the directional light along the shadows' (the sun's or the moon's) with them. The vertices are the game's own
+ * buffers, fetched as the generated functions fetch theirs (36 bytes: position, normal, D3DCOLOR, uv); the instance
+ * (inst) and its flags are push constants. W_AO takes the occlusion from the ambient, W_SPEC adds the highlights (with
+ * W_SHADOW), W_LAMPS lights every lamp per pixel in place of the instance's four point lights (with W_PIXEL), W_GI adds
+ * the bounce light to the ambient (per vertex, or per pixel at its quality 3 in scene 2). */
+static const char WORLD_GLSL[] =
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "layout(std140, set = 0, binding = 0) uniform WF { mat4 vp; vec4 params; } F;\n" /* params: alpha reference 0..255, the pixel-centre fixup */
+    "struct WL { vec4 pos, diffuse, ambient, att; };\n"
+    "struct WI { mat4 wvp, world, world_inv; vec4 sun_dir, sun_col, sun2_dir, sun2_col, ambient, fog, fog_col; ivec4 light; };\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer WIB { WI I[]; };\n"
+    "layout(std430, set = 0, binding = 2) readonly buffer WLB { WL L[]; };\n"
+    "layout(push_constant) uniform WD { uint inst, flags; } D;\n"
+    WFX_GLSL
+    /* saturate(vc * (ambient + each light's ambient) + vc * sum of N.L x diffuse) without the saturate, and without the
+     * directional light along sd, which goes into sun: saturate(the two's sum) is D3D's. lmp: the point lights' share,
+     * which fills the sun's (the moon's) shadow (shadow_fill); amb: the ambient's, which the occlusion scales. With
+     * W_LAMPS the point lights are the lamps', every one, per pixel (lamp_light). g: the bounce light, added to the
+     * ambient, and what the ambient is multiplied by ((0, 0, 0, 1) without it) */
+    "vec3 lit(vec3 P, vec3 N, vec3 vc, vec3 sd, vec4 g, out vec3 sun, out vec3 amb, out vec3 lmp) {\n"
+    "  vec3 a = I[D.inst].ambient.rgb * g.a + g.rgb, d = vec3(0.0), s = vec3(0.0), pl = vec3(0.0);\n"
+    "  if (I[D.inst].sun_dir.w > 0.0) {\n"
+    "    vec3 t = I[D.inst].sun_col.rgb * max(dot(N, I[D.inst].sun_dir.xyz), 0.0);\n"
+    "    if (dot(I[D.inst].sun_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
+    "  }\n"
+    "  if (I[D.inst].sun2_dir.w > 0.0) {\n"
+    "    vec3 t = I[D.inst].sun2_col.rgb * max(dot(N, I[D.inst].sun2_dir.xyz), 0.0);\n"
+    "    if (dot(I[D.inst].sun2_dir.xyz, sd) > 0.98) s += t; else d += t;\n"
+    "  }\n"
+    "#if !W_LAMPS\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    int li = I[D.inst].light[k];\n"
+    "    if (li < 0) continue;\n"
+    "    vec3 v = L[li].pos.xyz - P;\n"
+    "    float dist = length(v);\n"
+    "    if (dist > L[li].pos.w) continue;\n"
+    "    float at = 1.0 / max(L[li].att.x + L[li].att.y * dist + L[li].att.z * dist * dist, 1e-6);\n"
+    "    vec3 t = L[li].ambient.rgb * at + L[li].diffuse.rgb * at * max(dot(N, v / max(dist, 1e-6)), 0.0);\n"
+    "    d += t, pl += t;\n"
+    "  }\n"
+    "#endif\n"
+    "  lmp = vc * pl;\n"
+    "  sun = vc * s;\n"
+    "  amb = vc * a;\n"
+    "  return vc * a + vc * d;\n"
+    "}\n"
+    "#if W_SHADOW\n"
+    "#define SD S.dir.xyz\n"
+    "#else\n"
+    "#define SD vec3(0.0)\n"
+    "#endif\n"
+    "#ifdef GFX_VS\n"
+    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"
+    "layout(location = 0) out vec2 o_uv;\n"
+    "layout(location = 1) out vec4 o_col;\n"
+    "layout(location = 2) out vec3 o_wpos;\n"
+    "layout(location = 3) out vec3 o_nrm;\n"
+    "layout(location = 4) out float o_z;\n"
+    "layout(location = 5) out vec3 o_sun;\n"
+    "layout(location = 6) out vec3 o_lmp;\n"
+    "layout(location = 7) out vec3 o_amb;\n"
+    "layout(location = 8) out vec4 o_aop;\n" /* where the occlusion was made: this point through last frame's camera */
+    "layout(location = 9) out vec4 o_gi;\n"
+    "void main() {\n"
+    "  uint b = uint(gl_VertexIndex) * 9u;\n"
+    "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
+    "  vec3 nrm = uintBitsToFloat(uvec3(vb[b + 3u], vb[b + 4u], vb[b + 5u]));\n"
+    "  vec4 col = unpackUnorm4x8(vb[b + 6u]).zyxw;\n" /* D3DCOLOR's bytes are B, G, R, A */
+    "  o_uv = uintBitsToFloat(uvec2(vb[b + 7u], vb[b + 8u]));\n"
+    "  vec4 wp = I[D.inst].world * vec4(pos, 1.0);\n"
+    "  vec3 n = (vec4(nrm, 0.0) * I[D.inst].world_inv).xyz;\n"
+    "  if ((D.flags & 32u) != 0u) n = normalize(n);\n"
+    "  gl_Position = I[D.inst].wvp * vec4(pos, 1.0);\n"
+    "  o_z = gl_Position.w;\n"
+    "  gl_Position.x += gl_Position.w * F.params.y;\n" /* D3D's pixel centres, as the generated functions' fixup */
+    "  gl_Position.y -= gl_Position.w * F.params.z;\n"
+    "  o_wpos = wp.xyz;\n"
+    "  o_nrm = n;\n"
+    "  o_col = col;\n"
+    "  o_sun = vec3(0.0), o_lmp = vec3(0.0), o_amb = vec3(0.0);\n"
+    "#if W_AO\n"
+    "  o_aop = A.pvp * wp;\n"
+    "#else\n"
+    "  o_aop = vec4(0.0);\n"
+    "#endif\n"
+    "  o_gi = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "#if W_GI\n"
+    "  if (!(W_PIXEL != 0 && G.org.x > 0.5)) { o_gi = gi_at(wp.xyz, normalize(n)); o_gi.rgb *= G.k.x; }\n"
+    "#endif\n"
+    "#if !W_PIXEL\n"
+    "  vec3 rest = lit(wp.xyz, n, col.rgb, SD, o_gi, o_sun, o_amb, o_lmp);\n"
+    "  o_col.rgb = W_SHADOW != 0 || W_AO != 0 ? rest : sat(rest + o_sun);\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef GFX_FS\n"
+    "layout(set = 0, binding = 4) uniform sampler2D t;\n"
+    "layout(location = 0) in vec2 i_uv;\n"
+    "layout(location = 1) in vec4 i_col;\n"
+    "layout(location = 2) in vec3 i_wpos;\n"
+    "layout(location = 3) in vec3 i_nrm;\n"
+    "layout(location = 4) in float i_z;\n"
+    "layout(location = 5) in vec3 i_sun;\n"
+    "layout(location = 6) in vec3 i_lmp;\n"
+    "layout(location = 7) in vec3 i_amb;\n"
+    "layout(location = 8) in vec4 i_aop;\n"
+    "layout(location = 9) in vec4 i_gi;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "void main() {\n"
+    "  vec3 c = i_col.rgb, sun = i_sun, lmp = i_lmp, amb = i_amb;\n"
+    "  float shv = 1.0;\n"
+    "  vec3 N = (D.flags & 32u) != 0u ? normalize(i_nrm) : i_nrm;\n"
+    "  vec4 g = i_gi;\n"
+    "#if W_GI && W_PIXEL\n"
+    "  if (G.org.x > 0.5) { g = gi_at(i_wpos, normalize(N)); g.rgb *= G.k.x; }\n"
+    "#endif\n"
+    "#if W_PIXEL\n"
+    "  c = lit(i_wpos, N, i_col.rgb, SD, g, sun, amb, lmp);\n"
+    "#endif\n"
+    "#if W_LAMPS && W_PIXEL\n"
+    "  {\n"
+    "    vec3 ld = vec3(0.0), la = vec3(0.0);\n"
+    "    lamp_light(gl_FragCoord.xy, i_wpos, normalize(N), ld, la, i_wpos, true);\n"
+    "    c += i_col.rgb * (ld + la);\n" /* (on the vertex colour, as lit() lights) */
+    "    lmp += i_col.rgb * (ld + la);\n"
+    "    amb += i_col.rgb * la;\n"
+    "  }\n"
+    "#endif\n"
+    "#if W_AO\n" /* the occlusion takes from the ambient alone; scene_ao_debug 1 shows it */
+    "  {\n"
+    "    float ao = pow(ao_at(i_aop), A.k.x);\n"
+    "    if (A.k.z > 0.5) { oc = vec4(vec3(ao), 1.0); return; }\n"
+    "    c -= amb * (1.0 - ao);\n"
+    "  }\n"
+    "#endif\n"
+    "#if W_GI\n" /* scene_gi_debug: 1 the bounce light on the vertex colour, 2 the ambient's factor, 3 the bounce x 8 */
+    "  if (G.k.z > 0.5) { oc = vec4(sat(G.k.z > 2.5 ? 8.0 * g.rgb : G.k.z > 1.5 ? vec3(g.a) : 2.0 * i_col.rgb * g.rgb), 1.0); return; }\n"
+    "#endif\n"
+    "#if W_SHADOW\n"
+    "  if (S.cam.w > 1.5) {\n" /* scene_shadow_debug: the shadow, tinted by its cascade; dark facing away */
+    "    float d = length(i_wpos - S.cam.xyz);\n"
+    "    uint k = 0u;\n"
+    "    while (k < 3u && d > S.cas[k].x) ++k;\n"
+    "    vec3 tint = k == 0u ? vec3(1.0, 0.55, 0.55) : k == 1u ? vec3(0.55, 1.0, 0.55) : k == 2u ? vec3(0.55, 0.55, 1.0) : vec3(1.0, 1.0, 0.55);\n"
+    "    float nl = dot(normalize(N), S.dir.xyz);\n"
+    "    oc = vec4(nl > 0.0 ? tint * (0.2 + 0.8 * shadow(i_wpos, normalize(N), true)) : vec3(0.05), 1.0);\n"
+    "    return;\n"
+    "  }\n"
+    "  if (any(greaterThan(sun, vec3(0.0)))) {\n"
+    "    shv = shadow(i_wpos, normalize(N), true);\n"
+    "    vec3 Y = vec3(0.2126, 0.7152, 0.0722);\n" /* where the lamps outshine the sun or moon, its shadow fades out */
+    "    shv = mix(shv, 1.0, sat(S.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
+    "    sun *= shv;\n"
+    "  }\n"
+    "  c = sat(c + sun);\n"
+    "#elif W_PIXEL || W_AO\n"
+    "  c = sat(c + sun);\n"
+    "#endif\n"
+    "  vec4 tx = texture(t, i_uv);\n"
+    "  vec4 o = vec4(sat(2.0 * tx.rgb * c), sat(4.0 * tx.a * i_col.a));\n" /* MODULATE2X, MODULATE4X */
+    "#if W_ATEST\n"
+    "  if (!(o.a * 255.0 > F.params.x)) discard;\n"
+    "#endif\n"
+    "#if W_SPEC && W_SHADOW\n" /* the sun's (or moon's) highlight, where it reaches, and the lamps' */
+    "  {\n"
+    "    vec3 Nn = normalize(N), V = normalize(S.cam.xyz - i_wpos);\n"
+    "    float wet = SPc.k.z, lum = dot(tx.rgb, vec3(0.299, 0.587, 0.114));\n"
+    "    float a2 = spec_a2(mix(0.8, 0.5, wet), Nn, SPc.k.w);\n"
+    "    float f0 = mix(0.03, 0.05, wet) * (0.5 + lum);\n"
+    "    float occ = sat(2.0 * dot(i_col.rgb, vec3(0.333)));\n" /* the vertex colour's darkness: corners and crevices */
+    "    vec3 sp = vec3(0.0);\n"
+    "    vec4 s1 = I[D.inst].sun_dir, s2 = I[D.inst].sun2_dir;\n"
+    "    vec3 scol = s2.w > 0.0 && dot(s2.xyz, S.dir.xyz) > dot(s1.xyz, S.dir.xyz) ? I[D.inst].sun2_col.rgb : I[D.inst].sun_col.rgb;\n"
+    "    if (s1.w > 0.0 || s2.w > 0.0) sp += scol * spec_ggx(Nn, V, S.dir.xyz, a2, f0) * shv;\n" /* (the light the shadows are drawn from) */
+    "    for (int k = 0; k < 4 && SPc.k.y > 0.0; ++k) {\n"
+    "      int li = I[D.inst].light[k];\n"
+    "      if (li < 0) continue;\n"
+    "      vec3 v = L[li].pos.xyz - i_wpos;\n"
+    "      float dist = length(v);\n"
+    "      if (dist > L[li].pos.w) continue;\n"
+    "      float at = 1.0 / max(L[li].att.x + L[li].att.y * dist + L[li].att.z * dist * dist, 1e-6);\n"
+    "      sp += L[li].diffuse.rgb * at * SPc.k.y * spec_ggx(Nn, V, v / max(dist, 1e-6), a2, f0);\n"
+    "    }\n"
+    "    if (SPc.pad.x > 0.0) o.rgb += sp * (SPc.k.x * occ);\n" /* an HDR scene: past white, the tonemap's to roll off */
+    "    else o.rgb = 1.0 - (1.0 - o.rgb) * exp(-sp * (SPc.k.x * occ));\n" /* (a soft shoulder: toward white, never flat white) */
+    "  }\n"
+    "#endif\n"
+    "  vec4 fog = I[D.inst].fog;\n"
+    "  if (fog.z > 0.0) o.rgb = mix(I[D.inst].fog_col.rgb, o.rgb, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
+    "  oc = o;\n"
+    "}\n"
+    "#endif\n";
+
+/* --- the scene renderer's characters (gfx_chars_draw, gfx.h) -------------------------------------------------------
+ * gfx_metal.m's CHARS_MSL: skinned from the frame's bone palettes (each vertex its bone-space position and normal for
+ * two bones, weights applied, and their mirror bones), lit per vertex with D3D's fixed function as the game sets it
+ * for a character, then its two texture stages; alpha tested, no culling. W_SHADOW: the sun's (the moon's) light
+ * shaded with the shadows, looked up where the character stood when last frame's layers were drawn (lag); W_AO, W_SPEC,
+ * W_LAMPS and W_GI as the zone's (the lamps per pixel, in place of the state's point lights; the bounce light per
+ * vertex). The vertices (GfxCharVertex)
+ * and uvs are storage buffers, the indices the game's own; the palette, state, mirror, lag and the frame's parameters
+ * are push constants. */
+static const char CHARS_GLSL[] =
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
+    "struct CS { mat4 wvp, world; CL light[4]; vec4 ambient, md, ma, me, tf, fog, fog_col; };\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer PB { mat4 P[]; };\n"
+    "layout(std430, set = 0, binding = 2) readonly buffer SB { CS St[]; };\n"
+    "layout(push_constant) uniform CD { vec4 params; uint palette, state, mirror, pad; vec4 lag; } D;\n" /* params as WF's */
+    WFX_GLSL
+    "#ifdef GFX_VS\n"
+    SKIN_GLSL
+    "layout(location = 0) out vec2 o_uv;\n"
+    "layout(location = 1) out vec4 o_col;\n"
+    "layout(location = 2) out float o_z;\n"
+    "layout(location = 3) out vec3 o_sun;\n"
+    "layout(location = 4) out vec3 o_wp;\n"
+    "layout(location = 5) out vec3 o_wn;\n"
+    "layout(location = 6) out vec3 o_camb;\n" /* the ambient's share, which the occlusion scales */
+    "layout(location = 7) out vec4 o_aop;\n"
+    "layout(location = 8) flat out vec3 o_lmd;\n" /* a lamp's light as the game's would be: the material's scale and colours */
+    "layout(location = 9) flat out vec3 o_lma;\n"
+    "void main() {\n"
+    "  vec3 n, p = skin(n);\n"
+    "  vec3 wp = (St[D.state].world * vec4(p, 1.0)).xyz;\n"
+    "  vec3 wn = normalize((St[D.state].world * vec4(n, 0.0)).xyz);\n" /* NORMALIZENORMALS */
+    "  gl_Position = St[D.state].wvp * vec4(p, 1.0);\n"
+    "  o_z = gl_Position.w;\n"
+    "  gl_Position.x += gl_Position.w * D.params.y;\n"
+    "  gl_Position.y -= gl_Position.w * D.params.z;\n"
+    "  o_uv = uvs[gl_VertexIndex];\n"
+    "  vec3 amb = St[D.state].ambient.rgb, dif = vec3(0.0), sun = vec3(0.0);\n"
+    "#if W_GI\n" /* the bounce light */
+    "  { vec4 g = gi_at(wp, wn); amb = amb * g.a + g.rgb * G.k.x; }\n"
+    "#endif\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    CL l = St[D.state].light[k];\n"
+    "    if (l.dir.w == 0.0) continue;\n"
+    "#if W_LAMPS\n"
+    "    if (l.dir.w > 1.5) continue;\n" /* (point lights: the lamps, per pixel) */
+    "#endif\n"
+    "    float at = 1.0;\n"
+    "    vec3 Ld = l.dir.xyz;\n"
+    "    if (l.dir.w > 1.5) {\n"
+    "      vec3 d = l.pos.xyz - wp;\n"
+    "      float dist = length(d);\n"
+    "      if (dist > l.pos.w) continue;\n"
+    "      Ld = d / max(dist, 1e-6);\n"
+    "      at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
+    "    }\n"
+    "    amb += l.ambient.rgb * at;\n"
+    "    vec3 t = l.diffuse.rgb * at * max(dot(wn, Ld), 0.0);\n"
+    "#if W_SHADOW\n"
+    "    if (l.dir.w < 1.5 && dot(Ld, S.dir.xyz) > 0.98) { sun += t; continue; }\n" /* the sun or moon */
+    "#endif\n"
+    "    dif += t;\n"
+    "  }\n"
+    "  vec3 rest = St[D.state].ma.rgb * amb + St[D.state].md.rgb * dif + St[D.state].me.rgb;\n"
+    "  o_col = vec4(W_SHADOW != 0 || W_AO != 0 ? rest : sat(rest), St[D.state].md.a);\n"
+    "  o_camb = St[D.state].ma.rgb * amb;\n"
+    "#if W_AO\n"
+    "  o_aop = A.pvp * vec4(wp, 1.0);\n"
+    "#else\n"
+    "  o_aop = vec4(0.0);\n"
+    "#endif\n"
+    "  o_sun = St[D.state].md.rgb * sun;\n"
+    "  o_wp = wp, o_wn = wn;\n"
+    "  o_lmd = St[D.state].md.rgb * St[D.state].fog_col.a, o_lma = St[D.state].ma.rgb;\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef GFX_FS\n"
+    "layout(set = 0, binding = 4) uniform sampler2D t;\n"
+    "layout(location = 0) in vec2 i_uv;\n"
+    "layout(location = 1) in vec4 i_col;\n"
+    "layout(location = 2) in float i_z;\n"
+    "layout(location = 3) in vec3 i_sun;\n"
+    "layout(location = 4) in vec3 i_wp;\n"
+    "layout(location = 5) in vec3 i_wn;\n"
+    "layout(location = 6) in vec3 i_camb;\n"
+    "layout(location = 7) in vec4 i_aop;\n"
+    "layout(location = 8) flat in vec3 i_lmd;\n"
+    "layout(location = 9) flat in vec3 i_lma;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "void main() {\n"
+    "  vec4 tx = texture(t, i_uv), tf = St[D.state].tf;\n"
+    "  vec3 col = i_col.rgb, lmp = vec3(0.0);\n"
+    "  float shv = 1.0;\n"
+    "#if W_LAMPS\n"
+    "  {\n"
+    "    vec3 ld = vec3(0.0), la = vec3(0.0);\n"
+    "    lamp_light(gl_FragCoord.xy, i_wp, normalize(i_wn), ld, la, W_SHADOW != 0 ? i_wp + D.lag.xyz : i_wp, false);\n"
+    "    lmp = i_lmd * ld + i_lma * la;\n"
+    "    col += lmp;\n"
+    "  }\n"
+    "#endif\n"
+    "#if W_AO\n"
+    "  {\n"
+    "    float ao = pow(ao_at(i_aop), A.k.y);\n"
+    "    if (A.k.z > 0.5) { oc = vec4(vec3(ao), 1.0); return; }\n"
+    "    col -= i_camb * (1.0 - ao);\n"
+    "    if (W_SHADOW == 0) col = sat(col);\n"
+    "  }\n"
+    "#endif\n"
+    "#if W_SHADOW\n"
+    "  vec3 sun = i_sun;\n"
+    "  if (any(greaterThan(sun, vec3(0.0)))) {\n"
+    "    shv = shadow(i_wp + D.lag.xyz, normalize(i_wn), false);\n" /* (PCSS speckles curved, close self-shadow) */
+    "    vec3 Y = vec3(0.2126, 0.7152, 0.0722);\n" /* the lamps fill it, as the zone's (shadow_fill) */
+    "    shv = mix(shv, 1.0, sat(S.ctx.w * dot(lmp, Y) / max(dot(sun, Y), 1e-4)));\n"
+    "    sun *= shv;\n"
+    "  }\n"
+    "  col = sat(col + sun);\n"
+    "#endif\n"
+    "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * col) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
+    "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"    /* MODULATE2X, then MODULATE4X */
+    "  if (!(a * 255.0 > D.params.x)) discard;\n"
+    "#if W_SPEC && W_SHADOW\n" /* the sun's highlight: its colour from what it lit here (its diffuse over N.L) */
+    "  {\n"
+    "    vec3 Nn = normalize(i_wn), V = normalize(S.cam.xyz - i_wp), Ls = S.dir.xyz;\n"
+    "    vec3 tc = sat(2.0 * tx.rgb * tf.rgb);\n"
+    "    float lum = dot(tc, vec3(0.299, 0.587, 0.114));\n"
+    "    float sa = max(tc.r, max(tc.g, tc.b)) - min(tc.r, min(tc.g, tc.b));\n"
+    "    float m = smoothstep(0.25, 0.6, lum) * (1.0 - smoothstep(0.08, 0.3, sa));\n" /* bright and grey: metal */
+    "    float a2 = spec_a2(mix(0.7, 0.3, m), Nn, SPc.k.w);\n"
+    "    vec3 sc = i_sun / max(sat(dot(Nn, Ls)), 0.2);\n"
+    "    vec3 f = mix(vec3(0.03), tc * 0.6, m);\n"
+    "    float g = spec_ggx(Nn, V, Ls, a2, 1.0);\n" /* (Fresnel's own, tinted below) */
+    "    vec3 Hh = normalize(V + Ls);\n"
+    "    float fr = pow(1.0 - sat(dot(V, Hh)), 5.0);\n"
+    "    vec3 Fr = f + (1.0 - f) * fr;\n"
+    "    if (SPc.pad.x > 0.0) c += sc * g * Fr * (SPc.k.x * shv);\n"
+    "    else c = 1.0 - (1.0 - c) * exp(-sc * g * Fr * (SPc.k.x * shv));\n"
+    "  }\n"
+    "#endif\n"
+    "  vec4 fog = St[D.state].fog;\n"
+    "  if (fog.z > 0.0) c = mix(St[D.state].fog_col.rgb, c, sat((fog.y - i_z) / max(fog.y - fog.x, 1e-6)));\n"
+    "  oc = vec4(c, a);\n"
+    "}\n"
+    "#endif\n";
+
+/* --- the shadows' casters: the zone into a cascade of its layer (C_CHARS 0: depth alone, or alpha tested as the walk
+ * tests it, MODULATE4X GREATER 0x60), the characters into a layer of theirs (C_CHARS 1, alpha tested as they are drawn).
+ * F.M is the layer's matrix; the zone's world matrices are a storage buffer (inst a push constant) */
+static const char CAST_GLSL[] =
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "layout(std140, set = 0, binding = 0) uniform CF { mat4 M; vec4 params; } F;\n" /* params.x: the alpha reference */
+    "#if C_CHARS\n"
+    "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
+    "struct CS { mat4 wvp, world; CL light[4]; vec4 ambient, md, ma, me, tf, fog, fog_col; };\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer PB { mat4 P[]; };\n"
+    "layout(std430, set = 0, binding = 2) readonly buffer SB { CS St[]; };\n"
+    "layout(push_constant) uniform CD { vec4 params; uint palette, state, mirror, pad; } D;\n"
+    "#else\n"
+    "layout(std430, set = 0, binding = 1) readonly buffer WB { mat4 W[]; };\n"
+    "layout(push_constant) uniform ZD { uint inst; } D;\n"
+    "#endif\n"
+    "#ifdef GFX_VS\n"
+    "layout(location = 0) out vec2 o_uv;\n"
+    "layout(location = 1) out float o_a;\n"
+    "#if C_CHARS\n"
+    SKIN_GLSL
+    "void main() {\n"
+    "  vec3 n, p = skin(n);\n"
+    "  gl_Position = F.M * (St[D.state].world * vec4(p, 1.0));\n"
+    "  CLAMP_Z;\n"
+    "  o_uv = uvs[gl_VertexIndex];\n"
+    "  o_a = St[D.state].tf.a;\n"
+    "}\n"
+    "#else\n"
+    "layout(std430, set = 0, binding = 3) readonly buffer VB { uint vb[]; };\n"
+    "void main() {\n"
+    "  uint b = uint(gl_VertexIndex) * 9u;\n"
+    "  vec3 pos = uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u]));\n"
+    "  gl_Position = F.M * (W[D.inst] * vec4(pos, 1.0));\n"
+    "  CLAMP_Z;\n"
+    "  o_uv = uintBitsToFloat(uvec2(vb[b + 7u], vb[b + 8u]));\n"
+    "  o_a = unpackUnorm4x8(vb[b + 6u]).w;\n"
+    "}\n"
+    "#endif\n"
+    "#endif\n"
+    "#ifdef GFX_FS\n"
+    "layout(set = 0, binding = 4) uniform sampler2D t;\n"
+    "layout(location = 0) in vec2 i_uv;\n"
+    "layout(location = 1) in float i_a;\n"
+    "void main() {\n"
+    "#if C_CHARS\n"
+    "  float a = sat(4.0 * sat(2.0 * texture(t, i_uv).a * i_a) * i_a);\n"
+    "  if (!(a * 255.0 > F.params.x)) discard;\n"
+    "#else\n"
+    "  if (!(sat(4.0 * texture(t, i_uv).a * i_a) * 255.0 > 96.0)) discard;\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n";
+
+/* the zone's and characters' bindings (push descriptors): 0 the frame's uniforms (WF; a caster's CF), 1 the instances or
+ * the bone palettes (a zone caster's world matrices), 2 the lights or the characters' states, 3 the vertices, 4 the
+ * texture, 5 the characters' uvs; with the shadows 6 their uniforms (SH), 7-9 the zone's, the characters' and the
+ * fitted maps, 10 the comparing sampler, 11 the gathering one; with the occlusion 12 its uniforms (AU), 13 the result;
+ * with the highlights 14 theirs (SP); with the lamps 15 the lamps, 16 the tiles, 17 their uniforms (LU), 18-19 the
+ * characters' and the zone's cubes, 20 the cubes' faces, 21 their comparing sampler */
+enum
+{
+    W_FRAME = 0,
+    W_INST = 1,
+    W_LIGHTS = 2,
+    W_VB = 3,
+    W_TEX = 4,
+    W_UV = 5,
+    W_SH = 6,
+    W_ZM = 7,
+    W_CM = 8,
+    W_CT = 9,
+    W_CS = 10,
+    W_PS = 11,
+    W_AU = 12,
+    W_AOT = 13,
+    W_SP = 14,
+    W_LL = 15,
+    W_TL = 16,
+    W_LU = 17,
+    W_LSM = 18,
+    W_ZLSM = 19,
+    W_LSMM = 20,
+    W_LCS = 21,
+    W_GU = 22, /* the bounce light (GI_SHADE_GLSL): its uniforms, the probes' states, the atlases */
+    W_GPS = 23,
+    W_GIR = 24,
+    W_GID = 25,
+    W_COUNT = 26,
+};
+
+static struct
+{
+    int tried, ok;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    /* the zone's (by W_PIXEL, W_ATEST, W_SHADOW, W_AO, W_SPEC, W_LAMPS, W_GI) and the characters' (by W_SHADOW, W_AO,
+     * W_SPEC, W_LAMPS, W_GI) functions, made on first use: [stage][key] */
+    VkShaderModule mod[2][256];
+    VkShaderModule cast[2][2]; /* the casters': [stage][C_CHARS] */
+    struct
+    {
+        uint32_t key[2];
+        VkPipeline p;
+    } pipe[256];
+    uint32_t npipe;
+} g_world;
+
+static const VkDynamicState WORLD_DYNAMIC[] = {
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+    VK_DYNAMIC_STATE_DEPTH_BIAS,
+    VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
+    VK_DYNAMIC_STATE_CULL_MODE,
+    VK_DYNAMIC_STATE_FRONT_FACE,
+    VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY,
+    VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+    VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+    VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+};
+
+static int world_init(void)
+{
+    if (g_world.tried)
+        return g_world.ok;
+    g_world.tried = 1;
+    VkDescriptorSetLayoutBinding b[W_COUNT];
+    const VkShaderStageFlags both = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    b[W_FRAME] = (VkDescriptorSetLayoutBinding){ W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    b[W_INST] = (VkDescriptorSetLayoutBinding){ W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL };
+    b[W_LIGHTS] = (VkDescriptorSetLayoutBinding){ W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL };
+    b[W_VB] = (VkDescriptorSetLayoutBinding){ W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    b[W_TEX] = (VkDescriptorSetLayoutBinding){ W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_UV] = (VkDescriptorSetLayoutBinding){ W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL };
+    b[W_SH] = (VkDescriptorSetLayoutBinding){ W_SH, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    for (uint32_t i = W_ZM; i <= W_CT; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_CS] = (VkDescriptorSetLayoutBinding){ W_CS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_PS] = (VkDescriptorSetLayoutBinding){ W_PS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_AU] = (VkDescriptorSetLayoutBinding){ W_AU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    b[W_AOT] = (VkDescriptorSetLayoutBinding){ W_AOT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_SP] = (VkDescriptorSetLayoutBinding){ W_SP, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LL] = (VkDescriptorSetLayoutBinding){ W_LL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL }; /* (the glows' too) */
+    b[W_TL] = (VkDescriptorSetLayoutBinding){ W_TL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LU] = (VkDescriptorSetLayoutBinding){ W_LU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LSM] = (VkDescriptorSetLayoutBinding){ W_LSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_ZLSM] = (VkDescriptorSetLayoutBinding){ W_ZLSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LSMM] = (VkDescriptorSetLayoutBinding){ W_LSMM, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_LCS] = (VkDescriptorSetLayoutBinding){ W_LCS, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[W_GU] = (VkDescriptorSetLayoutBinding){ W_GU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, NULL };
+    b[W_GPS] = (VkDescriptorSetLayoutBinding){ W_GPS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, both, NULL };
+    b[W_GIR] = (VkDescriptorSetLayoutBinding){ W_GIR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, both, NULL };
+    b[W_GID] = (VkDescriptorSetLayoutBinding){ W_GID, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, both, NULL };
+    VkPushConstantRange pcr = { both, 0, 48 };
+    push_layout(b, W_COUNT, &pcr, &g_world.dsl, &g_world.layout);
+    g_world.ok = g_world.dsl && g_world.layout;
+    return g_world.ok;
+}
+
+/* the effects a zone's or characters' pipeline has (the GLSL's defines): WK_* bits */
+enum
+{
+    WK_PIXEL = 1,
+    WK_ATEST = 2,
+    WK_SHADOW = 4,
+    WK_AO = 8,
+    WK_SPEC = 16,
+    WK_LAMPS = 32,
+    WK_GI = 64,
+};
+
+/* one stage of the zone's (chars 0) or the characters' (1) functions, compiled on first use (k: WK_*; the characters'
+ * are neither per pixel nor alpha tested by a define) */
+static VkShaderModule world_module(int chars, uint32_t k, int fragment)
+{
+    if (chars)
+        k &= ~(uint32_t)(WK_PIXEL | WK_ATEST);
+    VkShaderModule* m = &g_world.mod[fragment][(chars ? 128u : 0u) | k];
+    if (*m)
+        return *m;
+    char d[224];
+    snprintf(d, sizeof d,
+        "#define W_PIXEL %d\n#define W_ATEST %d\n#define W_SHADOW %d\n#define W_AO %d\n#define W_SPEC %d\n#define W_LAMPS %d\n"
+        "#define W_GI %d\n",
+        !!(k & WK_PIXEL), !!(k & WK_ATEST), !!(k & WK_SHADOW), !!(k & WK_AO), !!(k & WK_SPEC), !!(k & WK_LAMPS), !!(k & WK_GI));
+    *m = compile_with(d, chars ? CHARS_GLSL : WORLD_GLSL, fragment);
+    if (!*m)
+        fprintf(stderr, "[recomp] gfx: scene renderer %s functions failed\n", chars ? "characters'" : "zone's");
+    return *m;
+}
+
+/* a pipeline into the current targets: the zone's or the characters', with the effects k (WK_*), blended or not */
+static VkPipeline world_pipeline(int chars, uint32_t k, int blend, GfxTex* depth)
+{
+    uint32_t df = depth ? (uint32_t)depth->vf : 0, sf = depth && depth->has_stencil ? df : 0;
+    uint32_t key[2] = { (uint32_t)chars | (uint32_t)blend << 1 | (uint32_t)(sf != 0) << 2 | k << 3 | (uint32_t)g_rt->vf << 12, df };
+    for (uint32_t i = 0; i < g_world.npipe; ++i)
+        if (g_world.pipe[i].key[0] == key[0] && g_world.pipe[i].key[1] == key[1])
+            return g_world.pipe[i].p;
+    if (g_world.npipe == sizeof g_world.pipe / sizeof g_world.pipe[0])
+        return VK_NULL_HANDLE;
+    VkShaderModule vs = world_module(chars, k, 0), fs = world_module(chars, k, 1);
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vs && fs)
+    {
+        VkPipelineColorBlendAttachmentState bs = { 0 };
+        bs.colorWriteMask = 0xF;
+        if (blend)
+        {
+            bs.blendEnable = VK_TRUE;
+            bs.srcColorBlendFactor = bs.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            bs.dstColorBlendFactor = bs.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        }
+        p = make_pipeline(vs, fs, g_world.layout, &bs, g_rt->vf, (VkFormat)df, (VkFormat)sf, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            VK_POLYGON_MODE_FILL, WORLD_DYNAMIC, sizeof WORLD_DYNAMIC / sizeof WORLD_DYNAMIC[0], 0);
+    }
+    /* (a failure is kept too: not tried again every draw) */
+    g_world.pipe[g_world.npipe].key[0] = key[0], g_world.pipe[g_world.npipe].key[1] = key[1];
+    g_world.pipe[g_world.npipe++].p = p;
+    return p;
+}
+
+static void desc_write(VkWriteDescriptorSet* w, uint32_t binding, VkDescriptorType type, const VkDescriptorBufferInfo* bi,
+    const VkDescriptorImageInfo* ii)
+{
+    *w = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    w->dstBinding = binding;
+    w->descriptorCount = 1;
+    w->descriptorType = type;
+    w->pBufferInfo = bi;
+    w->pImageInfo = ii;
+}
+
+/* an acceleration structure's write: wa holds it, until the push */
+static void as_write(VkWriteDescriptorSet* w, uint32_t binding, VkWriteDescriptorSetAccelerationStructureKHR* wa,
+    const VkAccelerationStructureKHR* as)
+{
+    *wa = (VkWriteDescriptorSetAccelerationStructureKHR){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+    wa->accelerationStructureCount = 1, wa->pAccelerationStructures = as;
+    desc_write(w, binding, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, NULL, NULL);
+    w->pNext = wa;
+}
+
+/* the state the zone's and characters' draws share: no stencil, front faces clockwise (D3D's), the depth tested as
+ * the game tests its zone (LESSEQUAL) when there is one, no scissor */
+static void world_state(GfxTex* depth)
+{
+    VkCommandBuffer cb = g_cb;
+    int32_t none[4] = { 0, 0, 0, 0 };
+    set_scissor(none);
+    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetDepthTestEnable(cb, depth ? VK_TRUE : VK_FALSE);
+    vkCmdSetDepthCompareOp(cb, VK_COMPARE_OP_LESS_OR_EQUAL);
+    vkCmdSetDepthBiasEnable(cb, VK_TRUE);
+}
+
+int gfx_world_supported(void) { return g_dev != VK_NULL_HANDLE; }
+
+void gfx_world_time(int pass)
+{
+    if (!g_dev || !gfx_pass_timing_on())
+        return;
+    end_pass();
+    g_pass_next = pass == 1 ? GFX_PASS_WORLD : pass == 2 ? GFX_PASS_CHARS : -1;
+}
+
+/* --- the lamps (scene_lamps): gfx_lamps hands the frame's; binned into 64-pixel tiles of the scene's viewport at the
+ * frame's first zone batch (its camera), the list and the tiles in the frame's ring (gfx_metal.m's, its notes there) */
+
+/* a zone item kept for the lamps' zone cubes at the frame's end: its buffer, texture and sampler as handles (the game
+ * may destroy the GfxBuf meanwhile; the handles live until the frame is done) */
+typedef struct LampZoneItem
+{
+    VkBuffer vb;
+    VkImageView tex; /* alpha tested with it; VK_NULL_HANDLE: depth alone */
+    VkSampler samp;
+    uint32_t first, count, prim, inst;
+} LampZoneItem;
+
+static struct
+{
+    GfxWorldLight l[256];
+    uint32_t n;
+    uint64_t set, binned;            /* the frames they were set, binned */
+    VkBuffer lb, tb;                 /* the lamps (LL), the tiles (32 16-bit words each: count, indices) */
+    VkDeviceSize lo, to, lsz, tsz;
+    float lu[12];                    /* LU: viewport, tiles across, down; shadows; debug; the zone's cubes, size, taps */
+    float vp[16];                    /* the camera's view x projection, for the glows */
+    float cam[3];
+    /* the characters' shadows from the nearest lamps (scene_lamp_shadows): drawn at a frame's end into a cube a lamp
+     * (six layers each of lsm), read by the next frame; each its lamp's place, to find it again */
+    GfxTex *lsm, *dummy;
+    uint32_t lsize, nsh;
+    float shpos[4][4];               /* the shadowed lamps' places (w: range) */
+    float shm[24][16];               /* their faces' matrices */
+    uint64_t sh_serial;              /* the frame they were drawn */
+    /* the zone into the same lamps' cubes (zlsm, Depth32F), kept: drawn again when the shadowed lamps change or every
+     * 600 frames (a door, a lift) */
+    GfxTex* zlsm;
+    float zpos[4][4];
+    uint32_t zn;
+    uint64_t z_serial;
+    /* the frame's opaque zone items, every batch's, and their world matrices, for the cubes at the frame's end */
+    LampZoneItem* zi;
+    float (*zw)[16];
+    uint32_t nzi, czi, nzw, czw;
+    uint64_t zc_serial;
+} g_lamps;
+
+void gfx_lamps(const GfxWorldLight* l, uint32_t n)
+{
+    g_lamps.n = n > 256 ? 256 : n;
+    if (g_lamps.n)
+        memcpy(g_lamps.l, l, g_lamps.n * sizeof *l);
+    g_lamps.set = g_serial;
+}
+
+static int g_fixed_light; /* the zone's light is fixed (scene.c, the weather record): the modern fog a light dust */
+void gfx_set_fixed_light(int fixed) { g_fixed_light = fixed != 0; }
+static int g_weather = -1; /* the zone's weather (host64, the server's packets): the ground mist and its drift */
+void gfx_set_weather(int weather) { g_weather = weather; }
+
+static void lamp_shadows_draw(const GfxCharFrame* cf, VkDescriptorBufferInfo pal, VkDescriptorBufferInfo st);
+static void lamp_zone_cubes(void);
+
+/* --- the scene renderer's sun and moon shadows (gfx_shadow_begin, gfx.h): gfx_metal.m's, on Vulkan ----------------
+ * Two depth arrays a cascade a layer: the zone's, 32-bit and kept (a layer drawn again only when host/scene.c says),
+ * and the characters', 16-bit, drawn at each frame's end into the first cascades and a fitted layer round those near
+ * the camera, read by the next frame. Casters are drawn with no culling, the depth clamped rather than clipped where
+ * the device can (what stands nearer the light than the cascade's box still casts) and a slope bias; the receivers'
+ * side (SHADOW_GLSL) adds a normal offset. The passes are the frame's command buffer's, between the game's. */
+
+/* the shadows' uniforms for the draws, as SHADOW_GLSL's SH */
+typedef struct ShU
+{
+    float m[GFX_SHADOW_CASCADES][16];
+    float cas[GFX_SHADOW_CASCADES][4];  /* reach from the camera, texel, depth range (world units), valid */
+    float cbox[GFX_SHADOW_CASCADES][4]; /* the characters in the map (x0, y0, x1, y1), with a margin */
+    float dir[4], cam[4];
+    float info[4]; /* cascades, of them the characters', strength, 1 / size */
+    float cm[GFX_SHADOW_CASCADES][16]; /* the characters' layers (last frame's): 0 fitted round those near the camera, 1
+                                        * and on the first cascades' */
+    float ctx[4];  /* world units a texel in the fitted layer (0: none), 1 / its size, the penumbra's width (1 the sun's), how
+                    * the lamps fill the shadow */
+    float pk[4];   /* soft shadows: the light's tan(angular radius) (0: off), the blocker search's taps, the filter's */
+} ShU;
+
+/* a character's draw as the shadow passes take it at the frame's end: its buffers' and texture's handles as they were
+ * (the game may let them go or fill them anew first: both wait for the frame) */
+typedef struct ShItem
+{
+    VkBuffer vb, uv, ib;
+    VkImageView tex;
+    VkSampler samp;
+    uint32_t index_size, first, count, prim, palette, state, mirror;
+    float at[3]; /* its place, world: its first bone through its state's WORLD */
+    uintptr_t key;
+} ShItem;
+
+static struct
+{
+    int on; /* this batch's draws are shadowed */
+    ShU u;
+    GfxTex *zmap, *cmap, *cmt; /* the zone's layers (kept); the characters' in the first cascades, half size; the fitted one */
+    uint32_t size, fsize;
+    VkPipeline zone[2], chars; /* depth alone, alpha tested; the characters' */
+    int tried;
+    float freach;        /* the fitted layer's reach from the camera */
+    uint64_t cframe;     /* the frame of the last batch */
+    uint32_t cdone;      /* of the frame's characters (the host's list grows batch by batch), those taken so far */
+    float near_lo[2], near_hi[2];       /* the frame's near characters in cascade 0's map */
+    float cbox[GFX_SHADOW_CASCADES][4]; /* the frame's characters in each cascade's map */
+    /* the frame's characters for the layers drawn at its end: its last batch (the host's palette and states hold until
+     * the next frame) and every batch's items */
+    GfxShadowFrame lf;
+    GfxCharFrame lc;
+    ShItem* items;
+    uint32_t nitems, capitems;
+    uint32_t lnch;
+    uint64_t lserial;
+    /* the layers drawn at a frame's end, read by the next frame */
+    struct
+    {
+        uint64_t serial;  /* the frame they hold */
+        uint32_t n;       /* cascade layers */
+        float cm[2][16];  /* their matrices */
+        float cbox[2][4]; /* their characters' boxes, with a margin */
+        float tm[16], ttx, chs; /* the fitted layer's matrix, texel (0 none), half size */
+        /* where each character's part (its vertex buffer and mirror) was: open addressing, cap a power of two */
+        uintptr_t* key;
+        float (*at)[3];
+        uint32_t cap;
+    } lag;
+} g_shd;
+static uint32_t g_shd_drawn[2]; /* character draws into the cascades and the fitted layer since the last log line */
+
+static void char_at(const GfxCharFrame* cf, const GfxCharItem* it, float at[3])
+{
+    const float* r = cf->palette + 16 * (size_t)it->palette + 12;
+    const float* W = cf->state[it->state].world;
+    for (int a = 0; a < 3; ++a)
+        at[a] = r[0] * W[a] + r[1] * W[4 + a] + r[2] * W[8 + a] + W[12 + a];
+}
+
+static uint32_t char_hash(uintptr_t k) { return (uint32_t)((k >> 4) * 0x9E3779B97F4A7C15ull >> 32); }
+static uintptr_t char_key(const GfxCharItem* it) { return (uintptr_t)it->vb ^ (uintptr_t)(it->mirror != 0); }
+
+/* how far a character's part moved since last frame's layers were drawn (where it was, less where it is): its shadow
+ * lookups go back by it, so it is shadowed as it stood then; 0 when it wasn't there (or jumped) */
+static void char_lag(const GfxCharFrame* cf, const GfxCharItem* it, float d[4])
+{
+    d[0] = d[1] = d[2] = d[3] = 0.0f;
+    if (!g_shd.lag.cap || g_shd.lag.serial + 1 != g_serial)
+        return;
+    uintptr_t k = char_key(it);
+    for (uint32_t h = char_hash(k) & (g_shd.lag.cap - 1);; h = (h + 1) & (g_shd.lag.cap - 1))
+    {
+        if (!g_shd.lag.key[h])
+            return;
+        if (g_shd.lag.key[h] == k)
+        {
+            float now[3];
+            char_at(cf, it, now);
+            float dx = g_shd.lag.at[h][0] - now[0], dy = g_shd.lag.at[h][1] - now[1], dz = g_shd.lag.at[h][2] - now[2];
+            if (dx * dx + dy * dy + dz * dz < 1.0f)
+                d[0] = dx, d[1] = dy, d[2] = dz;
+            return;
+        }
+    }
+}
+
+/* the host's items [from, nitem) taken (marked used this frame, so a later update renames rather than overwrites) */
+static void shadow_items_add(const GfxCharFrame* cf, uint32_t from)
+{
+    if (g_shd.nitems + (cf->nitem - from) > g_shd.capitems)
+        g_shd.capitems = (g_shd.nitems + (cf->nitem - from)) * 2,
+        g_shd.items = (ShItem*)realloc(g_shd.items, g_shd.capitems * sizeof *g_shd.items);
+    for (uint32_t i = from; i < cf->nitem; ++i)
+    {
+        const GfxCharItem* it = &cf->item[i];
+        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+            continue;
+        it->vb->used = it->uv->used = it->ib->used = it->tex->used = g_serial;
+        it->tex->rec = g_cb_index;
+        ShItem* o = &g_shd.items[g_shd.nitems++];
+        o->vb = it->vb->b, o->uv = it->uv->b, o->ib = it->ib->b, o->tex = it->tex->view;
+        o->samp = sampler(&it->samp);
+        o->index_size = it->index_size, o->first = it->first, o->count = it->count, o->prim = it->prim;
+        o->palette = it->palette, o->state = it->state, o->mirror = it->mirror;
+        char_at(cf, it, o->at);
+        o->key = char_key(it);
+    }
+}
+
+/* a depth array of n layers, size across (an attachment view a layer, attachment_view's face), cleared to 1 */
+static GfxTex* tex_array(VkFormat vf, uint32_t size, uint32_t n)
+{
+    return tex_make(GFX_TEX_2D, F_D16, size, size, 1, GFX_USE_DEPTH, vf, 1, n, 0);
+}
+
+/* a caster pipeline: the zone's (chars 0; atest: with its fragment function) into Depth32F, the characters' into Depth16 */
+static VkPipeline cast_pipeline(int chars, int atest)
+{
+    VkShaderModule m[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    for (int s = 0; s < 2; ++s)
+    {
+        if (s && !atest)
+            break;
+        VkShaderModule* p = &g_world.cast[s][chars];
+        /* without depth clamp, a caster nearer the light than the cascade is flattened onto its near plane instead of
+         * clipped (the cascades are orthographic: z is the depth) */
+        char d[96];
+        snprintf(d, sizeof d, "#define C_CHARS %d\n#define CLAMP_Z %s\n", chars, g_has_clamp ? "" : "gl_Position.z = max(gl_Position.z, 0.0)");
+        if (!*p)
+            *p = compile_with(d, CAST_GLSL, s);
+        m[s] = *p;
+    }
+    if (!m[0] || (atest && !m[1]))
+        return VK_NULL_HANDLE;
+    return make_pipeline(m[0], m[1], g_world.layout, NULL, VK_FORMAT_UNDEFINED, chars ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_UNDEFINED, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, WORLD_DYNAMIC,
+        sizeof WORLD_DYNAMIC / sizeof WORLD_DYNAMIC[0], 2);
+}
+
+static int shadow_init(uint32_t size)
+{
+    if (!world_init())
+        return 0;
+    if (!g_shd.tried)
+    {
+        g_shd.tried = 1;
+        g_shd.zone[0] = cast_pipeline(0, 0);
+        g_shd.zone[1] = cast_pipeline(0, 1);
+        g_shd.chars = cast_pipeline(1, 1);
+        if (!g_has_clamp)
+            fprintf(stderr, "[recomp] gfx: no depth clamp: the scene renderer's casters nearer the light than a cascade are flattened onto it\n");
+    }
+    if (!g_shd.zone[0] || !g_shd.zone[1] || !g_shd.chars)
+        return 0;
+    uint32_t fsz = (uint32_t)g_fxs.scene_shadow_fit_size;
+    fsz = fsz < 256 ? 256 : fsz > 4096 ? 4096 : fsz;
+    if (g_shd.size != size || g_shd.fsize != fsz || !g_shd.zmap || !g_shd.cmap || !g_shd.cmt)
+    {
+        end_pass(); /* (a pass of the game's may hold them) */
+        if (g_shd.size != size || !g_shd.zmap) /* the zone's layers are kept: only a new size draws them anew */
+            gfx_tex_destroy(g_shd.zmap), g_shd.zmap = tex_array(VK_FORMAT_D32_SFLOAT, size, GFX_SHADOW_CASCADES);
+        gfx_tex_destroy(g_shd.cmap), gfx_tex_destroy(g_shd.cmt);
+        g_shd.cmap = tex_array(VK_FORMAT_D16_UNORM, size / 2, GFX_SHADOW_CASCADES);
+        g_shd.cmt = tex_array(VK_FORMAT_D16_UNORM, fsz, 1);
+        g_shd.size = size, g_shd.fsize = fsz;
+        g_shd.cframe = 0, g_shd.lag.serial = 0, g_shd.lserial = 0;
+    }
+    return g_shd.zmap && g_shd.cmap && g_shd.cmt;
+}
+
+/* a depth pass into one layer of a shadow map, cleared, y up as the draws' (set_viewport): the map's rows as
+ * SHADOW_GLSL reads them; the casters' state set; its timestamp's index (ts_end's). next: a layer after another of the
+ * same group, which wrote apart from it and read nothing since - no barrier between them */
+static int shadow_pass_begin(GfxTex* t, uint32_t layer, int pass, int next)
+{
+    if (next)
+        g_dirty = 0;
+    VkViewport v = { 0, (float)t->h, (float)t->w, -(float)t->h, 0, 1 };
+    int ts = pass_open(t, layer, 0, VK_ATTACHMENT_LOAD_OP_CLEAR, &v, pass);
+    VkCommandBuffer cb = g_cb;
+    vkCmdSetCullMode(cb, VK_CULL_MODE_NONE);
+    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetDepthTestEnable(cb, VK_TRUE);
+    vkCmdSetDepthWriteEnable(cb, VK_TRUE);
+    vkCmdSetDepthCompareOp(cb, VK_COMPARE_OP_LESS_OR_EQUAL);
+    vkCmdSetDepthBiasEnable(cb, VK_TRUE);
+    vkCmdSetDepthBias(cb, 0.0f, 0.0f, 2.0f);
+    return ts;
+}
+
+/* a caster layer's draws (the cascades', the lamps' cubes'): its uniforms (W_FRAME: the layer's matrix, the alpha
+ * reference), the zone's instances' matrices or the characters' palette (W_INST) and states (W_LIGHTS), and what the
+ * last draw left bound */
+typedef struct Cast
+{
+    VkDescriptorBufferInfo bi[3];
+    float alpha_ref;
+    int pipe, topo;
+    uint32_t drawn;
+} Cast;
+
+/* the layer's uniforms; p bound for every draw (the characters'), or VK_NULL_HANDLE (the zone's: chosen per draw) */
+static void cast_begin(Cast* c, const float* m, float alpha_ref, VkDescriptorBufferInfo inst, VkDescriptorBufferInfo states,
+    VkPipeline p)
+{
+    float cu[20];
+    memcpy(cu, m, 64);
+    cu[16] = alpha_ref, cu[17] = cu[18] = cu[19] = 0.0f;
+    c->bi[0] = ring_put(cu, sizeof cu), c->bi[1] = inst, c->bi[2] = states;
+    c->alpha_ref = alpha_ref, c->pipe = c->topo = -1, c->drawn = 0;
+    if (p)
+        vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+}
+
+static void cast_topo(Cast* c, uint32_t prim)
+{
+    int strip = prim == GFX_TRIANGLESTRIP;
+    if (strip != c->topo)
+        vkCmdSetPrimitiveTopology(g_cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), c->topo = strip;
+}
+
+/* a zone caster: alpha tested with tex (and samp) where there is one, else depth alone */
+static void cast_zone(Cast* c, VkBuffer vb, VkImageView tex, VkSampler samp, uint32_t inst, uint32_t first, uint32_t count,
+    uint32_t prim)
+{
+    VkCommandBuffer cb = g_cb;
+    int at = tex != VK_NULL_HANDLE;
+    if (at != c->pipe)
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_shd.zone[at]), c->pipe = at;
+    cast_topo(c, prim);
+    VkDescriptorBufferInfo vbi = { vb, 0, VK_WHOLE_SIZE };
+    VkDescriptorImageInfo ii = { samp, tex, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w[4];
+    desc_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &c->bi[0], NULL);
+    desc_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &c->bi[1], NULL);
+    desc_write(&w[2], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &vbi, NULL);
+    if (at)
+        desc_write(&w[3], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, at ? 4 : 3, w);
+    vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &inst);
+    vkCmdDraw(cb, vertex_count(prim, count), 1, first, 0);
+    ++c->drawn;
+}
+
+/* a character caster (g_shd.chars bound by cast_begin) */
+static void cast_char(Cast* c, const ShItem* it)
+{
+    VkCommandBuffer cb = g_cb;
+    cast_topo(c, it->prim);
+    VkDescriptorBufferInfo vbi = { it->vb, 0, VK_WHOLE_SIZE }, ubi = { it->uv, 0, VK_WHOLE_SIZE };
+    VkDescriptorImageInfo ii = { it->samp, it->tex, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w[6];
+    desc_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &c->bi[0], NULL);
+    desc_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &c->bi[1], NULL);
+    desc_write(&w[2], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &c->bi[2], NULL);
+    desc_write(&w[3], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &vbi, NULL);
+    desc_write(&w[4], W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &ubi, NULL);
+    desc_write(&w[5], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 6, w);
+    struct
+    {
+        float params[4];
+        uint32_t palette, state, mirror, pad;
+    } pc = { { c->alpha_ref, 0.0f, 0.0f, 0.0f }, it->palette, it->state, it->mirror, 0 };
+    vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+    vkCmdBindIndexBuffer(cb, it->ib, 0, it->index_size == 4 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    vkCmdDrawIndexed(cb, vertex_count(it->prim, it->count), 1, it->first, 0, 0);
+    ++c->drawn;
+}
+
+/* one cascade of the zone's layer drawn again */
+static uint32_t shadow_zone(const GfxShadowFrame* f)
+{
+    int ts = shadow_pass_begin(g_shd.zmap, (uint32_t)f->redraw, GFX_PASS_SHADOW_ZONE, 0);
+    Cast c = { { { 0 } } };
+    if (f->nitem && f->nworld)
+    {
+        VkDescriptorBufferInfo none = { 0 };
+        cast_begin(&c, f->c[f->redraw].lmat, 0.0f, ring_put(f->world, (size_t)f->nworld * 64), none, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < f->nitem; ++i)
+        {
+            const GfxWorldItem* it = &f->item[i];
+            if (!it->vb || !it->count || it->inst >= f->nworld)
+                continue;
+            int at = (it->flags & GFX_WORLD_ATEST) && it->tex && it->tex->type == GFX_TEX_2D;
+            if (at)
+                it->tex->used = g_serial, it->tex->rec = g_cb_index;
+            it->vb->used = g_serial;
+            cast_zone(&c, it->vb->b, at ? it->tex->view : VK_NULL_HANDLE, at ? sampler(&it->samp) : VK_NULL_HANDLE, it->inst,
+                it->first, it->count, it->prim);
+        }
+    }
+    pass_close(ts);
+    g_cmd_draws += c.drawn;
+    return c.drawn;
+}
+
+/* characters into a characters' map (tex): the frame's taken items, each into the layers of mats. reach NULL: the one
+ * layer, the characters whose place is within two units of its square; else a layer each cascade, a character into
+ * the one its place (its first bone) from the camera falls in and the next (the cascades blend over their last tenth),
+ * none beyond scene_shadow_char_far. A pass a layer (Metal's one layered pass, without a layer from the vertex
+ * function). pal, st: the frame's palette and states in the ring */
+static void shadow_chars_pass(const GfxCharFrame* cf, VkDescriptorBufferInfo pal, VkDescriptorBufferInfo st, const float* cam,
+    GfxTex* tex, const float (*mats)[16], uint32_t nmat, const float* reach)
+{
+    const float* M = mats[0];
+    float lim = 1.0f + 2.0f * sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]); /* the square and two units, in the layer */
+    float far2 = g_fxs.scene_shadow_char_far * g_fxs.scene_shadow_char_far;
+    for (uint32_t layer = 0; layer < nmat; ++layer)
+    {
+        int ts = shadow_pass_begin(tex, layer, GFX_PASS_SHADOW_CHARS, layer > 0);
+        Cast c;
+        cast_begin(&c, mats[layer], cf->alpha_ref, pal, st, g_shd.chars);
+        for (uint32_t i = 0; i < g_shd.nitems; ++i)
+        {
+            const ShItem* it = &g_shd.items[i];
+            const float* r = it->at;
+            if (!reach)
+            {
+                if (fabsf(r[0] * M[0] + r[1] * M[4] + r[2] * M[8] + M[12]) > lim || fabsf(r[0] * M[1] + r[1] * M[5] + r[2] * M[9] + M[13]) > lim)
+                    continue;
+            }
+            else
+            {
+                float dx = r[0] - cam[0], dy = r[1] - cam[1], dz = r[2] - cam[2], d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > far2)
+                    continue;
+                uint32_t base = 0;
+                while (base < nmat && d2 > (reach[base] + 3.0f) * (reach[base] + 3.0f))
+                    ++base;
+                if (base >= nmat || layer < base || layer > base + 1)
+                    continue;
+            }
+            cast_char(&c, it);
+        }
+        pass_close(ts);
+        g_shd_drawn[!reach] += c.drawn;
+        g_cmd_draws += c.drawn;
+    }
+}
+
+/* a fitted layer round the near characters (their extent lo..hi in cascade 0's map, M): its square rounded up to a power
+ * of two (kept in *hs until they outgrow it or fit in a third of it), its centre on whole texels, so it holds still while
+ * the characters do; 0 when there are none */
+static int shadow_fit(const float* M, const float lo[2], const float hi[2], float* hs_kept, float tm[16], float* ttx)
+{
+    if (!(lo[0] <= hi[0] && lo[1] <= hi[1]))
+        return 0;
+    float half0 = 1.0f / sqrtf(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]); /* cascade 0's half size, world */
+    float m = 1.5f / half0, minhs = 2.0f / half0; /* a unit and a half's margin (the places are hips and feet), two at least */
+    float e = 0.5f * fmaxf(hi[0] - lo[0], hi[1] - lo[1]) + m;
+    float hs = *hs_kept > 0.0f ? *hs_kept : 1.0f;
+    if (e > hs || e < hs * (1.0f / 3.0f))
+        hs = exp2f(ceilf(log2f(fmaxf(e, minhs))));
+    hs = hs > 1.0f ? 1.0f : hs < minhs ? minhs : hs;
+    *hs_kept = hs;
+    float tq = 2.0f * hs / (float)g_shd.fsize; /* a texel, in cascade 0's map */
+    float cx = roundf(0.5f * (lo[0] + hi[0]) / tq) * tq, cy = roundf(0.5f * (lo[1] + hi[1]) / tq) * tq;
+    memcpy(tm, M, 64);
+    for (int r = 0; r < 4; ++r)
+        tm[4 * r] = M[4 * r] / hs, tm[4 * r + 1] = M[4 * r + 1] / hs;
+    tm[12] = (M[12] - cx) / hs, tm[13] = (M[13] - cy) / hs;
+    *ttx = 2.0f * hs * half0 / (float)g_shd.fsize;
+    return 1;
+}
+
+/* The characters' layers drawn at the frame's end, after all its draws, from all of the frame's characters: the first
+ * cascades' (half size) and a fitted one round those near the camera. The next frame's zone reads them (its draws come
+ * before any character is known), and so do its characters beyond the near ones, a frame late. */
+static void shadow_frame_end(void)
+{
+    if (g_shd.lserial != g_serial || !g_shd.cmap || !g_shd.lnch)
+        return;
+    const GfxShadowFrame* f = &g_shd.lf;
+    uint32_t n = g_shd.lnch < 2 ? g_shd.lnch : 2;
+    float reach[2];
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* C = f->c[i].lmat;
+        memcpy(g_shd.lag.cm[i], C, 64);
+        reach[i] = f->c[i].radius;
+        float mi = 2.5f * sqrtf(C[0] * C[0] + C[4] * C[4] + C[8] * C[8]); /* two and a half units */
+        g_shd.lag.cbox[i][0] = g_shd.cbox[i][0] - mi, g_shd.lag.cbox[i][1] = g_shd.cbox[i][1] - mi;
+        g_shd.lag.cbox[i][2] = g_shd.cbox[i][2] + mi, g_shd.lag.cbox[i][3] = g_shd.cbox[i][3] + mi;
+    }
+    g_shd.lag.n = n, g_shd.lag.ttx = 0.0f;
+    if (g_fxs.scene_shadow_fit > 0.0f)
+        shadow_fit(f->c[0].lmat, g_shd.near_lo, g_shd.near_hi, &g_shd.lag.chs, g_shd.lag.tm, &g_shd.lag.ttx);
+    /* where each part is, for the next frame's lookups */
+    uint32_t cap = 64;
+    while (cap < 2 * g_shd.nitems)
+        cap *= 2;
+    if (cap > g_shd.lag.cap)
+    {
+        free(g_shd.lag.key), free(g_shd.lag.at);
+        g_shd.lag.key = (uintptr_t*)malloc(cap * sizeof *g_shd.lag.key), g_shd.lag.at = (float (*)[3])malloc(cap * sizeof *g_shd.lag.at);
+        g_shd.lag.cap = cap;
+    }
+    memset(g_shd.lag.key, 0, g_shd.lag.cap * sizeof *g_shd.lag.key);
+    for (uint32_t i = 0; i < g_shd.nitems; ++i)
+    {
+        uintptr_t k = g_shd.items[i].key;
+        uint32_t h = char_hash(k) & (g_shd.lag.cap - 1);
+        while (g_shd.lag.key[h] && g_shd.lag.key[h] != k)
+            h = (h + 1) & (g_shd.lag.cap - 1);
+        g_shd.lag.key[h] = k, memcpy(g_shd.lag.at[h], g_shd.items[i].at, 12);
+    }
+    cmd();
+    const GfxCharFrame* cf = &g_shd.lc;
+    VkDescriptorBufferInfo pal = ring_put(cf->palette, (size_t)cf->nbones * 64);
+    VkDescriptorBufferInfo st = ring_put(cf->state, (size_t)cf->nstate * sizeof(GfxCharState));
+    shadow_chars_pass(cf, pal, st, f->cam, g_shd.cmap, (const float (*)[16])g_shd.lag.cm, n, reach);
+    if (g_shd.lag.ttx > 0.0f)
+        shadow_chars_pass(cf, pal, st, f->cam, g_shd.cmt, (const float (*)[16])g_shd.lag.tm, 1, NULL);
+    lamp_shadows_draw(cf, pal, st);
+    lamp_zone_cubes();
+    g_shd.lag.serial = g_serial;
+    g_shd.lserial = 0;
+    g_shd.nitems = 0; /* (the handles were the frame's: the next takes its own) */
+}
+
+void gfx_shadow_begin(const GfxShadowFrame* f)
+{
+    g_shd.on = 0;
+    if (!g_dev || !f || f->dir[3] <= 0.0f || !f->size || !f->ncascades)
+        return;
+    uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
+    if (!shadow_init(f->size))
+        return;
+    ShU* u = &g_shd.u;
+    memset(u, 0, sizeof *u);
+    uint32_t nc = f->ncascades < GFX_SHADOW_CASCADES ? f->ncascades : GFX_SHADOW_CASCADES;
+    for (uint32_t i = 0; i < nc; ++i)
+    {
+        memcpy(u->m[i], f->c[i].lmat, 64);
+        u->cas[i][0] = f->c[i].radius, u->cas[i][1] = f->c[i].texel, u->cas[i][2] = f->c[i].depth;
+        u->cas[i][3] = f->c[i].valid ? 1.0f : 0.0f;
+    }
+    memcpy(u->dir, f->dir, 16), memcpy(u->cam, f->cam, 16);
+    uint32_t nch = f->chars && f->chars->nitem && f->chars->nbones && f->c[0].valid ? (f->nchar < nc ? f->nchar : nc) : 0;
+    /* The characters' shadows. A frame has a batch for each run of the game's draws between the scene renderer's (a
+     * crowd: several), and the zone's come before any character is known: the characters' layers are drawn at the
+     * frame's end from all of them (shadow_frame_end) and read by the next frame - the zone a frame late, the
+     * characters each as it stood then (char_lag). Here each batch's new characters are taken. */
+    int first = g_shd.cframe != g_serial;
+    if (first || (f->chars && f->chars->nitem < g_shd.cdone))
+    {
+        g_shd.near_lo[0] = g_shd.near_lo[1] = 1e30f, g_shd.near_hi[0] = g_shd.near_hi[1] = -1e30f;
+        for (int i = 0; i < GFX_SHADOW_CASCADES; ++i)
+            g_shd.cbox[i][0] = g_shd.cbox[i][1] = 1e30f, g_shd.cbox[i][2] = g_shd.cbox[i][3] = -1e30f;
+        g_shd.cdone = 0;
+        g_shd.nitems = 0;
+    }
+    g_shd.cframe = g_serial;
+    g_shd.freach = fminf(f->c[0].radius, fmaxf(g_fxs.scene_shadow_fit_reach, 0.0f));
+    uint32_t from = g_shd.nitems;
+    if (nch)
+    {
+        float reach2 = g_shd.freach * g_shd.freach;
+        /* this batch's characters into the boxes: the near ones' extent, each cascade's box (by their places; the
+         * margins take the rest of them) */
+        shadow_items_add(f->chars, g_shd.cdone);
+        for (uint32_t k = from; k < g_shd.nitems; ++k)
+        {
+            const float* p = g_shd.items[k].at;
+            float dx = p[0] - f->cam[0], dy = p[1] - f->cam[1], dz = p[2] - f->cam[2];
+            int near = dx * dx + dy * dy + dz * dz <= reach2;
+            for (uint32_t i = 0; i < nch; ++i)
+            {
+                const float* C = f->c[i].lmat;
+                for (int a = 0; a < 2; ++a)
+                {
+                    float q = p[0] * C[a] + p[1] * C[4 + a] + p[2] * C[8 + a] + C[12 + a];
+                    g_shd.cbox[i][a] = q < g_shd.cbox[i][a] ? q : g_shd.cbox[i][a];
+                    g_shd.cbox[i][2 + a] = q > g_shd.cbox[i][2 + a] ? q : g_shd.cbox[i][2 + a];
+                    if (i == 0 && near)
+                        g_shd.near_lo[a] = q < g_shd.near_lo[a] ? q : g_shd.near_lo[a],
+                        g_shd.near_hi[a] = q > g_shd.near_hi[a] ? q : g_shd.near_hi[a];
+                }
+            }
+        }
+        g_shd.cdone = f->chars->nitem;
+        g_shd.lf = *f, g_shd.lc = *f->chars, g_shd.lf.chars = &g_shd.lc, g_shd.lnch = nch, g_shd.lserial = g_serial;
+    }
+    if (f->redraw >= 0 && f->redraw < (int32_t)nc)
+        shadow_zone(f); /* (between the game's draws: its pass is taken up again after) */
+    /* the characters' layers they read: last frame's, when it drew them */
+    if (g_shd.lag.serial && g_shd.lag.serial + 1 == g_serial)
+    {
+        memcpy(u->cm[0], g_shd.lag.tm, 64);
+        for (uint32_t i = 0; i < g_shd.lag.n; ++i)
+            memcpy(u->cm[1 + i], g_shd.lag.cm[i], 64), memcpy(u->cbox[i], g_shd.lag.cbox[i], 16);
+        u->info[1] = (float)g_shd.lag.n, u->ctx[0] = g_shd.lag.ttx;
+    }
+    u->ctx[1] = 1.0f / (float)g_shd.fsize, u->ctx[2] = f->soft > 1.0f ? f->soft : 1.0f;
+    u->ctx[3] = fmaxf(g_fxs.shadow_fill, 0.0f);
+    int hq = g_fxs.shadow_soft_q >= 1.5f;
+    u->pk[0] = f->soft_tan, u->pk[1] = hq ? 4.0f : 2.0f, u->pk[2] = hq ? 16.0f : 8.0f, u->pk[3] = 0.0f; /* gathers, compares */
+    u->info[0] = (float)nc, u->info[2] = f->strength, u->info[3] = 1.0f / (float)f->size;
+    g_shd.on = 1;
+    if (gfx_profiling)
+    {
+        g_prof.draw_ns += gfx_now_ns() - t0;
+        static uint64_t last;
+        static uint32_t calls;
+        ++calls;
+        uint64_t now = gfx_now_ns();
+        if (!last)
+            last = now;
+        if (now - last > 2000000000ull)
+        {
+            fprintf(stderr, "[recomp] gfx: scene shadows: %u batches, %.1f/%.1f character draws a batch into the cascades/fitted layer\n",
+                calls, calls ? (double)g_shd_drawn[0] / calls : 0.0, calls ? (double)g_shd_drawn[1] / calls : 0.0);
+            last = now, calls = 0, g_shd_drawn[0] = g_shd_drawn[1] = 0;
+        }
+    }
+}
+
+/* the shadows' bindings for a draw (6-11), their uniforms in bi: how many writes */
+static uint32_t shadow_writes(VkWriteDescriptorSet* w, const VkDescriptorBufferInfo* bi, VkDescriptorImageInfo ii[5])
+{
+    ii[0] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, g_shd.zmap->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[1] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, g_shd.cmap->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[2] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, g_shd.cmt->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[3] = (VkDescriptorImageInfo){ g_cmp_samp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+    ii[4] = (VkDescriptorImageInfo){ g_near_samp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+    desc_write(&w[0], W_SH, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, bi, NULL);
+    desc_write(&w[1], W_ZM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &ii[0]);
+    desc_write(&w[2], W_CM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &ii[1]);
+    desc_write(&w[3], W_CT, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &ii[2]);
+    desc_write(&w[4], W_CS, VK_DESCRIPTOR_TYPE_SAMPLER, NULL, &ii[3]);
+    desc_write(&w[5], W_PS, VK_DESCRIPTOR_TYPE_SAMPLER, NULL, &ii[4]);
+    g_shd.zmap->used = g_shd.cmap->used = g_shd.cmt->used = g_serial;
+    return 6;
+}
+
+/* the shadows' uniforms into the ring, when the batch is shadowed */
+static int shadow_uniforms(VkDescriptorBufferInfo* bi)
+{
+    if (!g_shd.on)
+        return 0;
+    static RingSame k;
+    *bi = ring_same(&k, &g_shd.u, sizeof g_shd.u);
+    return 1;
+}
+
+/* A camera cut (gfx_metal.m's cam_cut_note, its note there): the view jumped (first person and back, a cutscene, a
+ * warp) - the camera moved more than two units or turned more than 25 degrees since the last frame that had a view.
+ * The scene renderer's occlusion starts afresh rather than show the last view's for a frame. */
+static uint64_t g_cam_cut;  /* the last frame found to be a cut */
+static uint64_t g_cam_seen; /* the last frame a view was noted */
+static float g_cam_last[16];
+static void cam_cut_note(const float* view)
+{
+    if (g_cam_seen == g_serial)
+        return;
+    int cut = !g_cam_seen || g_cam_seen + 1 < g_serial;
+    if (!cut)
+    {
+        float a[16], b[16];
+        if (gfx_mat_inverse(a, view) && gfx_mat_inverse(b, g_cam_last))
+        {
+            float dx = a[12] - b[12], dy = a[13] - b[13], dz = a[14] - b[14];
+            float f = a[8] * b[8] + a[9] * b[9] + a[10] * b[10]; /* the view's z axes' cosine */
+            cut = dx * dx + dy * dy + dz * dz > 4.0f || f < 0.906f;
+        }
+    }
+    if (cut)
+        g_cam_cut = g_serial;
+    memcpy(g_cam_last, view, 64);
+    g_cam_seen = g_serial;
+}
+static int cam_cut(void) { return g_cam_cut == g_serial; }
+
+/* --- the scene renderer's bounce light: its state (gfx_gi_zone, gfx_gi_frame and the kernels further on, by the ray
+ * tracing's helpers), and what the zone's and characters' draws bind of it ---------------------------------------- */
+#define GI_IRR 6 /* texels across a probe's irradiance map, inside its border */
+#define GI_DIS 14 /* its distance map's */
+
+/* GU of GI_GLSL */
+typedef struct GiU
+{
+    float org[4];     /* x 1: looked up per pixel (scene 2), y 1: the shadows' zone layer is there, w: world units between
+                       * probes */
+    int32_t base[4];  /* the grid's lowest cell (world cells); w 1 when the grid is there */
+    int32_t dims[4];  /* cells each way; w all of them */
+    float k[4];       /* strength, the sky's share's hold on the ambient, debug, the shading's normal offset */
+    float inv[4];     /* 1 / the atlases' sizes: irradiance w, h, distance w, h */
+    float tr[4];      /* the rays' reach, hysteresis, the earlier bounces' weight, the ambient's weight at a hit */
+    uint32_t n[4];    /* rays a probe, 1 probe in this many traced an update, this update's phase, lamps */
+    float sun_dir[4], sun_col[4], sun2_dir[4], sun2_col[4], amb[4];
+    float rot[16];    /* this update's rays' rotation (columns) */
+} GiU;
+
+static struct
+{
+    int tried, ok;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkPipeline flatten, scroll, trace, birr, bdis;
+    VkQueryPool csize; /* the zone's structure's compacted size */
+    VkSampler rep;      /* the zone's textures' as they are flattened (repeated, mips) */
+    GfxTex* nozm;       /* bound for the shadows' zone layer when there is none */
+    /* the zone: its triangles' colours and normals, one structure over them, one instance of it at the top */
+    RtBuf attr, blas_buf, tlas_buf, inst;
+    VkAccelerationStructureKHR blas, tlas;
+    uint32_t ntri;
+    /* the probes: the irradiance's and the distance's atlases, their states, cells, and an update's rays */
+    GfxTex *irr, *dis;
+    RtBuf ps, pc, rb;
+    int clear;        /* ps and pc to be zeroed before the next update (every probe afresh) */
+    uint32_t quality;
+    uint32_t failed;  /* the qualities whose atlases or buffers couldn't be made (a bit each): not tried again */
+    uint64_t updated; /* the frame they were last traced */
+    uint32_t phase;
+    uint32_t seed;
+    int on;           /* this batch's zone and characters take the bounce light */
+    GiU u;
+} g_gi;
+
+/* the bounce light for a batch's draws: its uniforms into the ring (*bi); 0 off */
+static int gi_uniforms(VkDescriptorBufferInfo* bi)
+{
+    if (!g_gi.on)
+        return 0;
+    static RingSame k;
+    *bi = ring_same(&k, &g_gi.u, sizeof g_gi.u);
+    return 1;
+}
+
+/* its bindings (W_GU..W_GID): bi[0] its uniforms, bi[1] set here (the probes' states); how many writes */
+static uint32_t gi_writes(VkWriteDescriptorSet* w, VkDescriptorBufferInfo bi[2], VkDescriptorImageInfo ii[2])
+{
+    bi[1] = (VkDescriptorBufferInfo){ g_gi.ps.b, 0, VK_WHOLE_SIZE };
+    ii[0] = (VkDescriptorImageInfo){ g_lin_samp, g_gi.irr->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[1] = (VkDescriptorImageInfo){ g_lin_samp, g_gi.dis->view, VK_IMAGE_LAYOUT_GENERAL };
+    desc_write(&w[0], W_GU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+    desc_write(&w[1], W_GPS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+    desc_write(&w[2], W_GIR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[0]);
+    desc_write(&w[3], W_GID, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[1]);
+    g_gi.irr->used = g_gi.dis->used = g_serial;
+    return 4;
+}
+
+/* --- the scene renderer's ambient occlusion (scene_ao): gfx_ao_metal.inc's, on Vulkan (its notes there) -------------
+ * Made once a frame at half size when the scene is done (gfx_scene_done, ahead of the effects), from the depth the
+ * zone and characters were drawn with: SAO_PREP the nearest of each 2x2 as distance along the view (0 the sky),
+ * SAO_GTAO ground-truth occlusion, SAO_RESOLVE a 3x3 blur that keeps to its own depth blended over frames with the last
+ * result reprojected (the result keeps its distance and count beside it). Full-screen passes into float targets as
+ * the effects' are (fx_pass), where Metal has compute kernels. The zone and characters read the last frame's result
+ * (AO_GLSL). The rays (scene_ao_q 3, 4: SAO_RAYS) trace the bounce light's structure (built while scene_gi or they are
+ * on); without it, or without ray queries, GTAO high instead, as on Metal. */
+static const char SAO_GLSL[] =
+    /* vp: the viewport in the target (x, y, w, h); hs: the half size and its inverse; pr: P00, P11, P20, P21 (D3D's
+     * projection, row-major); pz: P22, P32, P23 (+-1), the depth's far end; prm: the reach, steps, slices, the reach's
+     * largest size in half pixels; tp: the blend's least weight, whether there is a last result, the frame, the frames
+     * it counts at most */
+    "layout(std140, set = 0, binding = 0) uniform AoUB { vec4 vp, hs, pr, pz, prm, tp; mat4 iv, pvp; } U;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
+    "layout(set = 0, binding = 3) uniform sampler2D t2;\n"
+    "#ifdef SAO_RAYS\n" /* the bounce light's structure and its triangles' colours and normals (GI_KERNELS_GLSL) */
+    "layout(set = 0, binding = 4) uniform accelerationStructureEXT gas;\n"
+    "layout(std430, set = 0, binding = 5) readonly buffer ATB { uvec2 gattr[]; };\n"
+    GI_OCT_GLSL
+    "#endif\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "float ao_ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }\n"
+    "float ao_acos(float x) {\n" /* XeGTAO's, within some 0.001 */
+    "  float r = (-0.156583 * abs(x) + 1.5707963) * sqrt(clamp(1.0 - abs(x), 0.0, 1.0));\n"
+    "  return x >= 0.0 ? r : 3.14159265 - r;\n"
+    "}\n"
+    /* half pixel h (its corner) at distance z, in the view: x right, y up, z the distance */
+    "vec3 ao_vpos(vec2 h, float z) {\n"
+    "  vec2 ndc = vec2((h.x + 0.5) * 2.0 * U.hs.z - 1.0, 1.0 - (h.y + 0.5) * 2.0 * U.hs.w);\n"
+    "  float vz = z * U.pz.z;\n"
+    "  return vec3((ndc.x * z - vz * U.pr.z) / U.pr.x, (ndc.y * z - vz * U.pr.w) / U.pr.y, z);\n"
+    "}\n"
+    "vec3 ao_world(vec3 P) { return (U.iv * vec4(P.x, P.y, P.z * U.pz.z, 1.0)).xyz; }\n"
+    "float hz(ivec2 q) { return texelFetch(t0, q, 0).x; }\n"
+    /* the normal from the neighbours, each way the side whose depth is nearer this one's (edges stay sharp); toward the
+     * eye */
+    "vec3 ao_normal(ivec2 p, vec3 P) {\n"
+    "  ivec2 hi = ivec2(U.hs.xy) - 1;\n"
+    "  float zl = hz(clamp(p - ivec2(1, 0), ivec2(0), hi)), zr = hz(clamp(p + ivec2(1, 0), ivec2(0), hi));\n"
+    "  float zu = hz(clamp(p - ivec2(0, 1), ivec2(0), hi)), zd = hz(clamp(p + ivec2(0, 1), ivec2(0), hi));\n"
+    "  bool r = zr > 0.0 && (zl <= 0.0 || abs(zr - P.z) < abs(zl - P.z));\n"
+    "  bool d = zd > 0.0 && (zu <= 0.0 || abs(zd - P.z) < abs(zu - P.z));\n"
+    "  vec2 h = vec2(p);\n"
+    "  vec3 dx = r ? ao_vpos(h + vec2(1, 0), zr) - P : (zl > 0.0 ? P - ao_vpos(h - vec2(1, 0), zl) : vec3(1, 0, 0));\n"
+    "  vec3 dy = d ? ao_vpos(h + vec2(0, 1), zd) - P : (zu > 0.0 ? P - ao_vpos(h - vec2(0, 1), zu) : vec3(0, 1, 0));\n"
+    "  vec3 n = normalize(cross(dx, dy));\n"
+    "  return dot(n, P) > 0.0 ? -n : n;\n"
+    "}\n"
+    "void main() {\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+    "#if defined(SAO_PREP)\n" /* t0: the depth */
+    "  ivec2 b = ivec2(U.vp.xy + floor(vec2(p) * U.vp.zw * U.hs.zw)), hi = textureSize(t0, 0) - 1;\n"
+    "  float z = 1e30;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    float d = texelFetch(t0, min(b + ivec2(k & 1, k >> 1), hi), 0).x;\n"
+    "    if (d >= U.pz.w) continue;\n" /* the sky, or nothing drawn */
+    "    float vz = U.pz.y / (d * U.pz.z - U.pz.x);\n"
+    "    z = min(z, vz * U.pz.z);\n"
+    "  }\n"
+    "  oc = vec4(z < 1e29 && z > 0.0 ? z : 0.0);\n"
+    "#elif defined(SAO_GTAO)\n" /* t0: the half-size distances */
+    "  float z = hz(p);\n"
+    /* the reach in texels each way (the texels need not be square on screen), held to prm.w texels near the eye */
+    "  float R = U.prm.x;\n"
+    "  vec2 rpx = R / max(z, 1e-3) * vec2(U.pr.x, U.pr.y) * 0.5 * U.hs.xy;\n"
+    "  float big = max(rpx.x, rpx.y);\n"
+    "  if (z <= 0.0 || big < 1.0) { oc = vec4(1.0); return; }\n"
+    "  if (big > U.prm.w) { float k = U.prm.w / big; rpx *= k, R *= k; }\n"
+    "  vec2 px1 = rpx / max(rpx.x, rpx.y);\n" /* a texel's step, the long way */
+    "  vec3 P = ao_vpos(vec2(p), z), N = ao_normal(p, P), V = normalize(-P);\n"
+    "  int steps = int(U.prm.y), slices = int(U.prm.z);\n"
+    "  float fr = U.tp.z, n0 = ao_ign(vec2(p) + 5.588238 * fr), n1 = ao_ign(vec2(p) + vec2(37.0, 17.0) + 5.588238 * fr);\n"
+    "  vec2 hi = U.hs.xy - 1.0;\n"
+    "  float vis = 0.0;\n"
+    "  for (int s = 0; s < slices; ++s) {\n"
+    "    float phi = (float(s) + n0) * (3.14159265 / float(slices));\n"
+    "    vec2 om = vec2(cos(phi), -sin(phi));\n"
+    "    vec3 dv = vec3(cos(phi), sin(phi), 0.0), od = dv - dot(dv, V) * V, ax = normalize(cross(od, V));\n"
+    "    vec3 pn = N - ax * dot(N, ax);\n"
+    "    float pl = length(pn);\n"
+    "    float cn = clamp(dot(pn, V) / max(pl, 1e-4), 0.0, 1.0), n = (dot(od, pn) >= 0.0 ? 1.0 : -1.0) * ao_acos(cn);\n"
+    "    float lo0 = cos(n + 1.5707963), lo1 = cos(n - 1.5707963), h0c = lo0, h1c = lo1;\n"
+    "    for (int j = 0; j < steps; ++j) {\n"
+    "      float t = (float(j) + fract(n1 + float(j) * 0.618034)) / float(steps);\n"
+    "      vec2 off = om * (t * t * rpx + px1);\n"
+    "      for (int side = 0; side < 2; ++side) {\n"
+    "        vec2 q = vec2(p) + (side == 0 ? off : -off);\n"
+    "        if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, hi))) continue;\n"
+    "        float zq = hz(ivec2(q + 0.5));\n"
+    "        if (zq <= 0.0) continue;\n"
+    "        vec3 dd = ao_vpos(floor(q + 0.5), zq) - P;\n"
+    "        float l = length(dd);\n"
+    "        if (l < 1e-4) continue;\n"
+    "        float w = clamp((R - l) / (0.4 * R), 0.0, 1.0);\n"
+    "        float c = dot(dd, V) / l;\n"
+    "        if (side == 0) h0c = max(h0c, mix(lo0, c, w)); else h1c = max(h1c, mix(lo1, c, w));\n"
+    "      }\n"
+    "    }\n"
+    "    float h0 = -ao_acos(clamp(h1c, -1.0, 1.0)), h1 = ao_acos(clamp(h0c, -1.0, 1.0));\n"
+    "    h0 = n + clamp(h0 - n, -1.5707963, 1.5707963), h1 = n + clamp(h1 - n, -1.5707963, 1.5707963);\n"
+    "    float sn = sin(n);\n"
+    "    vis += pl * ((cn + 2.0 * h0 * sn - cos(2.0 * h0 - n)) + (cn + 2.0 * h1 * sn - cos(2.0 * h1 - n))) * 0.25;\n"
+    "  }\n"
+    "  oc = vec4(clamp(vis / float(slices), 0.0, 1.0));\n"
+    "#elif defined(SAO_RAYS)\n" /* t0: the half-size distances; rays against the bounce light's structure */
+    "  float z = hz(p);\n"
+    "  if (z <= 0.0) { oc = vec4(1.0); return; }\n"
+    "  vec3 P = ao_vpos(vec2(p), z), N = ao_normal(p, P);\n"
+    "  vec3 W = ao_world(P), Nw = normalize((U.iv * vec4(N.x, N.y, N.z * U.pz.z, 0.0)).xyz);\n"
+    "  vec3 T = normalize(abs(Nw.y) < 0.99 ? cross(Nw, vec3(0.0, 1.0, 0.0)) : cross(Nw, vec3(1.0, 0.0, 0.0))), B = cross(Nw, T);\n"
+    "  vec3 o = W + Nw * (0.03 + 0.002 * z);\n"
+    "  float R = U.prm.x, fr = U.tp.z;\n"
+    "  float n0 = ao_ign(vec2(p) + 5.588238 * fr), n1 = ao_ign(vec2(p) + vec2(37.0, 17.0) + 5.588238 * fr);\n"
+    "  int nr = int(U.prm.z);\n"
+    "  float occ = 0.0;\n"
+    "  for (int r = 0; r < nr; ++r) {\n"
+    "    float u1 = fract(n0 + float(r) / float(nr)), u2 = fract(n1 + float(r) * 0.618034);\n" /* cosine-weighted */
+    "    float sr = sqrt(u1), ph = 6.2831853 * u2;\n"
+    "    vec3 d = normalize(T * (sr * cos(ph)) + B * (sr * sin(ph)) + Nw * sqrt(max(1.0 - u1, 0.0)));\n"
+    "    rayQueryEXT q;\n"
+    "    rayQueryInitializeEXT(q, gas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, d, R);\n"
+    "    while (rayQueryProceedEXT(q)) {}\n"
+    "    if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) continue;\n"
+    "    uvec2 at = gattr[rayQueryGetIntersectionPrimitiveIndexEXT(q, true)];\n"
+    "    vec3 hn = gi_unoct(unpackUnorm2x16(at.y) * 2.0 - 1.0);\n"
+    "    if (dot(hn, d) > 0.0 && (at.x >> 24) == 0u) continue;\n" /* a backface: the coarse model under the drawn one */
+    "    occ += 1.0 - rayQueryGetIntersectionTEXT(q, true) / R;\n"
+    "  }\n"
+    "  oc = vec4(clamp(1.0 - occ / float(nr), 0.0, 1.0));\n"
+    "#else\n" /* SAO_RESOLVE; t0 the distances, t1 this frame's occlusion, t2 the last result */
+    "  float z = hz(p);\n"
+    "  if (z <= 0.0) { oc = vec4(1.0, 0.0, 0.0, 0.0); return; }\n"
+    "  ivec2 hi = ivec2(U.hs.xy) - 1;\n"
+    "  float s = 0.0, ws = 0.0;\n"
+    "  for (int y = -1; y <= 1; ++y)\n"
+    "    for (int x = -1; x <= 1; ++x) {\n"
+    "      ivec2 q = clamp(p + ivec2(x, y), ivec2(0), hi);\n"
+    "      float zq = hz(q);\n"
+    "      float w = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0) * clamp(1.0 - abs(zq - z) / (0.03 * z), 0.0, 1.0);\n"
+    "      s += texelFetch(t1, q, 0).x * w, ws += w;\n"
+    "    }\n"
+    "  s = ws > 0.0 ? s / ws : texelFetch(t1, p, 0).x;\n"
+    "  float a = s, cnt = 1.0;\n"
+    "  if (U.tp.y > 0.5) {\n"
+    "    vec4 pc = U.pvp * vec4(ao_world(ao_vpos(vec2(p), z)), 1.0);\n"
+    "    if (pc.w > 1e-4) {\n"
+    "      vec2 uv = vec2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"
+    "      vec2 t = uv * U.hs.xy - 0.5, f = fract(t);\n"
+    "      ivec2 b = ivec2(floor(t));\n"
+    "      vec4 hv = vec4(0.0);\n"
+    "      float hw = 0.0;\n"
+    "      for (int k = 0; k < 4; ++k) {\n"
+    "        ivec2 o = b + ivec2(k & 1, k >> 1);\n"
+    "        if (any(lessThan(o, ivec2(0))) || any(greaterThan(o, hi))) continue;\n"
+    "        vec4 h = texelFetch(t2, o, 0);\n"
+    "        float w = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y) * clamp(1.0 - abs(h.y - pc.w) / (0.05 * pc.w), 0.0, 1.0);\n"
+    "        hv += h * w, hw += w;\n"
+    "      }\n"
+    "      if (hw > 0.05) {\n"
+    "        hv /= hw;\n"
+    "        cnt = min(hv.z + 1.0, U.tp.w);\n"
+    "        a = mix(hv.x, s, max(1.0 / cnt, U.tp.x));\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
+    "  oc = vec4(a, z, cnt, 0.0);\n"
+    "#endif\n"
+    "}\n";
+
+/* AoUB of SAO_GLSL */
+typedef struct AoU
+{
+    float vp[4], hs[4], pr[4], pz[4], prm[4], tp[4];
+    float iv[16], pvp[16];
+} AoU;
+
+/* AUB of AO_GLSL */
+typedef struct AoShadeU
+{
+    float pvp[16];
+    float vp[4];
+    float k[4];
+} AoShadeU;
+
+static struct
+{
+    int tried, ok;
+    VkPipeline prep, gtao, resolve;
+    /* the rays (SAO_RAYS): their layout (the effects' four, the structure and the triangles), made on first use */
+    int rtried;
+    VkDescriptorSetLayout rdsl;
+    VkPipelineLayout rlayout;
+    VkPipeline rays;
+    GfxTex *hz, *raw, *hist[2];
+    int cur; /* hist[cur] is the last result */
+    uint32_t hw, hh;
+    uint32_t frame;
+    /* the zone's draw this frame: its depth, target, camera and viewport (ao_note) */
+    GfxTex *depth, *rt;
+    uint64_t noted;
+    float view[16], proj[16];
+    uint32_t vp[4];
+    /* the last result's camera (row-major view x projection) and viewport; made: its frame */
+    float made_vp[16];
+    uint32_t made_view[4];
+    uint64_t made;
+    AoShadeU su;
+} g_sao;
+
+static void sao_forget(const GfxTex* t)
+{
+    if (g_sao.depth == t || g_sao.rt == t)
+        g_sao.depth = g_sao.rt = NULL, g_sao.noted = 0, g_sao.made = 0;
+}
+
+/* one of SAO_GLSL's passes, on the effects' layout (its uniforms, then samplers; the rays' own) and full-screen
+ * triangle */
+static VkPipeline sao_pipeline(const char* name, VkFormat fmt)
+{
+    int rays = !strcmp(name, "SAO_RAYS");
+    char d[96];
+    snprintf(d, sizeof d, "%s#define %s\n", rays ? "#extension GL_EXT_ray_query : require\n" : "", name);
+    return fs_pipeline(g_fx.vs, d, SAO_GLSL, rays ? g_sao.rlayout : g_fx_layout, fmt, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+}
+
+static int sao_init(void)
+{
+    if (g_sao.tried)
+        return g_sao.ok;
+    g_sao.tried = 1;
+    if (!fx_init())
+        return 0;
+    g_sao.prep = sao_pipeline("SAO_PREP", VK_FORMAT_R32_SFLOAT);
+    g_sao.gtao = sao_pipeline("SAO_GTAO", VK_FORMAT_R16_SFLOAT);
+    g_sao.resolve = sao_pipeline("SAO_RESOLVE", VK_FORMAT_R16G16B16A16_SFLOAT);
+    g_sao.ok = g_sao.prep && g_sao.gtao && g_sao.resolve;
+    if (!g_sao.ok)
+    {
+        atomic_fetch_add(&g_failures, 1);
+        fprintf(stderr, "[recomp] gfx: scene occlusion: its passes failed\n");
+    }
+    return g_sao.ok;
+}
+
+/* the rays' pass (SAO_RAYS), made on first use where there are ray queries: 1 when it is there */
+static int sao_rays_init(void)
+{
+    if (g_sao.rtried)
+        return g_sao.rays != VK_NULL_HANDLE;
+    g_sao.rtried = 1;
+    if (!g_has_rt)
+        return 0;
+    VkDescriptorSetLayoutBinding b[6];
+    b[0] = (VkDescriptorSetLayoutBinding){ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    for (uint32_t i = 1; i < 4; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[4] = (VkDescriptorSetLayoutBinding){ 4, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    b[5] = (VkDescriptorSetLayoutBinding){ 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    push_layout(b, 6, NULL, &g_sao.rdsl, &g_sao.rlayout);
+    g_sao.rays = g_sao.rlayout ? sao_pipeline("SAO_RAYS", VK_FORMAT_R16_SFLOAT) : VK_NULL_HANDLE;
+    if (!g_sao.rays)
+    {
+        atomic_fetch_add(&g_failures, 1);
+        fprintf(stderr, "[recomp] gfx: scene occlusion: its rays' pass failed\n");
+    }
+    return g_sao.rays != VK_NULL_HANDLE;
+}
+
+/* one full-screen triangle into all of target, reading in[0..n) as t0.. through the nearest sampler; timed as pass. The
+ * rays' (p g_sao.rays) take the bounce light's structure and triangles too */
+static void sao_pass(GfxTex* target, VkPipeline p, const VkDescriptorBufferInfo* ub, GfxTex* const* in, int n, int pass)
+{
+    int ts = pass_open(target, 0, 0, VK_ATTACHMENT_LOAD_OP_DONT_CARE, NULL, pass);
+    VkCommandBuffer cb = g_cb;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    VkWriteDescriptorSet w[6];
+    VkDescriptorImageInfo ii[3];
+    desc_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ub, NULL);
+    for (int i = 0; i < n; ++i)
+    {
+        ii[i] = (VkDescriptorImageInfo){ g_near_samp, in[i]->view, VK_IMAGE_LAYOUT_GENERAL };
+        desc_write(&w[1 + i], 1 + (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[i]);
+        in[i]->used = g_serial, in[i]->rec = g_cb_index;
+    }
+    uint32_t nw = 1 + (uint32_t)n;
+    int rays = p == g_sao.rays;
+    VkWriteDescriptorSetAccelerationStructureKHR wa;
+    VkDescriptorBufferInfo abi = { g_gi.attr.b, 0, VK_WHOLE_SIZE };
+    if (rays)
+    {
+        as_write(&w[nw++], 4, &wa, &g_gi.tlas);
+        desc_write(&w[nw++], 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &abi, NULL);
+    }
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, rays ? g_sao.rlayout : g_fx_layout, 0, nw, w);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    pass_close(ts);
+}
+
+/* the zone's draw (gfx_world_draw): its depth and camera, the first this frame into the main target */
+static void ao_note(const GfxWorldFrame* f, GfxTex* depth)
+{
+    if (g_fxs.scene_ao <= 0.0f || !depth || !g_rt || g_rt_face || g_rt_level || g_sao.noted == g_serial)
+        return;
+    g_sao.depth = depth, g_sao.rt = g_rt;
+    memcpy(g_sao.view, f->view, 64), memcpy(g_sao.proj, f->proj, 64);
+    uint32_t w = g_rt->w, h = g_rt->h;
+    uint32_t x = f->vp[0] < w ? f->vp[0] : 0, y = f->vp[1] < h ? f->vp[1] : 0;
+    uint32_t vw = f->vp[2] && x + f->vp[2] <= w ? f->vp[2] : w - x, vh = f->vp[3] && y + f->vp[3] <= h ? f->vp[3] : h - y;
+    g_sao.vp[0] = x, g_sao.vp[1] = y, g_sao.vp[2] = vw, g_sao.vp[3] = vh;
+    g_sao.noted = g_serial;
+}
+
+/* the scene done (gfx_scene_done): this frame's occlusion from the zone's depth, ahead of the effects. The quality's
+ * method: 1 GTAO low (2 slices of 4 steps each way), 2 GTAO high (3 of 6), 3 rays low (1 a pixel), 4 rays high (2); the
+ * rays GTAO high while the bounce light's structure is not there */
+static void ao_make(GfxTex* color)
+{
+    if (g_fxs.scene_ao <= 0.0f || g_sao.noted != g_serial || !color || color != g_sao.rt || !g_sao.depth || !sao_init())
+        return;
+    flush_pass();
+    /* half the viewport across, and down as many as keep the texels square on screen (the scene's target can be a
+     * square stretched to the window: its projection says the window's shape) */
+    const float* P = g_sao.proj;
+    uint32_t hw = (g_sao.vp[2] + 1) / 2;
+    float sq = P[5] != 0.0f ? fabsf(P[0] / P[5]) : 1.0f;
+    uint32_t hh = (uint32_t)((float)hw * sq + 0.5f);
+    if (hh > g_sao.vp[3])
+        hh = g_sao.vp[3];
+    if (hw < 8 || hh < 8)
+        return;
+    int fresh = !g_sao.hist[0] || g_sao.hw != hw || g_sao.hh != hh;
+    if (!fx_tex(&g_sao.hz, VK_FORMAT_R32_SFLOAT, hw, hh, GFX_USE_RT, 1) || !fx_tex(&g_sao.raw, VK_FORMAT_R16_SFLOAT, hw, hh, GFX_USE_RT, 1) ||
+        !fx_tex(&g_sao.hist[0], VK_FORMAT_R16G16B16A16_SFLOAT, hw, hh, GFX_USE_RT, 1) ||
+        !fx_tex(&g_sao.hist[1], VK_FORMAT_R16G16B16A16_SFLOAT, hw, hh, GFX_USE_RT, 1))
+        return;
+    g_sao.hw = hw, g_sao.hh = hh;
+    float vpm[16], iv[16];
+    gfx_mat_mul(vpm, g_sao.view, g_sao.proj);
+    if (!gfx_mat_inverse(iv, g_sao.view))
+        return;
+    AoU u;
+    memset(&u, 0, sizeof u);
+    u.vp[0] = (float)g_sao.vp[0], u.vp[1] = (float)g_sao.vp[1], u.vp[2] = (float)g_sao.vp[2], u.vp[3] = (float)g_sao.vp[3];
+    u.hs[0] = (float)hw, u.hs[1] = (float)hh, u.hs[2] = 1.0f / (float)hw, u.hs[3] = 1.0f / (float)hh;
+    u.pr[0] = P[0], u.pr[1] = P[5], u.pr[2] = P[8], u.pr[3] = P[9];
+    u.pz[0] = P[10], u.pz[1] = P[14], u.pz[2] = P[11] < 0.0f ? -1.0f : 1.0f, u.pz[3] = 0.99999f;
+    int q = g_fxs.scene_ao_q >= 3.5f ? 4 : g_fxs.scene_ao_q >= 2.5f ? 3 : g_fxs.scene_ao_q >= 1.5f ? 2 : 1;
+    if (q >= 3 && !(g_gi.tlas && g_gi.attr.b && sao_rays_init()))
+        q = 2;
+    u.prm[0] = g_fxs.scene_ao_radius > 0.05f ? g_fxs.scene_ao_radius : 0.05f;
+    u.prm[1] = q == 1 ? 4.0f : 6.0f;
+    u.prm[2] = q == 1 ? 2.0f : q == 2 ? 3.0f : q == 3 ? 1.0f : 2.0f;
+    u.prm[3] = 0.06f * (float)hw;
+    cam_cut_note(g_sao.view);
+    int same = !fresh && g_sao.made + 1 >= g_serial && !memcmp(g_sao.made_view, g_sao.vp, sizeof g_sao.vp) && !cam_cut();
+    u.tp[0] = 0.08f, u.tp[1] = same ? 1.0f : 0.0f, u.tp[2] = (float)(g_sao.frame++ & 63), u.tp[3] = 16.0f;
+    memcpy(u.iv, iv, 64);
+    memcpy(u.pvp, g_sao.made_vp, 64);
+    VkDescriptorBufferInfo ub = ring_put(&u, sizeof u);
+    GfxTex* in[3] = { g_sao.depth, NULL, NULL };
+    sao_pass(g_sao.hz, g_sao.prep, &ub, in, 1, GFX_PASS_SCENE_AO);
+    in[0] = g_sao.hz;
+    sao_pass(g_sao.raw, q >= 3 ? g_sao.rays : g_sao.gtao, &ub, in, 1, GFX_PASS_SCENE_AO_TRACE);
+    int nx = g_sao.cur ^ 1;
+    in[1] = g_sao.raw, in[2] = g_sao.hist[g_sao.cur];
+    sao_pass(g_sao.hist[nx], g_sao.resolve, &ub, in, 3, GFX_PASS_SCENE_AO);
+    g_sao.cur = nx;
+    memcpy(g_sao.made_vp, vpm, 64);
+    memcpy(g_sao.made_view, g_sao.vp, sizeof g_sao.vp);
+    g_sao.made = g_serial;
+    /* what the next frame's shading reads */
+    AoShadeU* s = &g_sao.su;
+    memcpy(s->pvp, vpm, 64);
+    s->vp[0] = (float)g_sao.vp[2], s->vp[1] = (float)g_sao.vp[3];
+    s->vp[2] = s->vp[3] = 1.0f; /* the texture is the viewport */
+    static uint32_t told;
+    if (++told % 3000 == 1)
+        fprintf(stderr, "[recomp] gfx: scene occlusion: %s, %ux%u of a %ux%u viewport (projection %.3f %.3f), reach %.2f\n",
+            q >= 3 ? (q == 4 ? "rays high" : "rays low") : (q == 2 ? "GTAO high" : "GTAO low"), hw, hh, g_sao.vp[2], g_sao.vp[3],
+            (double)P[0], (double)P[5], (double)u.prm[0]);
+}
+
+/* the occlusion for a batch's draws: its uniforms into the ring (*bi); 0 off */
+static int ao_uniforms(VkDescriptorBufferInfo* bi)
+{
+    if (g_fxs.scene_ao <= 0.0f || !g_sao.made || g_sao.made + 2 < g_serial || !g_sao.hist[g_sao.cur] || !g_rt || g_rt != g_sao.rt ||
+        g_rt_face || g_rt_level)
+        return 0;
+    AoShadeU* s = &g_sao.su;
+    s->k[0] = g_fxs.scene_ao, s->k[1] = g_fxs.scene_ao * g_fxs.scene_ao_chars, s->k[2] = g_fxs.scene_ao_debug, s->k[3] = 0.08f;
+    static RingSame k;
+    *bi = ring_same(&k, s, sizeof *s);
+    return 1;
+}
+
+static uint32_t ao_writes(VkWriteDescriptorSet* w, const VkDescriptorBufferInfo* bi, VkDescriptorImageInfo* ii)
+{
+    GfxTex* t = g_sao.hist[g_sao.cur];
+    *ii = (VkDescriptorImageInfo){ g_near_samp, t->view, VK_IMAGE_LAYOUT_GENERAL };
+    desc_write(&w[0], W_AU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, bi, NULL);
+    desc_write(&w[1], W_AOT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, ii);
+    t->used = g_serial, t->rec = g_cb_index;
+    return 2;
+}
+
+/* the highlights' settings for a batch's draws (*bi); 0 off (scene_spec 0, or no sun shadows to place them by) */
+static int spec_uniforms(int can, VkDescriptorBufferInfo* bi)
+{
+    if (!can || g_fxs.scene_spec <= 0.0f)
+        return 0;
+    float k[8] = { g_fxs.scene_spec, fmaxf(g_fxs.scene_spec_lamps, 0.0f), fminf(fmaxf(g_fxs.scene_spec_wet, 0.0f), 1.0f),
+        fmaxf(g_fxs.scene_spec_aa, 0.0f), g_rt && g_rt->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? 1.0f : 0.0f, 0, 0, 0 };
+    static RingSame keep;
+    *bi = ring_same(&keep, k, sizeof k);
+    return 1;
+}
+
+static void lamps_bin(const float* view, const float* proj, const uint32_t vp[6])
+{
+    float VP[16], iv[16];
+    gfx_mat_mul(VP, view, proj);
+    memcpy(g_lamps.vp, VP, 64);
+    if (gfx_mat_inverse(iv, view))
+        memcpy(g_lamps.cam, iv + 12, 12);
+    float x0 = (float)vp[0], y0 = (float)vp[1], w = (float)vp[2], h = (float)vp[3];
+    uint32_t tx = ((uint32_t)w + 63) / 64, ty = ((uint32_t)h + 63) / 64;
+    if (!tx || !ty || tx * ty > 4096)
+        return;
+    float k = fmaxf(g_fxs.scene_lamps, 0.0f), far2 = g_fxs.scene_lamp_far * g_fxs.scene_lamp_far;
+    g_lamps.lsz = (VkDeviceSize)g_lamps.n * 64 + 64, g_lamps.tsz = (VkDeviceSize)tx * ty * 64;
+    float* L = (float*)ring(g_lamps.lsz, RING_ALIGN, &g_lamps.lb, &g_lamps.lo);
+    static uint16_t T[4096 * 32]; /* binned here, then into the ring at once (its memory is for writing, not reading) */
+    memset(T, 0, g_lamps.tsz);
+    for (uint32_t i = 0; i < g_lamps.n; ++i)
+    {
+        const GfxWorldLight* l = &g_lamps.l[i];
+        float* o = L + 16 * i;
+        memcpy(o, l->pos, 16);
+        for (int c = 0; c < 3; ++c)
+            o[4 + c] = l->diffuse[c] * k, o[12 + c] = l->ambient[c] * k;
+        o[7] = o[15] = 0.0f;
+        memcpy(o + 8, l->att, 16);
+        o[11] = 0.0f;
+        if (g_lamps.sh_serial && g_lamps.sh_serial + 1 == g_serial)
+            for (uint32_t s = 0; s < g_lamps.nsh; ++s)
+            {
+                float ex = l->pos[0] - g_lamps.shpos[s][0], ey = l->pos[1] - g_lamps.shpos[s][1], ez = l->pos[2] - g_lamps.shpos[s][2];
+                if (ex * ex + ey * ey + ez * ez < 0.01f)
+                    o[11] = (float)(s + 1);
+            }
+        float r = l->pos[3];
+        float dx = l->pos[0] - g_lamps.cam[0], dy = l->pos[1] - g_lamps.cam[1], dz = l->pos[2] - g_lamps.cam[2];
+        if (dx * dx + dy * dy + dz * dz > far2 + r * r + 2.0f * r * sqrtf(far2))
+            continue;
+        /* the lamp's sphere wholly behind the camera: none */
+        {
+            float vz = l->pos[0] * view[2] + l->pos[1] * view[6] + l->pos[2] * view[10] + view[14];
+            float depth = proj[11] < 0.0f ? -vz : vz; /* along the view, toward what is seen */
+            if (depth < -r)
+                continue;
+        }
+        /* its box's corners on screen: the rectangle it can light (all of it when a corner is behind the camera) */
+        float sx0 = 1e30f, sy0 = 1e30f, sx1 = -1e30f, sy1 = -1e30f;
+        int behind = 0;
+        for (int c = 0; c < 8; ++c)
+        {
+            float p[3] = { l->pos[0] + ((c & 1) ? r : -r), l->pos[1] + ((c & 2) ? r : -r), l->pos[2] + ((c & 4) ? r : -r) };
+            float q[4];
+            for (int j = 0; j < 4; ++j)
+                q[j] = p[0] * VP[j] + p[1] * VP[4 + j] + p[2] * VP[8 + j] + VP[12 + j];
+            if (q[3] <= 0.05f)
+            {
+                behind = 1;
+                continue;
+            }
+            float sx = x0 + (q[0] / q[3] * 0.5f + 0.5f) * w, sy = y0 + (0.5f - q[1] / q[3] * 0.5f) * h;
+            sx0 = fminf(sx0, sx), sy0 = fminf(sy0, sy), sx1 = fmaxf(sx1, sx), sy1 = fmaxf(sy1, sy);
+        }
+        int ax = 0, ay = 0, bx = (int)tx - 1, by = (int)ty - 1;
+        if (!behind)
+        {
+            if (sx1 < x0 || sy1 < y0 || sx0 > x0 + w || sy0 > y0 + h)
+                continue;
+            ax = (int)fmaxf((sx0 - x0) / 64.0f, 0.0f), ay = (int)fmaxf((sy0 - y0) / 64.0f, 0.0f);
+            bx = (int)fminf((sx1 - x0) / 64.0f, (float)(tx - 1)), by = (int)fminf((sy1 - y0) / 64.0f, (float)(ty - 1));
+        }
+        for (int y = ay; y <= by; ++y)
+            for (int x = ax; x <= bx; ++x)
+            {
+                uint16_t* t = T + 32 * ((size_t)y * tx + x);
+                if (t[0] < 31)
+                    t[1 + t[0]++] = (uint16_t)i;
+            }
+    }
+    memcpy(ring(g_lamps.tsz, RING_ALIGN, &g_lamps.tb, &g_lamps.to), T, g_lamps.tsz);
+    float lu[12] = { x0, y0, w, h, (float)tx, (float)ty, 0, 0, 0, 0, 0, 0 };
+    memcpy(g_lamps.lu, lu, sizeof lu);
+    g_lamps.binned = g_serial;
+}
+
+/* a batch's lamps: what its draws bind (lamps_writes) */
+typedef struct LampBind
+{
+    VkDescriptorBufferInfo bi[4]; /* the lamps, the tiles, LU, the cubes' faces */
+    VkDescriptorImageInfo ii[3];  /* the characters' cubes, the zone's, the comparing sampler */
+} LampBind;
+
+/* the lamps for a batch's draws: binned at the frame's first zone batch (view etc. given), then bound; 0 none */
+static int lamps_bind(LampBind* b, const float* view, const float* proj, const uint32_t* vp)
+{
+    if (g_fxs.scene_lamps <= 0.0f || !g_lamps.n || g_lamps.set != g_serial)
+        return 0;
+    if (g_lamps.binned != g_serial)
+    {
+        if (!view)
+            return 0;
+        lamps_bin(view, proj, vp);
+        if (g_lamps.binned != g_serial)
+            return 0;
+    }
+    if (!g_lamps.dummy && !(g_lamps.dummy = tex_array(VK_FORMAT_D16_UNORM, 1, 1)))
+        return 0;
+    int sh = g_lamps.lsm && g_lamps.nsh && g_lamps.sh_serial + 1 == g_serial;
+    g_lamps.lu[6] = sh ? 1.0f : 0.0f, g_lamps.lu[7] = g_fxs.scene_lamp_debug;
+    int zs = sh && g_lamps.zlsm && g_lamps.zn == g_lamps.nsh && !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
+    g_lamps.lu[8] = zs ? 1.0f : 0.0f;
+    g_lamps.lu[9] = fmaxf(g_fxs.lamp_size, 0.0f) * fmaxf(g_fxs.shadow_softness, 0.0f);
+    g_lamps.lu[10] = g_fxs.shadow_soft_q >= 1.5f ? 8.0f : 4.0f;
+    b->bi[0] = (VkDescriptorBufferInfo){ g_lamps.lb, g_lamps.lo, g_lamps.lsz };
+    b->bi[1] = (VkDescriptorBufferInfo){ g_lamps.tb, g_lamps.to, g_lamps.tsz };
+    static RingSame klu, kshm;
+    b->bi[2] = ring_same(&klu, g_lamps.lu, sizeof g_lamps.lu);
+    size_t msz = sh ? (size_t)64 * 6 * g_lamps.nsh : 64;
+    b->bi[3] = ring_same(&kshm, g_lamps.shm, msz);
+    GfxTex *cm = sh ? g_lamps.lsm : g_lamps.dummy, *zm = zs ? g_lamps.zlsm : g_lamps.dummy;
+    b->ii[0] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, cm->view, VK_IMAGE_LAYOUT_GENERAL };
+    b->ii[1] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, zm->view, VK_IMAGE_LAYOUT_GENERAL };
+    b->ii[2] = (VkDescriptorImageInfo){ g_cmp_samp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+    cm->used = zm->used = g_serial;
+    cm->rec = zm->rec = g_cb_index;
+    return 1;
+}
+
+static uint32_t lamps_writes(VkWriteDescriptorSet* w, const LampBind* b)
+{
+    desc_write(&w[0], W_LL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &b->bi[0], NULL);
+    desc_write(&w[1], W_TL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &b->bi[1], NULL);
+    desc_write(&w[2], W_LU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &b->bi[2], NULL);
+    desc_write(&w[3], W_LSMM, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &b->bi[3], NULL);
+    desc_write(&w[4], W_LSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &b->ii[0]);
+    desc_write(&w[5], W_ZLSM, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NULL, &b->ii[1]);
+    desc_write(&w[6], W_LCS, VK_DESCRIPTOR_TYPE_SAMPLER, NULL, &b->ii[2]);
+    return 7;
+}
+
+/* a zone batch's opaque items and their world matrices, kept for lamp_zone_cubes at the frame's end (a frame draws the
+ * zone in several batches) */
+static void lamp_zone_collect(const GfxWorldFrame* f)
+{
+    if (g_fxs.scene_lamp_zone <= 0.0f || g_fxs.scene_lamp_shadows <= 0.0f || !f->nitem || !f->ninst)
+        return;
+    if (g_lamps.zc_serial != g_serial)
+        g_lamps.nzi = g_lamps.nzw = 0, g_lamps.zc_serial = g_serial;
+    if (g_lamps.nzw + f->ninst > g_lamps.czw)
+    {
+        uint32_t c = g_lamps.czw ? g_lamps.czw : 256;
+        while (c < g_lamps.nzw + f->ninst)
+            c *= 2;
+        float (*w)[16] = (float (*)[16])realloc(g_lamps.zw, (size_t)c * sizeof *w);
+        if (!w)
+            return;
+        g_lamps.zw = w, g_lamps.czw = c;
+    }
+    if (g_lamps.nzi + f->nitem > g_lamps.czi)
+    {
+        uint32_t c = g_lamps.czi ? g_lamps.czi : 1024;
+        while (c < g_lamps.nzi + f->nitem)
+            c *= 2;
+        LampZoneItem* v = (LampZoneItem*)realloc(g_lamps.zi, (size_t)c * sizeof *v);
+        if (!v)
+            return;
+        g_lamps.zi = v, g_lamps.czi = c;
+    }
+    uint32_t base = g_lamps.nzw;
+    for (uint32_t i = 0; i < f->ninst; ++i)
+        memcpy(g_lamps.zw[base + i], f->inst[i].world, 64);
+    g_lamps.nzw += f->ninst;
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxWorldItem* it = &f->item[i];
+        if (!it->vb || !it->count || it->inst >= f->ninst || (it->flags & GFX_WORLD_BLEND))
+            continue;
+        LampZoneItem* o = &g_lamps.zi[g_lamps.nzi++];
+        int at = (it->flags & GFX_WORLD_ATEST) && it->tex && it->tex->type == GFX_TEX_2D;
+        o->vb = it->vb->b, o->tex = at ? it->tex->view : VK_NULL_HANDLE, o->samp = at ? sampler(&it->samp) : VK_NULL_HANDLE;
+        o->first = it->first, o->count = it->count, o->prim = it->prim, o->inst = base + it->inst;
+        it->vb->used = g_serial;
+        if (at)
+            it->tex->used = g_serial;
+    }
+}
+
+/* the characters' shadows from the nearest lamps (scene_lamp_shadows): a cube each (six layers of lsm) at the frame's
+ * end, of the frame's characters within its reach (gfx_metal.m's, a pass a layer as the cascades' are here, each face
+ * drawing only the characters toward it); pal, st the frame's palette and states in the ring */
+static void lamp_shadows_draw(const GfxCharFrame* cf, VkDescriptorBufferInfo pal, VkDescriptorBufferInfo st)
+{
+    g_lamps.nsh = 0;
+    int want = (int)g_fxs.scene_lamp_shadows;
+    want = want < 0 ? 0 : want > 4 ? 4 : want;
+    if (g_fxs.scene_lamps <= 0.0f || !want || g_lamps.set != g_serial || !g_lamps.n || !g_shd.nitems || !g_shd.chars || !cf->nbones)
+        return;
+    uint32_t size = (uint32_t)g_fxs.scene_lamp_shadow_size;
+    size = size < 64 ? 64 : size > 1024 ? 1024 : size;
+    if (!g_lamps.lsm || g_lamps.lsize != size)
+    {
+        end_pass();
+        gfx_tex_destroy(g_lamps.lsm);
+        g_lamps.lsm = tex_array(VK_FORMAT_D16_UNORM, size, 24);
+        g_lamps.lsize = size;
+        if (!g_lamps.lsm)
+            return;
+    }
+    /* the nearest lamps to the camera with a character within their reach: the lamps in order of their distance (the
+     * first of equals first), each tried against the characters' places (a character's parts, one after another, share
+     * theirs) until enough have one */
+    float dist[256];
+    uint32_t order[256];
+    for (uint32_t i = 0; i < g_lamps.n; ++i)
+    {
+        const float* p = g_lamps.l[i].pos;
+        float cx = p[0] - g_lamps.cam[0], cy = p[1] - g_lamps.cam[1], cz = p[2] - g_lamps.cam[2];
+        dist[i] = cx * cx + cy * cy + cz * cz;
+        uint32_t j = i;
+        for (; j > 0 && dist[order[j - 1]] > dist[i]; --j)
+            order[j] = order[j - 1];
+        order[j] = i;
+    }
+    int pick[4] = { -1, -1, -1, -1 };
+    for (uint32_t o = 0, np = 0; o < g_lamps.n && np < (uint32_t)want; ++o)
+    {
+        const GfxWorldLight* l = &g_lamps.l[order[o]];
+        float r = l->pos[3] + 1.5f;
+        int near = 0;
+        for (uint32_t k = 0; k < g_shd.nitems && !near; ++k)
+        {
+            const float* a = g_shd.items[k].at;
+            if (k && !memcmp(a, g_shd.items[k - 1].at, 12))
+                continue;
+            float dx = a[0] - l->pos[0], dy = a[1] - l->pos[1], dz = a[2] - l->pos[2];
+            near = dx * dx + dy * dy + dz * dz < r * r;
+        }
+        if (near)
+            pick[np++] = (int)order[o];
+    }
+    static const float AX[6][3][3] = { /* each face: right, up, forward */
+        { { 0, 0, -1 }, { 0, -1, 0 }, { 1, 0, 0 } },  { { 0, 0, 1 }, { 0, -1, 0 }, { -1, 0, 0 } },
+        { { 1, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 } },    { { 1, 0, 0 }, { 0, 0, -1 }, { 0, -1, 0 } },
+        { { 1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } },   { { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, -1 } } };
+    uint32_t ns = 0;
+    for (int j = 0; j < want && pick[j] >= 0; ++j, ++ns)
+    {
+        const GfxWorldLight* l = &g_lamps.l[pick[j]];
+        memcpy(g_lamps.shpos[ns], l->pos, 16);
+        float n = 0.05f, f = fmaxf(l->pos[3], 0.5f), A = f / (f - n), B = -n * f / (f - n);
+        for (int fc = 0; fc < 6; ++fc)
+        {
+            const float* R = AX[fc][0];
+            const float* U = AX[fc][1];
+            const float* F = AX[fc][2];
+            float* M = g_lamps.shm[ns * 6 + fc];
+            memset(M, 0, 64);
+            float lr = R[0] * l->pos[0] + R[1] * l->pos[1] + R[2] * l->pos[2];
+            float lu = U[0] * l->pos[0] + U[1] * l->pos[1] + U[2] * l->pos[2];
+            float lf = F[0] * l->pos[0] + F[1] * l->pos[1] + F[2] * l->pos[2];
+            for (int a = 0; a < 3; ++a)
+                M[4 * a + 0] = R[a], M[4 * a + 1] = U[a], M[4 * a + 2] = F[a] * A, M[4 * a + 3] = F[a];
+            M[12] = -lr, M[13] = -lu, M[14] = -lf * A + B, M[15] = -lf;
+        }
+    }
+    if (!ns)
+        return;
+    uint32_t drawn = 0;
+    for (uint32_t layer = 0; layer < 6 * ns; ++layer)
+    {
+        const float* Lp = g_lamps.shpos[layer / 6];
+        const float *R = AX[layer % 6][0], *U = AX[layer % 6][1], *F = AX[layer % 6][2];
+        float r = Lp[3] + 1.5f;
+        int ts = shadow_pass_begin(g_lamps.lsm, layer, GFX_PASS_LAMPS, layer > 0);
+        vkCmdSetDepthBias(g_cb, 2.0f, 0.0f, 2.0f);
+        Cast c;
+        cast_begin(&c, g_lamps.shm[layer], cf->alpha_ref, pal, st, g_shd.chars);
+        for (uint32_t i = 0; i < g_shd.nitems; ++i)
+        {
+            const ShItem* it = &g_shd.items[i];
+            float d[3] = { it->at[0] - Lp[0], it->at[1] - Lp[1], it->at[2] - Lp[2] };
+            if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > r * r)
+                continue;
+            /* within the face's quarter of the cube: three units round the part's place, a large character's reach,
+             * inside each of its four sides */
+            float f = F[0] * d[0] + F[1] * d[1] + F[2] * d[2] + 3.0f * 1.41421356f;
+            if (fabsf(R[0] * d[0] + R[1] * d[1] + R[2] * d[2]) > f || fabsf(U[0] * d[0] + U[1] * d[1] + U[2] * d[2]) > f)
+                continue;
+            cast_char(&c, it);
+        }
+        pass_close(ts);
+        drawn += c.drawn;
+    }
+    g_cmd_draws += drawn;
+    g_lamps.nsh = ns, g_lamps.sh_serial = g_serial;
+}
+
+/* the frame's zone into the cubes of the lamps lamp_shadows_draw just took, when they changed or every 600 frames; read
+ * from the next frame on. The zone is what the game drew this frame: none of what lies out of its view */
+static void lamp_zone_cubes(void)
+{
+    if (!g_lamps.nsh || g_lamps.sh_serial != g_serial || g_lamps.zc_serial != g_serial || !g_lamps.nzi || !g_shd.zone[0] ||
+        !g_shd.zone[1])
+        return;
+    int same = g_lamps.zn == g_lamps.nsh && g_lamps.z_serial && g_serial - g_lamps.z_serial < 600 &&
+        !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
+    if (same)
+        return;
+    uint32_t size = g_lamps.lsize;
+    if (!g_lamps.zlsm || g_lamps.zlsm->w != size)
+    {
+        end_pass();
+        gfx_tex_destroy(g_lamps.zlsm);
+        g_lamps.zlsm = tex_array(VK_FORMAT_D32_SFLOAT, size, 24);
+        if (!g_lamps.zlsm)
+            return;
+    }
+    VkDescriptorBufferInfo wbi = ring_put(g_lamps.zw, (size_t)g_lamps.nzw * 64), none = { 0 };
+    uint32_t drawn = 0;
+    for (uint32_t layer = 0; layer < 6 * g_lamps.nsh; ++layer)
+    {
+        const float* L = g_lamps.shpos[layer / 6];
+        float reach = L[3] + 40.0f;
+        int ts = shadow_pass_begin(g_lamps.zlsm, layer, GFX_PASS_LAMPS, layer > 0);
+        Cast c;
+        cast_begin(&c, g_lamps.shm[layer], 0.0f, wbi, none, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < g_lamps.nzi; ++i)
+        {
+            const LampZoneItem* it = &g_lamps.zi[i];
+            const float* w = g_lamps.zw[it->inst];
+            float dx = w[12] - L[0], dy = w[13] - L[1], dz = w[14] - L[2];
+            if (dx * dx + dy * dy + dz * dz <= reach * reach)
+                cast_zone(&c, it->vb, it->tex, it->samp, it->inst, it->first, it->count, it->prim);
+        }
+        pass_close(ts);
+        drawn += c.drawn;
+    }
+    g_cmd_draws += drawn;
+    memcpy(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos);
+    g_lamps.zn = g_lamps.nsh, g_lamps.z_serial = g_serial;
+}
+
+/* the lamps' glows (scene_lamp_glow): a soft sprite at each lamp, its own colour, hidden by what stands in front of it
+ * (the scene's depth, softly), faded with distance; added to the scene (gfx_metal.m's lamp_glow_vs/fs). GLU in W_FRAME,
+ * the lamps in W_LL, the depth in W_TEX */
+static const char GLOW_GLSL[] =
+    "struct GLL { vec4 pos, col, att, amb; };\n"
+    "layout(std140, set = 0, binding = 0) uniform GLU { mat4 vp; vec4 p; vec4 cam; vec4 zp; vec4 vpr; vec4 pr; } G;\n"
+    "#ifdef GFX_VS\n"
+    "layout(std430, set = 0, binding = 15) readonly buffer LLB { GLL LS[]; };\n"
+    "layout(location = 0) out vec2 o_c;\n"
+    "layout(location = 1) flat out vec3 o_col;\n"
+    "layout(location = 2) flat out float o_lz;\n"
+    "void main() {\n"
+    "  GLL l = LS[gl_InstanceIndex];\n"
+    "  vec2 c = vec2((gl_VertexIndex & 1) != 0 ? 1.0 : -1.0, (gl_VertexIndex & 2) != 0 ? 1.0 : -1.0);\n"
+    "  vec4 q = G.vp * vec4(l.pos.xyz, 1.0);\n"
+    "  float dist = length(l.pos.xyz - G.cam.xyz);\n"
+    "  float fade = clamp(1.0 - dist / G.p.z, 0.0, 1.0) * step(0.3, q.w);\n"
+    "  float size = G.p.x * clamp(l.pos.w / 8.0, 0.5, 2.0);\n"
+    "  gl_Position = q + vec4(c * size * G.pr.xy, 0.0, 0.0);\n"
+    "  if (fade <= 0.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n" /* (off screen) */
+    "  o_c = c;\n"
+    "  o_col = l.col.rgb * (G.p.y * fade);\n"
+    "  o_lz = q.w;\n"
+    "}\n"
+    "#else\n"
+    "layout(set = 0, binding = 4) uniform sampler2D dt;\n"
+    "layout(location = 0) in vec2 i_c;\n"
+    "layout(location = 1) flat in vec3 i_col;\n"
+    "layout(location = 2) flat in float i_lz;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "void main() {\n"
+    "  float r2 = dot(i_c, i_c);\n"
+    "  if (r2 >= 1.0) discard;\n"
+    "  float d = texelFetch(dt, ivec2(gl_FragCoord.xy), 0).x;\n"
+    "  float dn = (d - G.zp.z) / max(G.zp.w - G.zp.z, 1e-6);\n"
+    "  float sz = dn >= 0.999999 ? 1e6 : abs(G.zp.y / (dn * G.pr.z - G.zp.x));\n" /* the scene's view depth here */
+    "  float vis = clamp((sz - i_lz) / max(G.p.x, 0.1) + 1.0, 0.0, 1.0);\n"
+    "  float f = exp(-r2 * 5.0) - 0.0067;\n"
+    "  oc = vec4(i_col * (f * vis), 1.0);\n"
+    "}\n"
+    "#endif\n";
+
+/* the lamps' glows onto the finished scene (color, its depth), before what takes the scene from here (the effects'
+ * bloom, as Metal's post effects do); the viewport in the target */
+static void post_lamp_glows(GfxTex* color, const GfxScene* s, GfxTex* depth, float vx, float vy, float vw, float vh)
+{
+    if (g_fxs.scene_lamps <= 0.0f || g_fxs.scene_lamp_glow <= 0.0f || g_lamps.binned != g_serial || !g_lamps.n || !g_lamps.lb ||
+        !world_init())
+        return;
+    VkPipeline glow = fmt_pipe(color->vf, FP_GLOW);
+    if (!glow)
+        return;
+    float minz, maxz;
+    memcpy(&minz, &s->vp[4], 4);
+    memcpy(&maxz, &s->vp[5], 4);
+    if (maxz <= minz)
+        minz = 0, maxz = 1;
+    struct
+    {
+        float vp[16], p[4], cam[4], zp[4], vpr[4], pr[4];
+    } u = { { 0 } };
+    memcpy(u.vp, g_lamps.vp, 64);
+    u.p[0] = fmaxf(g_fxs.scene_lamp_glow_size, 0.05f), u.p[1] = g_fxs.scene_lamp_glow, u.p[2] = fmaxf(g_fxs.scene_lamp_far, 1.0f);
+    memcpy(u.cam, g_lamps.cam, 12);
+    u.zp[0] = s->proj[10], u.zp[1] = s->proj[14], u.zp[2] = minz, u.zp[3] = maxz;
+    u.vpr[0] = vx, u.vpr[1] = vy, u.vpr[2] = vw, u.vpr[3] = vh;
+    u.pr[0] = s->proj[0], u.pr[1] = s->proj[5], u.pr[2] = s->proj[11] < 0.0f ? -1.0f : 1.0f;
+    VkViewport v = { vx, vy + vh, vw, -vh, 0, 1 }; /* y up, as the game's draws (set_viewport) */
+    int ts = pass_open(color, 0, 0, VK_ATTACHMENT_LOAD_OP_LOAD, &v, GFX_PASS_LAMPS);
+    VkCommandBuffer cb = g_cb;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, glow);
+    VkDescriptorBufferInfo bi[2] = { ring_put(&u, sizeof u), { g_lamps.lb, g_lamps.lo, g_lamps.lsz } };
+    VkDescriptorImageInfo ii = { g_near_samp, depth->view, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w[3];
+    desc_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+    desc_write(&w[1], W_LL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+    desc_write(&w[2], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, 3, w);
+    vkCmdDraw(cb, 4, g_lamps.n, 0, 0);
+    pass_close(ts);
+    depth->used = g_serial, depth->rec = g_cb_index;
+}
+
+/* the effects a batch's draws take (shadows, occlusion, highlights, lamps, bounce light): their uniforms and writes,
+ * made once a batch, every draw pushing them after its own */
+typedef struct WorldFx
+{
+    uint32_t wk; /* WK_SHADOW, WK_AO, WK_SPEC, WK_LAMPS, WK_GI */
+    VkDescriptorBufferInfo sbi, abi, pbi, gbi[2];
+    VkDescriptorImageInfo si[5], aii, gii[2];
+    LampBind lb;
+} WorldFx;
+
+/* f the zone's batch (its occlusion noted, its lamps binned and its items kept for the cubes, per pixel only), NULL the
+ * characters'; the writes into w (x holds what they point at); how many */
+static uint32_t world_fx(WorldFx* x, const GfxWorldFrame* f, GfxTex* depth, VkWriteDescriptorSet* w)
+{
+    int pixel = !f || f->mode == 2;
+    int shadow = shadow_uniforms(&x->sbi);
+    if (f)
+        ao_note(f, depth);
+    int ao = ao_uniforms(&x->abi);
+    int spec = spec_uniforms(shadow && pixel, &x->pbi);
+    int lamps = pixel && lamps_bind(&x->lb, f ? f->view : NULL, f ? f->proj : NULL, f ? f->vp : NULL);
+    if (lamps && f)
+        lamp_zone_collect(f);
+    int gi = gi_uniforms(&x->gbi[0]);
+    x->wk = (shadow ? WK_SHADOW : 0) | (ao ? WK_AO : 0) | (spec ? WK_SPEC : 0) | (lamps ? WK_LAMPS : 0) | (gi ? WK_GI : 0);
+    uint32_t nw = shadow ? shadow_writes(w, &x->sbi, x->si) : 0;
+    if (ao)
+        nw += ao_writes(&w[nw], &x->abi, &x->aii);
+    if (spec)
+        desc_write(&w[nw++], W_SP, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &x->pbi, NULL);
+    if (lamps)
+        nw += lamps_writes(&w[nw], &x->lb);
+    if (gi)
+        nw += gi_writes(&w[nw], x->gbi, x->gii);
+    return nw;
+}
+
+int gfx_world_draw(const GfxWorldFrame* f)
+{
+    if (!g_dev || !f->nitem || !world_init())
+        return 0;
+    uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
+    /* timed: a render pass of its own (an extra load and store of the target, only while timing) */
+    int timed = gfx_pass_timing_on();
+    if (timed)
+        end_pass(), g_pass_next = GFX_PASS_WORLD;
+    if (!begin_pass())
+    {
+        g_pass_next = -1;
+        return 0;
+    }
+    GfxTex* depth = depth_attachment();
+    int drew = 0;
+    if (!set_viewport(f->vp))
+        goto done;
+    VkCommandBuffer cb = g_cb;
+    struct
+    {
+        float vp[16];
+        float params[4];
+    } fu;
+    gfx_mat_mul(fu.vp, f->view, f->proj);
+    fu.params[0] = f->alpha_ref, fu.params[1] = f->pixel[0], fu.params[2] = f->pixel[1], fu.params[3] = 0.0f;
+    VkDescriptorBufferInfo bi[4];
+    bi[0] = ring_put(&fu, sizeof fu);
+    size_t isz = (size_t)f->ninst * sizeof(GfxWorldInst);
+    bi[1] = ring_put(f->inst, isz);
+    GfxWorldLight none;
+    memset(&none, 0, sizeof none);
+    uint32_t nl = f->nlight ? f->nlight : 1;
+    bi[2] = ring_put(f->nlight ? f->light : &none, (size_t)nl * sizeof none);
+    world_state(depth);
+    /* the batch's bindings made once: the draws' own five (bi[3] and ii set per item), then the effects' */
+    VkDescriptorImageInfo ii;
+    VkWriteDescriptorSet w[W_COUNT];
+    desc_write(&w[0], W_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+    desc_write(&w[1], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+    desc_write(&w[2], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+    desc_write(&w[3], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
+    desc_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+    WorldFx x;
+    uint32_t nw = 5 + world_fx(&x, f, depth, &w[5]);
+    uint32_t wk = (f->mode == 2 ? WK_PIXEL : 0) | x.wk;
+    VkPipeline pipes[4], cur = VK_NULL_HANDLE; /* by blend and alpha test, each found once */
+    uint32_t found = 0;
+    int cull = -1, bias = INT_MIN, write = -1, topo = -1;
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxWorldItem* it = &f->item[i];
+        if (!it->vb || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+            continue;
+        int blend = (it->flags & GFX_WORLD_BLEND) != 0, at = (it->flags & GFX_WORLD_ATEST) != 0, pk = blend << 1 | at;
+        if (!(found >> pk & 1))
+            pipes[pk] = world_pipeline(0, wk | (at ? WK_ATEST : 0), blend, depth), found |= 1u << pk;
+        VkPipeline p = pipes[pk];
+        if (!p)
+            continue;
+        if (p != cur)
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p), cur = p;
+        if ((!blend) != write)
+            vkCmdSetDepthWriteEnable(cb, depth && !blend ? VK_TRUE : VK_FALSE), write = !blend;
+        int c = (it->flags & GFX_WORLD_TWOSIDED) ? 0 : (it->flags & GFX_WORLD_MIRRORED) ? 1 : 2;
+        if (c != cull)
+            vkCmdSetCullMode(cb, c == 2 ? VK_CULL_MODE_BACK_BIT : c == 1 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE), cull = c;
+        int zb = blend ? f->zbias_blend : f->zbias_opaque;
+        if (zb != bias)
+            vkCmdSetDepthBias(cb, -(float)zb, 0.0f, -(float)zb * 0.5f), bias = zb;
+        int strip = it->prim == GFX_TRIANGLESTRIP;
+        if (strip != topo)
+            vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+        GfxSampler sk = it->samp;
+        sk.addr_u = sk.addr_v = sk.addr_w = (it->flags & GFX_WORLD_CLAMP) ? 3 : 1;
+        if (g_fxs.fx != 0.0f && g_fxs.aniso > 1.0f && it->tex->levels > 1 && it->tex->levels < 32 && sk.min >= 2 &&
+            it->tex->filled == (1u << it->tex->levels) - 1)
+            sk.min = 3, sk.mip = 2, sk.max_aniso = (uint8_t)(g_fxs.aniso > 16.0f ? 16.0f : g_fxs.aniso);
+        ii = (VkDescriptorImageInfo){ sampler(&sk), it->tex->view, VK_IMAGE_LAYOUT_GENERAL };
+        bi[3] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
+        uint32_t dc[2] = { it->inst, it->flags };
+        vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof dc, dc);
+        it->vb->used = g_serial;
+        it->tex->used = g_serial, it->tex->rec = g_cb_index;
+        vkCmdDraw(cb, vertex_count(it->prim, it->count), 1, it->first, 0);
+        ++drew;
+    }
+    g_bound = VK_NULL_HANDLE; /* the game's next draw binds its own */
+    g_cmd_draws += drew;
+done:
+    if (timed)
+        end_pass();
+    if (gfx_profiling)
+        g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws += drew;
+    return drew > 0;
+}
+
+int gfx_chars_draw(const GfxCharFrame* f)
+{
+    if (!g_dev || !f->nitem || !f->nbones || !world_init())
+        return 0;
+    uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
+    int timed = gfx_pass_timing_on();
+    if (timed)
+        end_pass(), g_pass_next = GFX_PASS_CHARS;
+    if (!begin_pass())
+    {
+        g_pass_next = -1;
+        return 0;
+    }
+    GfxTex* depth = depth_attachment();
+    int drew = 0;
+    /* the batch's bindings made once: the draws' own five (bi[2], bi[3] and ii set per item), then the effects' */
+    VkDescriptorBufferInfo bi[4];
+    VkDescriptorImageInfo ii;
+    VkWriteDescriptorSet w[W_COUNT];
+    desc_write(&w[0], W_INST, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[0], NULL);
+    desc_write(&w[1], W_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+    desc_write(&w[2], W_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+    desc_write(&w[3], W_UV, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[3], NULL);
+    desc_write(&w[4], W_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii);
+    WorldFx x;
+    uint32_t nw = 5 + world_fx(&x, NULL, depth, &w[5]);
+    int shadow = (x.wk & WK_SHADOW) != 0;
+    VkPipeline p = world_pipeline(1, x.wk, 0, depth);
+    if (!p || !set_viewport(f->vp))
+        goto done;
+    VkCommandBuffer cb = g_cb;
+    size_t psz = (size_t)f->nbones * 64, ssz = (size_t)f->nstate * sizeof(GfxCharState);
+    bi[0] = ring_put(f->palette, psz);
+    bi[1] = ring_put(f->state, ssz);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    world_state(depth);
+    vkCmdSetDepthWriteEnable(cb, depth ? VK_TRUE : VK_FALSE);
+    vkCmdSetCullMode(cb, VK_CULL_MODE_NONE);
+    vkCmdSetDepthBias(cb, 0.0f, 0.0f, 0.0f);
+    int topo = -1;
+    struct
+    {
+        float params[4];
+        uint32_t palette, state, mirror, pad;
+        float lag[4];
+    } pc = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f }, 0, 0, 0, 0, { 0.0f, 0.0f, 0.0f, 0.0f } };
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxCharItem* it = &f->item[i];
+        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+            continue;
+        int strip = it->prim == GFX_TRIANGLESTRIP;
+        if (strip != topo)
+            vkCmdSetPrimitiveTopology(cb, strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST), topo = strip;
+        ii = (VkDescriptorImageInfo){ sampler(&it->samp), it->tex->view, VK_IMAGE_LAYOUT_GENERAL };
+        bi[2] = (VkDescriptorBufferInfo){ it->vb->b, 0, VK_WHOLE_SIZE };
+        bi[3] = (VkDescriptorBufferInfo){ it->uv->b, 0, VK_WHOLE_SIZE };
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_world.layout, 0, nw, w);
+        pc.palette = it->palette, pc.state = it->state, pc.mirror = it->mirror;
+        if (shadow)
+            char_lag(f, it, pc.lag);
+        vkCmdPushConstants(cb, g_world.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+        vkCmdBindIndexBuffer(cb, it->ib->b, 0, it->index_size == 4 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+        it->vb->used = it->uv->used = it->ib->used = g_serial;
+        it->tex->used = g_serial, it->tex->rec = g_cb_index;
+        vkCmdDrawIndexed(cb, vertex_count(it->prim, it->count), 1, it->first, 0, 0);
+        ++drew;
+    }
+    g_bound = VK_NULL_HANDLE;
+    g_cmd_draws += drew;
+done:
+    if (timed)
+        end_pass();
+    if (gfx_profiling)
+        g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws += drew;
+    return drew > 0;
+}
+
+/* a buffer of at least need bytes in *b (made again, half as large again - or as large, exact: one made once, as the
+ * bounce light's zone - when smaller; the old one let go once the GPU is past it): the GPU's own, or one the CPU
+ * writes (host) */
+static int rt_buffer_ex(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host, int exact)
 {
     if (b->b && b->size >= need)
         return 0;
     if (b->b)
         trash(2, (uint64_t)(uintptr_t)b->b, b->m), b->b = VK_NULL_HANDLE;
-    need = (need + need / 2 + 65535) & ~(VkDeviceSize)65535;
+    need = (need + (exact ? 0 : need / 2) + 65535) & ~(VkDeviceSize)65535;
     VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     bi.size = need;
     bi.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -4583,10 +7649,12 @@ static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int 
     return 1;
 }
 
-/* an acceleration structure of at least need bytes in *s, over its own buffer */
-static int rt_structure(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize need, VkAccelerationStructureTypeKHR type)
+static int rt_buffer(RtBuf* b, VkDeviceSize need, VkBufferUsageFlags usage, int host) { return rt_buffer_ex(b, need, usage, host, 0); }
+
+/* an acceleration structure of at least need bytes in *s, over its own buffer (exact: rt_buffer_ex's) */
+static int rt_structure_ex(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize need, VkAccelerationStructureTypeKHR type, int exact)
 {
-    int grown = rt_buffer(buf, need, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 0);
+    int grown = rt_buffer_ex(buf, need, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 0, exact);
     if (grown < 0)
         return 0;
     if (*s && !grown)
@@ -4596,6 +7664,728 @@ static int rt_structure(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize 
     VkAccelerationStructureCreateInfoKHR ci = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
     ci.buffer = buf->b, ci.size = buf->size, ci.type = type;
     return vkCreateAccelerationStructureKHR(g_dev, &ci, NULL, s) == VK_SUCCESS;
+}
+
+static int rt_structure(VkAccelerationStructureKHR* s, RtBuf* buf, VkDeviceSize need, VkAccelerationStructureTypeKHR type)
+{
+    return rt_structure_ex(s, buf, need, type, 0);
+}
+
+static void rt_free(RtBuf* b)
+{
+    if (b->b)
+        trash(2, (uint64_t)(uintptr_t)b->b, b->m);
+    memset(b, 0, sizeof *b);
+}
+
+/* --- the scene renderer's bounce light (gfx_gi_zone, gfx_gi_frame, gfx.h): gfx_gi_metal.inc's, on Vulkan (its notes
+ * there; the shading's side is GI_GLSL, the state g_gi) -------------------------------------------------------------
+ * The same kernels as compute passes with ray queries: the zone flattened into world-space triangles (GI_FLATTEN) and
+ * built into one bottom-level structure, one instance of it at the top; each frame's share of the probes traced
+ * (GI_SCROLL, GI_TRACE) and blended into the two atlases (GI_BLEND, the distances' first), storage images the zone's
+ * and characters' functions sample (W_GI). Recorded into the frame's command buffer outside a pass, where Metal commits
+ * a command buffer of its own ahead of the frame's; the zone's structure is built and waited for once, as it loads.
+ * Without ray queries (g_has_rt) both calls do nothing. Both atlases are RGBA16F (the distances' RG16F on Metal: an
+ * extended storage format here). */
+static const char GI_KERNELS_GLSL[] =
+    "#if defined(GI_TRACE)\n"
+    "#extension GL_EXT_ray_query : require\n"
+    "#endif\n"
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "#if defined(GI_FLATTEN)\n"
+    GI_OCT_GLSL
+    /* the zone flattened: triangle t of an item into world space, with its albedo and its normal (faced as its vertex
+     * normals face, its corners turned to match); flags 1 textured, 2 two-sided. I: the item's world matrix and its
+     * inverse, a (first vertex, triangles, primitive, its first triangle in the list), b (flags, the texture's level) */
+    "layout(local_size_x = 64) in;\n"
+    "layout(std430, set = 0, binding = 10) readonly buffer VBB { uint vb[]; };\n"
+    "layout(set = 0, binding = 11) uniform sampler2D tx;\n"
+    "layout(std430, set = 0, binding = 12) writeonly buffer POSB { float pos[]; };\n"
+    "layout(std430, set = 0, binding = 3) writeonly buffer ATB { uvec2 attr[]; };\n"
+    "layout(std140, set = 0, binding = 13) uniform FIB { mat4 world, inv; uvec4 a; uvec4 b; } I;\n"
+    "void main() {\n"
+    "  uint t = gl_GlobalInvocationID.x;\n"
+    "  if (t >= I.a.y) return;\n"
+    "  uint v0 = I.a.x + (I.a.z == 5u ? t : 3u * t);\n"
+    "  uint vi[3] = uint[3](v0, v0 + 1u, v0 + 2u);\n"
+    "  if (I.a.z == 5u && (t & 1u) != 0u) { vi[0] = v0 + 1u; vi[1] = v0; }\n" /* a strip's odd triangles wind the other way */
+    "  vec3 p[3];\n"
+    "  vec3 n = vec3(0.0);\n"
+    "  vec4 vc = vec4(0.0), tc = vec4(0.0);\n"
+    "  vec2 uvc = vec2(0.0);\n"
+    "  bool tex = (I.b.x & 1u) != 0u;\n"
+    "  float lv = float(I.b.y);\n"
+    "  for (int k = 0; k < 3; ++k) {\n"
+    "    uint b = vi[k] * 9u;\n" /* 36-byte vertices: position, normal, D3DCOLOR, uv */
+    "    p[k] = (I.world * vec4(uintBitsToFloat(uvec3(vb[b], vb[b + 1u], vb[b + 2u])), 1.0)).xyz;\n"
+    "    n += (vec4(uintBitsToFloat(uvec3(vb[b + 3u], vb[b + 4u], vb[b + 5u])), 0.0) * I.inv).xyz;\n"
+    "    vc += unpackUnorm4x8(vb[b + 6u]).zyxw;\n"
+    "    vec2 uv = uintBitsToFloat(uvec2(vb[b + 7u], vb[b + 8u]));\n"
+    "    uvc += uv;\n"
+    "    if (tex) tc += textureLod(tx, uv, lv);\n"
+    "  }\n"
+    "  uvc /= 3.0;\n"
+    "  tc = tex ? (tc + textureLod(tx, uvc, lv)) * 0.25 : vec4(0.5);\n"
+    "  vc /= 3.0;\n"
+    "  vec3 fn = cross(p[1] - p[0], p[2] - p[0]);\n"
+    "  if (dot(fn, n) < 0.0) { vec3 x = p[1]; p[1] = p[2]; p[2] = x; fn = -fn; }\n"
+    "  float fl = length(fn);\n"
+    "  if (!(fl > 1e-12)) { p[1] = p[0]; p[2] = p[0]; }\n" /* nothing: a degenerate triangle no ray hits */
+    "  fn = fl > 1e-12 ? fn / fl : vec3(0.0, -1.0, 0.0);\n"
+    "  uint o = I.a.w + t;\n"
+    "  for (int k = 0; k < 3; ++k) {\n"
+    "    uint q = 9u * o + 3u * uint(k);\n"
+    "    pos[q] = p[k].x; pos[q + 1u] = p[k].y; pos[q + 2u] = p[k].z;\n"
+    "  }\n"
+    "  vec3 alb = min(2.0 * tc.rgb * vc.rgb, vec3(0.9));\n"
+    "  attr[o] = uvec2(packUnorm4x8(vec4(alb, float(I.b.x & 2u) / 255.0)), packUnorm2x16(gi_oct(fn) * 0.5 + 0.5));\n"
+    "}\n"
+    "#else\n"
+    "#define GI_B_GU 0\n#define GI_B_PS 1\n#define GI_B_IR 8\n#define GI_B_DS 9\n#define GI_PS_Q\n"
+    GI_GLSL
+    /* probe l's world cell */
+    "ivec3 gi_cell(uint l) {\n"
+    "  ivec3 s = ivec3(int(l) % G.dims.x, (int(l) / G.dims.x) % G.dims.y, int(l) / (G.dims.x * G.dims.y));\n"
+    "  return G.base.xyz + gi_slot(s - G.base.xyz);\n"
+    "}\n"
+    /* ray r of n: a spherical Fibonacci direction, turned by this update's rotation */
+    "vec3 gi_ray(uint r) {\n"
+    "  float n = float(G.n.x), z = 1.0 - (2.0 * float(r) + 1.0) / n, s = sqrt(sat(1.0 - z * z));\n"
+    "  float ph = 6.2831853 * fract(float(r) * 0.6180340);\n"
+    "  return normalize((G.rot * vec4(cos(ph) * s, sin(ph) * s, z, 0.0)).xyz);\n"
+    "}\n"
+    "#if defined(GI_SCROLL)\n" /* the cells new to the grid: cleared, not used till traced */
+    "layout(local_size_x = 64) in;\n"
+    "layout(std430, set = 0, binding = 2) buffer PCB { ivec4 PC[]; };\n"
+    "void main() {\n"
+    "  uint l = gl_GlobalInvocationID.x;\n"
+    "  if (l >= uint(G.dims.w)) return;\n"
+    "  ivec3 c = gi_cell(l);\n"
+    "  if (any(notEqual(PC[l].xyz, c)) || PC[l].w == 0) { PC[l] = ivec4(c, 1); PS[l] = 0u; }\n"
+    "}\n"
+    "#elif defined(GI_TRACE)\n"
+    /* ray x of this update's probe y: what it brings back (rgb) and how far it went (a; < 0 a backface, 1e4 the sky) */
+    "layout(local_size_x = 64) in;\n"
+    "struct GL { vec4 pos, diffuse, ambient, att; };\n" /* GfxWorldLight */
+    "layout(std430, set = 0, binding = 3) readonly buffer ATB { uvec2 attr[]; };\n"
+    "layout(std430, set = 0, binding = 4) readonly buffer LTB { GL LT[]; };\n"
+    "layout(std430, set = 0, binding = 5) writeonly buffer RBB { vec4 RB[]; };\n"
+    "layout(set = 0, binding = 6) uniform accelerationStructureEXT gas;\n"
+    /* the shadows' uniforms (SHADOW_GLSL's SH) and their zone layer */
+    "layout(std140, set = 0, binding = 7) uniform SHB { mat4 m[4]; vec4 cas[4]; vec4 cbox[4]; vec4 dir; vec4 cam; vec4 info;\n"
+    "  mat4 cm[4]; vec4 ctx; vec4 pk; } S;\n"
+    "layout(set = 0, binding = 14) uniform sampler2DArray zm;\n"
+    /* the sun's or moon's shadow at X (normal n) from the zone's cascades, one texel read: 1 lit, 0 not, -1 outside
+     * them (a ray then) */
+    "float gi_cascade(vec3 X, vec3 n) {\n"
+    "  float d = length(X - S.cam.xyz);\n"
+    "  for (uint c = 0u; c < uint(S.info.x); ++c) {\n"
+    "    if (S.cas[c].w == 0.0 || d > S.cas[c].x) continue;\n"
+    "    float t = S.cas[c].y;\n"
+    "    vec4 h = S.m[c] * vec4(X + n * (2.0 * t) + S.dir.xyz * t, 1.0);\n"
+    "    if (abs(h.x) > 0.99 || abs(h.y) > 0.99) continue;\n"
+    "    float w = float(textureSize(zm, 0).x);\n"
+    "    ivec2 px = ivec2(clamp(vec2(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5) * w, 0.0, w - 1.0));\n"
+    "    return h.z <= texelFetch(zm, ivec3(px, int(c)), 0).r ? 1.0 : 0.0;\n"
+    "  }\n"
+    "  return -1.0;\n"
+    "}\n"
+    "void main() {\n"
+    "  uint r = gl_GlobalInvocationID.x, u = gl_GlobalInvocationID.y, l = u * G.n.y + G.n.z;\n"
+    "  if (r >= G.n.x || l >= uint(G.dims.w)) return;\n"
+    "  vec3 o = vec3(gi_cell(l)) * G.org.w, d = gi_ray(r);\n"
+    "  vec4 res = vec4(0.0, 0.0, 0.0, 1e4);\n"
+    "  rayQueryEXT q;\n"
+    "  rayQueryInitializeEXT(q, gas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, d, G.tr.x);\n"
+    "  while (rayQueryProceedEXT(q)) {}\n"
+    "  if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {\n"
+    "    uvec2 at = attr[rayQueryGetIntersectionPrimitiveIndexEXT(q, true)];\n"
+    "    vec4 alb = unpackUnorm4x8(at.x);\n"
+    "    vec3 n = gi_unoct(unpackUnorm2x16(at.y) * 2.0 - 1.0);\n"
+    "    float t = rayQueryGetIntersectionTEXT(q, true);\n"
+    "    res = vec4(0.0, 0.0, 0.0, -t);\n"
+    "    if (dot(n, d) > 0.0 && alb.a > 0.0) n = -n;\n" /* two-sided: lit from the side the ray came */
+    "    if (dot(n, d) <= 0.0) {\n"
+    "      vec3 X = o + d * t + n * 0.05;\n"
+    "      vec3 E = G.amb.rgb * G.tr.w;\n"
+    "      for (int k = 0; k < 2; ++k) {\n"
+    "        vec4 L = k != 0 ? G.sun2_dir : G.sun_dir;\n"
+    "        float nl = dot(n, L.xyz);\n"
+    "        if (L.w <= 0.0 || nl <= 0.0) continue;\n"
+    "        float v = G.org.y > 0.5 && dot(L.xyz, S.dir.xyz) > 0.98 ? gi_cascade(X, n) : -1.0;\n"
+    "        if (v < 0.0) {\n"
+    "          rayQueryEXT sq;\n"
+    "          rayQueryInitializeEXT(sq, gas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFFu, X, 0.0, L.xyz, 2000.0);\n"
+    "          while (rayQueryProceedEXT(sq)) {}\n"
+    "          v = rayQueryGetIntersectionTypeEXT(sq, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;\n"
+    "        }\n"
+    "        E += (k != 0 ? G.sun2_col.rgb : G.sun_col.rgb) * (nl * v);\n"
+    "      }\n"
+    "      for (uint i = 0u; i < G.n.w; ++i) {\n"
+    "        GL lt = LT[i];\n"
+    "        vec3 v = lt.pos.xyz - X;\n"
+    "        float dist = length(v);\n"
+    "        if (dist >= lt.pos.w) continue;\n"
+    "        float qq = dist / lt.pos.w, win = sat(1.0 - qq * qq * qq * qq);\n" /* the range's edge, smoothed */
+    "        float a = win * win / max(lt.att.x + lt.att.y * dist + lt.att.z * dist * dist, 1e-6);\n"
+    "        E += lt.ambient.rgb * a + lt.diffuse.rgb * a * max(dot(n, v / max(dist, 1e-6)), 0.0);\n"
+    "      }\n"
+    "      if (G.tr.z > 0.0) E += gi_at(X, n).rgb * G.tr.z;\n" /* the bounces before */
+    "      res = vec4(alb.rgb * E, t);\n"
+    "    }\n"
+    "  }\n"
+    "  RB[u * G.n.x + r] = res;\n"
+    "}\n"
+    "#else\n"
+    /* GI_BLEND: a probe's map (GI_TS texels a side, a border of one round N inside) from its rays: texel tid of update
+     * slot gid; the border copied from the inside as the octahedron folds (bilinear lookups wrap across its edges).
+     * GI_DIS 1: the distance map (mean and square, sharp weights), else the irradiance (cosine-weighted, and the sky's
+     * share). The irradiance's pass also marks the probe traced, and inside something when a quarter of its rays hit
+     * backfaces */
+    "layout(local_size_x = GI_TS, local_size_y = GI_TS) in;\n"
+    "layout(std430, set = 0, binding = 5) readonly buffer RBB { vec4 RB[]; };\n"
+    "layout(set = 0, binding = 15, rgba16f) uniform image2D m;\n"
+    "shared vec4 tg[GI_TS * GI_TS];\n"
+    "void main() {\n"
+    "  const int N = GI_TS - 2;\n"
+    "  uvec2 tid = gl_LocalInvocationID.xy;\n"
+    "  uint u = gl_WorkGroupID.x, l = u * G.n.y + G.n.z;\n"
+    "  if (l >= uint(G.dims.w)) return;\n" /* (the whole group) */
+    "  ivec3 s = ivec3(int(l) % G.dims.x, (int(l) / G.dims.x) % G.dims.y, int(l) / (G.dims.x * G.dims.y));\n"
+    "  ivec2 org = ivec2(s.x + G.dims.x * s.y, s.z) * GI_TS;\n"
+    "  bool fresh = (PS[l] & 1u) == 0u;\n"
+    "  if (tid.x >= 1u && tid.y >= 1u && tid.x <= uint(N) && tid.y <= uint(N)) {\n"
+    "    vec3 dir = gi_unoct(((vec2(tid) - 0.5) / float(N)) * 2.0 - 1.0);\n"
+    "    vec4 sum = vec4(0.0);\n"
+    "    float ws = 0.0;\n"
+    "    for (uint r = 0u; r < G.n.x; ++r) {\n"
+    "      vec4 R = RB[u * G.n.x + r];\n"
+    "      float c = max(dot(dir, gi_ray(r)), 0.0);\n"
+    "#if GI_DIS\n"
+    "      float w = pow(c, 50.0), dd = min(abs(R.w), G.tr.x);\n"
+    "      sum += vec4(dd, dd * dd, 0.0, 0.0) * w;\n"
+    "      ws += w;\n"
+    "#else\n"
+    "      if (R.w < 0.0) continue;\n" /* backfaces bring nothing */
+    "      sum += vec4(R.rgb, R.w >= 1e3 ? 1.0 : 0.0) * c;\n"
+    "      ws += c;\n"
+    "#endif\n"
+    "    }\n"
+    "    vec4 nv = ws > 1e-6 ? sum / ws : vec4(0.0);\n"
+    "    vec4 old = imageLoad(m, org + ivec2(tid));\n"
+    "    tg[tid.y * uint(GI_TS) + tid.x] = fresh ? nv : mix(nv, old, G.tr.y);\n"
+    "  }\n"
+    "  barrier();\n"
+    "  uint x = tid.x, y = tid.y, e = uint(GI_TS - 1), sx = x, sy = y;\n"
+    "  if ((x == 0u || x == e) && (y == 0u || y == e)) { sx = x == 0u ? uint(N) : 1u; sy = y == 0u ? uint(N) : 1u; }\n"
+    "  else if (y == 0u || y == e) { sx = e - x; sy = y == 0u ? 1u : uint(N); }\n"
+    "  else if (x == 0u || x == e) { sx = x == 0u ? 1u : uint(N); sy = e - y; }\n"
+    "  imageStore(m, org + ivec2(tid), tg[sy * uint(GI_TS) + sx]);\n"
+    "#if !GI_DIS\n"
+    "  if (x == 0u && y == 0u) {\n"
+    "    uint bf = 0u;\n"
+    "    for (uint r = 0u; r < G.n.x; ++r) bf += RB[u * G.n.x + r].w < 0.0 ? 1u : 0u;\n"
+    "    PS[l] = 1u | (bf * 4u > G.n.x ? 2u : 0u);\n"
+    "  }\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n"
+    "#endif\n";
+
+/* the kernels' bindings (GI_KERNELS_GLSL), pushed */
+enum
+{
+    GB_GU = 0,
+    GB_PS = 1,
+    GB_PC = 2,
+    GB_ATTR = 3,
+    GB_LT = 4,
+    GB_RB = 5,
+    GB_AS = 6,
+    GB_SH = 7,
+    GB_IR = 8,
+    GB_DS = 9,
+    GB_VB = 10,
+    GB_TX = 11,
+    GB_POS = 12,
+    GB_FI = 13,
+    GB_ZM = 14,
+    GB_IMG = 15,
+    GB_COUNT = 16,
+};
+
+static VkPipeline gi_kernel(const char* defines)
+{
+    VkPipeline p = compute_pipeline(defines, GI_KERNELS_GLSL, g_gi.layout);
+    if (!p)
+        fprintf(stderr, "[recomp] gfx: scene bounce light: its kernel (%s) failed\n", defines);
+    return p;
+}
+
+static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags src_stage,
+    VkAccessFlags src, VkPipelineStageFlags dst_stage, VkAccessFlags dst);
+
+/* an atlas (or the stand-in for the shadows' zone layer: array 1): RGBA16F, sampled and stored, zeroed */
+static GfxTex* gi_image(uint32_t w, uint32_t h, int array)
+{
+    return tex_make(GFX_TEX_2D, F_A8R8G8B8, w, h, 1, GFX_USE_SAMPLE, VK_FORMAT_R16G16B16A16_SFLOAT, 1, array ? 1 : 0,
+        VK_IMAGE_USAGE_STORAGE_BIT);
+}
+
+static int gi_init(void)
+{
+    if (g_gi.tried)
+        return g_gi.ok;
+    g_gi.tried = 1;
+    if (!g_has_rt || !rt_init())
+    {
+        fprintf(stderr, "[recomp] gfx: scene bounce light: this GPU has no ray queries\n");
+        return 0;
+    }
+    static const VkDescriptorType types[GB_COUNT] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+    };
+    VkDescriptorSetLayoutBinding b[GB_COUNT];
+    for (uint32_t i = 0; i < GB_COUNT; ++i)
+        b[i] = (VkDescriptorSetLayoutBinding){ i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+    push_layout(b, GB_COUNT, NULL, &g_gi.dsl, &g_gi.layout);
+    if (!g_gi.layout)
+        return 0;
+    VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.maxLod = VK_LOD_CLAMP_NONE;
+    VK_CHECK(vkCreateSampler(g_dev, &si, NULL, &g_gi.rep));
+    g_gi.flatten = gi_kernel("#define GI_FLATTEN\n");
+    g_gi.scroll = gi_kernel("#define GI_SCROLL\n");
+    g_gi.trace = gi_kernel("#define GI_TRACE\n");
+    g_gi.bdis = gi_kernel("#define GI_BLEND\n#define GI_DIS 1\n#define GI_TS 16\n");
+    g_gi.birr = gi_kernel("#define GI_BLEND\n#define GI_DIS 0\n#define GI_TS 8\n");
+    g_gi.nozm = gi_image(1, 1, 1);
+    VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+    qi.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, qi.queryCount = 1;
+    VK_CHECK(vkCreateQueryPool(g_dev, &qi, NULL, &g_gi.csize));
+    g_gi.ok = g_gi.flatten && g_gi.scroll && g_gi.trace && g_gi.bdis && g_gi.birr && g_gi.rep && g_gi.nozm;
+    if (!g_gi.ok)
+        atomic_fetch_add(&g_failures, 1);
+    return g_gi.ok;
+}
+
+static void gi_push(VkCommandBuffer cb, const VkWriteDescriptorSet* w, uint32_t n)
+{
+    p_push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.layout, 0, n, w);
+}
+
+/* one instance of blas, unmoved, both faces, into d */
+static void tlas_instance(VkAccelerationStructureInstanceKHR* d, VkAccelerationStructureKHR blas, uint32_t custom, uint32_t mask)
+{
+    memset(d, 0, sizeof *d);
+    d->transform.matrix[0][0] = d->transform.matrix[1][1] = d->transform.matrix[2][2] = 1.0f;
+    d->instanceCustomIndex = custom, d->mask = mask;
+    d->flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    VkAccelerationStructureDeviceAddressInfoKHR ai = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+    ai.accelerationStructure = blas;
+    d->accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(g_dev, &ai);
+}
+
+/* a top-level structure's build over the instances at addr: its geometry (tg) and what tl builds of it (for fast tracing) */
+static void tlas_info(VkAccelerationStructureGeometryKHR* tg, VkAccelerationStructureBuildGeometryInfoKHR* tl, VkDeviceAddress addr)
+{
+    *tg = (VkAccelerationStructureGeometryKHR){ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    tg->geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    tg->geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    tg->geometry.instances.data.deviceAddress = addr;
+    *tl = (VkAccelerationStructureBuildGeometryInfoKHR){ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    tl->type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    tl->flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    tl->mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    tl->geometryCount = 1, tl->pGeometries = tg;
+}
+
+/* the zone's structure let go (once the GPU is past it) */
+static void gi_drop(void)
+{
+    if (g_gi.blas)
+        trash(3, (uint64_t)(uintptr_t)g_gi.blas, VK_NULL_HANDLE), g_gi.blas = VK_NULL_HANDLE;
+    if (g_gi.tlas)
+        trash(3, (uint64_t)(uintptr_t)g_gi.tlas, VK_NULL_HANDLE), g_gi.tlas = VK_NULL_HANDLE;
+    rt_free(&g_gi.blas_buf), rt_free(&g_gi.tlas_buf), rt_free(&g_gi.attr), rt_free(&g_gi.inst);
+    g_gi.ntri = 0;
+}
+
+void gfx_gi_zone(const GfxGiZone* z)
+{
+    if (!g_dev)
+        return;
+    gi_drop();
+    g_gi.updated = 0;
+    g_gi.clear = 1; /* every probe afresh */
+    if (!z || !z->nitem || !gi_init())
+        return;
+    uint64_t t0 = gfx_now_ns();
+    uint32_t ntri = 0;
+    for (uint32_t i = 0; i < z->nitem; ++i)
+        if (z->item[i].vb && z->item[i].inst < z->nworld)
+            ntri += z->item[i].count;
+    if (!ntri)
+        return;
+    const VkBufferUsageFlags SB = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    RtBuf pos, scratch;
+    memset(&pos, 0, sizeof pos), memset(&scratch, 0, sizeof scratch);
+    if (rt_buffer_ex(&pos, (VkDeviceSize)ntri * 36, SB | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 0, 1) < 0 ||
+        rt_buffer_ex(&g_gi.attr, (VkDeviceSize)ntri * 8, SB, 0, 1) < 0)
+    {
+        rt_free(&pos), gi_drop();
+        return;
+    }
+    flush_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    /* the triangles, an item at a time */
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.flatten);
+    VkDescriptorBufferInfo pbi = { pos.b, 0, VK_WHOLE_SIZE }, abi = { g_gi.attr.b, 0, VK_WHOLE_SIZE };
+    struct
+    {
+        float world[16], inv[16];
+        uint32_t first, count, prim, tri, flags, level, pad[2];
+    } fi;
+    uint32_t at = 0;
+    for (uint32_t i = 0; i < z->nitem; ++i)
+    {
+        const GfxWorldItem* it = &z->item[i];
+        if (!it->vb || it->inst >= z->nworld)
+            continue;
+        memcpy(fi.world, z->world + 16 * (size_t)it->inst, 64);
+        memcpy(fi.inv, z->world_inv + 16 * (size_t)it->inst, 64);
+        fi.first = it->first, fi.count = it->count, fi.prim = it->prim, fi.tri = at;
+        fi.flags = (it->flags & GFX_WORLD_TWOSIDED) ? 2u : 0u, fi.level = 0, fi.pad[0] = fi.pad[1] = 0;
+        GfxTex* t = it->tex && it->tex->view && it->tex->type == GFX_TEX_2D ? it->tex : NULL;
+        if (t)
+        {
+            fi.flags |= 1u;
+            /* a level some 8 texels across, when the chain is all there */
+            uint32_t lv = 0, w = t->w < t->h ? t->w : t->h;
+            while (w > 8 && lv + 1 < t->levels)
+                w >>= 1, ++lv;
+            fi.level = t->levels > 1 && t->levels < 32 && t->filled == (1u << t->levels) - 1 ? lv : 0;
+            t->used = g_serial, t->rec = g_cb_index;
+        }
+        VkDescriptorBufferInfo fbi = ring_put(&fi, sizeof fi), vbi = { it->vb->b, 0, VK_WHOLE_SIZE };
+        VkDescriptorImageInfo ti = { g_gi.rep, t ? t->view : g_dummy2d->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w[5];
+        desc_write(&w[0], GB_VB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &vbi, NULL);
+        desc_write(&w[1], GB_TX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ti);
+        desc_write(&w[2], GB_POS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pbi, NULL);
+        desc_write(&w[3], GB_ATTR, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &abi, NULL);
+        desc_write(&w[4], GB_FI, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &fbi, NULL);
+        gi_push(cb, w, 5);
+        vkCmdDispatch(cb, (it->count + 63) / 64, 1, 1);
+        it->vb->used = g_serial;
+        at += it->count;
+    }
+    full_barrier(cb);
+    /* one structure over them (compacted, as on Metal), one instance of it */
+    VkAccelerationStructureGeometryKHR g = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    VkAccelerationStructureGeometryTrianglesDataKHR* td = &g.geometry.triangles;
+    td->sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    td->vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    td->vertexData.deviceAddress = pos.addr;
+    td->vertexStride = 12;
+    td->maxVertex = 3 * ntri - 1;
+    td->indexType = VK_INDEX_TYPE_NONE_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR bl = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    bl.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bl.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | (g_gi.csize ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0);
+    bl.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bl.geometryCount = 1, bl.pGeometries = &g;
+    VkAccelerationStructureBuildSizesInfoKHR sz = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    vkGetAccelerationStructureBuildSizesKHR(g_dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bl, &ntri, &sz);
+    VkDeviceSize al = g_ray.scratch_align;
+    if (!rt_structure_ex(&g_gi.blas, &g_gi.blas_buf, sz.accelerationStructureSize, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, 1) ||
+        rt_buffer_ex(&scratch, sz.buildScratchSize + al, SB, 0, 1) < 0)
+    {
+        fprintf(stderr, "[recomp] gfx: scene bounce light: no room for the zone's structure (%u triangles)\n", ntri);
+        rt_free(&pos), rt_free(&scratch), gi_drop();
+        return;
+    }
+    bl.dstAccelerationStructure = g_gi.blas;
+    bl.scratchData.deviceAddress = (scratch.addr + al - 1) / al * al;
+    VkAccelerationStructureBuildRangeInfoKHR br = { ntri, 0, 0, 0 };
+    const VkAccelerationStructureBuildRangeInfoKHR* brp = &br;
+    vkCmdBuildAccelerationStructuresKHR(cb, 1, &bl, &brp);
+    full_barrier(cb);
+    if (g_gi.csize)
+    {
+        vkCmdResetQueryPool(cb, g_gi.csize, 0, 1);
+        vkCmdWriteAccelerationStructuresPropertiesKHR(cb, 1, &g_gi.blas, VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, g_gi.csize, 0);
+    }
+    g_dirty = 1;
+    uint64_t t1 = gfx_now_ns();
+    submit(1); /* once a zone, while it loads: the corners and the scratch let go after, the compacted size read */
+    uint64_t t2 = gfx_now_ns();
+    rt_free(&pos), rt_free(&scratch);
+    VkDeviceSize full = g_gi.blas_buf.size, csize = 0;
+    if (g_gi.csize)
+        vkGetQueryPoolResults(g_dev, g_gi.csize, 0, 1, sizeof csize, &csize, sizeof csize, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    cb = cmd();
+    gpu_sync();
+    if (csize && csize < full)
+    {
+        VkAccelerationStructureKHR small = VK_NULL_HANDLE;
+        RtBuf sbuf;
+        memset(&sbuf, 0, sizeof sbuf);
+        if (rt_structure_ex(&small, &sbuf, csize, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, 1))
+        {
+            VkCopyAccelerationStructureInfoKHR ci = { VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR };
+            ci.src = g_gi.blas, ci.dst = small, ci.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+            vkCmdCopyAccelerationStructureKHR(cb, &ci);
+            full_barrier(cb);
+            trash(3, (uint64_t)(uintptr_t)g_gi.blas, VK_NULL_HANDLE), rt_free(&g_gi.blas_buf);
+            g_gi.blas = small, g_gi.blas_buf = sbuf;
+        }
+        else
+            rt_free(&sbuf);
+    }
+    if (rt_buffer_ex(&g_gi.inst, sizeof(VkAccelerationStructureInstanceKHR), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, 1, 1) < 0)
+    {
+        gi_drop();
+        return;
+    }
+    tlas_instance((VkAccelerationStructureInstanceKHR*)g_gi.inst.p, g_gi.blas, 0, 0xFF);
+    VkAccelerationStructureGeometryKHR tg;
+    VkAccelerationStructureBuildGeometryInfoKHR tl;
+    tlas_info(&tg, &tl, g_gi.inst.addr);
+    uint32_t one = 1;
+    VkAccelerationStructureBuildSizesInfoKHR tsz = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    vkGetAccelerationStructureBuildSizesKHR(g_dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tl, &one, &tsz);
+    if (!rt_structure_ex(&g_gi.tlas, &g_gi.tlas_buf, tsz.accelerationStructureSize, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, 1) ||
+        rt_buffer_ex(&scratch, tsz.buildScratchSize + al, SB, 0, 1) < 0)
+    {
+        rt_free(&scratch), gi_drop();
+        return;
+    }
+    tl.dstAccelerationStructure = g_gi.tlas;
+    tl.scratchData.deviceAddress = (scratch.addr + al - 1) / al * al;
+    VkAccelerationStructureBuildRangeInfoKHR tr = { 1, 0, 0, 0 };
+    const VkAccelerationStructureBuildRangeInfoKHR* trp = &tr;
+    vkCmdBuildAccelerationStructuresKHR(cb, 1, &tl, &trp);
+    full_barrier(cb);
+    rt_free(&scratch); /* (let go once the GPU is past this frame) */
+    g_dirty = 1;
+    g_gi.ntri = ntri;
+    fprintf(stderr, "[recomp] gfx: scene bounce light: the zone's structure: %u items, %u triangles, %.1f MB (%.1f MB before "
+                    "compaction) + %.1f MB the triangles' colours and normals, %.1f ms recorded, %.1f ms to the build's end (with the "
+                    "frame's work before it), %.1f ms in all\n",
+        z->nitem, ntri, (double)g_gi.blas_buf.size / 1048576.0, (double)full / 1048576.0, (double)ntri * 8.0 / 1048576.0,
+        (double)(t1 - t0) / 1e6, (double)(t2 - t0) / 1e6, (double)(gfx_now_ns() - t0) / 1e6);
+}
+
+/* the grid at each quality (1 low, 2 high): cells each way, world units between them, rays a probe, 1 in how many
+ * traced a frame, hysteresis */
+typedef struct GiPreset
+{
+    int32_t d[3];
+    float sp;
+    uint32_t rays, stride;
+    float hyst;
+} GiPreset;
+static const GiPreset GI_PRESETS[2] = { { { 24, 8, 24 }, 4.0f, 32, 16, 0.85f }, { { 32, 12, 32 }, 3.0f, 64, 12, 0.9f } };
+
+static void gi_probes_free(void)
+{
+    gfx_tex_destroy(g_gi.irr), gfx_tex_destroy(g_gi.dis);
+    g_gi.irr = g_gi.dis = NULL;
+    rt_free(&g_gi.ps), rt_free(&g_gi.pc), rt_free(&g_gi.rb);
+}
+
+static int gi_probes_make(uint32_t q);
+
+/* the probes at quality q, or the next lower that can be made (high's distance atlas is 6144 across, past some GPUs'
+ * limit; one that failed is not tried again): g_gi.quality */
+static int gi_probes(uint32_t q)
+{
+    for (; q >= 1; --q)
+    {
+        if (g_gi.irr && g_gi.quality == q)
+            return 1;
+        int over = q >= 2 && (uint32_t)(GI_PRESETS[1].d[0] * GI_PRESETS[1].d[1]) * (GI_DIS + 2) > g_props.limits.maxImageDimension2D;
+        if (!over && !(g_gi.failed & (1u << q)) && gi_probes_make(q))
+            return 1;
+    }
+    return 0;
+}
+
+/* the probes at quality q made in place of what was there; 0 when they could not be (remembered in g_gi.failed) */
+static int gi_probes_make(uint32_t q)
+{
+    gi_probes_free();
+    const int32_t* d = GI_PRESETS[q >= 2].d;
+    uint32_t rays = GI_PRESETS[q >= 2].rays, stride = GI_PRESETS[q >= 2].stride;
+    float sp = GI_PRESETS[q >= 2].sp;
+    uint32_t np = (uint32_t)(d[0] * d[1] * d[2]), slots = (np + stride - 1) / stride;
+    g_gi.irr = gi_image((uint32_t)(d[0] * d[1]) * (GI_IRR + 2), (uint32_t)d[2] * (GI_IRR + 2), 0);
+    g_gi.dis = gi_image((uint32_t)(d[0] * d[1]) * (GI_DIS + 2), (uint32_t)d[2] * (GI_DIS + 2), 0);
+    const VkBufferUsageFlags SB = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (!g_gi.irr || !g_gi.dis || rt_buffer(&g_gi.ps, np * 4, SB, 0) < 0 || rt_buffer(&g_gi.pc, np * 16, SB, 0) < 0 ||
+        rt_buffer(&g_gi.rb, (VkDeviceSize)slots * rays * 16, SB, 0) < 0)
+    {
+        gi_probes_free();
+        g_gi.failed |= 1u << q;
+        fprintf(stderr, "[recomp] gfx: scene bounce light: its probes at quality %u could not be made\n", q);
+        return 0;
+    }
+    g_gi.quality = q, g_gi.updated = 0, g_gi.phase = 0, g_gi.clear = 1;
+    fprintf(stderr, "[recomp] gfx: scene bounce light: %dx%dx%d probes %.1f apart, %u rays, 1 in %u a frame, %.1f MB\n", d[0], d[1],
+        d[2], (double)sp, rays, stride,
+        (double)((d[0] * d[1] * (GI_IRR + 2)) * (d[2] * (GI_IRR + 2)) * 8 + (d[0] * d[1] * (GI_DIS + 2)) * (d[2] * (GI_DIS + 2)) * 8 +
+                    np * 20 + slots * rays * 16) / 1048576.0);
+    return 1;
+}
+
+static uint32_t gi_rand(void)
+{
+    g_gi.seed = g_gi.seed * 1664525u + 1013904223u;
+    return g_gi.seed;
+}
+
+/* a random rotation (a random unit quaternion) into m, as columns */
+static void gi_rotation(float* m)
+{
+    float r[3];
+    for (int i = 0; i < 3; ++i)
+        r[i] = (float)(gi_rand() >> 8) / 16777216.0f;
+    float a = sqrtf(1.0f - r[0]), b = sqrtf(r[0]), t1 = 6.2831853f * r[1], t2 = 6.2831853f * r[2];
+    float x = a * sinf(t1), y = a * cosf(t1), z = b * sinf(t2), w = b * cosf(t2);
+    float R[9] = { 1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+        2 * (y * z - x * w), 2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y) };
+    memset(m, 0, 64);
+    for (int c = 0; c < 3; ++c)
+        for (int rr = 0; rr < 3; ++rr)
+            m[c * 4 + rr] = R[rr * 3 + c];
+    m[15] = 1.0f;
+}
+
+void gfx_gi_frame(const GfxGiFrame* f)
+{
+    g_gi.on = 0;
+    if (!g_dev || !f || f->strength <= 0.0f || !g_gi.tlas || !gi_init())
+        return;
+    uint32_t q = f->quality >= 2 ? 2 : 1;
+    g_gi.u.org[0] = f->quality >= 3 ? 1.0f : 0.0f;
+    if (!gi_probes(q))
+        return;
+    GiU* u = &g_gi.u;
+    const GiPreset* gp = &GI_PRESETS[g_gi.quality >= 2]; /* (what gi_probes made) */
+    const int32_t* d = gp->d;
+    float sp = gp->sp, hyst = gp->hyst;
+    uint32_t rays = gp->rays, stride = gp->stride;
+    u->org[3] = sp;
+    for (int a = 0; a < 3; ++a)
+        u->dims[a] = d[a], u->base[a] = (int32_t)floorf(f->cam[a] / sp + 0.5f) - d[a] / 2;
+    u->base[3] = 1, u->dims[3] = d[0] * d[1] * d[2];
+    u->k[0] = f->strength, u->k[1] = f->sky, u->k[2] = f->debug, u->k[3] = 0.25f * sp;
+    u->inv[0] = 1.0f / (float)(d[0] * d[1] * (GI_IRR + 2)), u->inv[1] = 1.0f / (float)(d[2] * (GI_IRR + 2));
+    u->inv[2] = 1.0f / (float)(d[0] * d[1] * (GI_DIS + 2)), u->inv[3] = 1.0f / (float)(d[2] * (GI_DIS + 2));
+    if (g_gi.updated != g_serial) /* the probes traced once a frame, at its first batch */
+    {
+        u->tr[0] = 16.0f * sp, u->tr[1] = hyst, u->tr[2] = f->bounce, u->tr[3] = f->ambient_bounce;
+        /* the sun's visibility at a hit from the shadows' zone layer when it is there (one read), else a ray */
+        int zl = g_shd.on && g_shd.zmap;
+        u->org[1] = zl ? 1.0f : 0.0f;
+        uint32_t nl = f->nlight < 64 ? f->nlight : 64;
+        u->n[0] = rays, u->n[1] = stride, u->n[2] = g_gi.phase, u->n[3] = nl;
+        memcpy(u->sun_dir, f->sun_dir, 16), memcpy(u->sun_col, f->sun_col, 16);
+        memcpy(u->sun2_dir, f->sun2_dir, 16), memcpy(u->sun2_col, f->sun2_col, 16), memcpy(u->amb, f->ambient, 16);
+        gi_rotation(u->rot);
+        g_gi.phase = (g_gi.phase + 1) % stride;
+        g_gi.updated = g_serial;
+        static uint32_t told;
+        if (++told % 2000 == 1)
+            fprintf(stderr, "[recomp] gfx: scene bounce light: grid at (%d, %d, %d), %u lamps, sun %.2f %.2f %.2f, second %.2f %.2f %.2f, "
+                            "ambient %.2f %.2f %.2f, zone layer %s\n",
+                u->base[0], u->base[1], u->base[2], nl, u->sun_col[0] * u->sun_dir[3], u->sun_col[1] * u->sun_dir[3],
+                u->sun_col[2] * u->sun_dir[3], u->sun2_col[0] * u->sun2_dir[3], u->sun2_col[1] * u->sun2_dir[3],
+                u->sun2_col[2] * u->sun2_dir[3], u->amb[0], u->amb[1], u->amb[2], zl ? "read" : "not there");
+        uint32_t np = (uint32_t)u->dims[3], slots = (np + stride - 1) / stride;
+        VkBuffer buf;
+        VkDeviceSize off;
+        GfxWorldLight none;
+        memset(&none, 0, sizeof none);
+        size_t lsz = (nl ? nl : 1) * sizeof(GfxWorldLight);
+        VkDescriptorBufferInfo lbi = ring_put(nl ? f->light : &none, lsz);
+        VkDescriptorBufferInfo ubi = ring_put(u, sizeof *u);
+        VkDescriptorBufferInfo sbi;
+        if (!shadow_uniforms(&sbi))
+        {
+            memset(ring(sizeof g_shd.u, RING_ALIGN, &buf, &off), 0, sizeof g_shd.u);
+            sbi = (VkDescriptorBufferInfo){ buf, off, sizeof g_shd.u };
+        }
+        flush_pass();
+        gpu_sync();
+        VkCommandBuffer cb = g_cb;
+        if (g_gi.clear)
+        {
+            vkCmdFillBuffer(cb, g_gi.ps.b, 0, VK_WHOLE_SIZE, 0);
+            vkCmdFillBuffer(cb, g_gi.pc.b, 0, VK_WHOLE_SIZE, 0);
+            full_barrier(cb);
+            g_gi.clear = 0;
+        }
+        int ts = ts_begin(cb, GFX_PASS_GI);
+        VkDescriptorBufferInfo psbi = { g_gi.ps.b, 0, VK_WHOLE_SIZE }, pcbi = { g_gi.pc.b, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo abi = { g_gi.attr.b, 0, VK_WHOLE_SIZE }, rbi = { g_gi.rb.b, 0, VK_WHOLE_SIZE };
+        GfxTex* zm = zl ? g_shd.zmap : g_gi.nozm;
+        VkDescriptorImageInfo iri = { g_lin_samp, g_gi.irr->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo dsi = { g_lin_samp, g_gi.dis->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo zmi = { g_near_samp, zm->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSetAccelerationStructureKHR wa;
+        VkWriteDescriptorSet w[GB_COUNT];
+        /* the cells new to the grid */
+        desc_write(&w[0], GB_GU, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &ubi, NULL);
+        desc_write(&w[1], GB_PS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &psbi, NULL);
+        desc_write(&w[2], GB_PC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pcbi, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.scroll);
+        gi_push(cb, w, 3);
+        vkCmdDispatch(cb, (np + 63) / 64, 1, 1);
+        full_barrier(cb);
+        /* the rays */
+        desc_write(&w[2], GB_ATTR, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &abi, NULL);
+        desc_write(&w[3], GB_LT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &lbi, NULL);
+        desc_write(&w[4], GB_RB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &rbi, NULL);
+        as_write(&w[5], GB_AS, &wa, &g_gi.tlas);
+        desc_write(&w[6], GB_SH, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &sbi, NULL);
+        desc_write(&w[7], GB_IR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &iri);
+        desc_write(&w[8], GB_DS, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &dsi);
+        desc_write(&w[9], GB_ZM, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &zmi);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_gi.trace);
+        gi_push(cb, w, 10);
+        vkCmdDispatch(cb, (rays + 63) / 64, slots, 1);
+        full_barrier(cb);
+        /* the maps: the distances' first (the irradiance's pass marks the probes traced) */
+        VkDescriptorImageInfo mi[2] = { { VK_NULL_HANDLE, g_gi.dis->view, VK_IMAGE_LAYOUT_GENERAL },
+            { VK_NULL_HANDLE, g_gi.irr->view, VK_IMAGE_LAYOUT_GENERAL } };
+        VkPipeline bp[2] = { g_gi.bdis, g_gi.birr };
+        desc_write(&w[2], GB_RB, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &rbi, NULL);
+        for (int k = 0; k < 2; ++k)
+        {
+            desc_write(&w[3], GB_IMG, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, NULL, &mi[k]);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, bp[k]);
+            gi_push(cb, w, 4);
+            vkCmdDispatch(cb, slots, 1, 1);
+            full_barrier(cb);
+        }
+        ts_end(cb, ts);
+        g_gi.irr->used = g_gi.dis->used = zm->used = g_serial;
+        g_gi.irr->rec = g_gi.dis->rec = zm->rec = g_cb_index;
+    }
+    g_gi.on = 1;
 }
 
 /* one caster to capture: what it draws, through which matrix (clip space to this frame's view space) */
@@ -4645,12 +8435,6 @@ static VkPipeline rt_pipeline(const Caster* c, int alpha)
     return pipeline_for(&pk, c->vs, c->ps);
 }
 
-static VkWriteDescriptorSet rt_write(uint32_t binding, VkDescriptorType type, const VkDescriptorBufferInfo* bi)
-{
-    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    w.dstBinding = binding, w.descriptorCount = 1, w.descriptorType = type, w.pBufferInfo = bi;
-    return w;
-}
 
 /* The world for this frame's rays (invP the projection's inverse, view the camera, cam where it is): 1
  * when it was made */
@@ -4775,16 +8559,16 @@ static int rt_capture(const float* invP, const float* view, const float* cam)
         bi[2] = (VkDescriptorBufferInfo){ g_ray.tri.b, 0, VK_WHOLE_SIZE };
         bi[3] = (VkDescriptorBufferInfo){ cbuf, coff, 16 };
         bi[4] = cs->itype ? (VkDescriptorBufferInfo){ cs->ib, iat, VK_WHOLE_SIZE } : (VkDescriptorBufferInfo){ g_dummy, 0, VK_WHOLE_SIZE };
-        w[nw++] = rt_write(B_U, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0]);
-        w[nw++] = rt_write(B_SHADOW, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[1]);
-        w[nw++] = rt_write(B_RT_OUT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2]);
-        w[nw++] = rt_write(B_RT_C, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[3]);
-        w[nw++] = rt_write(B_RT_IDX, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[4]);
+        desc_write(&w[nw++], B_U, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+        desc_write(&w[nw++], B_SHADOW, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[1], NULL);
+        desc_write(&w[nw++], B_RT_OUT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+        desc_write(&w[nw++], B_RT_C, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[3], NULL);
+        desc_write(&w[nw++], B_RT_IDX, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[4], NULL);
         for (int st = 0; st < GFX_NSTREAMS; ++st)
         {
             bi[5 + st] = cs->vb[st] ? (VkDescriptorBufferInfo){ cs->vb[st], cs->voff[st], VK_WHOLE_SIZE }
                                     : (VkDescriptorBufferInfo){ g_dummy, 0, VK_WHOLE_SIZE };
-            w[nw++] = rt_write(B_STREAM0 + (uint32_t)st, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[5 + st]);
+            desc_write(&w[nw++], B_STREAM0 + (uint32_t)st, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[5 + st], NULL);
         }
         p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, nw, w);
         vkCmdDraw(cb, it->tris * 3, 1, 0, 0);
@@ -4889,24 +8673,9 @@ static int rt_capture(const float* invP, const float* view, const float* cam)
     memset(inst, 0, 2 * sizeof *inst);
     for (int k = 0; k < 2; ++k)
         if (bl[k].geometryCount)
-        {
-            VkAccelerationStructureInstanceKHR* d = &inst[ninst++];
-            d->transform.matrix[0][0] = d->transform.matrix[1][1] = d->transform.matrix[2][2] = 1.0f;
-            d->instanceCustomIndex = (uint32_t)k, d->mask = k ? 2 : 1;
-            d->flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-            VkAccelerationStructureDeviceAddressInfoKHR ai = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
-            ai.accelerationStructure = g_ray.blas[k];
-            d->accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(g_dev, &ai);
-        }
-    VkAccelerationStructureGeometryKHR tg = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
-    tg.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    tg.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-    tg.geometry.instances.data.deviceAddress = ib->addr;
-    tl.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-    tl.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    tl.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    tl.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    tl.geometryCount = 1, tl.pGeometries = &tg;
+            tlas_instance(&inst[ninst++], g_ray.blas[k], (uint32_t)k, k ? 2 : 1);
+    VkAccelerationStructureGeometryKHR tg;
+    tlas_info(&tg, &tl, ib->addr);
     VkAccelerationStructureBuildSizesInfoKHR tsz = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
     vkGetAccelerationStructureBuildSizesKHR(g_dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tl, &ninst, &tsz);
     if (!rt_structure(&g_ray.tlas, &g_ray.tlas_buf, tsz.accelerationStructureSize, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR))
@@ -4936,7 +8705,7 @@ static int rt_capture(const float* invP, const float* view, const float* cam)
     VkDescriptorBufferInfo cbi[3] = { { g_ray.table.b, 0, VK_WHOLE_SIZE }, { g_ray.tri.b, 0, VK_WHOLE_SIZE }, { g_ray.nrm.b, 0, VK_WHOLE_SIZE } };
     VkWriteDescriptorSet cw[3];
     for (uint32_t i = 0; i < 3; ++i)
-        cw[i] = rt_write(i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &cbi[i]);
+        desc_write(&cw[i], i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &cbi[i], NULL);
     uint32_t nc[4] = { (uint32_t)(verts / 3), slots - 1, (uint32_t)verts, 0 };
     VkPipeline passes[3] = { g_ray.nclear, g_ray.nsum, g_ray.nresolve };
     uint32_t counts[3] = { slots, (uint32_t)(verts / 3), (uint32_t)verts };
@@ -4984,23 +8753,20 @@ static void rt_pass(GfxTex* target, int load, VkPipeline p, const float* vp, con
     VkDescriptorBufferInfo bi[4] = { { g_fx.ub, g_fx.uoff, sizeof(FxU) }, { g_ray.tri.b, 0, VK_WHOLE_SIZE }, { g_ray.nrm.b, 0, VK_WHOLE_SIZE },
         { g_ray.tab[g_frame].b, 0, VK_WHOLE_SIZE } };
     VkDescriptorImageInfo ii[9];
-    w[0] = rt_write(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0]);
+    desc_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
     for (int i = 0; i < 9; ++i)
     {
         int t = i < 6 ? i : i == 8 ? 6 : -1;
-        ii[i] = t >= 0 ? (VkDescriptorImageInfo){ g_fx.samp, t < n && in[t] ? in[t] : g_dummy2d->view, VK_IMAGE_LAYOUT_GENERAL }
-                       : (VkDescriptorImageInfo){ g_fx.cmp, g_fx.sdummy->view, VK_IMAGE_LAYOUT_GENERAL };
+        ii[i] = t >= 0 ? (VkDescriptorImageInfo){ g_lin_samp, t < n && in[t] ? in[t] : g_dummy2d->view, VK_IMAGE_LAYOUT_GENERAL }
+                       : (VkDescriptorImageInfo){ g_cmp_samp, g_fx.sdummy->view, VK_IMAGE_LAYOUT_GENERAL };
         w[1 + i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w[1 + i].dstBinding = 1 + (uint32_t)i, w[1 + i].descriptorCount = 1;
         w[1 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, w[1 + i].pImageInfo = &ii[i];
     }
-    VkWriteDescriptorSetAccelerationStructureKHR wa = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
-    wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &g_ray.tlas;
-    w[10] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    w[10].pNext = &wa, w[10].dstBinding = 10, w[10].descriptorCount = 1;
-    w[10].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    VkWriteDescriptorSetAccelerationStructureKHR wa;
+    as_write(&w[10], 10, &wa, &g_ray.tlas);
     for (uint32_t i = 0; i < 3; ++i)
-        w[11 + i] = rt_write(11 + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1 + i]);
+        desc_write(&w[11 + i], 11 + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1 + i], NULL);
     p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ray.layout, 0, 14, w);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ray.layout, 1, 1, &g_ray.texset, 0, NULL);
     uint32_t pc[8] = { dir ? (uint32_t)dir[0] : 0, dir ? (uint32_t)dir[1] : 0, 0, 0, g_ray.rtp[0], g_ray.rtp[1], g_ray.rtp[2], g_ray.rtp[3] };
@@ -5093,12 +8859,9 @@ static int water_capture(void)
 /* the water's bindings for a draw (gfx_msl.h: 16-18) into w; how many */
 static uint32_t water_bind(VkWriteDescriptorSet* w, VkDescriptorBufferInfo* bi, VkDescriptorImageInfo* ii)
 {
-    VkBuffer b;
-    VkDeviceSize off;
-    memcpy(ring(sizeof g_fx.wu, RING_ALIGN, &b, &off), &g_fx.wu, sizeof g_fx.wu);
-    *bi = (VkDescriptorBufferInfo){ b, off, sizeof g_fx.wu };
-    ii[0] = (VkDescriptorImageInfo){ g_fx.samp, g_fx.wcol->view, VK_IMAGE_LAYOUT_GENERAL };
-    ii[1] = (VkDescriptorImageInfo){ g_fx.samp, g_fx.wdep->view, VK_IMAGE_LAYOUT_GENERAL };
+    *bi = ring_put(&g_fx.wu, sizeof g_fx.wu);
+    ii[0] = (VkDescriptorImageInfo){ g_lin_samp, g_fx.wcol->view, VK_IMAGE_LAYOUT_GENERAL };
+    ii[1] = (VkDescriptorImageInfo){ g_lin_samp, g_fx.wdep->view, VK_IMAGE_LAYOUT_GENERAL };
     for (int i = 0; i < 3; ++i)
     {
         w[i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -5129,11 +8892,7 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     float vp[4] = { (float)s->vp[0], (float)s->vp[1], (float)s->vp[2], (float)s->vp[3] };
     if (vp[2] < 16 || vp[3] < 16 || vp[0] + vp[2] > color->w || vp[1] + vp[3] > color->h)
         vp[0] = vp[1] = 0, vp[2] = (float)color->w, vp[3] = (float)color->h;
-    if (!g_fx.aa_pipe || g_fx.aa_fmt != color->vf)
-    {
-        g_fx.aa_pipe = fx_pipeline("FXAA", color->vf);
-        g_fx.aa_fmt = color->vf;
-    }
+    g_fx.aa_pipe = fmt_pipe(color->vf, FP_FX_AA);
     if (!g_fx.aa_pipe || !fx_tex(&g_fx.aa_src, color->vf, color->w, color->h, GFX_USE_RT, 1))
         return;
     gpu_sync();
@@ -5148,14 +8907,1156 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     color->scene = 0; /* its mips are behind (scene_mips) */
 }
 
+/* --- post effects: bloom and depth of field (post_bloom, post_dof), the sun shafts (post_shafts), the HDR scene ----
+ * gfx_metal.m's POST_MSL and post_effects, on Vulkan (their notes there). On the finished scene, before the interface and
+ * the nameplates go over it, with or without the effects (FFXI_FX) and the scene renderer: the lamps' glows, the sun
+ * shafts, then the depth of field (circles of confusion at half size, a disc gather, blended back by each pixel's own
+ * circle), then the bloom (its source the glow - the scene's additive draws, drawn again: glow_new - and the sky over a
+ * soft threshold; five levels down, a tent back up, screen-blended onto the scene). Each pass a full-screen triangle
+ * of its own on the effects' layout (fs_init): the uniforms, then three textures; timed as Metal's. */
+static const char POST_GLSL[] =
+    "layout(std140, set = 0, binding = 0) uniform PU {\n"
+    "  vec4 vp;    // the scene's viewport in its target, pixels\n"
+    "  vec4 src;   // the texture read: width, height, 1 / width, 1 / height\n"
+    "  vec4 bloom; // threshold, knee, glow weight, strength\n"
+    "  vec4 dof;   // focus (view z), sharp range behind it, ramp, largest radius (half-size pixels)\n"
+    "  vec4 dof2;  // near strength, hand, levels, radius scale (up)\n"
+    "  vec4 zp;    // projection [10], [14], viewport min z, max z\n"
+    "  vec4 aux;   // x: a texel step down the target per step across; y: the sky's emissive weight; w: an HDR scene\n"
+    "} u;\n"
+    "layout(location = 0) in vec2 vuv;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
+    "layout(set = 0, binding = 3) uniform sampler2D t2;\n"
+    "float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }\n"
+    "vec3 finite3(vec3 v) { return vec3(isnan(v.x) || isinf(v.x) ? 0.0 : v.x, isnan(v.y) || isinf(v.y) ? 0.0 : v.y,\n"
+    "                                   isnan(v.z) || isinf(v.z) ? 0.0 : v.z); }\n"
+    "#if defined(POST_BLOOM_PRE)\n"
+    "// the bloom's source at a point of the scene: the glow, and where nothing was drawn with depth (the sky, the sun)\n"
+    "// what is over the threshold (a soft knee) - lit ground and walls, however bright, do not glow\n"
+    "vec3 bright(vec2 uv) {\n"
+    "  vec3 c = texture(t0, uv).rgb;\n"
+    "  ivec2 q = ivec2(clamp(uv * u.src.xy, vec2(0.0), u.src.xy - 1.0));\n"
+    "  float sky = texelFetch(t2, q, 0).r >= u.zp.w - 1e-6 ? 1.0 : 0.0;\n"
+    "  float br = max(c.r, max(c.g, c.b)), k = max(u.bloom.y, 1e-4);\n"
+    "  float soft = clamp(br - u.bloom.x + k, 0.0, 2.0 * k);\n"
+    "  soft = soft * soft / (4.0 * k);\n"
+    "  float w = max(soft, br - u.bloom.x) / max(br, 1e-4);\n"
+    "  // the glow past a little (faint, wide additive layers - a sea's shimmer - stay as they are)\n"
+    "  vec3 g = texture(t1, uv).rgb;\n"
+    "  float gb = max(g.r, max(g.g, g.b)), gs = clamp(gb - 0.1, 0.0, 0.2);\n"
+    "  gs = gs * gs / 0.4;\n"
+    "  float gw = max(gs, gb - 0.2) / max(gb, 1e-4);\n"
+    "  vec3 r = c * (w * sky * u.aux.y) + g * (gw * u.bloom.z); // each by its emissive weight: past 1, the chain is float\n"
+    "  return finite3(clamp(r, 0.0, 64.0)); // (no NaN or infinity into the chain: it would spread)\n"
+    "}\n"
+    "// the first level: four bilinear taps, each weighted by 1 / (1 + its luma) - a Karis average, so a lone bright texel\n"
+    "// cannot flicker as the camera moves\n"
+    "void main() {\n"
+    "  vec2 uv = (u.vp.xy + vuv * u.vp.zw) * u.src.zw, t = u.src.zw * vec2(1.0, u.aux.x);\n"
+    "  vec3 a = bright(uv + t * vec2(-1, -1)), b = bright(uv + t * vec2(1, -1));\n"
+    "  vec3 c = bright(uv + t * vec2(-1, 1)), d = bright(uv + t * vec2(1, 1));\n"
+    "  float wa = 1.0 / (1.0 + luma(a)), wb = 1.0 / (1.0 + luma(b)), wc = 1.0 / (1.0 + luma(c)), wd = 1.0 / (1.0 + luma(d));\n"
+    "  oc = vec4((a * wa + b * wb + c * wc + d * wd) / (wa + wb + wc + wd), 1.0);\n"
+    "}\n"
+    "#elif defined(POST_BLOOM_DOWN)\n"
+    "// the 13 taps a texel apart (Jimenez): a centre box and four corner boxes, weighted half and an eighth each\n"
+    "void main() {\n"
+    "  vec2 uv = vuv, t = u.src.zw * vec2(1.0, u.aux.x);\n"
+    "  vec3 a = texture(t0, uv + t * vec2(-2, -2)).rgb, b = texture(t0, uv + t * vec2(0, -2)).rgb;\n"
+    "  vec3 c = texture(t0, uv + t * vec2(2, -2)).rgb, d = texture(t0, uv + t * vec2(-1, -1)).rgb;\n"
+    "  vec3 e = texture(t0, uv + t * vec2(1, -1)).rgb, f = texture(t0, uv + t * vec2(-2, 0)).rgb;\n"
+    "  vec3 g = texture(t0, uv).rgb, h = texture(t0, uv + t * vec2(2, 0)).rgb;\n"
+    "  vec3 i = texture(t0, uv + t * vec2(-1, 1)).rgb, j = texture(t0, uv + t * vec2(1, 1)).rgb;\n"
+    "  vec3 k = texture(t0, uv + t * vec2(-2, 2)).rgb, l = texture(t0, uv + t * vec2(0, 2)).rgb;\n"
+    "  vec3 m = texture(t0, uv + t * vec2(2, 2)).rgb;\n"
+    "  oc = vec4((d + e + i + j) * 0.125 + (a + c + k + m) * 0.03125 + (b + f + h + l) * 0.0625 + g * 0.125, 1.0);\n"
+    "}\n"
+    "#elif defined(POST_BLOOM_UP)\n"
+    "// a 3x3 tent of the level below, added onto this one (blended): each level the sum of those under it\n"
+    "void main() {\n"
+    "  vec2 uv = vuv, t = u.src.zw * vec2(1.0, u.aux.x) * u.dof2.w;\n"
+    "  vec3 o = texture(t0, uv).rgb * 4.0;\n"
+    "  o += (texture(t0, uv + t * vec2(-1, 0)).rgb + texture(t0, uv + t * vec2(1, 0)).rgb +\n"
+    "        texture(t0, uv + t * vec2(0, -1)).rgb + texture(t0, uv + t * vec2(0, 1)).rgb) * 2.0;\n"
+    "  o += texture(t0, uv + t * vec2(-1, -1)).rgb + texture(t0, uv + t * vec2(1, -1)).rgb +\n"
+    "       texture(t0, uv + t * vec2(-1, 1)).rgb + texture(t0, uv + t * vec2(1, 1)).rgb;\n"
+    "  oc = vec4(o * (1.0 / 16.0), 1.0);\n"
+    "}\n"
+    "#elif defined(POST_BLOOM_COMP)\n"
+    "// onto the scene, screen-blended by the pipeline (src x (1 - dst) + dst); the sum's highlights eased toward 1\n"
+    "void main() {\n"
+    "  vec3 b = texture(t0, vuv).rgb * (u.bloom.w * 1.5 / u.dof2.z);\n"
+    "  oc = u.aux.w > 0.0 ? vec4(max(b, 0.0), 1.0) : vec4(1.0 - exp(-max(b, 0.0)), 1.0); // an HDR scene: added as it is\n"
+    "}\n"
+    "#elif defined(POST_DOF_COC) || defined(POST_DOF_GATHER) || defined(POST_DOF_COMP)\n"
+    "float view_z(float d) {\n"
+    "  d = (d - u.zp.z) / max(u.zp.w - u.zp.z, 1e-6);\n"
+    "  float z = u.zp.y / (d * u.dof2.y - u.zp.x);\n"
+    "  return d >= 0.999999 || !(z * u.dof2.y > 0.0) ? 1e6 : abs(z); // the sky: as far as can be\n"
+    "}\n"
+    "// the circle of confusion, 0 sharp to 1 the largest: behind the focus past its range, and (dof_near) well before it;\n"
+    "// always sharp within 4 units of the focus (the player, whatever the settings)\n"
+    "float coc(float z) {\n"
+    "  float far = clamp((z - u.dof.x - max(u.dof.y, 4.0)) / max(u.dof.z, 1e-3), 0.0, 1.0);\n"
+    "  float nr = min(u.dof.x * 0.5, u.dof.x - 4.0);\n"
+    "  float near = nr > 0.0 ? u.dof2.x * clamp((nr - z) / max(nr, 1e-3), 0.0, 1.0) : 0.0;\n"
+    "  return max(far, near);\n"
+    "}\n"
+    "#if defined(POST_DOF_COC)\n"
+    "// half size: each texel the 2x2 under it, their colours weighted toward the blurred ones, and the largest circle\n"
+    "void main() {\n"
+    "  vec2 p = floor(u.vp.xy + gl_FragCoord.xy * 2.0 - 1.0);\n"
+    "  vec3 c = vec3(0.0); float w = 0.0, m = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    ivec2 q = ivec2(clamp(p + vec2(k & 1, k >> 1), u.vp.xy, u.vp.xy + u.vp.zw - 1.0));\n"
+    "    float r = coc(view_z(texelFetch(t1, q, 0).r));\n"
+    "    float wk = r + 0.02;\n"
+    "    c += texelFetch(t0, q, 0).rgb * wk, w += wk, m = max(m, r);\n"
+    "  }\n"
+    "  oc = vec4(c / w, m);\n"
+    "}\n"
+    "#elif defined(POST_DOF_GATHER)\n"
+    "// the gather: a disc of taps as wide as this texel's circle; a tap counts where its own circle (no wider than this\n"
+    "// one's) reaches here; bright taps count a little more, for bokeh\n"
+    "void main() {\n"
+    "  vec4 c0 = texture(t0, vuv);\n"
+    "  float R = c0.a * u.dof.w;\n"
+    "  if (R < 0.5) { oc = c0; return; }\n"
+    "  int n = R < 2.5 ? 8 : 16; // (the composite's tent fills between the taps)\n"
+    "  vec3 acc = vec3(0.0); float wsum = 0.0;\n"
+    "  for (int i = 0; i < n; ++i) {\n"
+    "    float r = sqrt((float(i) + 0.5) / float(n)) * R, a = float(i) * 2.39996323;\n"
+    "    vec2 o = vec2(cos(a), sin(a)) * r;\n"
+    "    vec4 t = texture(t0, vuv + o * vec2(1.0, u.aux.x) * u.src.zw);\n"
+    "    float w = clamp(min(t.a, c0.a) * u.dof.w - r + 1.0, 0.0, 1.0);\n"
+    "    w *= 1.0 + 3.0 * clamp(luma(t.rgb) - 0.75, 0.0, 1.0);\n"
+    "    acc += t.rgb * w, wsum += w;\n"
+    "  }\n"
+    "  oc = vec4(wsum > 0.0 ? acc / wsum : c0.rgb, c0.a);\n"
+    "}\n"
+    "#else\n"
+    "// onto the scene by its own circle at full size (alpha-blended by the pipeline): sharp where it is in focus\n"
+    "void main() {\n"
+    "  vec2 px = gl_FragCoord.xy;\n"
+    "  float r = coc(view_z(texelFetch(t1, ivec2(px), 0).r)) * u.dof.w;\n"
+    "  float a = smoothstep(0.25, 1.5, r);\n"
+    "  if (a <= 0.0) { oc = vec4(0.0); return; }\n"
+    "  vec2 uv = (px - u.vp.xy) / u.vp.zw, t = u.src.zw * vec2(0.75, 0.75 * u.aux.x);\n"
+    "  vec3 b = (texture(t0, uv + vec2(-t.x, -t.y)).rgb + texture(t0, uv + vec2(t.x, -t.y)).rgb +\n"
+    "            texture(t0, uv + vec2(-t.x, t.y)).rgb + texture(t0, uv + vec2(t.x, t.y)).rgb) * 0.25;\n"
+    "  oc = vec4(b, a);\n"
+    "}\n"
+    "#endif\n"
+    "#elif defined(POST_HDR_COPY)\n"
+    "// the HDR scene (scene_hdr): a target's first level copied into its float replacement, texel for texel\n"
+    "void main() { oc = texelFetch(t0, ivec2(gl_FragCoord.xy), 0); }\n"
+    "#elif defined(POST_HDR_TONE)\n"
+    "// the tonemap (the pixel as it was, from a copy): 0 neutral (clamped), 1 a highlight shoulder, 2 ACES, normalised to\n"
+    "// the white point; u.bloom: mode, exposure, white point, knee\n"
+    "vec3 aces(vec3 x) { return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14); }\n"
+    "void main() {\n"
+    "  vec4 c = texelFetch(t0, ivec2(gl_FragCoord.xy), 0);\n"
+    "  vec3 v = max(c.rgb, 0.0);\n"
+    "  if (u.bloom.x < 0.5) { oc = vec4(min(v, 1.0), c.a); return; }\n"
+    "  if (u.bloom.x < 1.5) {\n"
+    "    v *= u.bloom.y;\n"
+    "    float m = max(v.r, max(v.g, v.b)), kn = u.bloom.w;\n"
+    "    if (m > kn) {\n"
+    "      float r = kn + (1.0 - kn) * (1.0 - exp(-(m - kn) / (1.0 - kn)));\n"
+    "      vec3 h = v * (r / m);\n"
+    "      v = mix(h, vec3(r), clamp((m - 1.0) / (u.bloom.z - 1.0), 0.0, 1.0) * 0.5); // the brightest toward white\n"
+    "    }\n"
+    "    oc = vec4(clamp(v, 0.0, 1.0), c.a);\n"
+    "    return;\n"
+    "  }\n"
+    "  vec3 l = pow(v, vec3(2.2)) * u.bloom.y;\n"
+    "  vec3 t = aces(l) / aces(vec3(u.bloom.z));\n"
+    "  oc = vec4(pow(clamp(t, 0.0, 1.0), vec3(1.0 / 2.2)), c.a);\n"
+    "}\n"
+    "#endif\n";
+
+/* the air the modern fog (fog_modern) and its volume share (gfx_metal.m's fog_tau/su_tau, fog_lamp/su_lamp): the lamps'
+ * list and tiles (lamps_bin's) at 10 and 11 of the post's layout, the air's optical depth along a ray in closed form, and
+ * the lamps' light it scatters toward the eye */
+#define AIR_GLSL                                                                                                      \
+    "struct LL { vec4 pos, col, att, amb; };\n"                                                                       \
+    "layout(std430, set = 0, binding = 10) readonly buffer LLB { LL LS[]; };\n"                                       \
+    "layout(std430, set = 0, binding = 11) readonly buffer TLB { uint TL[]; };\n"                                     \
+    "uint tl_at(uint i) { uint w = TL[i >> 1]; return (i & 1u) != 0u ? w >> 16 : w & 0xffffu; }\n"                   \
+    /* along [0, d] of dir from the camera: density rho at the camera's height, falling as exp(-k * rise) (y down) */  \
+    "float air_tau(float rho, float k, vec3 dir, float d) {\n"                                                        \
+    "  float rise = -dir.y * d * k;\n"                                                                                \
+    "  float f = abs(rise) < 1e-3 ? 1.0 - 0.5 * rise : (1.0 - exp(-rise)) / rise;\n"                                  \
+    "  return rho * d * f;\n"                                                                                         \
+    "}\n"                                                                                                             \
+    /* a point light's light scattered toward the eye along the ray inside its reach: the integral of 1 / r^2 */      \
+    "float air_lamp(vec3 Lp, float range, vec3 dir, float d) {\n"                                                     \
+    "  float tc = dot(Lp, dir), h2 = max(dot(Lp, Lp) - tc * tc, 0.0), r2 = range * range;\n"                          \
+    "  if (h2 >= r2) return 0.0;\n"                                                                                   \
+    "  float w = sqrt(r2 - h2), a = max(tc - w, 0.0), b = min(tc + w, d);\n"                                          \
+    "  if (b <= a) return 0.0;\n"                                                                                     \
+    "  float h = sqrt(max(h2, 0.09));\n"                                                                              \
+    "  return (atan((b - tc) / h) - atan((a - tc) / h)) / h;\n"                                                       \
+    "}\n"                                                                                                             \
+    /* the lamps of fp's tile (lt: the tiles' origin, across, down) along dir to d from cam: halos of strength s round \
+     * a point lift above each light, dimmed by the air (rho, k) between */                                            \
+    "vec3 air_lamps(vec4 lt, vec2 fp, vec3 cam, vec3 dir, float d, float s, float lift, float rho, float k) {\n"      \
+    "  ivec2 tq = ivec2((fp - lt.xy) / 64.0);\n"                                                                      \
+    "  if (any(lessThan(tq, ivec2(0))) || tq.x >= int(lt.z) || tq.y >= int(lt.w)) return vec3(0.0);\n"               \
+    "  uint b = (uint(tq.y) * uint(lt.z) + uint(tq.x)) * 32u, n = tl_at(b);\n"                                        \
+    "  vec3 I = vec3(0.0);\n"                                                                                         \
+    "  for (uint i = 0u; i < n; ++i) {\n"                                                                             \
+    "    LL l = LS[tl_at(b + 1u + i)];\n"                                                                             \
+    "    vec3 Lp = l.pos.xyz - cam - vec3(0.0, lift, 0.0);\n"                                                         \
+    "    I += l.col.rgb * (s * air_lamp(Lp, l.pos.w, dir, d) * exp(-air_tau(rho, k, dir, max(dot(Lp, dir), 0.0))));\n" \
+    "  }\n"                                                                                                           \
+    "  return I;\n"                                                                                                   \
+    "}\n"                                                                                                             \
+    "float air_dither(vec2 fp) { return fract(sin(dot(fp, vec2(12.9898, 78.233))) * 43758.5453) - 0.5; }\n"
+
+/* the modern fog (fog_modern; gfx_metal.m's fog_comp and its notes): light scattered by the air between the eye and
+ * each point, and the point's light dimmed by it - not a fade to grey. Over the scene by its own alpha (the colour times
+ * what gets through, plus what is scattered in); t0 the scene's depth */
+static const char FOG_GLSL[] =
+    "layout(std140, set = 0, binding = 0) uniform FU {\n"
+    "  mat4 ivp;  // the scene's clip space to the world round the camera (the view's turn alone)\n"
+    "  vec4 cam;  // the camera, world; w: how far the fog goes (beyond: the sky)\n"
+    "  vec4 sun;  // toward the sun (or moon), world; w: the forward lobe's g\n"
+    "  vec4 sunc; // its scattered colour (0 with the shafts on: theirs)\n"
+    "  vec4 airc; // the air's own colour (the game's fog colour, cooled)\n"
+    "  vec4 p;    // density at the camera's height, its falloff with height, the lamps' halo strength, the 8-bit dither\n"
+    "  vec4 vp;   // the scene's viewport in its target\n"
+    "  vec4 lt;   // the lamps' tiles: origin x, y, tiles across, down (0: no lamps)\n"
+    "  vec4 dbg;  // x: fog_debug; y: how far above the game's light its lantern hangs (the halo's centre)\n"
+    "} u;\n"
+    "layout(location = 0) in vec2 vuv;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    AIR_GLSL
+    "void main() {\n"
+    "  vec2 fp = gl_FragCoord.xy;\n"
+    "  float d0 = texelFetch(t0, ivec2(fp), 0).r;\n"
+    "  if (d0 >= 0.99999) { oc = vec4(0.0); return; } // the sky: the game's own, with its own haze\n"
+    "  vec2 n = vec2((fp.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (fp.y - u.vp.y) / u.vp.w * 2.0);\n"
+    "  vec4 w = u.ivp * vec4(n, d0, 1.0);\n"
+    "  vec3 v = w.xyz / w.w;\n"
+    "  float l = length(v), d = min(l, u.cam.w);\n"
+    "  vec3 dir = v / max(l, 1e-4);\n"
+    "  float T = exp(-air_tau(u.p.x, u.p.y, dir, d));\n"
+    "  float g = u.sun.w, mu = dot(dir, u.sun.xyz);\n"
+    "  float mie = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float ray = 0.75 * (1.0 + mu * mu); // (Rayleigh: a little more toward and away from the sun than across)\n"
+    "  vec3 I = (u.airc.rgb * ray + u.sunc.rgb * mie) * (1.0 - T);\n"
+    "  if (u.lt.z > 0.0 && u.p.z > 0.0) I += air_lamps(u.lt, fp, u.cam.xyz, dir, d, u.p.z, u.dbg.y, u.p.x, u.p.y);\n"
+    "  if (u.dbg.x > 0.5) { oc = vec4(u.dbg.x > 1.5 ? I : vec3(1.0 - T), 1.0); return; } // fog_debug: 1 how much it takes, 2 what it adds\n"
+    "  float a = 1.0 - T;\n"
+    "  if (a < 1e-4 && all(lessThan(I, vec3(1e-4)))) { oc = vec4(0.0); return; }\n"
+    "  oc = vec4(max(I / max(a, 1e-4) + air_dither(fp) * u.p.w / max(a, 1e-4), 0.0), a); // over: I / a * a + scene * T; dithered at 8 bits\n"
+    "}\n";
+
+/* the sun shafts' passes (gfx_metal.m's shaft_march, shaft_resolve, shaft_comp), on the same layout with SU for PU */
+static const char SHAFT_GLSL[] =
+    "layout(std140, set = 0, binding = 0) uniform SU {\n"
+    "  mat4 ivp;    // the scene's clip space to the world round the camera (the view's turn alone: no translation)\n"
+    "  mat4 pvp;    // the world round last frame's camera to last frame's clip space\n"
+    "  mat4 m[4];   // the zone's shadow cascades (world to the light's clip space)\n"
+    "  vec4 cas[4]; // their reach from the camera, texel, depth range, valid\n"
+    "  vec4 cam;    // the camera, world; w: how far the rays go\n"
+    "  vec4 sun;    // toward the light, world; w: 1 when it shines\n"
+    "  vec4 sunc;   // its colour times the shafts' strength; w: the phase's g\n"
+    "  vec4 p;      // density at the camera's height, its falloff with height, steps, this frame's jitter\n"
+    "  vec4 vp;     // the scene's viewport in its target\n"
+    "  vec4 lo;     // the small textures' size, 1 / size\n"
+    "  vec4 hist;   // x: last frame's history is there and lines up; y: its weight; z: shafts_debug; w: an HDR scene\n"
+    "  vec4 pcam;   // last frame's camera, world\n"
+    "  // the fog volume (fog_modern with fog_volume): the air's own colour; x the lamps' halo density, y how far above the\n"
+    "  // game's light its lantern hangs, z the ground fog's strength, w its noise's scale; the noise's drift (xyz) and w 1\n"
+    "  // in the volume; the lamps' tiles (origin x, y, across, down; 0 none)\n"
+    "  vec4 airc;\n"
+    "  vec4 fv;\n"
+    "  vec4 wind;\n"
+    "  vec4 lt;\n"
+    "} u;\n"
+    "layout(location = 0) in vec2 vuv;\n"
+    "layout(location = 0) out vec4 oc;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D t0;\n"
+    "#ifdef SHAFT_MARCH\n"
+    "layout(location = 1) out float ot; // what gets through (the fog volume's)\n"
+    "layout(set = 0, binding = 2) uniform sampler2DArrayShadow t1;\n"
+    AIR_GLSL
+    "#else\n"
+    "layout(set = 0, binding = 2) uniform sampler2D t1;\n"
+    "#endif\n"
+    "layout(set = 0, binding = 3) uniform sampler2D t2;\n"
+    "vec3 su_dir(vec2 fp, float d, out float dist) {\n"
+    "  vec2 n = vec2((fp.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (fp.y - u.vp.y) / u.vp.w * 2.0);\n"
+    "  bool sky = d >= 0.99999;\n"
+    "  vec4 w = u.ivp * vec4(n, sky ? 0.5 : d, 1.0);\n"
+    "  vec3 v = w.xyz / w.w;\n"
+    "  float l = length(v);\n"
+    "  dist = sky ? u.cam.w : min(l, u.cam.w);\n"
+    "  return v / max(l, 1e-4);\n"
+    "}\n"
+    "#if defined(SHAFT_MARCH)\n"
+    "// low, smooth noise for the ground fog: value noise, two octaves, 0..1\n"
+    "float su_hash(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }\n"
+    "float su_vnoise(vec3 x) {\n"
+    "  vec3 i = floor(x), f = x - i; f = f * f * (3.0 - 2.0 * f);\n"
+    "  return mix(mix(mix(su_hash(i), su_hash(i + vec3(1, 0, 0)), f.x), mix(su_hash(i + vec3(0, 1, 0)), su_hash(i + vec3(1, 1, 0)), f.x), f.y),\n"
+    "             mix(mix(su_hash(i + vec3(0, 0, 1)), su_hash(i + vec3(1, 0, 1)), f.x), mix(su_hash(i + vec3(0, 1, 1)), su_hash(i + vec3(1, 1, 1)), f.x), f.y), f.z);\n"
+    "}\n"
+    "float su_ground(vec3 x) {\n"
+    "  vec3 q = (x + u.wind.xyz) * u.fv.w;\n"
+    "  return 0.65 * su_vnoise(q) + 0.35 * su_vnoise(q * 2.7 + 13.1);\n"
+    "}\n"
+    "float su_depth(vec2 fp) { return texelFetch(t0, ivec2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0)), 0).r; }\n"
+    "// the ray to the surface (or as far as the rays go): steps spread as the square of their order, the first by this\n"
+    "// pixel's jitter; the light in-scattered, each step lit where the cascades see the sun. In the fog volume the air's\n"
+    "// own light too, the ground mist over the surface the ray ends on and the lamps' halos; ot what gets through\n"
+    "void main() {\n"
+    "  vec2 lp = floor(gl_FragCoord.xy);\n"
+    "  vec2 fp = u.vp.xy + (lp + 0.5) * (u.vp.zw * u.lo.zw);\n"
+    "  float dist, d0 = su_depth(fp);\n"
+    "  vec3 dir = su_dir(fp, d0, dist);\n"
+    "  bool vol = u.wind.w > 0.5, sky = d0 >= 0.99999;\n"
+    "  // this texel's jitter: interleaved gradient noise (near blue), turned a golden ratio each frame\n"
+    "  float j = fract(fract(52.9829189 * fract(dot(lp, vec2(0.06711056, 0.00583715)))) + u.p.w);\n"
+    "  int n = int(u.p.z);\n"
+    "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
+    "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float ray = 0.75 * (1.0 + mu * mu);\n"
+    "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0, llast = 1.0, A = 0.0;\n"
+    "  for (int i = 0; i < n; ++i) {\n"
+    "    float f = (float(i) + j) / float(n), t = dist * f * f, seg = 2.0 * dist * f / float(n);\n"
+    "    vec3 x = u.cam.xyz + dir * t;\n"
+    "    float rho = u.p.x * exp(clamp(u.p.y * (x.y - u.cam.y), -10.0, 3.0)); // y down: above the camera thinner\n"
+    "    float lit = 1.0, inr = 0.0;\n"
+    "    for (int c = 0; c < 4; ++c) {\n"
+    "      if (u.cas[c].w == 0.0 || t > u.cas[c].x) continue;\n"
+    "      vec4 h = u.m[c] * vec4(x, 1.0);\n"
+    "      if (all(lessThan(abs(h.xy), vec2(0.995))) && h.z > 0.0 && h.z < 1.0)\n"
+    "        lit = texture(t1, vec4(h.x * 0.5 + 0.5, 0.5 - h.y * 0.5, float(c), h.z - 2e-4)), inr = 1.0;\n"
+    "      break;\n"
+    "    }\n"
+    "    ls += lit, lin += inr, llast = lit;\n"
+    "    float a = rho * seg;\n"
+    "    L += T * a * lit;\n"
+    "    if (vol && !sky) A += T * a; // the air's own light: the sky's, unshadowed\n"
+    "    T *= exp(-a);\n"
+    "  }\n"
+    "  ot = sky ? 1.0 : T;\n"
+    "  if (u.hist.z < 0.0) { oc = vec4(ls / float(n), lin / float(n), 0.0, dist); return; } // shafts_debug < 0\n"
+    "  vec3 o = u.sunc.rgb * (L * ph);\n"
+    "  if (vol && !sky) {\n"
+    "    o += u.airc.rgb * (A * ray);\n"
+    "    if (u.fv.z > 0.0) {\n"
+    "      // the ground mist: a layer some 1.5 units deep over the surface this ray ends on (the ground taken as level\n"
+    "      // there), in drifting patches; its depth along the ray in closed form, lit as the surface is - only over\n"
+    "      // ground (the surface's facing from the depths beside it; up, y down: -y), not characters or walls\n"
+    "      float sl = max(abs(dir.y), 0.2), H = 1.5;\n"
+    "      vec3 P = u.cam.xyz + dir * dist;\n"
+    "      vec2 fx = fp + vec2(u.vp.z * u.lo.z, 0.0), fy = fp + vec2(0.0, u.vp.w * u.lo.w);\n"
+    "      float d1, d2;\n"
+    "      vec3 r1 = su_dir(fx, su_depth(fx), d1), r2 = su_dir(fy, su_depth(fy), d2);\n"
+    "      vec3 nn = cross(r1 * d1 - dir * dist, r2 * d2 - dir * dist);\n"
+    "      float up = length(nn) > 1e-6 ? abs(normalize(nn).y) : 0.0;\n"
+    "      float edge = clamp(1.0 - max(abs(d1 - dist), abs(d2 - dist)) / (0.05 * dist + 0.3), 0.0, 1.0); // (a silhouette's edge: no facing to trust)\n"
+    "      float tm = u.fv.z * 0.12 * smoothstep(0.75, 0.95, up) * edge * smoothstep(0.3, 0.65, su_ground(P)) * (H / sl) * (1.0 - exp(-dist * sl / H));\n"
+    "      float am = 1.0 - exp(-tm);\n"
+    "      o += (u.airc.rgb * ray + u.sunc.rgb * (ph * llast)) * (T * am);\n"
+    "      T *= 1.0 - am;\n"
+    "      ot = T;\n"
+    "    }\n"
+    "    if (u.lt.z > 0.0 && u.fv.x > 0.0) o += air_lamps(u.lt, fp, u.cam.xyz, dir, dist, u.fv.x, u.fv.y, u.p.x, u.p.y);\n"
+    "  }\n"
+    "  oc = vec4(any(isnan(o)) || any(isinf(o)) ? vec3(0.0) : o, dist);\n"
+    "}\n"
+    "#elif defined(SHAFT_RESOLVE)\n"
+    "// over frames: this frame's march and last frame's result where this texel's point was then, clamped to this frame's\n"
+    "// neighbours (no trails where the scene moved); t0 the scene's depth, t1 this frame's march, t2 last frame's\n"
+    "void main() {\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy), hi = ivec2(u.lo.xy) - 1;\n"
+    "  vec4 c = texelFetch(t1, p, 0);\n"
+    "  if (u.hist.x <= 0.0) { oc = c; return; }\n"
+    "  vec3 mn = c.rgb, mx = c.rgb;\n"
+    "  for (int k = 0; k < 9; ++k) {\n"
+    "    if (k == 4) continue;\n"
+    "    vec3 v = texelFetch(t1, clamp(p + ivec2(k % 3 - 1, k / 3 - 1), ivec2(0), hi), 0).rgb;\n"
+    "    mn = min(mn, v), mx = max(mx, v);\n"
+    "  }\n"
+    "  vec2 fp = u.vp.xy + (vec2(p) + 0.5) * (u.vp.zw * u.lo.zw);\n"
+    "  float dist;\n"
+    "  vec3 dir = su_dir(fp, texelFetch(t0, ivec2(clamp(fp, u.vp.xy, u.vp.xy + u.vp.zw - 1.0)), 0).r, dist);\n"
+    "  vec4 pc = u.pvp * vec4(u.cam.xyz + dir * c.a - u.pcam.xyz, 1.0);\n"
+    "  if (pc.w <= 1e-4) { oc = c; return; }\n"
+    "  vec2 uv = vec2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5);\n"
+    "  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { oc = c; return; }\n"
+    "  vec3 h = clamp(texture(t2, uv).rgb, mn, mx);\n"
+    "  oc = vec4(mix(c.rgb, h, u.hist.y), c.a);\n"
+    "}\n"
+    "#else\n"
+    "// onto the scene (screen-blended): the four small texels round each pixel, weighted by how near they are and how\n"
+    "// alike in distance; t0 the scene's depth, t1 the resolved shafts, t2 what got through (the fog volume's)\n"
+    "void main() {\n"
+    "  vec2 fp = gl_FragCoord.xy;\n"
+    "  float dist;\n"
+    "  su_dir(fp, texelFetch(t0, ivec2(fp), 0).r, dist);\n"
+    "  vec2 h = (fp - u.vp.xy) * (u.lo.xy / u.vp.zw) - 0.5;\n"
+    "  ivec2 b = ivec2(floor(h)), hi = ivec2(u.lo.xy) - 1;\n"
+    "  vec2 fr = h - vec2(b);\n"
+    "  vec3 sum = vec3(0.0); float ws = 0.0, tsum = 0.0;\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    ivec2 o = ivec2(k & 1, k >> 1), q = clamp(b + o, ivec2(0), hi);\n"
+    "    vec4 t = texelFetch(t1, q, 0);\n"
+    "    float w = (o.x != 0 ? fr.x : 1.0 - fr.x) * (o.y != 0 ? fr.y : 1.0 - fr.y) + 1e-3;\n"
+    "    w *= exp(-abs(t.a - dist) / (0.05 * dist + 0.5));\n"
+    "    sum += t.rgb * w, ws += w;\n"
+    "    if (u.wind.w > 0.5) tsum += texelFetch(t2, q, 0).r * w;\n"
+    "  }\n"
+    "  vec3 c = ws > 1e-6 ? sum / ws : vec3(0.0);\n"
+    "  if (u.hist.z != 0.0) { oc = vec4(clamp(c * abs(u.hist.z), 0.0, 1.0), 1.0); return; } // shafts_debug: the term alone\n"
+    "  if (u.wind.w > 0.5) { // the fog volume: the scene dimmed by the air, what it scatters added (premultiplied over)\n"
+    "    float a = texelFetch(t0, ivec2(fp), 0).r >= 0.99999 ? 0.0 : clamp(1.0 - (ws > 1e-6 ? tsum / ws : 1.0), 0.0, 1.0);\n"
+    "    float r = u.hist.w > 0.0 ? 0.0 : (fract(sin(dot(fp, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;\n"
+    "    oc = vec4(max(c + r, 0.0), a);\n"
+    "    return;\n"
+    "  }\n"
+    "  oc = u.hist.w > 0.0 ? vec4(max(c, 0.0), 1.0) : vec4(1.0 - exp(-max(c, 0.0)), 1.0); // an HDR scene: added as it is\n"
+    "}\n"
+    "#endif\n";
+
+typedef struct PostU
+{
+    float vp[4], src[4], bloom[4], dof[4], dof2[4], zp[4], aux[4];
+} PostU;
+
+/* the sun shafts' uniforms: SU in SHAFT_GLSL */
+typedef struct ShaftU
+{
+    float ivp[16], pvp[16], m[4][16], cas[4][4], cam[4], sun[4], sunc[4], p[4], vp[4], lo[4], hist[4], pcam[4];
+    float airc[4], fv[4], wind[4], lt[4];
+} ShaftU;
+
+/* the modern fog's uniforms: FU in FOG_GLSL */
+typedef struct FogU
+{
+    float ivp[16];
+    float cam[4], sun[4], sunc[4], airc[4], p[4], vp[4], lt[4], dbg[4];
+} FogU;
+
+enum
+{
+    POST_LEVELS = 6
+};
+static struct
+{
+    int tried, ok;
+    VkFormat lvl_fmt;                     /* the bloom's levels: R11G11B10 float where it blends, else RGBA16F */
+    VkPipeline pre, down, up, coc, gather; /* into the post's own textures (onto the scene: fmt_pipe's FP_*) */
+    VkPipeline smarch, sresolve;          /* the sun shafts' march and their resolve over frames */
+    GfxTex* lvl[POST_LEVELS]; /* the bloom's levels, from half the scene's size */
+    GfxTex* glow;             /* the glow's draws, as the scene's target */
+    GfxTex *h0, *h1;          /* the depth of field at half size: colour and circle; gathered */
+    GfxTex *sh, *shist[2];    /* the shafts at a third or a fifth of the size: this frame's march, the resolved two */
+    GfxTex* sht;              /* what gets through, as marched (the fog volume's) */
+    int shist_at;             /* which of shist[] the last frame wrote */
+    uint64_t sh_serial;       /* that frame (0: none) */
+    float sh_pvp[16], sh_pcam[3]; /* its view's turn times projection, its camera */
+    float focus;              /* the focus distance (view z), eased */
+    uint64_t focus_ns;
+} g_post;
+
+/* one pass's pipeline: the post's vertex function and POST_<name> (or SHAFT_<name> from SHAFT_GLSL, FOG FOG_GLSL) into
+ * fmt; blended as fs_blend says */
+static VkPipeline post_pipeline(const char* name, VkFormat fmt, int blend)
+{
+    int shaft = !strncmp(name, "SHAFT_", 6), fog = !strcmp(name, "FOG");
+    char d[64];
+    snprintf(d, sizeof d, "#define %s%s\n", shaft || fog ? "" : "POST_", name);
+    VkPipeline p = fs_pipeline(g_fx.vs, d, shaft ? SHAFT_GLSL : fog ? FOG_GLSL : POST_GLSL, g_fx_layout, fmt, blend,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    if (!p)
+        atomic_fetch_add(&g_failures, 1), fprintf(stderr, "[recomp] gfx: post effect %s failed\n", name);
+    return p;
+}
+
+static int post_init(VkFormat scene_fmt)
+{
+    if (!g_post.tried)
+    {
+        g_post.tried = 1;
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(g_phys, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &fp);
+        g_post.lvl_fmt = (fp.optimalTilingFeatures & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) ==
+                (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+            ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
+            : VK_FORMAT_R16G16B16A16_SFLOAT;
+        const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+        if (fs_init())
+        {
+            g_post.pre = post_pipeline("BLOOM_PRE", g_post.lvl_fmt, 0);
+            g_post.down = post_pipeline("BLOOM_DOWN", g_post.lvl_fmt, 0);
+            g_post.up = post_pipeline("BLOOM_UP", g_post.lvl_fmt, 1);
+            g_post.coc = post_pipeline("DOF_COC", F16, 0);
+            g_post.gather = post_pipeline("DOF_GATHER", F16, 0);
+            /* the march: two targets, the in-scatter and distance, and what gets through */
+            VkShaderModule fs = compile_with("#define SHAFT_MARCH\n", SHAFT_GLSL, 1);
+            if (fs)
+            {
+                static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+                const VkFormat mf[2] = { F16, VK_FORMAT_R16_SFLOAT };
+                VkPipelineColorBlendAttachmentState b[2] = { fs_blend(0), fs_blend(0) };
+                g_post.smarch = make_pipeline_n(g_fx.vs, fs, g_fx_layout, b, mf, 2, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED,
+                    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, dyn, 2, 0);
+                vkDestroyShaderModule(g_dev, fs, NULL);
+            }
+            if (!g_post.smarch)
+                atomic_fetch_add(&g_failures, 1), fprintf(stderr, "[recomp] gfx: post effect SHAFT_MARCH failed\n");
+            g_post.sresolve = post_pipeline("SHAFT_RESOLVE", F16, 0);
+        }
+        g_post.ok = g_post.pre && g_post.down && g_post.up && g_post.coc && g_post.gather && g_post.smarch &&
+                    g_post.sresolve;
+    }
+    if (!g_post.ok)
+        return 0;
+    for (int k = FP_BLOOM_COMP; k <= FP_SHAFT_DBG; ++k) /* (onto the scene) */
+        if (!fmt_pipe(scene_fmt, k))
+            return 0;
+    return 1;
+}
+
+static VkPipeline fmt_build(VkFormat f, int which)
+{
+    switch (which)
+    {
+    case FP_FX_COMP: return fx_pipeline("COMP", f);
+    case FP_FX_AA: return fx_pipeline("FXAA", f);
+    case FP_BLOOM_COMP: return post_pipeline("BLOOM_COMP", f, 2);
+    case FP_BLOOM_ADD: return post_pipeline("BLOOM_COMP", f, 1);
+    case FP_DOF_COMP: return post_pipeline("DOF_COMP", f, 3);
+    case FP_SHAFT_COMP: return post_pipeline("SHAFT_COMP", f, 2);
+    case FP_SHAFT_ADD: return post_pipeline("SHAFT_COMP", f, 1);
+    case FP_SHAFT_DBG: return post_pipeline("SHAFT_COMP", f, 0);
+    case FP_SHAFT_VOL: return post_pipeline("SHAFT_COMP", f, 4);
+    case FP_FOG: return post_pipeline("FOG", f, 3);
+    case FP_HDR_COPY: return post_pipeline("HDR_COPY", f, 0);
+    case FP_GLOW:
+    {
+        static VkShaderModule vs;
+        if (!vs)
+            vs = compile_glsl(GLOW_GLSL, 0);
+        VkPipeline p = fs_pipeline(vs, "", GLOW_GLSL, g_world.layout, f, 1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+        if (!p)
+            fprintf(stderr, "[recomp] gfx: lamp glows failed\n");
+        return p;
+    }
+    }
+    return VK_NULL_HANDLE;
+}
+
+/* one full-screen triangle into the first level of target (and target2, NULL none) within vp (x y w h), its uniforms u
+ * (un bytes) and t0..t2 (NULL: none) each through its sampler (VK_NULL_HANDLE: the linear one), with lamps (AIR_GLSL's
+ * buffers: this frame's binned lamps, or with none an empty list); load keeps what is there; timed as pass */
+static void post_pass_x(GfxTex* target, GfxTex* target2, int load, VkPipeline p, const float* vp, const void* u, size_t un,
+    GfxTex* const* in, const VkSampler* samp, int lamps, int pass)
+{
+    VkViewport v = { vp[0], vp[1], vp[2], vp[3], 0, 1 };
+    int ts = pass_open2(target, target2, 0, 0, load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE, &v, pass);
+    VkCommandBuffer cb = g_cb;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    VkDescriptorBufferInfo bi[3] = { ring_put(u, un) };
+    VkDescriptorImageInfo ii[3];
+    VkWriteDescriptorSet w[6];
+    desc_write(&w[0], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &bi[0], NULL);
+    for (int i = 0; i < 3; ++i)
+    {
+        GfxTex* t = in[i] ? in[i] : g_dummy2d;
+        VkSampler s = samp && samp[i] ? samp[i] : g_lin_samp;
+        ii[i] = (VkDescriptorImageInfo){ s, t->view, VK_IMAGE_LAYOUT_GENERAL };
+        desc_write(&w[1 + i], 1 + (uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NULL, &ii[i]);
+        t->used = g_serial, t->rec = g_cb_index;
+    }
+    uint32_t nw = 4;
+    if (lamps)
+    {
+        int have = g_lamps.binned == g_serial && g_lamps.lb && g_lamps.tb;
+        static const uint32_t none[16];
+        bi[1] = have ? (VkDescriptorBufferInfo){ g_lamps.lb, g_lamps.lo, g_lamps.lsz } : ring_put(none, sizeof none);
+        bi[2] = have ? (VkDescriptorBufferInfo){ g_lamps.tb, g_lamps.to, g_lamps.tsz } : bi[1];
+        desc_write(&w[nw++], 10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[1], NULL);
+        desc_write(&w[nw++], 11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bi[2], NULL);
+    }
+    p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_fx_layout, 0, nw, w);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    pass_close(ts);
+}
+
+static void post_pass(GfxTex* target, int load, VkPipeline p, const float* vp, const void* u, size_t un, GfxTex* const* in,
+    const VkSampler* samp, int pass)
+{
+    post_pass_x(target, NULL, load, p, vp, u, un, in, samp, 0, pass);
+}
+
+/* The modern fog (fog_modern; FOG_GLSL, gfx_metal.m's scene_fog and its notes): over the finished scene before the
+ * shafts, depth of field and bloom. Its density from the game's fog end (some 4% of a point's light left there) times
+ * fog_density, thinning with height by fog_thin; indoors (a zone's fixed light) a light dust. With the sun's cascades
+ * (fog_volume) it is the shafts' march instead: one volume, shadowed. */
+
+/* the fog's fixed height in the world (y down): the player's feet as they arrived in a zone, kept until they jump far
+ * (a zone change, a teleport), so the haze and the ground mist stay put as the player climbs or descends */
+static float fog_ref(void)
+{
+    static float ref, last[3];
+    static int set;
+    if (g_fx.has_focus)
+    {
+        float dx = g_fx.focus[0] - last[0], dy = g_fx.focus[1] - last[1], dz = g_fx.focus[2] - last[2];
+        if (!set || dx * dx + dy * dy + dz * dz > 60.0f * 60.0f)
+            ref = g_fx.focus[1], set = 1;
+        memcpy(last, g_fx.focus, sizeof last);
+    }
+    return set ? ref : 0.0f;
+}
+
+/* the haze's density at the camera's height, from its density at the fixed height and its thinning upward */
+static float fog_at_cam(float sigma, float cam_y)
+{
+    float e = fminf(fmaxf(g_fxs.fog_thin * (cam_y - fog_ref()), -3.0f), 3.0f);
+    return sigma * expf(e);
+}
+
+/* the haze's density at the fixed height */
+static float fog_sigma(const GfxScene* s)
+{
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
+    fog_end = fminf(fmaxf(fog_end, 20.0f), 3000.0f);
+    float k = fmaxf(g_fxs.fog_density, 0.0f) * 3.2f / fog_end; /* exp(-3.2): 4% */
+    return k * (g_fixed_light ? 0.15f : 1.0f);
+}
+
+/* the air's own colour: the game's fog colour, a little cooler and brighter where the sky lights it */
+static void fog_air(const GfxScene* s, float* airc)
+{
+    const float* fc = s->fogcolor;
+    float lum = 0.2126f * fc[0] + 0.7152f * fc[1] + 0.0722f * fc[2];
+    static const float cool[3] = { 0.88f, 0.97f, 1.18f };
+    for (int c = 0; c < 3; ++c)
+        airc[c] = fmaxf(fc[c] * 0.7f + lum * cool[c] * 0.3f, 0.0f);
+}
+
+/* the lamps' tiles for the fog's halos (origin x, y, across, down), 0 none */
+static int fog_lamp_tiles(float* lt)
+{
+    if (g_fxs.scene_lamps <= 0.0f || g_lamps.binned != g_serial || !g_lamps.lb || !g_lamps.tb)
+        return 0;
+    lt[0] = g_lamps.lu[0], lt[1] = g_lamps.lu[1], lt[2] = g_lamps.lu[4], lt[3] = g_lamps.lu[5];
+    return 1;
+}
+
+/* the sun's cascades this frame, to shade the shafts and the fog volume by */
+static int sun_cascades(void)
+{
+    return g_shd.zmap && g_shd.cframe == g_serial && g_shd.u.dir[3] > 0.0f && g_shd.u.info[0] > 0.0f && g_shd.u.info[2] > 0.0f;
+}
+
+/* whether the fog is the shafts' volume this frame (fog_modern, fog_volume and the cascades); else scene_fog's pass */
+static int fog_volume_on(void)
+{
+    return g_fxs.fog_modern > 0.0f && g_fxs.fog_volume > 0.0f && sun_cascades();
+}
+
+static void scene_fog(GfxTex* color, const GfxScene* s)
+{
+    if (g_fxs.fog_modern <= 0.0f || s->proj[11] == 0.0f || fog_volume_on())
+        return;
+    GfxTex *ct = color, *depth = color->depth_world ? color->depth_world : color->depth_seen;
+    if (!depth || depth->w != ct->w || depth->h != ct->h || !post_init(ct->vf))
+        return;
+    VkPipeline pipe = fmt_pipe(ct->vf, FP_FOG);
+    if (!pipe)
+        return;
+    int hdr = ct->vf == VK_FORMAT_R16G16B16A16_SFLOAT;
+    float Vr[16], VP[16], iv[16];
+    memcpy(Vr, s->view, 64);
+    Vr[12] = Vr[13] = Vr[14] = 0.0f;
+    gfx_mat_mul(VP, Vr, s->proj);
+    FogU u;
+    memset(&u, 0, sizeof u);
+    if (!gfx_mat_inverse(u.ivp, VP) || !gfx_mat_inverse(iv, s->view))
+        return;
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > ct->w || vy + vh > ct->h)
+        vx = vy = 0, vw = (float)ct->w, vh = (float)ct->h;
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 600.0f;
+    u.cam[0] = iv[12], u.cam[1] = iv[13], u.cam[2] = iv[14], u.cam[3] = fminf(fmaxf(fog_end, 20.0f), 3000.0f) * 1.5f;
+    /* the sun (or moon) toward it, world: the scene's is in camera space */
+    float sd[3] = { 0, -1, 0 };
+    if (s->sun_dir[3] != 0.0f)
+        for (int j = 0; j < 3; ++j)
+            sd[j] = s->sun_dir[0] * iv[j] + s->sun_dir[1] * iv[4 + j] + s->sun_dir[2] * iv[8 + j];
+    float sl = sqrtf(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]);
+    for (int j = 0; j < 3; ++j)
+        u.sun[j] = sl > 1e-4f ? sd[j] / sl : 0.0f;
+    u.sun[3] = 0.6f;
+    /* the sun's forward scattering in its own colour, none with the shafts on (theirs is shadowed) */
+    fog_air(s, u.airc);
+    int shafts = g_fxs.post_shafts > 0.0f && g_shd.zmap && g_shd.cframe == g_serial && g_shd.u.dir[3] > 0.0f;
+    float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
+    for (int c = 0; c < 3; ++c)
+        u.sunc[c] = shafts || s->sun_dir[3] == 0.0f ? 0.0f : fmaxf(s->sun_color[c], 0.0f) * (0.15f + 0.6f * low * low);
+    /* (the mist round a lamp: its own, not the haze's) */
+    u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f), u.p[2] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f;
+    u.p[3] = hdr ? 0.0f : 1.0f / 255.0f;
+    u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+    fog_lamp_tiles(u.lt);
+    u.dbg[0] = g_fxs.fog_debug, u.dbg[1] = g_fxs.fog_lamp_lift;
+    flush_pass();
+    GfxTex* in[3] = { depth, NULL, NULL };
+    VkSampler ns[3] = { g_near_samp, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    float fv[4] = { vx, vy, vw, vh };
+    post_pass_x(ct, NULL, 1, pipe, fv, &u, sizeof u, in, ns, 1, GFX_PASS_POST_SHAFTS);
+}
+
+/* The sun shafts (post_shafts; gfx_metal.m's note): the sun's or moon's light scattered toward the eye along each
+ * pixel's ray, through haze as thick as the game's fog says, where the scene renderer's zone shadow cascades see the
+ * light; with the modern fog's volume (fog_volume_on) the fog itself, marched the same way. Needs the scene renderer's
+ * shadows (scene 1 or 2, scene_shadows): without them, or indoors, the pass stays off. */
+static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float vx, float vy, float vw, float vh)
+{
+    if (!sun_cascades())
+    {
+        g_post.sh_serial = 0;
+        return;
+    }
+    float Vr[16], VP[16];
+    memcpy(Vr, s->view, 64);
+    Vr[12] = Vr[13] = Vr[14] = 0.0f;
+    gfx_mat_mul(VP, Vr, s->proj);
+    ShaftU u;
+    memset(&u, 0, sizeof u);
+    if (!gfx_mat_inverse(u.ivp, VP))
+        return;
+    int q = g_fxs.shafts_q >= 1.5f ? 2 : 1, div = q == 2 ? 3 : 5;
+    uint32_t lw = (uint32_t)(vw / div), lh = (uint32_t)(vh / div);
+    lw = lw ? lw : 1, lh = lh ? lh : 1;
+    const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (!fx_tex(&g_post.sh, F16, lw, lh, GFX_USE_RT, 1) || !fx_tex(&g_post.sht, VK_FORMAT_R16_SFLOAT, lw, lh, GFX_USE_RT, 1) ||
+        !fx_tex(&g_post.shist[0], F16, lw, lh, GFX_USE_RT, 1) || !fx_tex(&g_post.shist[1], F16, lw, lh, GFX_USE_RT, 1))
+        return;
+    memcpy(u.m, g_shd.u.m, sizeof u.m), memcpy(u.cas, g_shd.u.cas, sizeof u.cas);
+    /* the haze: as thick as the game's fog, the nearer its end the thicker */
+    float fog_end = s->fog[2] != 0.0f && s->fog[1] > 1.0f ? s->fog[1] : 1000.0f;
+    fog_end = fminf(fmaxf(fog_end, 30.0f), 3000.0f);
+    memcpy(u.cam, g_shd.u.cam, 12);
+    u.cam[3] = fminf(fmaxf(g_fxs.shafts_dist, 10.0f), fog_end * 1.5f);
+    memcpy(u.sun, g_shd.u.dir, 12), u.sun[3] = 1.0f;
+    /* the light: this frame's sun (or moon) colour, as strong as the shadows are drawn; strongest with the light low */
+    float sc[3] = { 1.0f, 0.95f, 0.85f };
+    if (s->sun_dir[3] != 0.0f)
+        sc[0] = s->sun_color[0], sc[1] = s->sun_color[1], sc[2] = s->sun_color[2];
+    float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
+    float k = g_fxs.post_shafts * g_shd.u.info[2] * 1.5f * (0.25f + 0.75f * low * low);
+    for (int c = 0; c < 3; ++c)
+        u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
+    u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
+    u.p[0] = fmaxf(g_fxs.shafts_density, 0.0f) * 2.0f / fog_end, u.p[1] = 0.02f, u.p[2] = q == 2 ? 16.0f : 10.0f;
+    if (g_fxs.fog_modern > 0.0f) /* one air: the modern fog's density and falloff */
+        u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]) * fmaxf(g_fxs.shafts_density, 0.0f), u.p[1] = fmaxf(g_fxs.fog_thin, 0.0f);
+    int vol = fog_volume_on();
+    if (vol)
+    {
+        /* the fog volume: the air's own light, the ground fog's drift, the lamps; the sun's in-scatter the fog's when the
+         * shafts are off; to the fog's far limit, not the shafts' reach */
+        fog_air(s, u.airc);
+        if (g_fxs.post_shafts <= 0.0f)
+            for (int c = 0; c < 3; ++c)
+                u.sunc[c] = fmaxf(sc[c], 0.0f) * g_shd.u.info[2] * (0.15f + 0.6f * low * low);
+        u.p[0] = fog_at_cam(fog_sigma(s), u.cam[1]);
+        u.cam[3] = fog_end * 1.5f;
+        u.fv[0] = fmaxf(g_fxs.fog_lamps, 0.0f) * 0.05f, u.fv[1] = g_fxs.fog_lamp_lift;
+        /* the weather: fog lies thick on the ground, rain and snow raise some, wind and gales thin it and blow it on */
+        float wm = g_weather == 3 ? 2.0f : g_weather == 6 || g_weather == 7 || g_weather == 12 ? 1.8f : g_weather == 10 ? 0.6f
+                 : g_weather == 11 || g_weather == 13 ? 0.35f : 1.0f;
+        float ws = g_weather == 10 ? 3.0f : g_weather == 11 || g_weather == 13 || g_weather == 7 ? 6.0f : 1.0f;
+        u.fv[2] = fmaxf(g_fxs.fog_ground, 0.0f) * wm, u.fv[3] = 1.0f / fmaxf(g_fxs.fog_ground_size, 1.0f);
+        static double drift, last_t; /* the noise's offset, carried frame to frame (a speed change doesn't jump it) */
+        double t = (double)gfx_now_ns() * 1e-9, dt = last_t > 0.0 ? fmin(t - last_t, 0.25) : 0.0;
+        last_t = t, drift = fmod(drift + dt * fmaxf(g_fxs.fog_drift, 0.0f) * ws, 4096.0);
+        u.wind[0] = (float)drift, u.wind[1] = 0.0f, u.wind[2] = (float)(drift * 0.6), u.wind[3] = 1.0f;
+        fog_lamp_tiles(u.lt);
+    }
+    u.p[3] = (float)fmod((double)g_serial * 0.6180339887, 1.0);
+    u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+    u.lo[0] = (float)lw, u.lo[1] = (float)lh, u.lo[2] = 1.0f / (float)lw, u.lo[3] = 1.0f / (float)lh;
+    /* last frame's, when it was the frame before at this size and the camera didn't jump */
+    float jx = u.cam[0] - g_post.sh_pcam[0], jy = u.cam[1] - g_post.sh_pcam[1], jz = u.cam[2] - g_post.sh_pcam[2];
+    int have = g_post.sh_serial && g_post.sh_serial + 1 == g_serial && jx * jx + jy * jy + jz * jz < 25.0f && !cam_cut();
+    memcpy(u.pvp, g_post.sh_pvp, 64), memcpy(u.pcam, g_post.sh_pcam, 12);
+    u.hist[0] = have && g_fxs.shafts_debug >= 0.0f ? 1.0f : 0.0f, u.hist[1] = fminf(fmaxf(g_fxs.shafts_temporal, 0.0f), 0.97f),
+    u.hist[2] = g_fxs.shafts_debug;
+    u.hist[3] = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? 1.0f : 0.0f;
+    GfxTex *prev = g_post.shist[g_post.shist_at], *out = g_post.shist[g_post.shist_at ^ 1];
+    float lv[4] = { 0, 0, (float)lw, (float)lh };
+    GfxTex* march_in[3] = { depth, g_shd.zmap, NULL };
+    VkSampler march_s[3] = { g_near_samp, g_cmp_samp, VK_NULL_HANDLE };
+    post_pass_x(g_post.sh, g_post.sht, 0, g_post.smarch, lv, &u, sizeof u, march_in, march_s, 1, GFX_PASS_POST_SHAFTS);
+    GfxTex* res_in[3] = { depth, g_post.sh, prev };
+    VkSampler res_s[3] = { g_near_samp, g_near_samp, VK_NULL_HANDLE };
+    post_pass(out, 0, g_post.sresolve, lv, &u, sizeof u, res_in, res_s, GFX_PASS_POST_SHAFTS);
+    GfxTex* comp_in[3] = { depth, out, g_post.sht };
+    VkSampler comp_s[3] = { g_near_samp, g_near_samp, g_near_samp };
+    float fv[4] = { vx, vy, vw, vh };
+    VkPipeline comp = fmt_pipe(color->vf, u.hist[2] != 0.0f ? FP_SHAFT_DBG : vol ? FP_SHAFT_VOL : u.hist[3] > 0.0f ? FP_SHAFT_ADD : FP_SHAFT_COMP);
+    if (comp)
+        post_pass(color, 1, comp, fv, &u, sizeof u, comp_in, comp_s, GFX_PASS_POST_SHAFTS);
+    g_post.shist_at ^= 1, g_post.sh_serial = g_serial;
+    memcpy(g_post.sh_pvp, VP, 64), memcpy(g_post.sh_pcam, u.cam, 12);
+}
+
+/* the glow's draws again, onto black over the scene's depth (glow_new's records); 0 when there were none */
+static int post_glow(GfxTex* color)
+{
+    VkImageView depth = VK_NULL_HANDLE;
+    int stencil = 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g_nglows; ++i)
+        if (g_glows[i].rt == color && g_glows[i].fmt == color->vf) /* (not those from before a format change) */
+        {
+            if (!n++)
+                depth = g_glows[i].depth, stencil = g_glows[i].stencil;
+        }
+    if (!n || !fx_tex(&g_post.glow, color->vf, color->w, color->h, GFX_USE_RT, 1))
+        return 0;
+    end_pass();
+    gpu_sync();
+    VkCommandBuffer cb = g_cb;
+    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    ca.imageView = attachment_view(g_post.glow, 0, 0);
+    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo da = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    da.imageView = depth;
+    da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    ri.renderArea.extent = (VkExtent2D){ color->w, color->h };
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    if (depth)
+    {
+        ri.pDepthAttachment = &da;
+        if (stencil)
+            ri.pStencilAttachment = &da;
+    }
+    int ts = ts_begin(cb, GFX_PASS_POST_BLOOM);
+    vkCmdBeginRendering(cb, &ri);
+    vkCmdSetStencilTestEnable(cb, VK_FALSE);
+    vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
+    vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
+    vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    VkPipeline bound = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < g_nglows; ++i)
+    {
+        Glow* g = &g_glows[i];
+        if (g->rt != color || g->depth != depth || g->fmt != color->vf)
+            continue;
+        if (g->pipe != bound)
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g->pipe), bound = g->pipe;
+        vkCmdSetViewport(cb, 0, 1, &g->vp);
+        vkCmdSetScissor(cb, 0, 1, &g->sc);
+        vkCmdSetDepthTestEnable(cb, g->ztest ? VK_TRUE : VK_FALSE);
+        /* tested against the scene's depth, never written: Metal discards this pass's depth (DontCare), which here would
+         * leave the game's depth undefined for what reads it later (water, nameplates); the draws are additive, so the
+         * order among them that a write would have kept doesn't show */
+        vkCmdSetDepthWriteEnable(cb, VK_FALSE);
+        vkCmdSetDepthCompareOp(cb, g->zfunc);
+        vkCmdSetCullMode(cb, g->cull);
+        vkCmdSetDepthBiasEnable(cb, g->zbias ? VK_TRUE : VK_FALSE);
+        vkCmdSetDepthBias(cb, -(float)g->zbias, 0.0f, -(float)g->zbias * 0.5f);
+        vkCmdSetPrimitiveTopology(cb, g->topo);
+        VkWriteDescriptorSet w[B_COUNT];
+        for (uint32_t k = 0; k < g->nw; ++k)
+        {
+            const GlowBind* b = &g_glow_binds[g->bind + k];
+            int buf = b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            desc_write(&w[k], b->binding, b->type, buf ? &b->b : NULL, buf ? NULL : &b->i);
+        }
+        p_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, g->nw, w);
+        if (g->indexed)
+        {
+            vkCmdBindIndexBuffer(cb, g->ib, g->ioff, g->itype);
+            vkCmdDrawIndexed(cb, g->n, 1, 0, 0, 0);
+        }
+        else
+            vkCmdDraw(cb, g->n, 1, g->vstart, 0);
+    }
+    vkCmdEndRendering(cb);
+    ts_end(cb, ts);
+    g_dirty = 1;
+    g_post.glow->used = g_serial, g_post.glow->rec = g_cb_index;
+    return 1;
+}
+
+/* the textures of the effects turned off, let go (once the frames that drew with them are done) */
+static void post_release(int bloom, int dof, int shafts)
+{
+    if (!bloom)
+    {
+        for (int i = 0; i < POST_LEVELS; ++i)
+            gfx_tex_destroy(g_post.lvl[i]), g_post.lvl[i] = NULL;
+        gfx_tex_destroy(g_post.glow), g_post.glow = NULL;
+    }
+    if (!dof)
+        gfx_tex_destroy(g_post.h0), gfx_tex_destroy(g_post.h1), g_post.h0 = g_post.h1 = NULL;
+    if (!shafts)
+        gfx_tex_destroy(g_post.sh), gfx_tex_destroy(g_post.sht), gfx_tex_destroy(g_post.shist[0]), gfx_tex_destroy(g_post.shist[1]),
+            g_post.sh = g_post.sht = g_post.shist[0] = g_post.shist[1] = NULL;
+}
+
+static void post_effects(GfxTex* color, const GfxScene* s)
+{
+    int bloom = g_fxs.post_bloom > 0.0f, dof = g_fxs.post_dof > 0.0f, shafts = g_fxs.post_shafts > 0.0f;
+    int glows = g_fxs.scene_lamps > 0.0f && g_fxs.scene_lamp_glow > 0.0f && g_lamps.binned == g_serial;
+    int vol = fog_volume_on();
+    post_release(bloom, dof, shafts || (g_fxs.fog_modern > 0.0f && g_fxs.fog_volume > 0.0f)); /* (the volume: the shafts' textures) */
+    if (!bloom && !dof && !shafts && !glows && !vol)
+    {
+        g_post.sh_serial = 0;
+        return;
+    }
+    flush_pass();
+    cam_cut_note(s->view);
+    GfxTex *ct = color, *depth = color->depth_world ? color->depth_world : color->depth_seen;
+    if (!post_init(ct->vf))
+        return;
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > ct->w || vy + vh > ct->h)
+        vx = vy = 0, vw = (float)ct->w, vh = (float)ct->h;
+    float minz, maxz;
+    memcpy(&minz, &s->vp[4], 4);
+    memcpy(&maxz, &s->vp[5], 4);
+    if (maxz <= minz)
+        minz = 0, maxz = 1;
+    int full_depth = depth && depth->w == ct->w && depth->h == ct->h;
+    /* a texel step down the target per step across: the scene's square stretched to the screen's shape (the
+     * projection's aspect), so a blur is round on screen */
+    float aspect = s->proj[0] != 0.0f ? fabsf(s->proj[5] / s->proj[0]) : 1.0f;
+    PostU u = { { vx, vy, vw, vh }, { 0 }, { 0 }, { 0 }, { 0 }, { s->proj[10], s->proj[14], minz, maxz }, { aspect * vh / vw, 0, 0, 0 } };
+    u.dof2[1] = s->proj[11] < 0.0f ? -1.0f : 1.0f, u.dof2[2] = POST_LEVELS, u.dof2[3] = fmaxf(g_fxs.bloom_radius, 0.0f);
+    uint32_t hw = (uint32_t)(vw + 1) / 2, hh = (uint32_t)(vh + 1) / 2;
+    float fv[4] = { vx, vy, vw, vh };
+    if (glows && full_depth && s->proj[11] != 0.0f)
+        post_lamp_glows(color, s, depth, vx, vy, vw, vh);
+    if ((shafts || vol) && full_depth && s->proj[11] != 0.0f)
+        post_shafts(color, s, depth, vx, vy, vw, vh); /* (before the depth of field and the bloom: both take it; the fog volume too) */
+    else
+        g_post.sh_serial = 0;
+    const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (dof && full_depth && s->proj[11] != 0.0f)
+    {
+        /* the focus: the player's distance along the view (or dof_focus), eased over some 0.2 s; a jump (a new place,
+         * the camera cut) taken at once */
+        float want = g_fxs.dof_focus > 0.0f ? g_fxs.dof_focus : 0.0f;
+        if (want <= 0.0f && g_fx.has_focus)
+        {
+            const float* V = s->view;
+            const float* p = g_fx.focus;
+            want = fabsf(p[0] * V[2] + p[1] * V[6] + p[2] * V[10] + V[14]);
+        }
+        if (!(want > 0.5f) || !isfinite(want)) /* (no player, or the camera in its head: first person) */
+            want = g_post.focus > 0.5f && isfinite(g_post.focus) ? g_post.focus : 10.0f;
+        uint64_t now = gfx_now_ns();
+        double dt = g_post.focus_ns ? (double)(now - g_post.focus_ns) * 1e-9 : 1.0;
+        g_post.focus_ns = now;
+        if (!(g_post.focus > 0.0f) || !isfinite(g_post.focus) || dt > 0.5 || cam_cut() || fabsf(want - g_post.focus) > 0.5f * fmaxf(want, g_post.focus))
+            g_post.focus = want;
+        else
+            g_post.focus += (want - g_post.focus) * (float)(1.0 - exp(-dt / 0.2));
+        u.dof[0] = g_post.focus, u.dof[1] = fmaxf(g_fxs.dof_range, 0.0f), u.dof[2] = fmaxf(g_fxs.dof_ramp, 1e-3f);
+        u.dof[3] = g_fxs.post_dof * 4.0f * vw / 2048.0f; /* at 1: some 8 pixels of a 2048 scene */
+        u.dof2[0] = fminf(fmaxf(g_fxs.dof_near, 0.0f), 1.0f);
+        if (fx_tex(&g_post.h0, F16, hw, hh, GFX_USE_RT, 1) && fx_tex(&g_post.h1, F16, hw, hh, GFX_USE_RT, 1))
+        {
+            float hv[4] = { 0, 0, (float)hw, (float)hh };
+            u.src[0] = (float)hw, u.src[1] = (float)hh, u.src[2] = 1.0f / (float)hw, u.src[3] = 1.0f / (float)hh;
+            GfxTex* coc_in[3] = { ct, depth, NULL };
+            VkSampler coc_s[3] = { g_near_samp, g_near_samp, VK_NULL_HANDLE };
+            post_pass(g_post.h0, 0, g_post.coc, hv, &u, sizeof u, coc_in, coc_s, GFX_PASS_POST_DOF);
+            GfxTex* gat_in[3] = { g_post.h0, NULL, NULL };
+            post_pass(g_post.h1, 0, g_post.gather, hv, &u, sizeof u, gat_in, NULL, GFX_PASS_POST_DOF);
+            GfxTex* cmp_in[3] = { g_post.h1, depth, NULL };
+            VkSampler cmp_s[3] = { VK_NULL_HANDLE, g_near_samp, VK_NULL_HANDLE };
+            post_pass(ct, 1, fmt_pipe(ct->vf, FP_DOF_COMP), fv, &u, sizeof u, cmp_in, cmp_s, GFX_PASS_POST_DOF);
+        }
+    }
+    if (bloom && full_depth)
+    {
+        u.bloom[0] = g_fxs.bloom_threshold, u.bloom[1] = g_fxs.bloom_knee, u.bloom[2] = g_fxs.bloom_emissive_fx;
+        u.aux[1] = fmaxf(g_fxs.bloom_emissive_lights, 0.0f);
+        u.bloom[3] = g_fxs.post_bloom;
+        GfxTex* glow = post_glow(color) ? g_post.glow : NULL; /* (none: the dummy, black) */
+        uint32_t w[POST_LEVELS], h[POST_LEVELS];
+        int ok = 1;
+        for (int i = 0; i < POST_LEVELS; ++i)
+        {
+            w[i] = (uint32_t)(vw / (float)(2 << i)), h[i] = (uint32_t)(vh / (float)(2 << i));
+            w[i] = w[i] ? w[i] : 1, h[i] = h[i] ? h[i] : 1;
+            ok = ok && fx_tex(&g_post.lvl[i], g_post.lvl_fmt, w[i], h[i], GFX_USE_RT, 1);
+        }
+        if (ok)
+        {
+            u.src[0] = (float)ct->w, u.src[1] = (float)ct->h, u.src[2] = 1.0f / (float)ct->w, u.src[3] = 1.0f / (float)ct->h;
+            GfxTex* pre_in[3] = { ct, glow, depth };
+            VkSampler pre_s[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, g_near_samp };
+            float lv[4] = { 0, 0, (float)w[0], (float)h[0] };
+            post_pass(g_post.lvl[0], 0, g_post.pre, lv, &u, sizeof u, pre_in, pre_s, GFX_PASS_POST_BLOOM);
+            for (int i = 1; i < POST_LEVELS; ++i)
+            {
+                u.src[0] = (float)w[i - 1], u.src[1] = (float)h[i - 1], u.src[2] = 1.0f / (float)w[i - 1], u.src[3] = 1.0f / (float)h[i - 1];
+                GfxTex* in[3] = { g_post.lvl[i - 1], NULL, NULL };
+                float l[4] = { 0, 0, (float)w[i], (float)h[i] };
+                post_pass(g_post.lvl[i], 0, g_post.down, l, &u, sizeof u, in, NULL, GFX_PASS_POST_BLOOM);
+            }
+            for (int i = POST_LEVELS - 2; i >= 0; --i)
+            {
+                u.src[0] = (float)w[i + 1], u.src[1] = (float)h[i + 1], u.src[2] = 1.0f / (float)w[i + 1], u.src[3] = 1.0f / (float)h[i + 1];
+                GfxTex* in[3] = { g_post.lvl[i + 1], NULL, NULL };
+                float l[4] = { 0, 0, (float)w[i], (float)h[i] };
+                post_pass(g_post.lvl[i], 1, g_post.up, l, &u, sizeof u, in, NULL, GFX_PASS_POST_BLOOM);
+            }
+            u.aux[3] = ct->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? 1.0f : 0.0f;
+            GfxTex* in[3] = { g_post.lvl[0], NULL, NULL };
+            post_pass(ct, 1, fmt_pipe(ct->vf, u.aux[3] > 0.0f ? FP_BLOOM_ADD : FP_BLOOM_COMP), fv, &u, sizeof u, in, NULL, GFX_PASS_POST_BLOOM);
+        }
+    }
+    color->scene = 0; /* its mips are behind (scene_mips) */
+    color->used = g_serial, color->rec = g_cb_index;
+}
+
+/* --- the HDR scene (scene_hdr; gfx_metal.m's note) -----------------------------------------------------------------
+ * The game's world target (its large background) made RGBA16F in place: a new image of the same size and levels, the
+ * old one's first level drawn into it, so the frame goes on with what was drawn; its draws build their pipelines for the
+ * float target as they would for any. One tonemap pass at the scene's end (hdr_tone) brings it back to the display's
+ * range before the nameplates and the interface go over it - from a copy of the scene, as Vulkan has no reading the
+ * pixel being shaded. The game's copies between targets of other formats are skipped (gfx_copy), as on Metal. */
+static struct
+{
+    GfxTex* t;    /* the target made float */
+    VkPipeline tone;
+    GfxTex* src;  /* the scene as it was, for the tonemap to read */
+} g_hdr;
+
+static void hdr_swap(GfxTex* t, VkFormat vf)
+{
+    if (t->vf == vf || !post_init(t->vf))
+        return;
+    VkPipeline cp = fmt_pipe(vf, FP_HDR_COPY);
+    if (!cp)
+        return;
+    /* the new image as gfx_tex_create would make it in this format (the same levels and views), taken into t */
+    GfxTex* n = tex_create(GFX_TEX_2D, t->fmt, t->w, t->h, t->levels, GFX_USE_RT, vf, 0);
+    if (!n)
+        return;
+    end_pass();
+    flush_pass();
+    if (n->mips != t->mips)
+    {
+        gfx_tex_destroy(n);
+        return;
+    }
+    PostU u;
+    memset(&u, 0, sizeof u);
+    GfxTex* in[3] = { t, NULL, NULL };
+    VkSampler ns[3] = { g_near_samp, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    float vp[4] = { 0, 0, (float)t->w, (float)t->h };
+    post_pass(n, 0, cp, vp, &u, sizeof u, in, ns, GFX_PASS_HDR);
+    /* n's image, views and format (its texel and conversion: tex_make's) become t's; t's go with n once the frame is done */
+#define SWAP(f) (k.f = t->f, t->f = n->f, n->f = k.f)
+    GfxTex k;
+    SWAP(img), SWAP(mem), SWAP(view), SWAP(mipview), SWAP(rtv), SWAP(levelv), SWAP(vf), SWAP(texel), SWAP(conv);
+#undef SWAP
+    for (int i = 0; i < GFX_READBACKS; ++i) /* (sized for the old texel; made again on the next read) */
+        if (t->rb[i])
+            trash(2, (uint64_t)(uintptr_t)t->rb[i], t->rbm[i]), t->rb[i] = VK_NULL_HANDLE, t->rbsize[i] = 0, t->rb_serial[i] = 0;
+    gfx_tex_destroy(n);
+    tex_forget(t);
+    t->scene = 0, t->used = g_serial, t->rec = g_cb_index;
+}
+
+/* the scene's target float while scene_hdr is on (and back once it is off) */
+static void hdr_update(GfxTex* color)
+{
+    int want = g_fxs.scene_hdr > 0.0f && color->use == GFX_USE_RT && color->mips > 1 && !color->block;
+    if (g_hdr.t && g_hdr.t != color)
+        hdr_swap(g_hdr.t, VK_FORMAT_B8G8R8A8_UNORM), g_hdr.t = NULL; /* (another target is the world now) */
+    if (want && color->vf == VK_FORMAT_B8G8R8A8_UNORM)
+        hdr_swap(color, VK_FORMAT_R16G16B16A16_SFLOAT), g_hdr.t = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? color : NULL;
+    else if (!want && g_hdr.t == color && color->vf == VK_FORMAT_R16G16B16A16_SFLOAT)
+        hdr_swap(color, VK_FORMAT_B8G8R8A8_UNORM), g_hdr.t = NULL;
+    if (!g_hdr.t && g_hdr.src) /* (the tonemap's copy, once no target is float) */
+        gfx_tex_destroy(g_hdr.src), g_hdr.src = NULL;
+}
+
+/* the tonemap over the scene's viewport, from a copy of it */
+static void hdr_tone(GfxTex* color, const GfxScene* s)
+{
+    if (g_hdr.t != color)
+        return;
+    if (!g_hdr.tone)
+        g_hdr.tone = post_pipeline("HDR_TONE", VK_FORMAT_R16G16B16A16_SFLOAT, 0);
+    if (!g_hdr.tone || !fx_tex(&g_hdr.src, VK_FORMAT_R16G16B16A16_SFLOAT, color->w, color->h, GFX_USE_RT, 1))
+        return;
+    flush_pass();
+    float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+    if (vw < 16 || vh < 16 || vx + vw > color->w || vy + vh > color->h)
+        vx = vy = 0, vw = (float)color->w, vh = (float)color->h;
+    gpu_sync();
+    VkImageCopy c = { 0 };
+    c.srcSubresource = (VkImageSubresourceLayers){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    c.dstSubresource = c.srcSubresource;
+    c.srcOffset = c.dstOffset = (VkOffset3D){ (int32_t)vx, (int32_t)vy, 0 };
+    c.extent = (VkExtent3D){ (uint32_t)vw, (uint32_t)vh, 1 };
+    int ts = ts_begin(g_cb, GFX_PASS_HDR);
+    vkCmdCopyImage(g_cb, color->img, VK_IMAGE_LAYOUT_GENERAL, g_hdr.src->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    ts_end(g_cb, ts);
+    g_dirty = 1;
+    PostU u;
+    memset(&u, 0, sizeof u);
+    u.bloom[0] = g_fxs.tonemap, u.bloom[1] = fmaxf(g_fxs.exposure, 0.01f), u.bloom[2] = fmaxf(g_fxs.tone_white, 1.01f);
+    u.bloom[3] = fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f);
+    GfxTex* in[3] = { g_hdr.src, NULL, NULL };
+    VkSampler ns[3] = { g_near_samp, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    float fv[4] = { vx, vy, vw, vh };
+    post_pass(color, 1, g_hdr.tone, fv, &u, sizeof u, in, ns, GFX_PASS_HDR);
+    color->scene = 0;
+}
+
+static void hdr_forget(const GfxTex* t)
+{
+    if (g_hdr.t == t)
+        g_hdr.t = NULL;
+}
+
 static void scene_fx(GfxTex* color, const GfxScene* s);
 
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
         return;
+    hdr_update(color);
+    ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
+    scene_fog(color, s);
+    post_effects(color, s); /* (the lamps' glows among them, ahead of the bloom) */
+    hdr_tone(color, s);
     scene_aa(color, s);
 }
 
@@ -5368,11 +10269,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             fx_tex(&g_fx.b2b, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) && fx_tex(&g_fx.ra, F16, bw, bh, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.rb, F16, bw, bh, GFX_USE_RT, 1))
         {
-            if (!g_fx.comp_pipe || g_fx.comp_fmt != ct->vf)
-            {
-                g_fx.comp_pipe = fx_pipeline("COMP", ct->vf);
-                g_fx.comp_fmt = ct->vf;
-            }
+            g_fx.comp_pipe = fmt_pipe(ct->vf, FP_FX_COMP);
             if (g_fx.comp_pipe)
             {
                 gpu_sync();
@@ -5853,7 +10750,7 @@ static int present_to_window(GfxTex* bb)
         memset(&u, 0, sizeof u);
         u.rect[0] = sharpen;
         vkCmdPushConstants(cb, g_util_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof u, &u);
-        VkDescriptorImageInfo ii = { g_present_samp, bb->view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo ii = { g_lin_samp, bb->view, VK_IMAGE_LAYOUT_GENERAL };
         VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w.dstBinding = 0;
         w.descriptorCount = 1;
@@ -5887,6 +10784,7 @@ static int present_to_window(GfxTex* bb)
 static void frame_end(void)
 {
     casters_clear();
+    glows_clear();
     submit(0);
     Frame* f = &g_frames[g_frame];
     if (!f->value)
@@ -5903,6 +10801,7 @@ void gfx_present(GfxTex* bb)
     uint64_t present_start = gfx_profiling ? gfx_now_ns() : 0;
     g_present_thread = pthread_self();
     flush_pass();
+    shadow_frame_end(); /* the scene renderer's characters' shadows, for the next frame: timed with the frame's passes */
     if (g_surface && bb && bb->use != GFX_USE_DEPTH)
     {
         int pw = 0, ph = 0;
@@ -6099,6 +10998,8 @@ int gfx_init(void* window, int vsync)
     en.samplerAnisotropy = have.samplerAnisotropy;
     en.fillModeNonSolid = have.fillModeNonSolid;
     en.largePoints = have.largePoints;
+    en.depthClamp = have.depthClamp;
+    g_has_clamp = have.depthClamp;
     en.vertexPipelineStoresAndAtomics = g_has_rt ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceRayQueryFeaturesKHR en_rq = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
     en_rq.rayQuery = VK_TRUE;
@@ -6240,11 +11141,27 @@ int gfx_init(void* window, int vsync)
     memset(p, 0, 256);
     g_dummy2d = dummy_texture(GFX_TEX_2D);
     g_dummycube = dummy_texture(GFX_TEX_CUBE);
+    /* the fixed samplers, clamped: linear (the present's, the effects'), nearest, and the depth maps' comparing one
+     * (LESSEQUAL), filtered where the device filters both depth formats the maps have */
     VkSamplerCreateInfo ps = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     ps.magFilter = ps.minFilter = VK_FILTER_LINEAR;
     ps.addressModeU = ps.addressModeV = ps.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     ps.maxLod = 0.25f;
-    VK_CHECK(vkCreateSampler(g_dev, &ps, NULL, &g_present_samp));
+    VK_CHECK(vkCreateSampler(g_dev, &ps, NULL, &g_lin_samp));
+    ps.magFilter = ps.minFilter = VK_FILTER_NEAREST;
+    VK_CHECK(vkCreateSampler(g_dev, &ps, NULL, &g_near_samp));
+    VkFilter zf = VK_FILTER_LINEAR;
+    for (int i = 0; i < 2; ++i)
+    {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(g_phys, i ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT, &fp);
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+            zf = VK_FILTER_NEAREST;
+    }
+    ps.magFilter = ps.minFilter = zf;
+    ps.compareEnable = VK_TRUE;
+    ps.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VK_CHECK(vkCreateSampler(g_dev, &ps, NULL, &g_cmp_samp));
 
     const char* prof = getenv("FFXI_PROFILE");
     gfx_profiling = prof && prof[0] && prof[0] != '0';
