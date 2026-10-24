@@ -498,6 +498,7 @@ typedef struct Ui
     SePlayer* se;               /* the menus' sounds (SND_*), if there is audio */
     SeWave snd[4];
     float se_gain;              /* at the player's volume */
+    float mouse_x, mouse_y;     /* where the pointer last was: only a move hovers */
 } Ui;
 
 /* The menus' sounds, as the game's menus play them: their effect ids (ROM/0/0.DAT's "0001".."0004") */
@@ -1405,6 +1406,11 @@ static void mouse(Ui* u, const SDL_Event* e, float d)
     int o;
     if (e->type == SDL_EVENT_MOUSE_MOTION)
     {
+        /* a pointer that reports where it already was (a console's, with no mouse) would hold the
+         * cursor under it against the keys and the D-pad */
+        if (e->motion.x == u->mouse_x && e->motion.y == u->mouse_y)
+            return;
+        u->mouse_x = e->motion.x, u->mouse_y = e->motion.y;
         Widget* f = field(u);
         if (u->dragging && f && (e->motion.state & SDL_BUTTON_LMASK))
         {
