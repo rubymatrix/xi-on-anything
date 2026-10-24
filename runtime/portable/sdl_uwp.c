@@ -1,5 +1,5 @@
-/* The SDL3 calls the runtime makes (user32.c, input.c, dsound.c), for the UWP build, where SDL3 has
- * no back end. Compiled against SDL3's headers for its types, linked instead of SDL3.lib. There is one
+/* The SDL3 calls the runtime and the sign-in screen make (user32.c, input.c, dsound.c, host/signin.c
+ * and what it uses), for the UWP build, where SDL3 has no back end. Compiled against SDL3's headers for its types, linked instead of SDL3.lib. There is one
  * window, the app's view; its input arrives through uwp_bridge.h and leaves here as SDL events. Audio
  * is a thread that pulls the mix every 10 ms, as SDL's device would - dsound.c moves the DirectSound
  * cursors, and signals the game's notification events, from that callback - and hands it to the app.
@@ -63,6 +63,49 @@ SDL_InitFlags SDL_WasInit(SDL_InitFlags flags) { (void)flags; return 0; }
 bool SDL_SetClipboardText(const char* text) { (void)text; return false; }
 bool SDL_HasClipboardText(void) { return false; }
 char* SDL_GetClipboardText(void) { return (char*)calloc(1, 1); } /* SDL's "" for none, freed with SDL_free */
+
+Uint64 SDL_GetTicks(void) { return GetTickCount64(); }
+int SDL_GetAtomicInt(SDL_AtomicInt* a) { return (int)InterlockedCompareExchange((volatile LONG*)&a->value, 0, 0); }
+int SDL_SetAtomicInt(SDL_AtomicInt* a, int v) { return (int)InterlockedExchange((volatile LONG*)&a->value, v); }
+
+size_t SDL_strlcpy(char* dst, const char* src, size_t maxlen)
+{
+    size_t n = strlen(src);
+    if (maxlen)
+    {
+        size_t k = n < maxlen - 1 ? n : maxlen - 1;
+        memcpy(dst, src, k);
+        dst[k] = 0;
+    }
+    return n;
+}
+size_t SDL_strlcat(char* dst, const char* src, size_t maxlen)
+{
+    size_t d = strnlen(dst, maxlen);
+    return d + SDL_strlcpy(dst + d, src, maxlen - d);
+}
+char* SDL_strdup(const char* s) { return _strdup(s); }
+
+/* the app passes host64 --data-dir (its LocalState): nothing asks for this */
+char* SDL_GetPrefPath(const char* org, const char* app)
+{
+    (void)org, (void)app;
+    return NULL;
+}
+
+/* UTF-8 paths, as SDL's, to the wide calls UWP apps may make */
+static int wide(const char* s, wchar_t* out, int n) { return MultiByteToWideChar(CP_UTF8, 0, s, -1, out, n) > 0; }
+
+bool SDL_CreateDirectory(const char* path)
+{
+    wchar_t w[1024];
+    return wide(path, w, 1024) && (CreateDirectoryW(w, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+}
+bool SDL_RenamePath(const char* from, const char* to)
+{
+    wchar_t a[1024], b[1024];
+    return wide(from, a, 1024) && wide(to, b, 1024) && MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING);
+}
 
 /* --- the event queue ------------------------------------------------------------------------------ */
 #define QUEUE 1024
@@ -147,12 +190,144 @@ bool SDL_SetWindowFullscreen(SDL_Window* w, bool on) { (void)w, (void)on; return
 bool SDL_SyncWindow(SDL_Window* w) { (void)w; return true; }
 bool SDL_RaiseWindow(SDL_Window* w) { (void)w; return true; }
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* w) { (void)w; return 0; } /* shown, and the view is all there is */
-bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; }
+bool SDL_SetWindowFullscreenMode(SDL_Window* w, const SDL_DisplayMode* m) { (void)w, (void)m; return true; }
+float SDL_GetWindowPixelDensity(SDL_Window* w) { (void)w; return 1.0f; } /* the view's sizes are pixels already */
+SDL_Window** SDL_GetWindows(int* count)
+{
+    SDL_Window** list = (SDL_Window**)calloc(2, sizeof *list);
+    int n = list && g_have_window ? 1 : 0;
+    if (n)
+        list[0] = &g_window;
+    if (count)
+        *count = n;
+    return list;
+}
+SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window* w) { return w ? 1 : 0; }
+/* the TV's output mode is the console's to choose: the desktop mode only */
+SDL_DisplayMode** SDL_GetFullscreenDisplayModes(SDL_DisplayID id, int* count)
+{
+    (void)id;
+    if (count)
+        *count = 0;
+    return (SDL_DisplayMode**)calloc(1, sizeof(SDL_DisplayMode*));
+}
+
+/* --- properties: the few the sign-in screen sets for its text input ---------------------------------- */
+#define PROPS 4
+#define PROP_ITEMS 8
+typedef struct Prop
+{
+    char name[64];
+    Sint64 number;
+    char text[256];
+} Prop;
+static struct
+{
+    int used;
+    int n;
+    Prop items[PROP_ITEMS];
+} g_props[PROPS];
+static SRWLOCK g_prlock = SRWLOCK_INIT;
+
+SDL_PropertiesID SDL_CreateProperties(void)
+{
+    AcquireSRWLockExclusive(&g_prlock);
+    SDL_PropertiesID id = 0;
+    for (int i = 0; i < PROPS && !id; ++i)
+        if (!g_props[i].used)
+        {
+            memset(&g_props[i], 0, sizeof g_props[i]);
+            g_props[i].used = 1;
+            id = (SDL_PropertiesID)(i + 1);
+        }
+    ReleaseSRWLockExclusive(&g_prlock);
+    return id;
+}
+void SDL_DestroyProperties(SDL_PropertiesID props)
+{
+    if (props >= 1 && props <= PROPS)
+        g_props[props - 1].used = 0;
+}
+static Prop* prop(SDL_PropertiesID props, const char* name, int add)
+{
+    if (props < 1 || props > PROPS || !g_props[props - 1].used)
+        return NULL;
+    for (int i = 0; i < g_props[props - 1].n; ++i)
+        if (!strcmp(g_props[props - 1].items[i].name, name))
+            return &g_props[props - 1].items[i];
+    if (!add || g_props[props - 1].n == PROP_ITEMS)
+        return NULL;
+    Prop* p = &g_props[props - 1].items[g_props[props - 1].n++];
+    memset(p, 0, sizeof *p);
+    SDL_strlcpy(p->name, name, sizeof p->name);
+    return p;
+}
+bool SDL_SetNumberProperty(SDL_PropertiesID props, const char* name, Sint64 value)
+{
+    Prop* p = prop(props, name, 1);
+    if (p)
+        p->number = value;
+    return p != NULL;
+}
+bool SDL_SetBooleanProperty(SDL_PropertiesID props, const char* name, bool value) { return SDL_SetNumberProperty(props, name, value); }
+bool SDL_SetStringProperty(SDL_PropertiesID props, const char* name, const char* value)
+{
+    Prop* p = prop(props, name, 1);
+    if (p)
+        SDL_strlcpy(p->text, value ? value : "", sizeof p->text);
+    return p != NULL;
+}
+Sint64 SDL_GetNumberProperty(SDL_PropertiesID props, const char* name, Sint64 default_value)
+{
+    Prop* p = prop(props, name, 0);
+    return p ? p->number : default_value;
+}
+const char* SDL_GetStringProperty(SDL_PropertiesID props, const char* name, const char* default_value)
+{
+    Prop* p = prop(props, name, 0);
+    return p ? p->text : default_value;
+}
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window* w) { (void)w; return 0; }
 void* SDL_GetPointerProperty(SDL_PropertiesID props, const char* name, void* default_value)
 {
     (void)props, (void)name;
     return default_value;
+}
+
+/* --- text input: the on-screen keyboard -------------------------------------------------------------- */
+static UwpTextInput g_text_input;
+static int g_keyboard_up;
+
+void uwp_set_text_input(UwpTextInput cb) { g_text_input = cb; }
+
+/* Text events arrive with or without this; it only asks for nothing to be shown. */
+bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; }
+
+/* host/signin.c asks for the keyboard over a field, with the field's text so far ("xi.textinput.text":
+ * the app's keyboard edits the whole of it) */
+bool SDL_StartTextInputWithProperties(SDL_Window* w, SDL_PropertiesID props)
+{
+    (void)w;
+    Sint64 type = SDL_GetNumberProperty(props, SDL_PROP_TEXTINPUT_TYPE_NUMBER, SDL_TEXTINPUT_TYPE_TEXT);
+    const char* text = SDL_GetStringProperty(props, "xi.textinput.text", "");
+    int kind = type == SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN || type == SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_VISIBLE ? UWP_TEXT_SECRET
+             : type == SDL_TEXTINPUT_TYPE_NUMBER                                                                   ? UWP_TEXT_NUMBER
+                                                                                                                   : UWP_TEXT;
+    UwpTextInput cb = g_text_input;
+    if (cb)
+        cb(1, kind, text);
+    g_keyboard_up = cb != NULL;
+    return true;
+}
+
+bool SDL_StopTextInput(SDL_Window* w)
+{
+    (void)w;
+    UwpTextInput cb = g_text_input;
+    if (cb && g_keyboard_up)
+        cb(0, 0, "");
+    g_keyboard_up = 0;
+    return true;
 }
 
 SDL_DisplayID SDL_GetPrimaryDisplay(void) { return 1; }
@@ -257,6 +432,17 @@ void uwp_text(const char* utf8)
         e.text.text = piece; /* copied by push */
         push(&e);
     }
+}
+
+/* The on-screen keyboard's text, for the field it was opened over: the caret to the end, everything
+ * before it erased (Ctrl+Backspace), then the text typed in. */
+void uwp_replace_text(const char* utf8)
+{
+    key_event(SDL_SCANCODE_END, 1, 0, SDL_KMOD_NONE);
+    key_event(SDL_SCANCODE_END, 0, 0, SDL_KMOD_NONE);
+    key_event(SDL_SCANCODE_BACKSPACE, 1, 0, SDL_KMOD_LCTRL);
+    key_event(SDL_SCANCODE_BACKSPACE, 0, 0, SDL_KMOD_LCTRL);
+    uwp_text(utf8);
 }
 
 void uwp_mouse_move(float x, float y)
@@ -540,6 +726,27 @@ bool SDL_LoadWAV(const char* path, SDL_AudioSpec* spec, Uint8** buf, Uint32* len
     (void)path, (void)spec, (void)buf, (void)len;
     return false;
 }
+/* The sign-in screen's sound effects (host/sewave.c) want a device of their own: none here, so the
+ * screen is silent and the game's own sounds are unchanged. */
+SDL_AudioDeviceID SDL_OpenAudioDevice(SDL_AudioDeviceID dev, const SDL_AudioSpec* spec)
+{
+    (void)dev, (void)spec;
+    return 0;
+}
+void SDL_CloseAudioDevice(SDL_AudioDeviceID dev) { (void)dev; }
+bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID dev, SDL_AudioSpec* spec, int* frames)
+{
+    (void)dev, (void)spec, (void)frames;
+    return false;
+}
+SDL_AudioStream* SDL_CreateAudioStream(const SDL_AudioSpec* from, const SDL_AudioSpec* to)
+{
+    (void)from, (void)to;
+    return NULL;
+}
+bool SDL_BindAudioStream(SDL_AudioDeviceID dev, SDL_AudioStream* s) { (void)dev, (void)s; return false; }
+bool SDL_ClearAudioStream(SDL_AudioStream* s) { (void)s; return true; }
+bool SDL_SetAudioStreamGain(SDL_AudioStream* s, float gain) { (void)s, (void)gain; return true; }
 int SDL_GetAudioStreamQueued(SDL_AudioStream* s) { (void)s; return 0; }
 bool SDL_FlushAudioStream(SDL_AudioStream* s) { (void)s; return true; }
 void SDL_DestroyAudioStream(SDL_AudioStream* s) { (void)s; }
