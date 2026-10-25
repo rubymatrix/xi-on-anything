@@ -57,6 +57,8 @@ struct Failure : std::runtime_error
 };
 uint32_t failures = 0;
 std::recursive_mutex mutex;
+std::mutex presentRectLock;
+GfxPresentRect presentRect{}; // gfx_set_present_rect: w 0 for gfx_present_rect's letterbox
 gfxpolicy::LaunchPolicy launchPolicy;
 [[noreturn]] void fail(const std::string& why)
 {
@@ -3469,6 +3471,27 @@ extern "C"
             collect();
         });
     }
+    // No bounce light and no sun's shadows here: the game's own shadows stay on
+    void gfx_gi_zone(const GfxGiZone* z)
+    {
+        (void)z;
+    }
+    void gfx_gi_frame(const GfxGiFrame* f)
+    {
+        (void)f;
+    }
+    int gfx_sun_shadows_on(void)
+    {
+        return 0;
+    }
+    void gfx_set_present_rect(int x, int y, int w, int h)
+    {
+        std::lock_guard<std::mutex> lock(presentRectLock);
+        if (x < 0 || y < 0 || w <= 0 || h <= 0)
+            presentRect = GfxPresentRect{};
+        else
+            presentRect = GfxPresentRect{uint32_t(x), uint32_t(y), uint32_t(w), uint32_t(h)};
+    }
     void gfx_present(GfxTex* backbuffer)
     {
         guarded([&] {
@@ -3569,6 +3592,13 @@ extern "C"
             image_barrier(g.swapImages[index], VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             GfxPresentRect rect = gfx_present_rect(g.extent.width, g.extent.height, backbuffer->w, backbuffer->h);
+            {
+                // The rectangle display_fit.c chose (the safe area), when it is on this surface
+                std::lock_guard<std::mutex> lock(presentRectLock);
+                if (presentRect.w && presentRect.x + presentRect.w <= g.extent.width &&
+                    presentRect.y + presentRect.h <= g.extent.height)
+                    rect = presentRect;
+            }
             VkImageBlit blit{};
             blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             blit.srcOffsets[1] = {int32_t(backbuffer->w), int32_t(backbuffer->h), 1};
