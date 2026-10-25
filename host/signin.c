@@ -1416,6 +1416,24 @@ static void start_typing(SDL_Window* win)
     SDL_DestroyProperties(tp);
 }
 
+#ifdef FFXI_IOS
+/* The focused field as the text input area: while iOS's keyboard is up, SDL slides the view up just
+ * far enough to keep it above the keyboard (SDL_uikitviewcontroller.m updateKeyboard) */
+static void typing_area(Ui* u, SDL_Window* win)
+{
+    static SDL_Rect last;
+    Widget* f = field(u);
+    if (!f || !SDL_TextInputActive(win))
+        return;
+    float d = SDL_GetWindowPixelDensity(win);
+    SDL_Rect r = { (int)(f->x0 / d), (int)(f->y0 / d), (int)((f->x1 - f->x0) / d), (int)((f->y1 - f->y0) / d) + 12 };
+    if (!memcmp(&r, &last, sizeof r))
+        return;
+    last = r;
+    SDL_SetTextInputArea(win, &r, 0);
+}
+#endif
+
 static void mouse(Ui* u, const SDL_Event* e, float d)
 {
     int o;
@@ -1908,6 +1926,9 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         }
         if (!u->closing && open_progress(u) >= 1)
             stick(u, win), build(u);
+#ifdef FFXI_IOS
+        typing_area(u, win);
+#endif
 
         /* the saved password, when macOS has let us read it: into an empty field */
         if (SDL_GetAtomicInt(&g_keyread.state) == 2)

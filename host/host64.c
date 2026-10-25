@@ -760,6 +760,36 @@ static void shadow_focus(void)
 #ifdef FFXI_IOS
 static void* g_signin_window; /* the window the game takes over: display_fit_start */
 
+/* The game's own soft keyboard (the PS2 client's: ffxi-pc client/systems/soft-keyboard.md) off for
+ * good: iOS has its own (chat_keyboard). It opens from the pad button the 26th value of padsin000
+ * names (the lobby always, the field with Config option 0xc9 on); that value made none (-1). */
+static void soft_keyboard_off(void)
+{
+    static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";
+    char v[256], out[256];
+    if (!reg_get_string(KEY, "padsin000", v, sizeof v))
+        return;
+    size_t n = 0;
+    int field = 1;
+    for (const char* p = v; *p && n + 4 < sizeof out; ++p)
+    {
+        if (*p == ',')
+        {
+            if (++field == 26)
+            {
+                n += (size_t)snprintf(out + n, sizeof out - n, ",-1");
+                while (p[1] && p[1] != ',')
+                    ++p;
+                continue;
+            }
+        }
+        out[n++] = *p;
+    }
+    out[n] = 0;
+    if (field >= 26)
+        reg_set_string(KEY, "padsin000", out);
+}
+
 /* a tap on the screen while the player types in the chat line: the keyboard away, or back */
 static SDL_AtomicInt g_chat_taps;
 
@@ -796,6 +826,14 @@ static void chat_keyboard(void)
     set = want;
     if (want)
     {
+        /* the chat line, at the foot of the game, as the text input area: while iOS's keyboard is up,
+         * SDL slides the view up just far enough to keep it above the keyboard */
+        SDL_Rect safe, line;
+        if (SDL_GetWindowSafeArea(win, &safe))
+        {
+            line = (SDL_Rect){ safe.x, safe.y + safe.h - 32, safe.w, 32 };
+            SDL_SetTextInputArea(win, &line, 0);
+        }
         SDL_PropertiesID p = SDL_CreateProperties();
         SDL_SetBooleanProperty(p, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
         SDL_StartTextInputWithProperties(win, p);
@@ -1317,6 +1355,7 @@ int main(int argc, char** argv)
         reg_load_final(finals[i]);
 #ifdef FFXI_IOS
     display_fit_start(g_signin_window); /* the game's size from the screen, whatever the file says */
+    soft_keyboard_off();
 #endif
     {
         /* The install folders are where the game is now, whatever the imported registry says (it

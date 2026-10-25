@@ -86,7 +86,9 @@ gamepad, so the game sees an Xbox pad and uses its own button mapping.
 
 **Keyboard:** the on-screen keyboard shows on the sign-in screen's fields, and in game only while
 the chat line is typed in. A tap outside the text puts it away, and the next brings it back. An
-iPad's key that hides it works too.
+iPad's key that hides it works too. While it is up, the view slides up just far enough to keep the
+focused field, or the chat line, above it. The game's own soft keyboard (the PS2 client's) is off:
+the pad button that opens it, the 26th value of `padsin000`, is set to none.
 
 ## Differences from macOS
 
@@ -97,6 +99,5 @@ iPad's key that hides it works too.
 - **Never closes itself:** Escape on the sign-in screen does nothing, as an iOS app does not quit.
 - **Not yet done:**
   - pausing in the background
-  - keeping the sign-in fields above the on-screen keyboard, which covers the lower half
   - an iPad in the simulator: its system keyboard is drawn upright over the landscape game
   - performance work

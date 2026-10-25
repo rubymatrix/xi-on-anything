@@ -199,8 +199,8 @@ static void pad_release(void)
     for (int b = 0; g_pad && b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
         SDL_SetJoystickVirtualButton(g_pad, b, false);
     if (g_pad)
-        SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 0),
-            SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 0);
+        SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN),
+            SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
     memset(g_down, 0, sizeof g_down);
 }
 
@@ -331,8 +331,8 @@ static void apply(const Control* c, int down)
         key(g_key_window, (SDL_Scancode)c->btn, down);
     else if (g_pad && c->ctl == C_BUTTON)
         g_down[c->btn] = down, SDL_SetJoystickVirtualButton(g_pad, c->btn, down);
-    else if (g_pad && c->ctl == C_TRIGGER)
-        SDL_SetJoystickVirtualAxis(g_pad, c->btn, down ? 32767 : 0);
+    else if (g_pad && c->ctl == C_TRIGGER) /* the axis's whole range is the trigger's: up at its minimum */
+        SDL_SetJoystickVirtualAxis(g_pad, c->btn, down ? SDL_JOYSTICK_AXIS_MAX : SDL_JOYSTICK_AXIS_MIN);
 }
 
 static Uint32 SDLCALL release_later(void* control, SDL_TimerID timer, Uint32 interval)
