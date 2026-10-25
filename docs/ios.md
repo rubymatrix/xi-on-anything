@@ -32,9 +32,27 @@ Objects go to `build/ios-<sdk>/obj`. The desktop objects in `build/` are left al
 ## Device builds
 
 ```sh
-python3 tools/build_ios.py app --sdk iphoneos --sign-identity "Apple Development: ..." \
-    --profile path/to/profile.mobileprovision
+python3 tools/build_ios.py install --bundle-id com.you.xionanything
 ```
+
+`install` builds for the device, signs it and installs it on a connected iPhone or iPad
+(`--device` picks one). It signs with the first Apple Development identity in the keychain and the
+newest unexpired profile Xcode made for the bundle id. `--sign-identity` and `--profile` name them
+instead; `app --sdk iphoneos` builds and signs without installing.
+
+**A free Apple account (a Personal Team)** works, with these limits:
+- **App id:** it must be one of your own: a free team can't register one another team owns.
+- **Signature:** it lasts 7 days, so install again weekly.
+- **Set-up, once:**
+  - Sign in to Xcode (Settings > Accounts).
+  - Turn on Developer Mode on the device (Settings > Privacy & Security). It restarts and asks
+    you to confirm.
+  - Get Xcode to make the certificate and a profile for the app id. One way is a device build of
+    any small app with that id and automatic signing, with the device connected, so Xcode registers
+    it to the team. A profile made before then won't install on that device.
+
+The app's icon is `assets/icon-ios.png` (made by `tools/make_ios_icon.swift`), compiled into the
+bundle with `actool`.
 
 On iOS the guest's memory is a 2 GB reserved window (`runtime/portable/gwin.c`), the address space of
 a 32-bit process, where the desktop reserves 4 GB. The game is told it has 2 GB (`GetSystemInfo`),
@@ -88,8 +106,18 @@ gamepad, so the game sees an Xbox pad and uses its own button mapping.
   - the D-pad, L1/R1, L2/R2 (the macro palette), SELECT and START
   - Target, above △: the F8 key
 - **Taps:** a quick tap off the controls is a click, for the game's menus and targets.
+- **Layout:**
+  - A phone's has the top row along the top, the D-pad upper left, and the stick and face buttons
+    in the lower corners.
+  - An iPad's gathers everything at the foot. The stick and the face buttons sit 17.5% of the
+    height up, with the rest above them.
 - **Toggle:** the gamepad button in the left bar (an iPad: the top-left corner) hides the controls
   or brings them back.
+- **Moving them:** the lock beside the toggle unlocks the layout; a long press on the toggle does too.
+  - Drag a group (the stick, the D-pad, the face buttons with Target, L1/L2, R1/R2, SELECT/START)
+    anywhere in its box.
+  - The lock again, or Done, keeps the layout. Reset puts every group back.
+  - Layouts are kept per window shape (a phone's, an iPad's) in `Documents/touch-layout.txt`.
 - **Real controllers:** one in use hides the controls and becomes the game's pad. A touch on the
   screen brings the controls back.
 - **Back:** a swipe in from the left edge is Escape.

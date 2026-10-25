@@ -56,6 +56,8 @@ enum
     TOGGLE_MARGIN = 16, /* from the safe area's corner where there is no bar (an iPad) */
     BAR_TOP = 44,       /* down a phone's bar: clear of its rounded screen corner (~62 points) */
 };
+#define EDIT_HOLD_NS 600000000 /* the toggle held this long: the layout edited */
+#define TALL_FOOT 0.175f /* a tall screen's stick and face buttons: this much of its height up from its foot */
 
 /* what each control is to the virtual pad */
 enum Ctl
@@ -66,7 +68,24 @@ enum Ctl
     C_BUTTON, /* + the gamepad button: btn */
     C_TRIGGER,
     C_KEY,    /* a keyboard key: btn the scancode */
-    C_TOGGLE, /* the controls shown or hidden */
+    C_TOGGLE, /* the controls shown or hidden; held: the layout edited */
+    C_LOCK,   /* the layout locked, or being edited */
+    C_RESET,  /* editing: every group back in its place */
+    C_DONE,   /* editing: the layout kept */
+    C_DRAG,   /* editing: a finger moving a group */
+};
+
+/* the groups that move together when the layout is edited */
+enum Group
+{
+    G_NONE,
+    G_STICK,
+    G_DPAD,
+    G_FACE, /* and Target */
+    G_LEFT, /* L1, L2 */
+    G_RIGHT,
+    G_MENU, /* SELECT, START */
+    G_COUNT,
 };
 
 typedef struct Control
@@ -76,6 +95,7 @@ typedef struct Control
     int kind, sym;     /* how it is drawn */
     const char* label;
     float x, y, hw, hh; /* points */
+    int group;
 } Control;
 
 static SDL_Mutex* g_lock;
@@ -85,6 +105,12 @@ static int g_shown;              /* the controls are up (the game, no real contr
 static int g_hidden;             /* put away with the toggle */
 static float g_density = 1.0f;   /* the window's pixels a point */
 static float g_stick_x, g_stick_y; /* the stick's resting place */
+static int g_editing;            /* the layout is being edited (the toggle held) */
+static int g_group;              /* the group add() puts controls in */
+static float g_off[G_COUNT][2];  /* each group's move from its place, in fractions of the safe area */
+static char g_shape[32];         /* the window in points ("874x402"): a layout is kept for each */
+static SDL_Window* g_win;        /* the window last laid out for */
+static SDL_FRect g_safe;         /* its safe area, in points */
 
 /* the fingers on the screen */
 typedef struct Finger
@@ -94,6 +120,8 @@ typedef struct Finger
     enum Ctl what;
     float x0, y0, x, y; /* points */
     Uint64 t0;
+    int group;          /* C_DRAG: the group, and its move when the finger landed */
+    float ox, oy;
 } Finger;
 static Finger g_fingers[10];
 
@@ -232,7 +260,52 @@ static void controller_event(const SDL_Event* e)
 static void add(enum Ctl ctl, int btn, int kind, int sym, const char* label, float x, float y, float hw, float hh)
 {
     if (g_nctl < GFX_TOUCH_MAX)
-        g_ctl[g_nctl++] = (Control){ ctl, btn, kind, sym, label, x, y, hw, hh };
+        g_ctl[g_nctl++] = (Control){ ctl, btn, kind, sym, label, x, y, hw, hh, g_group };
+}
+
+/* --- the edited layouts: Documents/touch-layout.txt, a line a group moved: "<shape> <group> <dx> <dy>",
+ * the move in fractions of the safe area, a layout for each shape of window (a phone's, an iPad's) */
+static void layout_path(char* out, size_t n)
+{
+    const char* home = getenv("HOME");
+    snprintf(out, n, "%s/Documents/touch-layout.txt", home ? home : ".");
+}
+
+static void load_layout(void)
+{
+    char path[1100], line[128], shape[32];
+    int g;
+    float dx, dy;
+    memset(g_off, 0, sizeof g_off);
+    layout_path(path, sizeof path);
+    FILE* f = fopen(path, "r");
+    if (!f)
+        return;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "%31s %d %f %f", shape, &g, &dx, &dy) == 4 && !strcmp(shape, g_shape) && g > 0 && g < G_COUNT)
+            g_off[g][0] = dx, g_off[g][1] = dy;
+    fclose(f);
+}
+
+static void save_layout(void)
+{
+    char path[1100], line[128], shape[32], kept[4096] = "";
+    layout_path(path, sizeof path);
+    FILE* f = fopen(path, "r");
+    if (f) /* the other shapes' lines, as they were */
+    {
+        while (fgets(line, sizeof line, f))
+            if (sscanf(line, "%31s", shape) == 1 && strcmp(shape, g_shape) && strlen(kept) + strlen(line) < sizeof kept)
+                strcat(kept, line);
+        fclose(f);
+    }
+    if (!(f = fopen(path, "w")))
+        return;
+    fputs(kept, f);
+    for (int g = 1; g < G_COUNT; ++g)
+        if (g_off[g][0] || g_off[g][1])
+            fprintf(f, "%s %d %.4f %.4f\n", g_shape, g, g_off[g][0], g_off[g][1]);
+    fclose(f);
 }
 
 /* The controls for the window as it is now; the Back button only, off the game */
@@ -246,7 +319,14 @@ static void layout(SDL_Window* win, int controls)
         return;
     g_density = (float)pw / (float)w;
     g_nctl = 0;
+    g_win = win;
     float sx = (float)safe.x, sy = (float)safe.y, sw = (float)safe.w, sh = (float)safe.h;
+    g_safe = (SDL_FRect){ sx, sy, sw, sh };
+    char shape[32];
+    snprintf(shape, sizeof shape, "%dx%d", w, h);
+    if (strcmp(shape, g_shape)) /* another shape of window (or the first): its layout */
+        snprintf(g_shape, sizeof g_shape, "%s", shape), load_layout();
+    g_group = G_NONE;
     /* the toggle: in a phone's black bar left of the game, else in the safe area's top-left corner */
     int bar = safe.x >= TOGGLE + 8;
     float tx = bar ? sx * 0.5f : sx + TOGGLE_MARGIN + TOGGLE * 0.5f;
@@ -254,30 +334,94 @@ static void layout(SDL_Window* win, int controls)
     add(C_TOGGLE, 0, GFX_TOUCH_BUTTON, GFX_SYM_PAD, NULL, tx, ty, TOGGLE * 0.5f, TOGGLE * 0.5f);
     if (!controls)
         return;
-    float left = sx + (bar ? 0.0f : TOGGLE + TOGGLE_MARGIN); /* the top row right of an iPad's toggle */
+    /* the lock beside it: under it in a phone's bar, right of it on an iPad */
+    add(C_LOCK, 0, GFX_TOUCH_BUTTON, g_editing ? GFX_SYM_UNLOCK : GFX_SYM_LOCK, NULL, bar ? tx : tx + TOGGLE + 10,
+        bar ? ty + TOGGLE + 10 : ty, TOGGLE * 0.5f, TOGGLE * 0.5f);
+    /* where each group goes. A phone: the top row along the top, the D-pad upper left, the stick and
+     * the face buttons in the lower corners. A tall screen (an iPad): everything gathered by the thumbs
+     * at its foot, the stick and the face buttons TALL_FOOT of its height up, the rest above them */
+    float left = sx + (bar ? 0.0f : 2 * TOGGLE + 10 + TOGGLE_MARGIN); /* the top row right of an iPad's toggle and lock */
     float top = sy + PILL_H + 10.0f;
-    add(C_TRIGGER, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, GFX_TOUCH_PILL, 0, "L2", left + 16 + PILL_W, top, PILL_W, PILL_H);
-    add(C_BUTTON, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, GFX_TOUCH_PILL, 0, "L1", left + 28 + 3 * PILL_W, top, PILL_W, PILL_H);
-    add(C_TRIGGER, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, GFX_TOUCH_PILL, 0, "R2", sx + sw - 16 - PILL_W, top, PILL_W, PILL_H);
-    add(C_BUTTON, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, GFX_TOUCH_PILL, 0, "R1", sx + sw - 28 - 3 * PILL_W, top, PILL_W, PILL_H);
-    add(C_BUTTON, SDL_GAMEPAD_BUTTON_BACK, GFX_TOUCH_PILL, 0, "SELECT", sx + sw * 0.5f - 44, top, 36, PILL_H);
-    add(C_BUTTON, SDL_GAMEPAD_BUTTON_START, GFX_TOUCH_PILL, 0, "START", sx + sw * 0.5f + 44, top, 36, PILL_H);
-    /* the face buttons, lower right */
-    float fx = sx + sw - FACE_GAP - FACE - 18, fy = sy + sh - FACE_GAP - FACE - 14;
+    float fx, fy, dx, dy, ly, l2x, l1x, ry, r2x, r1x, sel_y;
+    if (sh > 600)
+    {
+        float cy = sy + sh - sh * TALL_FOOT;
+        fx = sx + sw - FACE_GAP - FACE - 60, fy = cy;
+        g_stick_x = sx + STICK + 70, g_stick_y = cy;
+        dx = g_stick_x, dy = cy - STICK - 40 - DPAD_GAP - DPAD;
+        ly = dy - DPAD_GAP - DPAD - 24 - PILL_H, l2x = dx - PILL_W - 8, l1x = dx + PILL_W + 8;
+        ry = fy - FACE_GAP - FACE - 10 - 3 * PILL_H - 16, r1x = fx - PILL_W - 8, r2x = fx + PILL_W + 8;
+        sel_y = sy + sh - PILL_H - 24;
+    }
+    else
+    {
+        fx = sx + sw - FACE_GAP - FACE - 18, fy = sy + sh - FACE_GAP - FACE - 14;
+        g_stick_x = sx + STICK + 26, g_stick_y = sy + sh - STICK - 18;
+        dx = sx + DPAD_GAP + DPAD + 18, dy = top + PILL_H + 14 + DPAD_GAP + DPAD;
+        ly = ry = sel_y = top;
+        l2x = left + 16 + PILL_W, l1x = left + 28 + 3 * PILL_W;
+        r2x = sx + sw - 16 - PILL_W, r1x = sx + sw - 28 - 3 * PILL_W;
+    }
+    g_group = G_LEFT;
+    add(C_TRIGGER, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, GFX_TOUCH_PILL, 0, "L2", l2x, ly, PILL_W, PILL_H);
+    add(C_BUTTON, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, GFX_TOUCH_PILL, 0, "L1", l1x, ly, PILL_W, PILL_H);
+    g_group = G_RIGHT;
+    add(C_TRIGGER, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, GFX_TOUCH_PILL, 0, "R2", r2x, ry, PILL_W, PILL_H);
+    add(C_BUTTON, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, GFX_TOUCH_PILL, 0, "R1", r1x, ry, PILL_W, PILL_H);
+    g_group = G_MENU;
+    add(C_BUTTON, SDL_GAMEPAD_BUTTON_BACK, GFX_TOUCH_PILL, 0, "SELECT", sx + sw * 0.5f - 44, sel_y, 36, PILL_H);
+    add(C_BUTTON, SDL_GAMEPAD_BUTTON_START, GFX_TOUCH_PILL, 0, "START", sx + sw * 0.5f + 44, sel_y, 36, PILL_H);
+    /* the face buttons, Target above them */
+    g_group = G_FACE;
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_NORTH, GFX_TOUCH_BUTTON, GFX_SYM_TRIANGLE, NULL, fx, fy - FACE_GAP, FACE, FACE);
     add(C_KEY, SDL_SCANCODE_F8, GFX_TOUCH_PILL, 0, "Target", fx, fy - FACE_GAP - FACE - 10 - PILL_H, 34, PILL_H);
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_SOUTH, GFX_TOUCH_BUTTON, GFX_SYM_CROSS, NULL, fx, fy + FACE_GAP, FACE, FACE);
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_WEST, GFX_TOUCH_BUTTON, GFX_SYM_SQUARE, NULL, fx - FACE_GAP, fy, FACE, FACE);
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_EAST, GFX_TOUCH_BUTTON, GFX_SYM_CIRCLE, NULL, fx + FACE_GAP, fy, FACE, FACE);
-    /* the D-pad, upper left, above the stick's place */
-    float dx = sx + DPAD_GAP + DPAD + 18, dy = top + PILL_H + 14 + DPAD_GAP + DPAD;
+    /* the D-pad, above the stick's place */
+    g_group = G_DPAD;
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_DPAD_UP, GFX_TOUCH_BUTTON, GFX_SYM_UP, NULL, dx, dy - DPAD_GAP, DPAD, DPAD);
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_DPAD_DOWN, GFX_TOUCH_BUTTON, GFX_SYM_DOWN, NULL, dx, dy + DPAD_GAP, DPAD, DPAD);
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_DPAD_LEFT, GFX_TOUCH_BUTTON, GFX_SYM_LEFT, NULL, dx - DPAD_GAP, dy, DPAD, DPAD);
     add(C_BUTTON, SDL_GAMEPAD_BUTTON_DPAD_RIGHT, GFX_TOUCH_BUTTON, GFX_SYM_RIGHT, NULL, dx + DPAD_GAP, dy, DPAD, DPAD);
-    /* the stick's resting place, lower left */
-    g_stick_x = sx + STICK + 26, g_stick_y = sy + sh - STICK - 18;
-    (void)h;
+    /* each group where the player moved it, kept on the screen */
+    for (int i = 0; i < g_nctl; ++i)
+    {
+        Control* c = &g_ctl[i];
+        if (!c->group)
+            continue;
+        c->x = SDL_clamp(c->x + g_off[c->group][0] * sw, c->hw, (float)w - c->hw);
+        c->y = SDL_clamp(c->y + g_off[c->group][1] * sh, c->hh, (float)h - c->hh);
+    }
+    g_stick_x = SDL_clamp(g_stick_x + g_off[G_STICK][0] * sw, (float)STICK, (float)w - STICK);
+    g_stick_y = SDL_clamp(g_stick_y + g_off[G_STICK][1] * sh, (float)STICK, (float)h - STICK);
+    if (g_editing) /* Reset and Done, in the middle */
+    {
+        g_group = G_NONE;
+        add(C_RESET, 0, GFX_TOUCH_PILL, 0, "Reset", sx + sw * 0.5f - 48, sy + sh * 0.5f, 40, 18);
+        add(C_DONE, 0, GFX_TOUCH_PILL, 0, "Done", sx + sw * 0.5f + 48, sy + sh * 0.5f, 40, 18);
+    }
+}
+
+/* the group under a point (editing): anywhere in the box around its controls (the D-pad's middle
+ * too), or on the stick's resting place */
+static int group_at(float x, float y)
+{
+    for (int g = G_STICK + 1; g < G_COUNT; ++g)
+    {
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (int i = 0; i < g_nctl; ++i)
+            if (g_ctl[i].group == g)
+            {
+                const Control* c = &g_ctl[i];
+                x0 = SDL_min(x0, c->x - c->hw), x1 = SDL_max(x1, c->x + c->hw);
+                y0 = SDL_min(y0, c->y - c->hh), y1 = SDL_max(y1, c->y + c->hh);
+            }
+        if (x >= x0 - 6 && x <= x1 + 6 && y >= y0 - 6 && y <= y1 + 6)
+            return g;
+    }
+    float dx = x - g_stick_x, dy = y - g_stick_y;
+    return dx * dx + dy * dy <= STICK * STICK ? G_STICK : G_NONE;
 }
 
 static int hit(float x, float y)
@@ -292,8 +436,13 @@ static int hit(float x, float y)
     return -1;
 }
 
-/* where the stick floats from: the lower left, under the D-pad */
-static int stick_zone(float x, float y, int w, int h) { return x < w * 0.42f && y > h * 0.5f; }
+/* where the stick floats from: around its resting place (wherever the player put it) */
+static int stick_zone(float x, float y, int w, int h)
+{
+    (void)w, (void)h;
+    float dx = x - g_stick_x, dy = y - g_stick_y;
+    return dx * dx + dy * dy <= (STICK * 2.2f) * (STICK * 2.2f);
+}
 
 /* --- fingers ------------------------------------------------------------------------------------- */
 static Finger* finger(SDL_FingerID id)
@@ -400,7 +549,16 @@ static void finger_down(const SDL_TouchFingerEvent* e, float x, float y, int w, 
     if (!f)
         return;
     int i = hit(x, y);
-    *f = (Finger){ e->fingerID, i, C_NONE, x, y, x, y, e->timestamp };
+    *f = (Finger){ e->fingerID, i, C_NONE, x, y, x, y, e->timestamp, 0, 0, 0 };
+    if (g_editing) /* the toggle, Reset, Done, or a group to move: nothing reaches the game */
+    {
+        int g = i >= 0 && g_ctl[i].group ? g_ctl[i].group : i < 0 ? group_at(x, y) : G_NONE;
+        if (g)
+            f->ctl = -1, f->what = C_DRAG, f->group = g, f->ox = g_off[g][0], f->oy = g_off[g][1];
+        else if (i >= 0)
+            f->what = g_ctl[i].ctl;
+        return;
+    }
     if (i >= 0)
     {
         f->what = g_ctl[i].ctl;
@@ -411,13 +569,58 @@ static void finger_down(const SDL_TouchFingerEvent* e, float x, float y, int w, 
         f->what = stick_zone(x, y, w, h) ? C_STICK : C_LOOK;
 }
 
+/* a finger moved (g_lock held): a dragged group follows it, a stick finger moves its stick */
+static void finger_moved(Finger* f, float x, float y)
+{
+    f->x = x, f->y = y;
+    if (f->what == C_DRAG && g_safe.w > 0 && g_win)
+    {
+        g_off[f->group][0] = f->ox + (x - f->x0) / g_safe.w;
+        g_off[f->group][1] = f->oy + (y - f->y0) / g_safe.h;
+        layout(g_win, 1);
+    }
+    else if (f->what == C_STICK || f->what == C_LOOK)
+        sticks();
+}
+
 static void finger_up(const SDL_TouchFingerEvent* e, Finger* f, float x, float y)
 {
-    if (f->what == C_TOGGLE && hit(x, y) == f->ctl) /* as iOS's buttons: on release, over it */
+    int over = f->ctl >= 0 && hit(x, y) == f->ctl; /* as iOS's buttons: on release, over it */
+    if (f->what == C_TOGGLE && over)
     {
-        g_hidden = !g_hidden;
+        if (g_editing) /* a tap while editing: done */
+            g_editing = 0, save_layout();
+        else if (e->timestamp - f->t0 >= EDIT_HOLD_NS) /* held: the layout edited */
+            g_editing = 1, g_hidden = 0;
+        else
+            g_hidden = !g_hidden;
         memset(f, 0, sizeof *f);
         refresh(SDL_GetWindowFromID(e->windowID));
+        return;
+    }
+    if (f->what == C_LOCK && over) /* unlocked: the layout edited; locked again: kept */
+    {
+        if (g_editing)
+            save_layout();
+        g_editing = !g_editing;
+        memset(f, 0, sizeof *f);
+        refresh(SDL_GetWindowFromID(e->windowID));
+        return;
+    }
+    if (f->what == C_DRAG || ((f->what == C_RESET || f->what == C_DONE) && over))
+    {
+        if (f->what == C_RESET)
+            memset(g_off, 0, sizeof g_off);
+        if (f->what == C_DONE)
+            g_editing = 0;
+        save_layout();
+        memset(f, 0, sizeof *f);
+        refresh(SDL_GetWindowFromID(e->windowID));
+        return;
+    }
+    if (g_editing)
+    {
+        memset(f, 0, sizeof *f);
         return;
     }
     if (f->ctl >= 0)
@@ -440,9 +643,7 @@ static int pointer(const SDL_Event* e)
     {
         if (!f)
             return 1; /* hovering: the game's cursor */
-        f->x = e->motion.x, f->y = e->motion.y;
-        if (f->what == C_STICK || f->what == C_LOOK)
-            sticks();
+        finger_moved(f, e->motion.x, e->motion.y);
         draw();
         return 0;
     }
@@ -543,11 +744,7 @@ static bool SDLCALL touch(void* unused, SDL_Event* e)
     else if (e->type == SDL_EVENT_FINGER_MOTION)
     {
         if (f)
-        {
-            f->x = x, f->y = y;
-            if (f->what == C_STICK || f->what == C_LOOK)
-                sticks();
-        }
+            finger_moved(f, x, y);
         if (e->tfinger.fingerID == swiping)
         {
             float dx = e->tfinger.x - sx0, dy = fabsf(e->tfinger.y - sy0);
@@ -581,12 +778,14 @@ static void draw(void)
     GfxTouchShape s[GFX_TOUCH_MAX];
     int n = 0;
     float d = g_density;
-    int pressed[GFX_TOUCH_MAX] = { 0 };
+    int pressed[GFX_TOUCH_MAX] = { 0 }, dragged = G_NONE;
     const Finger* stick = NULL;
     for (int i = 0; i < 10; ++i)
     {
         if (g_fingers[i].id && g_fingers[i].ctl >= 0)
             pressed[g_fingers[i].ctl] = 1;
+        if (g_fingers[i].id && g_fingers[i].what == C_DRAG)
+            dragged = g_fingers[i].group;
         if (g_fingers[i].id && g_fingers[i].what == C_STICK)
             stick = &g_fingers[i];
     }
@@ -599,8 +798,10 @@ static void draw(void)
         GfxTouchShape* t = &s[n++];
         memset(t, 0, sizeof *t);
         t->x = c->x * d, t->y = c->y * d, t->hw = c->hw * d, t->hh = c->hh * d;
-        t->kind = c->kind, t->sym = c->sym, t->pressed = pressed[i];
+        t->kind = c->kind, t->sym = c->sym, t->pressed = pressed[i] || (c->group && c->group == dragged);
         t->alpha = 0.85f * fade;
+        if (g_editing && c->group) /* editing: the groups that move pulse */
+            t->alpha = 0.7f + 0.25f * sinf((float)SDL_GetTicks() / 160.0f);
         if (c->label)
             snprintf(t->label, sizeof t->label, "%s", c->label);
     }
@@ -616,6 +817,8 @@ static void draw(void)
             kx += dx, ky += dy;
         }
         float a = (stick ? 0.9f : 0.5f) * fade;
+        if (g_editing)
+            a = 0.7f + 0.25f * sinf((float)SDL_GetTicks() / 160.0f);
         s[n++] = (GfxTouchShape){ bx * d, by * d, STICK * d, STICK * d, GFX_TOUCH_RING, 0, 0, a, "" };
         s[n++] = (GfxTouchShape){ kx * d, ky * d, KNOB * d, KNOB * d, GFX_TOUCH_KNOB, 0, stick != NULL, a, "" };
     }
@@ -627,7 +830,7 @@ static void draw(void)
  * sign-in screen takes a pad's D-pad, its confirm and back buttons, and START. */
 static void refresh(SDL_Window* win)
 {
-    int show = !SDL_GetAtomicInt(&g_pad_used) && !g_hidden;
+    int show = (!SDL_GetAtomicInt(&g_pad_used) && !g_hidden) || g_editing;
     if (show != g_shown)
     {
         g_shown = show;

@@ -542,6 +542,7 @@ enum
     GFX_SYM_CROSS, GFX_SYM_CIRCLE, GFX_SYM_SQUARE, GFX_SYM_TRIANGLE, /* the face buttons */
     GFX_SYM_UP, GFX_SYM_DOWN, GFX_SYM_LEFT, GFX_SYM_RIGHT,           /* the D-pad's */
     GFX_SYM_PAD,                                                     /* a gamepad: the controls' toggle */
+    GFX_SYM_LOCK, GFX_SYM_UNLOCK,                                    /* the layout locked, or being moved */
 };
 typedef struct GfxTouchShape
 {

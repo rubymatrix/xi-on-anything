@@ -3,6 +3,9 @@
   python3 tools/build_ios.py app [--sdk iphonesimulator|iphoneos] [--sign-identity name]
         [--profile file.mobileprovision] [--wallpaper picture]
         build/ios-<sdk>/XI on Anything.app, from the game prepared by tools/build_posix.py prepare
+  python3 tools/build_ios.py install [--device name] [--bundle-id id]
+        the device build signed (the identity and the profile found in the keychain and Xcode's
+        profiles when not given) and installed on a connected iPhone
   python3 tools/build_ios.py run [--device name] [-- host64 arguments ...]
         the simulator build installed on a simulator (booted, else the named or first iPhone) and
         started with its log on this terminal; arguments after -- go to host64 (--game, --server ...)
@@ -56,8 +59,9 @@ def xcrun(sdk, *what):
 class Target:
     """One SDK's compilers and flags, and its output folder."""
 
-    def __init__(self, sdk):
+    def __init__(self, sdk, bundle_id=APP_ID):
         self.sdk = sdk
+        self.bundle_id = bundle_id
         self.out = os.path.join(ROOT, 'build', 'ios-' + sdk)
         triple = 'arm64-apple-ios' + MIN_IOS + ('-simulator' if sdk == 'iphonesimulator' else '')
         self.arch = ['-target', triple, '-isysroot', xcrun(sdk, '--show-sdk-path')]
@@ -195,7 +199,7 @@ def host(t):
 def info_plist(t):
     return {
         'CFBundleExecutable': APP_NAME,
-        'CFBundleIdentifier': APP_ID,
+        'CFBundleIdentifier': t.bundle_id,
         'CFBundleName': APP_NAME,
         'CFBundleDisplayName': APP_NAME,
         'CFBundlePackageType': 'APPL',
@@ -223,6 +227,27 @@ def info_plist(t):
     }
 
 
+def app_icon(t, bundle):
+    """assets/icon-ios.png (tools/make_ios_icon.swift) as the app's icon: an asset catalog compiled into
+    the bundle with actool; returns the Info.plist keys that name it."""
+    cat = os.path.join(t.out, 'Assets.xcassets')
+    icon = os.path.join(cat, 'AppIcon.appiconset')
+    shutil.rmtree(cat, ignore_errors=True)
+    os.makedirs(icon)
+    shutil.copy(os.path.join(ROOT, 'assets', 'icon-ios.png'), os.path.join(icon, 'icon.png'))
+    with open(os.path.join(icon, 'Contents.json'), 'w') as f:
+        json.dump({'images': [{'filename': 'icon.png', 'idiom': 'universal', 'platform': 'ios', 'size': '1024x1024'}],
+                   'info': {'author': 'xcode', 'version': 1}}, f)
+    with open(os.path.join(cat, 'Contents.json'), 'w') as f:
+        json.dump({'info': {'author': 'xcode', 'version': 1}}, f)
+    partial = os.path.join(t.out, 'icon-info.plist')
+    run(['xcrun', 'actool', cat, '--compile', bundle, '--platform', t.sdk, '--minimum-deployment-target', MIN_IOS,
+         '--app-icon', 'AppIcon', '--target-device', 'iphone', '--target-device', 'ipad',
+         '--output-partial-info-plist', partial], stdout=subprocess.DEVNULL)
+    with open(partial, 'rb') as f:
+        return plistlib.load(f)
+
+
 def app(t, a):
     exe = host(t)
     bundle = os.path.join(t.out, APP_NAME + '.app')
@@ -237,15 +262,20 @@ def app(t, a):
             shutil.copy(src, os.path.join(bundle, 'wallpaper' + ext))
         else:
             run(['sips', '-s', 'format', 'png', src, '--out', os.path.join(bundle, 'wallpaper.png')])
+    info = info_plist(t)
+    info.update(app_icon(t, bundle))
     with open(os.path.join(bundle, 'Info.plist'), 'wb') as f:
-        plistlib.dump(info_plist(t), f, fmt=plistlib.FMT_BINARY)
+        plistlib.dump(info, f, fmt=plistlib.FMT_BINARY)
     with open(os.path.join(bundle, 'PkgInfo'), 'w') as f:
         f.write('APPL????')
     if t.sdk == 'iphonesimulator':
         run(['codesign', '--force', '--sign', '-', '--timestamp=none', bundle])
     else:
+        a.profile = a.profile or find_profile(t.bundle_id)
+        a.sign_identity = a.sign_identity or find_identity()
         if not a.sign_identity or not a.profile:
-            raise SystemExit('a device build needs --sign-identity and --profile (docs/ios.md)')
+            raise SystemExit('a device build needs a signing identity and a provisioning profile for %s '
+                             '(--sign-identity, --profile; docs/ios.md)' % t.bundle_id)
         shutil.copy(a.profile, os.path.join(bundle, 'embedded.mobileprovision'))
         prof = plistlib.loads(subprocess.run(['security', 'cms', '-D', '-i', a.profile], capture_output=True,
                                              check=True).stdout)
@@ -262,6 +292,49 @@ def app(t, a):
         run(['codesign', '--force', '--sign', a.sign_identity, '--entitlements', path, bundle])
     print('built %s' % bundle)
     return bundle
+
+
+def find_profile(bundle_id):
+    """An unexpired provisioning profile Xcode made for bundle_id (a free Personal Team's too), newest first."""
+    import datetime
+    found = []
+    for d in ('~/Library/Developer/Xcode/UserData/Provisioning Profiles', '~/Library/MobileDevice/Provisioning Profiles'):
+        d = os.path.expanduser(d)
+        for f in os.listdir(d) if os.path.isdir(d) else []:
+            path = os.path.join(d, f)
+            r = subprocess.run(['security', 'cms', '-D', '-i', path], capture_output=True)
+            if r.returncode:
+                continue
+            prof = plistlib.loads(r.stdout)
+            app_id = prof.get('Entitlements', {}).get('application-identifier', '')
+            expires = prof.get('ExpirationDate')
+            if app_id.split('.', 1)[-1] == bundle_id and expires and expires > datetime.datetime.now():
+                found.append((expires, path))
+    return max(found)[1] if found else None
+
+
+def find_identity():
+    """The first Apple Development signing identity in the keychain."""
+    out = subprocess.run(['security', 'find-identity', '-v', '-p', 'codesigning'], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if '"Apple Development:' in line:
+            return line.split('"')[1]
+    return None
+
+
+def iphone(name):
+    """The identifier of a connected, paired iPhone or iPad (the named one, else the first)."""
+    out = os.path.join(ROOT, 'build', 'devices.json')
+    subprocess.run(['xcrun', 'devicectl', 'list', 'devices', '--json-output', out], capture_output=True, check=True)
+    with open(out) as f:
+        devices = json.load(f)['result']['devices']
+    for d in devices:
+        props = d.get('deviceProperties', {})
+        if d.get('hardwareProperties', {}).get('reality') != 'physical':
+            continue
+        if not name or name in (props.get('name'), d.get('identifier'), d.get('hardwareProperties', {}).get('udid')):
+            return d['identifier']
+    raise SystemExit('no iPhone connected%s (cable or Wi-Fi, paired, Developer Mode on)' % (' named ' + name if name else ''))
 
 
 def simulator(name):
@@ -281,23 +354,28 @@ def simulator(name):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('target', choices=['app', 'run'])
+    ap.add_argument('target', choices=['app', 'run', 'install'])
     ap.add_argument('--sdk', choices=['iphonesimulator', 'iphoneos'], default='iphonesimulator')
     ap.add_argument('--sign-identity')
     ap.add_argument('--profile')
-    ap.add_argument('--device', help='simulator name for run')
+    ap.add_argument('--device', help='simulator name for run, iPhone name for install')
+    ap.add_argument('--bundle-id', default=APP_ID, help='the app id (a free Personal Team needs one of its own)')
     ap.add_argument('--wallpaper', help='a picture behind the black bars beside the game (yours: not in the source)')
     argv = sys.argv[1:]
     host_args = argv[argv.index('--') + 1:] if '--' in argv else []
     a = ap.parse_args(argv[:argv.index('--')] if '--' in argv else argv)
     if a.target == 'run':
         a.sdk = 'iphonesimulator'
-    t = Target(a.sdk)
+    if a.target == 'install':
+        a.sdk = 'iphoneos'
+    t = Target(a.sdk, a.bundle_id)
     bundle = app(t, a)
+    if a.target == 'install':
+        run(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', iphone(a.device), bundle])
     if a.target == 'run':
         udid = simulator(a.device)
         run(['xcrun', 'simctl', 'install', udid, bundle])
-        run(['xcrun', 'simctl', 'launch', '--console-pty', '--terminate-running-process', udid, APP_ID] + host_args)
+        run(['xcrun', 'simctl', 'launch', '--console-pty', '--terminate-running-process', udid, t.bundle_id] + host_args)
 
 
 if __name__ == '__main__':

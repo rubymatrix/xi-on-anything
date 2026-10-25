@@ -2061,6 +2061,13 @@ static const char CLEAR_MSL[] =
     "      float dots = min(length(p - float2(0.24, -0.07)), length(p - float2(0.33, 0.02))) - 0.045;\n"
     "      g = max(body, -min(plus, dots));\n"
     "    }\n"
+    "    else if (u.sym == 10u || u.sym == 11u) {\n" /* a padlock: body, shackle (open: lifted, to the right) */
+    "      float2 b = abs(p - float2(0.0, 0.14)) - float2(0.28, 0.2);\n"
+    "      float body = length(max(b, 0.0)) + min(max(b.x, b.y), 0.0) - 0.05;\n"
+    "      float2 q = p - (u.sym == 10u ? float2(0.0, -0.1) : float2(0.12, -0.22));\n"
+    "      float arc = q.y < 0.0 ? abs(length(q) - 0.18) - 0.06 : max(abs(abs(q.x) - 0.18) - 0.06, q.y - 0.14);\n"
+    "      g = min(body, arc);\n"
+    "    }\n"
     "    else {\n"
     "      float2 q = u.sym == 5u ? float2(p.x, -p.y) : u.sym == 6u ? p : u.sym == 7u ? float2(p.y, -p.x) : float2(p.y, p.x);\n"
     "      g = tri(q, 0.3);\n"
