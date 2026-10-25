@@ -70,7 +70,8 @@ goes to `Documents/host64.log` unless the app runs with a terminal (`run`).
   Documents, or build one in with `build_ios.py app --wallpaper picture`. It is the player's own,
   never in the source. It is cropped to fill the screen and dimmed.
 - **Defaults:**
-  - the scene effects are off (`FFXI_FX=0`; Config > Modern turns them on)
+  - the scene effects are off (`FFXI_FX=0`), and so is the frame-rate gauge (`FFXI_FPS=0`). Config >
+    Modern turns them on.
   - at most 60 frames a second are presented (`FFXI_MAX_FPS`, 0 for no cap), against a ProMotion
     phone's 120
 

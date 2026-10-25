@@ -118,8 +118,9 @@ int main(int argc, char** argv)
     wallpaper(docs);
     /* no Discord app to talk to on iOS */
     setenv("FFXI_DISCORD", "0", 0);
-    /* the scene effects off by default on a phone's GPU: Config > Modern still turns them on */
+    /* the scene effects and the frame-rate gauge off by default: Config > Modern still turns them on */
     setenv("FFXI_FX", "0", 0);
+    setenv("FFXI_FPS", "0", 0);
     args[n] = NULL;
     fprintf(stderr, "[ios] host64 with %d arguments\n", n - 1);
     int ret = xi_host_main(n, args);
