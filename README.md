@@ -30,6 +30,9 @@ Experimental: an [Android build](docs/android.md), tested on a Pixel Fold, and a
 Experimental: a [browser build](docs/web.md) (WebAssembly and WebGPU) that you host for yourself from
 your own install; there is no public instance.
 
+**Step-by-step guides for every platform** (macOS, Linux, Steam Deck, Windows, web browser, iOS,
+Xbox One and PS4) are in [docs/platforms](docs/platforms/README.md).
+
 ## What's better than the original
 
 - **A Modern page in the game's own Config menu**, next to Gameplay, Windows and the rest:
