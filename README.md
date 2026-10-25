@@ -58,7 +58,7 @@ and a LandSandBoat server to sign in to. What every platform has in common is in
 - **Widescreen and ultrawide**: the 3D view widens with the window instead of stretching a 4:3
   view, the interface can stay 16:9 in the middle of an ultrawide, and nameplates keep their shape.
 - **A native sign-in screen** in the game's own window themes and font, with the password kept in
-  the macOS Keychain.
+  the system's password store (macOS Keychain, Windows Credential Manager, Linux Secret Service).
 - **[DAT overlays](docs/running.md#dat-overlays---dats)** for a server's own DATs, without touching the install.
 - **Ashita v4 and Windower 4 Lua addons**, unmodified, without DLL injection
   ([in progress](docs/addons.md)).

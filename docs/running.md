@@ -15,7 +15,8 @@ Started without a way in on its command line (no `--session`, nor `--user` with 
 `host64` shows its own sign-in screen before the game, in the game's own UI art read from the
 install (window themes, font, title art; `host/datui.c`), in the window the game then takes over.
 It signs in to a **LandSandBoat server** (username, password, one-time code), with the server,
-whether to remember the password (macOS Keychain) and the window theme in its **Settings**. It
+whether to remember the password (the system's password store: the macOS Keychain, the Windows
+Credential Manager, or the Secret Service on Linux) and the window theme in its **Settings**. It
 keeps its files in `~/Library/Application Support/FFXIRecompile/FFXI` (or `--data-dir`):
 `signin.cfg`, `settings.reg` (the display settings, written once with defaults), `saved.reg` (the
 game's own saves), `host64.log` when started from Finder, and an optional `background.png`/`.jpg` behind the
@@ -47,7 +48,7 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--pass <password>` | The account's password. Without it, `host64` reads `FFXI_PASSWORD`, else the sign-in screen asks for it. Prefer those: a password on the command line ends up in your shell history. |
 | `--otp <code>` | The two-factor code, for an account that has one. |
 | `--login-token <token>` | A single-use launch token from a server's own launcher (for example a Discord login). It stands in for the password. |
-| `--trust on` | xiloader's "trust this computer": with an account's two-factor code, the server hands out a token that stands in for the code for 30 days, kept in the keychain per `--server` name and account (the sign-in screen's Settings has the same switch). Where there is no keychain (Windows, for now) nothing is kept. |
+| `--trust on` | xiloader's "trust this computer": with an account's two-factor code, the server hands out a token that stands in for the code for 30 days, kept in the keychain per `--server` name and account (the sign-in screen's Settings has the same switch). Where there is no password store (a Linux desktop without a Secret Service) nothing is kept. |
 | `--authport`, `--dataport`, `--viewport` | LandSandBoat's ports, by default 54231 (sign-in, TLS), 54230 (data), 54001 (lobby view). |
 | `--loader-version <a.b.c>` | The loader version sent at sign-in, `2.2.0` by default (current xiloader). LandSandBoat refuses a version it does not expect; when its refusal names the one it wants (`2.1.x`), `host64` signs in again once with that (an `x` as 0). The sign-in screen remembers the version (`loader_version=` in `signin.cfg`), including one a server asked for. |
 | `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its own registry keys. `ffxi.reg` in this repo is a starting point. |

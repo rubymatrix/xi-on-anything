@@ -379,7 +379,11 @@ static void keysave_thread(void* arg)
 {
     Keysave* k = arg;
     if (k->remember)
-        keychain_set(k->key, k->password);
+    {
+        if (!keychain_set(k->key, k->password))
+            fprintf(stderr, "[signin] the password was not saved: %s\n",
+                    keychain_available() ? "the store refused it" : "no password store here");
+    }
     else
         keychain_delete(k->key);
     memset(k->password, 0, sizeof k->password);
@@ -676,7 +680,11 @@ static void choose(Ui* u, int id, int v)
     if (v == choice_value(u, id))
         return;
     if (id == ID_REMEMBER)
+    {
         u->cfg.remember = v == 0;
+        if (u->cfg.remember && !keychain_available())
+            set_status(u, "No keyring here: the username is remembered, the password isn't.", 1);
+    }
     else if (id == ID_TRUST)
     {
         u->cfg.trust = v == 0;
@@ -719,7 +727,11 @@ static void activate(Ui* u, int i)
     if (w->kind == W_CHOICE)
         choose(u, w->id, u->sub);
     else if (w->id == ID_SETTINGS && !busy())
+    {
         u->screen = SCREEN_SETTINGS, set_status(u, "", 0), build(u), focus_on(u, 0), u->anim_at = SDL_GetTicks();
+        if (u->cfg.remember && !keychain_available())
+            set_status(u, "No keyring here: the username is remembered, the password isn't.", 0);
+    }
     else if (w->id == ID_BACK)
         u->screen = SCREEN_SIGNIN, build(u), focus_on(u, 0), u->anim_at = SDL_GetTicks();
     else if (u->screen == SCREEN_SIGNIN)
