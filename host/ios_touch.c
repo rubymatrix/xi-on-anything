@@ -27,6 +27,7 @@
 #include <SDL3/SDL.h>
 
 #include "gfx.h"
+#include "gwin.h"
 #include "input.h"
 
 void ios_touch_init(void);
@@ -506,6 +507,13 @@ static bool SDLCALL touch(void* unused, SDL_Event* e)
         controller_event(e);
         return true;
     }
+    if (e->type == SDL_EVENT_SCREEN_KEYBOARD_SHOWN || e->type == SDL_EVENT_SCREEN_KEYBOARD_HIDDEN)
+    {
+        SDL_LockMutex(g_lock);
+        draw(); /* dimmed, or back */
+        SDL_UnlockMutex(g_lock);
+        return true;
+    }
     if (e->type != SDL_EVENT_FINGER_DOWN && e->type != SDL_EVENT_FINGER_MOTION && e->type != SDL_EVENT_FINGER_UP &&
         e->type != SDL_EVENT_FINGER_CANCELED)
         return true;
@@ -582,6 +590,9 @@ static void draw(void)
         if (g_fingers[i].id && g_fingers[i].what == C_STICK)
             stick = &g_fingers[i];
     }
+    /* dimmed while iOS's keyboard is up: it covers the lower half, and typing is what is wanted */
+    SDL_Window* focus = SDL_GetKeyboardFocus();
+    float fade = focus && SDL_ScreenKeyboardShown(focus) ? 0.15f : 1.0f;
     for (int i = 0; i < g_nctl && n < GFX_TOUCH_MAX - 2; ++i)
     {
         const Control* c = &g_ctl[i];
@@ -589,7 +600,7 @@ static void draw(void)
         memset(t, 0, sizeof *t);
         t->x = c->x * d, t->y = c->y * d, t->hw = c->hw * d, t->hh = c->hh * d;
         t->kind = c->kind, t->sym = c->sym, t->pressed = pressed[i];
-        t->alpha = 0.85f;
+        t->alpha = 0.85f * fade;
         if (c->label)
             snprintf(t->label, sizeof t->label, "%s", c->label);
     }
@@ -604,7 +615,7 @@ static void draw(void)
                 dx *= STICK / len, dy *= STICK / len;
             kx += dx, ky += dy;
         }
-        float a = stick ? 0.9f : 0.5f;
+        float a = (stick ? 0.9f : 0.5f) * fade;
         s[n++] = (GfxTouchShape){ bx * d, by * d, STICK * d, STICK * d, GFX_TOUCH_RING, 0, 0, a, "" };
         s[n++] = (GfxTouchShape){ kx * d, ky * d, KNOB * d, KNOB * d, GFX_TOUCH_KNOB, 0, stick != NULL, a, "" };
     }
@@ -646,6 +657,15 @@ void ios_touch_frame(int in_game)
     else
         draw();
     SDL_UnlockMutex(g_lock);
+    if (frames % 600 == 0) /* the guest's memory, against the 2 GB window (gwin.c), when it grew */
+    {
+        static uint32_t said;
+        GwinStats s;
+        gwin_stats(&s);
+        if (s.top > said)
+            said = s.top, fprintf(stderr, "[ios] guest memory: %llu MB committed, peak %llu MB, top %08x of 80000000\n",
+                (unsigned long long)(s.committed >> 20), (unsigned long long)(s.committed_peak >> 20), s.top);
+    }
 }
 
 void ios_touch_init(void)

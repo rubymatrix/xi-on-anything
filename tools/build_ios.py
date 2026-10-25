@@ -1,7 +1,7 @@
 """Build the iPhone host (an .app with host64 inside) with Xcode's clang, for arm64.
 
   python3 tools/build_ios.py app [--sdk iphonesimulator|iphoneos] [--sign-identity name]
-        [--profile file.mobileprovision]
+        [--profile file.mobileprovision] [--wallpaper picture]
         build/ios-<sdk>/XI on Anything.app, from the game prepared by tools/build_posix.py prepare
   python3 tools/build_ios.py run [--device name] [-- host64 arguments ...]
         the simulator build installed on a simulator (booted, else the named or first iPhone) and
@@ -231,6 +231,12 @@ def app(t, a):
     shutil.copy(exe, os.path.join(bundle, APP_NAME))
     shutil.copy(os.path.join(ROOT, 'ffxi.reg'), bundle)
     shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(bundle, 'textures'))
+    if a.wallpaper:  # behind the black bars (host/ios_main.c): PNG or JPEG, anything else as a PNG
+        src, ext = os.path.expanduser(a.wallpaper), os.path.splitext(a.wallpaper)[1].lower()
+        if ext in ('.png', '.jpg', '.jpeg'):
+            shutil.copy(src, os.path.join(bundle, 'wallpaper' + ext))
+        else:
+            run(['sips', '-s', 'format', 'png', src, '--out', os.path.join(bundle, 'wallpaper.png')])
     with open(os.path.join(bundle, 'Info.plist'), 'wb') as f:
         plistlib.dump(info_plist(t), f, fmt=plistlib.FMT_BINARY)
     with open(os.path.join(bundle, 'PkgInfo'), 'w') as f:
@@ -280,6 +286,7 @@ def main():
     ap.add_argument('--sign-identity')
     ap.add_argument('--profile')
     ap.add_argument('--device', help='simulator name for run')
+    ap.add_argument('--wallpaper', help='a picture behind the black bars beside the game (yours: not in the source)')
     argv = sys.argv[1:]
     host_args = argv[argv.index('--') + 1:] if '--' in argv else []
     a = ap.parse_args(argv[:argv.index('--')] if '--' in argv else argv)

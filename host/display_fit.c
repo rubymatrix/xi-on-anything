@@ -67,8 +67,9 @@ static int read_window(SDL_Window* win, DisplayIn* in)
         return 0;
     in->density = (float)pw / (float)in->win_w;
     SDL_Rect safe;
-    if (SDL_GetWindowSafeArea(win, &safe))
-        in->safe_x = safe.x, in->safe_y = safe.y, in->safe_w = safe.w, in->safe_h = safe.h;
+    if (SDL_GetWindowSafeArea(win, &safe)) /* across only: the full height, the home indicator over the
+                                                * game's foot as in any full-screen game, bars only beside it */
+        in->safe_x = safe.x, in->safe_y = 0, in->safe_w = safe.w, in->safe_h = in->win_h;
     const char* e = getenv("FFXI_UI_POINTS");
     in->ui_points = e ? (float)atof(e) : 1.0f;
     e = getenv("FFXI_MAX_PIXELS");

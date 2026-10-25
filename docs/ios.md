@@ -36,11 +36,13 @@ python3 tools/build_ios.py app --sdk iphoneos --sign-identity "Apple Development
     --profile path/to/profile.mobileprovision
 ```
 
-The guest's memory is a 4 GB reserved window (`runtime/guest.h`), more than an iOS app's default
-address space allows. The provisioning profile's app ID needs the **Extended Virtual Addressing**
-capability, and preferably **Increased Memory Limit** too. The build signs with the entitlements the
-profile grants and drops the rest. If a profile lacks extended virtual addressing, the app can
-install but will fail to reserve guest memory.
+On iOS the guest's memory is a 2 GB reserved window (`runtime/portable/gwin.c`), the address space of
+a 32-bit process, where the desktop reserves 4 GB. The game is told it has 2 GB (`GetSystemInfo`),
+nothing is handed out above it, and the thunks above it are call targets, never memory. The aim is a
+window an app can reserve without the **Extended Virtual Addressing** entitlement, which may need a
+paid account; that has not been tried on a device. The build still asks for that entitlement and
+**Increased Memory Limit**, signs with the ones the profile grants, and drops the rest. The log shows
+the guest's memory every ten seconds when it grows ("guest memory: ... top ...").
 
 ## Game files and arguments
 
@@ -61,8 +63,16 @@ goes to `Documents/host64.log` unless the app runs with a terminal (`run`).
   points high gives 480 lines. `FFXI_UI_POINTS` sets the points an interface pixel.
 - **When:** the size goes into the registry before the game starts, and the game follows a later
   change of size or safe area (`modern_window_size`).
-- **Safe area:** the frame is presented into it, with black bars by a phone's Dynamic Island. The
+- **Safe area:** the frame is presented into its width at the screen's full height. A phone's
+  Dynamic Island gets bars at the sides, and the home indicator is drawn over the game's foot. The
   pointer is mapped through the same rectangle (`user32_set_view`).
+- **Wallpaper:** a picture fills the bars. Put `wallpaper.png` or `wallpaper.jpg` in the app's
+  Documents, or build one in with `build_ios.py app --wallpaper picture`. It is the player's own,
+  never in the source. It is cropped to fill the screen and dimmed.
+- **Defaults:**
+  - the scene effects are off (`FFXI_FX=0`; Config > Modern turns them on)
+  - at most 60 frames a second are presented (`FFXI_MAX_FPS`, 0 for no cap), against a ProMotion
+    phone's 120
 
 `tests/display_fit_test.c` checks the sizes for phones and iPads.
 
@@ -83,6 +93,7 @@ gamepad, so the game sees an Xbox pad and uses its own button mapping.
   screen brings the controls back.
 - **Back:** a swipe in from the left edge is Escape.
 - **Mouse:** the simulator's mouse, and an iPad's trackpad, work the controls like a finger.
+- **Keyboard up:** the controls dim while iOS's keyboard is up.
 
 **Keyboard:** the on-screen keyboard shows on the sign-in screen's fields, and in game only while
 the chat line is typed in. A tap outside the text puts it away, and the next brings it back. An
@@ -96,7 +107,9 @@ the pad button that opens it, the 26th value of `padsin000`, is set to none.
   `supportsBCTextureCompression` is false, the Metal back end decodes DXT1-5 to BGRA8 on upload.
   To test that path on a Mac, set `FFXI_BC=0`.
 - **Frame pacing:** the Metal layer always waits for the display. iOS has no `displaySyncEnabled`.
-- **Never closes itself:** Escape on the sign-in screen does nothing, as an iOS app does not quit.
+- **Closing:** Escape on the sign-in screen does nothing, as an iOS app does not quit. When the game
+  ends (Shutdown, or Exit at its main menu), the app exits: returning from `SDL_main` would leave it
+  running with a black window.
 - **Not yet done:**
   - pausing in the background
   - an iPad in the simulator: its system keyboard is drawn upright over the landscape game

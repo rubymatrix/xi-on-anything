@@ -13,6 +13,14 @@ unsigned char* rt_guest_base;
 #define PAGE 0x1000u
 #define LOW_RESERVED 0x00100000u   /* never handed out: null pointer region */
 #define HIGH_RESERVED 0xFFF00000u  /* never handed out: the thunk range and the top */
+/* The window's size. iOS: the 2 GB of a 32-bit process (all the game asks for: GetSystemInfo says
+ * 0x7FFEFFFF, k32_misc.c), as an app may reserve without the Extended Virtual Addressing entitlement;
+ * nothing is handed out above it. The thunks above (thunk.h) are call targets, never memory. */
+#if defined(FFXI_IOS)
+#define WINDOW 0x80000000ull
+#else
+#define WINDOW 0x100000000ull
+#endif
 
 static uint32_t g_res[GRANULES];   /* granules in the reservation starting here, else 0 */
 static uint8_t g_used[GRANULES];   /* granule belongs to a reservation */
@@ -35,8 +43,8 @@ static void unlock(void)
 int gwin_init(void)
 {
 #if defined(RT_GUEST_WINDOW)
-    /* 4 GB plus a guard page: an unaligned access at 0xFFFFFFFF reaches past the window. */
-    rt_guest_base = (unsigned char*)plat_reserve(0x100000000ull + PAGE);
+    /* the window plus a guard page: an unaligned access at its last byte reaches past it */
+    rt_guest_base = (unsigned char*)plat_reserve(WINDOW + PAGE);
     if (!rt_guest_base)
         return 0;
     for (uint32_t g = 0; g < LOW_RESERVED / GRANULE; ++g)
@@ -49,7 +57,7 @@ int gwin_init(void)
         g_used[g] = 1;
     g_hint = PLAT_HOST_TOP / GRANULE;
 #endif
-    for (uint32_t g = HIGH_RESERVED / GRANULE; g < GRANULES; ++g)
+    for (uint32_t g = (uint32_t)(WINDOW < HIGH_RESERVED ? WINDOW : HIGH_RESERVED) / GRANULE; g < GRANULES; ++g)
         g_used[g] = 1;
     return 1;
 }

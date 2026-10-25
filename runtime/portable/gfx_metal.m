@@ -126,6 +126,14 @@ static GfxTouchShape g_touch[GFX_TOUCH_MAX]; /* gfx_set_touch_shapes: what is dr
 static int g_ntouch;
 static pthread_mutex_t g_touch_lock = PTHREAD_MUTEX_INITIALIZER; /* set from the sign-in's thread or the game's */
 static id<MTLRenderPipelineState> g_touch_pipe;
+static struct
+{
+    uint8_t* rgba; /* gfx_set_wallpaper's, until its texture is made on the present's thread */
+    int w, h;
+    id<MTLTexture> tex;
+    pthread_mutex_t lock;
+} g_wall = { .lock = PTHREAD_MUTEX_INITIALIZER };
+static id<MTLRenderPipelineState> g_wall_pipe;
 
 /* Whether a depth format carries stencil. iOS has no 24-bit depth. */
 static int format_has_stencil(MTLPixelFormat df)
@@ -2072,6 +2080,12 @@ static const char CLEAR_MSL[] =
     "  float3 col = mix(mix(glass, float3(1.0), rim * 0.35), inkc, ink);\n"
     "  float a = max(body * mix(fill, 0.97, ink), shadow * (1.0 - body)) * u.alpha;\n"
     "  return float4(body > 0.0 ? col : float3(0.0), a);\n"
+    "}\n"
+    /* the wallpaper behind a present rectangle (gfx_set_wallpaper): the part of the picture that fills
+     * the drawable (uv: its origin and size), dimmed so the game stands out */
+    "fragment float4 wallpaper_fs(PO in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]],\n"
+    "                             constant float4& uv [[buffer(0)]]) {\n"
+    "  return float4(t.sample(s, uv.xy + in.uv * uv.zw).rgb * 0.7, 1.0);\n"
     "}\n"
     "fragment float4 present_fs(PO in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return float4(t.sample(s, in.uv).rgb, 1.0);\n"
@@ -8342,6 +8356,39 @@ static int label_cell(const char* text)
     return i;
 }
 
+/* The wallpaper over the whole drawable, cropped to fill it, before the game goes into its rectangle */
+static void draw_wallpaper(id<MTLRenderCommandEncoder> e, NSUInteger w, NSUInteger h)
+{
+    pthread_mutex_lock(&g_wall.lock);
+    if (g_wall.rgba) /* new pixels: its texture, here on the present's thread */
+    {
+        [g_wall.tex release];
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+            width:(NSUInteger)g_wall.w height:(NSUInteger)g_wall.h mipmapped:NO];
+        d.storageMode = MTLStorageModeShared;
+        g_wall.tex = [g_dev newTextureWithDescriptor:d];
+        [g_wall.tex replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)g_wall.w, (NSUInteger)g_wall.h) mipmapLevel:0
+                        withBytes:g_wall.rgba bytesPerRow:(NSUInteger)g_wall.w * 4];
+        free(g_wall.rgba);
+        g_wall.rgba = NULL;
+    }
+    id<MTLTexture> t = g_wall.tex;
+    float iw = (float)g_wall.w, ih = (float)g_wall.h;
+    pthread_mutex_unlock(&g_wall.lock);
+    if (!t || !g_wall_pipe || !w || !h)
+        return;
+    float dw = (float)w / (float)h, pa = iw / ih, uv[4] = { 0, 0, 1, 1 };
+    if (pa > dw) /* wider than the screen: its middle across */
+        uv[2] = dw / pa, uv[0] = (1.0f - uv[2]) * 0.5f;
+    else
+        uv[3] = pa / dw, uv[1] = (1.0f - uv[3]) * 0.5f;
+    [e setRenderPipelineState:g_wall_pipe];
+    [e setFragmentBytes:uv length:sizeof uv atIndex:0];
+    [e setFragmentTexture:t atIndex:0];
+    [e setFragmentSamplerState:g_present_samp atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
 static void draw_touch(id<MTLRenderCommandEncoder> e, NSUInteger w, NSUInteger h)
 {
     GfxTouchShape shapes[GFX_TOUCH_MAX];
@@ -8423,6 +8470,10 @@ void gfx_present(GfxTex* bb)
                 p.colorAttachments[0].storeAction = MTLStoreActionStore;
                 ts_mark(p, GFX_PASS_PRESENT);
                 id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:p];
+#if TARGET_OS_IPHONE
+                if (boxed)
+                    draw_wallpaper(e, drawable.texture.width, drawable.texture.height);
+#endif
                 if (boxed)
                     [e setViewport:(MTLViewport){ g_present_rect.x, g_present_rect.y, g_present_rect.w, g_present_rect.h, 0, 1 }];
                 float sharpen = g_fxs.fx != 0.0f ? g_fxs.sharpen : 0.0f;
@@ -8449,7 +8500,32 @@ void gfx_present(GfxTex* bb)
                 draw_touch(e, drawable.texture.width, drawable.texture.height);
 #endif
                 [e endEncoding];
+#if TARGET_OS_IPHONE
+                /* at most FFXI_MAX_FPS frames a second (60 unless set; 0 none): the layer runs at the
+                 * display's rate, 120 on a ProMotion phone, and the phone's battery and heat go with it */
+                static double min_frame = -1.0;
+                if (min_frame < 0.0)
+                {
+                    const char* m = getenv("FFXI_MAX_FPS");
+                    double fps = m && *m ? atof(m) : 60.0;
+                    min_frame = fps > 0.0 ? 1.0 / fps : 0.0;
+                }
+                if (min_frame > 0.0 && [drawable respondsToSelector:@selector(presentAfterMinimumDuration:)])
+                {
+                    /* the drawable's own (the simulator's command buffers have no
+                     * presentDrawable:afterMinimumDuration:), once the GPU has the frame */
+                    id<CAMetalDrawable> d = drawable;
+                    double t = min_frame;
+                    [cmd() addScheduledHandler:^(id<MTLCommandBuffer> done) {
+                        (void)done;
+                        [d presentAfterMinimumDuration:t];
+                    }];
+                }
+                else
+                    [cmd() presentDrawable:drawable];
+#else
                 [cmd() presentDrawable:drawable];
+#endif
                 bb->used = g_serial;
             }
         }
@@ -8485,6 +8561,17 @@ uint64_t gfx_window_flags(void)
 #else
     return 0;
 #endif
+}
+
+void gfx_set_wallpaper(const uint8_t* rgba, int w, int h)
+{
+    uint8_t* copy = rgba && w > 0 && h > 0 ? (uint8_t*)malloc((size_t)w * h * 4) : NULL;
+    if (copy)
+        memcpy(copy, rgba, (size_t)w * h * 4);
+    pthread_mutex_lock(&g_wall.lock);
+    free(g_wall.rgba);
+    g_wall.rgba = copy, g_wall.w = w, g_wall.h = h;
+    pthread_mutex_unlock(&g_wall.lock);
 }
 
 void gfx_set_touch_shapes(const GfxTouchShape* shapes, int n)
@@ -8551,6 +8638,12 @@ int gfx_init(void* window, int vsync)
         ff = [g_util newFunctionWithName:@"present_cas_fs"];
         pd.fragmentFunction = ff;
         g_present_cas_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:NULL];
+#if TARGET_OS_IPHONE
+        [ff release];
+        ff = [g_util newFunctionWithName:@"wallpaper_fs"];
+        pd.fragmentFunction = ff;
+        g_wall_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:NULL];
+#endif
         [vf release];
         [ff release];
         [pd release];
