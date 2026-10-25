@@ -19,7 +19,7 @@ Developer Mode builds are sideloaded to your own console only; they aren't distr
   `xbox/tools/xbox.py` uses only the standard library.
 - Your `FINAL FANTASY XI` folder (about 14 GB). The PlayOnline viewer folder isn't needed.
 - Performance: on an Xbox One the CPU is several times slower than a current PC; expect about
-  24 to 30 fps in busy scenes (`xbox/docs/feasibility.md`). The Series consoles have headroom.
+  24 to 30 fps in busy scenes. The Series consoles have headroom.
 
 ## 1. Put the console in Developer Mode (once)
 

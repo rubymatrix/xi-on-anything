@@ -73,4 +73,4 @@ python xbox/tools/frame_budget.py build/run.log [--factor 6.5] [--min-draws 500]
 ```
 
 It reads `host64`'s `FFXI_PROFILE=1` output and projects the game thread's busy time per frame onto a
-slower CPU. See [docs/feasibility.md](docs/feasibility.md).
+slower CPU.
