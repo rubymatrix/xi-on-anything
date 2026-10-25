@@ -75,8 +75,8 @@ open "build/Final Fantasy XI.app"
 
 Signing: the app is signed with the identity `FFXI Local Code Signing` when your login keychain has
 one, else ad hoc. Ad hoc, macOS treats every rebuild as a new app and asks again before it reads the
-saved password. `tools/setup.py` makes the certificate on its first run; the README shows how by
-hand.
+saved password. `tools/setup.py` makes the certificate on its first run; [Building](../building.md#final-fantasy-xiapp)
+shows how by hand.
 
 ## Signing in
 
@@ -95,7 +95,8 @@ theme in its **Settings**. Cmd+Q, the Dock's Quit and Ctrl+C quit at any point.
 ## Troubleshooting
 
 - **"is build &lt;sha&gt;, which meta/builds.json does not know"**: your client version isn't
-  supported yet. See the README, Supporting a new client version.
+  supported yet. See
+  [Supporting a new client version](../new-client-version.md#supporting-a-new-client-version).
 - **The app asks for Keychain access after every update**: it is signed ad hoc; make the
   `FFXI Local Code Signing` certificate (above) and rebuild.
 - **Graphics problems**: `build/gfx_test --window` checks the Metal back end without the game;

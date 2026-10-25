@@ -11,8 +11,7 @@ LandSandBoat server over a WebSocket.
 > request; to reach it from other devices, put it behind a private network or a sign-in you control
 > (below), never on the open internet.
 
-Branch: `feat/web` (`git checkout feat/web`). The full reference, with the private bucket and every
-option, is `docs/web.md` on that branch; the design is `docs/web-port-plan.md`.
+The full reference, with the private bucket and every option, is [../web.md](../web.md).
 
 ## What you need
 
@@ -85,7 +84,7 @@ keep the `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers
 in front. Never expose `webserve.py` with only the token in front of it.
 
 For faster loading far from home, files can come from a private S3-compatible bucket
-(`tools/bucket.py`); see `docs/web.md` on the branch. In the page, **Download all game data** (the
+(`tools/bucket.py`); see [../web.md](../web.md). In the page, **Download all game data** (the
 gear, top right) fills the browser's storage so zoning reads nothing over the network.
 
 ## Page options

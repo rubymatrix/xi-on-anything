@@ -11,14 +11,12 @@ your own install and host it for yourself, on your own machine, reachable only b
 devices you put it behind a private network or a sign-in you control (below), never on the open
 internet.
 
-How it is built and why is in [web-port-plan.md](web-port-plan.md).
-
 ## What you need
 
 - A Mac (Apple silicon) or Linux machine to build and host it. Windows hosting is untested.
 - Python 3.12 or later, with `capstone` and `pefile` (`pip3 install capstone pefile`).
 - [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (tested with 6.0.11).
-- A `FINAL FANTASY XI` folder of a supported client build (README: Rules), and a LandSandBoat server
+- A `FINAL FANTASY XI` folder of a supported client build ([Supported builds](new-client-version.md#supported-builds)), and a LandSandBoat server
   to play on.
 - To play: a desktop Chrome or Edge with WebGPU. Safari 26 and Firefox are untested; phones and
   tablets are out of scope for now.

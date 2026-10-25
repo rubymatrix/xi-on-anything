@@ -1,13 +1,12 @@
-# iPhone and iPad (experimental, in progress)
+# iPhone and iPad: developer notes
 
 The iOS build is the macOS host on UIKit: the same recompiled client, platform layer and Metal back
 end, with SDL3's UIKit video, audio and GameController back ends in place of Cocoa's. It uses no
 emulator or JIT. LuaJIT runs as its interpreter, because iOS forbids writable code.
 
-Status: it compiles and links for the simulator and for devices. In the iOS 27 simulator (iPhone
-18 Pro) it signs in to a local LandSandBoat server and runs the game in landscape, sized to the
-screen, with touch controls. It has not run on a device yet. The design notes for the display and
-the controls are in [ios-design.md](ios-design.md).
+Status: done. It builds for the simulator and for devices, signs in to LandSandBoat and runs the
+game in landscape, sized to the screen, with touch controls. The step-by-step guide is
+[platforms/ios.md](platforms/ios.md); these are the notes for working on it.
 
 ## Build on a Mac
 

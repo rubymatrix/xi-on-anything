@@ -70,8 +70,8 @@ password" and `--trust on` keep nothing.
 To start it with a double-click, make a shortcut to `host64.exe` and put the options in its
 **Target** field.
 
-Every option (`--dats`, `--fps-divisor`, `--ui-aspect`, ...) is in the README, under Running:
-`host64`. Graphics settings are in the game's Config > Modern page.
+Every option (`--dats`, `--fps-divisor`, `--ui-aspect`, ...) is in
+[Running `host64`](../running.md#options). Graphics settings are in the game's Config > Modern page.
 
 ## Files
 

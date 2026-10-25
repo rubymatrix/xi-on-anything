@@ -1,4 +1,4 @@
-"""The local web server for the browser build (docs/web-port-plan.md): serves the build to the
+"""The local web server for the browser build (docs/web.md): serves the build to the
 player's own browser and bridges its network. Standard library only.
 
   python3 tools/webserve.py --server <game server IP> [--root build/web] [--port 8417]

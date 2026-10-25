@@ -1472,7 +1472,7 @@ int main(int argc, char** argv)
     cexi_init(cexi, game);
     addons_packet_tap(moghouse_tap);
     {
-        /* the addon host: Ashita v4 and Windower 4 Lua addons, and our own (docs/addon-compat-design.md) */
+        /* the addon host: Ashita v4 and Windower 4 Lua addons, and our own (docs/addons.md) */
         const char* off = getenv("FFXI_ADDONS");
         if (!off || strcmp(off, "0"))
         {

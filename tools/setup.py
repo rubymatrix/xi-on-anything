@@ -439,7 +439,7 @@ def build_libraries():
 
 def ensure_identity():
     """This Mac's own code-signing certificate, so macOS knows each rebuild as the same app and
-    keeps the keychain's "Always Allow" for the saved password (README)."""
+    keeps the keychain's "Always Allow" for the saved password (docs/building.md)."""
     if subprocess.run(['security', 'find-certificate', '-c', IDENTITY], capture_output=True).returncode == 0:
         return
     work = os.path.join(ROOT, 'build', 'signing')

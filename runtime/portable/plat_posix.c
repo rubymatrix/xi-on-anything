@@ -151,7 +151,7 @@ int plat_thread_start(void (*fn)(void*), void* arg)
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
 #if defined(__EMSCRIPTEN__)
     /* only the C shadow stack (locals whose address is taken): wasm keeps its own call stack, and
-     * gate 0 measured 20 KB of native stack at most (docs/web-port-plan.md) */
+     * gate 0 measured 20 KB of native stack at most */
     pthread_attr_setstacksize(&a, 1u << 20);
 #else
     pthread_attr_setstacksize(&a, 8u << 20); /* translated frames are large; Windows gives 1 MB+ and grows */

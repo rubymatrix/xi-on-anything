@@ -1,4 +1,4 @@
-/* host/display_fit.c's sizes for phones and iPads in landscape (docs/ios-design.md), without SDL:
+/* host/display_fit.c's sizes for phones and iPads in landscape (docs/ios.md), without SDL:
  *   clang -DDISPLAY_FIT_POLICY_ONLY -I host tests/display_fit_test.c host/display_fit.c -o build/display_fit_test */
 #include <stdio.h>
 #include <stdlib.h>

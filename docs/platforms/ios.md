@@ -1,69 +1,45 @@
-# iPhone and iPad (experimental, in progress)
+# iPhone and iPad
 
 The macOS host on UIKit: the same recompiled client and Metal back end, with SDL3's UIKit video,
-audio and game controller support. No emulator and no JIT (LuaJIT runs as its interpreter, since iOS
-forbids writable code).
-
-Branch: `port/iphone` (`git checkout port/iphone`). Developer notes: `docs/ios.md` on that branch.
-
-**Status**: builds for the simulator and for devices. In the iOS 27 simulator (iPhone 18 Pro) it
-reaches the sign-in screen in landscape and the on-screen keyboard types into it. It has not signed
-in to a server or run on a device yet. Expect the steps for devices below to need adjusting.
+audio and game controller support, and touch controls drawn over the game. No emulator and no JIT
+(LuaJIT runs as its interpreter, since iOS forbids writable code). Developer notes, the display
+sizing and every touch control are in [../ios.md](../ios.md).
 
 ## What you need
 
 - A Mac with Xcode and the iOS SDK (deployment target iOS 17.0 or later).
 - Python 3.12 or later with `capstone` and `pefile`.
 - For the simulator: an iOS simulator runtime (`xcodebuild -downloadPlatform iOS`).
-- For a device: an Apple Developer account whose App ID can have the **Extended Virtual Addressing**
-  capability (and, preferably, **Increased Memory Limit**). A free personal team can't add these
-  capabilities as far as we know; that is unverified.
+- For a device: an Apple account signed in to Xcode. A free one (a Personal Team) works; its
+  signature lasts 7 days, so install again weekly.
 - Your `FINAL FANTASY XI` folder, with the viewer folder beside it if your install has one.
-- A controller or keyboard: touch controls aren't done yet.
 
 ## Simulator
 
 ```bash
-git checkout port/iphone
 python3 tools/build_posix.py prepare --game /path/to/"FINAL FANTASY XI"
 python3 tools/build_ios.py app          # build/ios-iphonesimulator/XI on Anything.app
 python3 tools/build_ios.py run -- --game /path/to/"FINAL FANTASY XI" --server <your server>
 ```
 
-`run` installs the build on the booted simulator (or boots the newest iPhone; `--device <name>` picks
-one) and starts it with its log in the terminal. Arguments after `--` go to host64. The simulator
-reads the Mac's files, so `--game` can name the install on the Mac.
+`run` installs the build on the booted simulator (or boots the newest iPhone) and starts it with its
+log in the terminal. Arguments after `--` go to host64. The simulator reads the Mac's files, so
+`--game` can name the install on the Mac.
 
 ## Device
 
-1. **Make an App ID and profile.** In the Apple Developer site (Certificates, Identifiers &
-   Profiles): an App ID for `com.rubymatrix.xionanything` (or your own), with **Extended Virtual
-   Addressing** and **Increased Memory Limit** ticked; then a development provisioning profile for it
-   that includes your device. Download the `.mobileprovision`.
-2. **Build and sign:**
+1. **Once:** sign in to Xcode (Settings > Accounts), and turn on Developer Mode on the device
+   (Settings > Privacy & Security; it restarts and asks you to confirm). Then get Xcode to make a
+   certificate and profile for your app id, e.g. a device build of any small app with that id and
+   automatic signing, with the device connected. A free team can only use an id of its own.
+2. **Build, sign and install** with the device connected:
 
    ```bash
-   python3 tools/build_ios.py app --sdk iphoneos \
-       --sign-identity "Apple Development: <you> (<team>)" \
-       --profile path/to/profile.mobileprovision
+   python3 tools/build_ios.py install --bundle-id com.you.xionanything
    ```
 
-   `security find-identity -v -p codesigning` lists your identities. The build signs with the
-   entitlements the profile grants and drops the rest.
-3. **Install** with the device connected (or paired over Wi-Fi), using Xcode's tools:
-
-   ```bash
-   xcrun devicectl list devices
-   xcrun devicectl device install app --device <device id> "build/ios-iphoneos/XI on Anything.app"
-   ```
-
-   Or drag the `.app` onto the device in Xcode's Devices and Simulators window. The first launch may
-   need Settings, General, VPN & Device Management, trust your developer certificate, and Developer
-   Mode turned on (Settings, Privacy & Security).
-
-The guest's memory is a 4 GB reserved window, more than an iOS app may reserve by default. Without
-Extended Virtual Addressing in the profile the app installs but fails to reserve guest memory at
-start.
+   It signs with the first Apple Development identity in the keychain and the newest profile Xcode
+   made for the id (`--sign-identity` and `--profile` name them instead; `--device` picks a device).
 
 ## Game files and arguments
 
@@ -83,10 +59,15 @@ The app's Documents folder is shared through the Files app and Finder (`UIFileSh
 
 The log goes to `Documents/host64.log` unless the app was started with a terminal (`run`).
 
-## Differences from macOS
+## Playing
 
-- Most iPhone GPUs can't sample BC (DXT) textures; the back end decodes them to BGRA8 on upload.
-  `FFXI_BC=0` tests that path on a Mac.
-- The frame rate always follows the display's refresh.
-- Not done yet: touch controls, safe-area and notch layout, pausing in the background, keeping the
-  sign-in fields above the on-screen keyboard (it covers the lower half), performance work.
+- **Touch controls:** a gamepad over the game, from the sign-in screen on. The left stick starts
+  where your thumb lands, a drag elsewhere turns the camera, and a quick tap is a click. The lock
+  beside the gamepad button lets you drag the controls where you want them.
+- **A controller** hides the touch controls and takes over; touching the screen brings them back.
+- **The keyboard** shows on the sign-in fields and while you type in the chat line, with the view
+  kept above it.
+- **Defaults:** the scene effects and the frame-rate gauge are off, and the frame rate is capped at
+  60. Config > Modern turns the effects on.
+- **Wallpaper:** put `wallpaper.png` or `wallpaper.jpg` in Documents to fill the bars beside the
+  game.

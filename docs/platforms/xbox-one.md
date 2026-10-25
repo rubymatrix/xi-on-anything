@@ -4,8 +4,8 @@ The recompiled game as a UWP app on a console in Developer Mode, drawn with Dire
 CoreWindow, with the native sign-in screen driven by the controller. Developed on an Xbox One X; the
 Series X|S run the same build.
 
-Branch: `xbox/v2-native-signin` (`git checkout xbox/v2-native-signin`). The app and its tools are in
-`xbox/`; every quirk found along the way is in `xbox/docs/xbox-install.md` on that branch.
+The app and its tools are in [`xbox/`](../../xbox/README.md); every quirk found along the way is in
+[`xbox/docs/xbox-install.md`](../../xbox/docs/xbox-install.md).
 
 Developer Mode builds are sideloaded to your own console only; they aren't distributed.
 

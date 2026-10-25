@@ -1,4 +1,4 @@
-"""The browser build (docs/web-port-plan.md): the same translation and runtime, compiled to wasm32
+"""The browser build (docs/web.md): the same translation and runtime, compiled to wasm32
 with Emscripten, for the local web server (tools/webserve.py) to serve to the player's own browser.
 
   python3 tools/build_web.py --game <FINAL FANTASY XI> [--node]

@@ -19,7 +19,7 @@ This skill runs two others in order:
   `FINAL FANTASY XI` folder is; never write into the install.
 - **No Square Enix bytes are ever committed** (README, *Rules*). Images, Ghidra projects and
   generated C stay in `generated/`, which is gitignored. Commit only `meta/`, `discovery/verdicts.py`,
-  `discovery/notes/`, README and tooling.
+  `discovery/notes/`, docs and tooling.
 - Note the working tree state (`git status`). Other work may be uncommitted. Touch only the files
   this flow owns, and never stage unrelated changes.
 
@@ -42,7 +42,7 @@ the gate result, and each platform's result.
    discovery pass. Follow `discovery/notes/FFXiMain.2026-09-03.discovery.txt`: the retail files and
    hashes, what changed from the previous build, what carried over and what was mapped by hand,
    new verdicts with their evidence, the results table, and verification.
-2. README: add the build to the table under *Rules* (label, shortened SHA-256, version, where the
+2. `docs/new-client-version.md`: add the build to the *Supported builds* table (label, shortened SHA-256, version, where the
    install came from).
 3. Summarize for the user:
    - the build label and version string, and whether the version was read from `patch.ver` or
@@ -51,5 +51,5 @@ the gate result, and each platform's result.
    - every manual verdict added.
    - each platform target: PASS, FAIL, or not run (and why, e.g. "macOS needs the Mac").
    - what's left: an in-game test (sign in, zone in, fight, zone again) and the commit.
-4. Offer to commit `meta/`, `discovery/`, and README together as one commit. Commit only when the
+4. Offer to commit `meta/`, `discovery/`, and `docs/new-client-version.md` together as one commit. Commit only when the
    user says so.

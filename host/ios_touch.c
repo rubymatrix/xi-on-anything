@@ -1,4 +1,4 @@
-/* Touch controls on iOS (docs/ios-design.md): a gamepad on the screen, for playing without a controller
+/* Touch controls on iOS (docs/ios.md): a gamepad on the screen, for playing without a controller
  * or a keyboard, and Back everywhere.
  *
  * The gamepad is SDL's virtual one: the game sees an Xbox pad like any other (input.c, dinput.c), with

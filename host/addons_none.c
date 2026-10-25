@@ -1,7 +1,7 @@
 /* The addon host's interface (host/addons/addons.h) for builds without it: the browser build
  * (tools/build_web.py), where LuaJIT can't run. Nothing loads; Config > Addons has no page; the
  * packet taps see nothing (the Mog House detection and CatsEyeXI's that ride on them stay off).
- * The browser's addons will be its own (HTML and JS over the canvas: docs/web-port-plan.md). */
+ * The browser's addons will be its own (HTML and JS over the canvas). */
 #include "addons/addons.h"
 
 void addons_init(const AddonsSetup* s) { (void)s; }
