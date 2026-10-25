@@ -342,9 +342,10 @@ CHAT.AddChatMessage = CHAT.Write
 function CHAT:ParseAutoTranslate(msg, use_brackets)
     msg = tostring(msg or '')
     return (msg:gsub('\xFD(.)(.)(.)(.)\xFD', function(k, l, b2, b3)
-        -- one we cannot read as a ?, not its raw bytes: addons that split lines on control bytes
-        -- (timestamp, on 07 and 0A) would cut the code in two
-        local s = xi.res.auto_translate(k:byte(), l:byte(), b2:byte(), b3:byte()) or '?'
+        -- in the reader's language (0, the default), not the sender's (the token's own byte), as
+        -- the game shows it. One we cannot read as a ?, not its raw bytes: addons that split lines
+        -- on control bytes (timestamp, on 07 and 0A) would cut the code in two
+        local s = xi.res.auto_translate(k:byte(), 0, b2:byte(), b3:byte()) or '?'
         if use_brackets then return '\xEF\x27' .. s .. '\xEF\x28' end
         return s
     end))

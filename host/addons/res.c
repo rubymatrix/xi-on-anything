@@ -790,7 +790,7 @@ done:
 
 const char* res_auto_translate(uint8_t kind, uint8_t lang, uint8_t b2, uint8_t b3)
 {
-    int l = lang == 1 ? 1 : 0;
+    int l = li(lang);
     /* items (base 07) and key items (base 13) by id, high byte b2; a zero byte would end the string,
      * so it is sent as FF with the kind saying which: base+2 the high byte, base+3 the low one */
     uint8_t base = kind >= 0x13 ? 0x13 : 0x07, off = (uint8_t)(kind - base);
@@ -933,7 +933,8 @@ static void convert(Out* o, const uint8_t* s, size_t n, int flags, int depth)
         }
         else if (b == 0xFD && i + 5 < n && s[i + 5] == 0xFD)
         {
-            const char* t = depth < 2 ? res_auto_translate(s[i + 1], s[i + 2], s[i + 3], s[i + 4]) : NULL;
+            /* the token's language byte is the sender's: show it in the reader's (the default) */
+            const char* t = depth < 2 ? res_auto_translate(s[i + 1], RES_LANG_DEFAULT, s[i + 3], s[i + 4]) : NULL;
             if (t)
             {
                 put(o, "{", 1);
