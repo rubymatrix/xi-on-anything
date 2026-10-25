@@ -21,9 +21,23 @@
 #elif defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
 #include <xmmintrin.h>
 #define GEOMETRY_SSE2 1
+#elif defined(__EMSCRIPTEN__)
+#define GEOMETRY_NONE 1 /* the browser: geometry_guest.c keeps the kernels off */
 #else
 #error geometry_simd requires ARM64 NEON or x86 SSE2
 #endif
+
+#if defined(GEOMETRY_NONE)
+int geometry_simd_supported(void) { return 0; }
+void geometry_simd_rigid(const void* matrix, const void* source, void* position, void* normal)
+{
+    (void)matrix, (void)source, (void)position, (void)normal;
+}
+void geometry_simd_weighted(const void* matrix_a, const void* matrix_b, const void* source, void* position, void* normal)
+{
+    (void)matrix_a, (void)matrix_b, (void)source, (void)position, (void)normal;
+}
+#else
 
 int geometry_simd_supported(void)
 {
@@ -168,3 +182,4 @@ void geometry_simd_weighted(const void* matrix_a, const void* matrix_b, const vo
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma float_control(pop)
 #endif
+#endif /* GEOMETRY_NONE */

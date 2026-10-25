@@ -61,6 +61,7 @@ CFLAGS = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-fno-strict-aliasing', 
           '-I', 'generated', '-I', 'third_party/stb']
 if sys.platform != 'darwin':
     CFLAGS.append('-D_GNU_SOURCE')  # glibc hides POSIX (strdup, getaddrinfo, sigaction) under -std=c11
+CFLAGS += shlex.split(os.environ.get('XI_CFLAGS', ''))  # e.g. -DRT_WATERMARK
 CFLAGS += thirdparty.PIE
 PIE_LINK = ['-pie'] if thirdparty.PIE else []  # host64 above 4 GB (thirdparty.PIE)
 # the generated C: every label and local is emitted whether used or not

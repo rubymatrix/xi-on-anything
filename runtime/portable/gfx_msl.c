@@ -10,6 +10,12 @@
  * sampling and vector compares. GLSL has no `in.` (a keyword): the fragment function's copy of its
  * inputs is `I`, and `in.` is rewritten to it at the end.
  *
+ * And as WGSL (Sb.glsl 2, gfx_wgsl_generate) for gfx_webgpu.c. WGSL's functions are written the MSL
+ * way (an entry point that returns its outputs), its prelude names MSL's types (float4 is vec4f), and
+ * what C-like statements the emitters write - declarations, comma lists, one-line ifs - become WGSL in
+ * one pass at the end (wgsl_fix). The few constructs WGSL lacks are written its own way where they
+ * are emitted: ?: as select, writes to several components of a vector, vector clamps, vertex fetch.
+ *
  * Conventions the functions follow:
  *   - matrices are D3D's bytes in a float4x4, so `m * v` is D3D's v * M;
  *   - D3D puts pixel centers on integer coordinates and Metal on half-integers: every clip-space
@@ -84,6 +90,30 @@ static const char GLSL_PRELUDE[] =
     "  vec4 psc[8];\n"
     "} u;\n"
     "#define reg_offset(uu, r) u.offset[(r) >> 2][(r) & 3]\n";
+
+/* The WGSL prelude: MSL's names, the uniforms (binding 0), and the few functions WGSL names otherwise */
+static const char WGSL_PRELUDE[] =
+    "alias float2 = vec2f;\nalias float3 = vec3f;\nalias float4 = vec4f;\nalias float4x4 = mat4x4f;\n"
+    "struct Light { diffuse: vec4f, specular: vec4f, ambient: vec4f, pos: vec4f, dir: vec4f, att: vec4f, spot: vec4f, };\n"
+    "struct U {\n"
+    "  wvp: mat4x4f, wv: mat4x4f, wvit: mat4x4f,\n"
+    "  texm: array<mat4x4f, 8>,\n"
+    "  mat_d: vec4f, mat_a: vec4f, mat_s: vec4f, mat_e: vec4f, params: vec4f, ambient: vec4f, tfactor: vec4f,\n"
+    "  fogcolor: vec4f, params2: vec4f, vp: vec4f,\n"
+    "  vofs: vec4i, stride: vec4i,\n"
+    "  offset: array<vec4i, 5>,\n"
+    "  light: array<Light, 8>,\n"
+    "  vsc: array<vec4f, 96>,\n"
+    "  psc: array<vec4f, 8>,\n"
+    "};\n"
+    "@group(0) @binding(0) var<uniform> u: U;\n"
+    "fn reg_offset(r: i32) -> i32 { return u.offset[r >> 2u][r & 3]; }\n"
+    "fn rsqrt(x: f32) -> f32 { return inverseSqrt(x); }\n"
+    "fn rint(x: f32) -> f32 { return round(x); }\n"
+    "fn xinf() -> f32 { var b = 0x7f800000u; return bitcast<f32>(b); }\n";
+
+#define WGSL(b) ((b)->glsl == 2)
+#define GLSL(b) ((b)->glsl == 1)
 
 /* The back end's water (GfxFsKey.water), after the game's own color and fog: the scene behind it
  * (wcol, a copy of the target made before the frame's first water draw) seen through the surface,
@@ -283,9 +313,36 @@ static void glsl_copy_varyings(Sb* b, const GfxVsKey* k, const char* dst, const 
         sb_printf(b, "  %s.%s = %s.%s;\n", dst, names[i], src, names[i]);
 }
 
+/* WGSL: the vertex function's output, one location each (flat colors when the key says so) */
+static void wgsl_vout(Sb* b, const GfxVsKey* k)
+{
+    const char* fl = k->flat ? " @interpolate(flat)" : "";
+    int loc = 0;
+    sb_printf(b, "struct VOut {\n  @builtin(position) pos: vec4f,\n");
+    sb_printf(b, "  @location(%d)%s d: vec4f,\n  @location(%d)%s s: vec4f,\n", loc, fl, loc + 1, fl);
+    loc += 2;
+    if (pixel_lit(k))
+    {
+        static const char* const pl[] = { "n: vec3f", "pe: vec4f", "md: vec4f", "ma: vec4f", "ms: vec4f", "me: vec4f",
+            "pa: vec4f", "pd: vec4f", "ps: vec4f" };
+        for (int i = 0; i < (point_per_vertex(k) ? 9 : 6); ++i)
+            sb_printf(b, "  @location(%d) %s,\n", loc++, pl[i]);
+    }
+    for (int i = 0; i < k->ntex; ++i)
+        sb_printf(b, "  @location(%d) t%d: vec4f,\n", loc++, i);
+    if (k->water)
+        sb_printf(b, "  @location(%d) pv: vec3f,\n", loc++);
+    sb_printf(b, "  @location(%d) fog: f32,\n  @location(%d) ez: f32,\n};\n", loc, loc + 1);
+}
+
 /* the vertex function's output: what the fragment function reads */
 static void emit_vout(Sb* b, const GfxVsKey* k)
 {
+    if (WGSL(b))
+    {
+        wgsl_vout(b, k);
+        return;
+    }
     if (b->glsl)
     {
         glsl_vout(b, k);
@@ -343,6 +400,44 @@ static void glsl_fetch(Sb* b, const GfxElem* e, int reg)
     }
 }
 
+/* WGSL: the same from words, with WGSL's explicit integer types (shifts by u32, bitcasts) */
+static void wgsl_fetch(Sb* b, const GfxElem* e, int reg)
+{
+    int s = e->stream;
+    sb_printf(b, "  var p%d: i32 = (vi * u.stride[%d] + reg_offset(%d)) >> 2u;\n", reg, s, reg);
+    switch (e->type)
+    {
+    case GFX_FLOAT1: sb_printf(b, "  var v%d: vec4f = vec4f(bitcast<f32>(s%d.w[p%d]), 0.0, 0.0, 1.0);\n", reg, s, reg); break;
+    case GFX_FLOAT2:
+        sb_printf(b, "  var v%d: vec4f = vec4f(bitcast<vec2f>(vec2u(s%d.w[p%d], s%d.w[p%d + 1])), 0.0, 1.0);\n", reg, s, reg, s, reg);
+        break;
+    case GFX_FLOAT3:
+        sb_printf(b, "  var v%d: vec4f = vec4f(bitcast<vec3f>(vec3u(s%d.w[p%d], s%d.w[p%d + 1], s%d.w[p%d + 2])), 1.0);\n", reg, s,
+            reg, s, reg, s, reg);
+        break;
+    case GFX_FLOAT4:
+        sb_printf(b, "  var v%d: vec4f = bitcast<vec4f>(vec4u(s%d.w[p%d], s%d.w[p%d + 1], s%d.w[p%d + 2], s%d.w[p%d + 3]));\n", reg,
+            s, reg, s, reg, s, reg, s, reg);
+        break;
+    case GFX_D3DCOLOR: sb_printf(b, "  var v%d: vec4f = unpack4x8unorm(s%d.w[p%d]).zyxw;\n", reg, s, reg); break;
+    case GFX_UBYTE4:
+        sb_printf(b, "  var w%d: u32 = s%d.w[p%d];\n  var v%d: vec4f = vec4f(vec4u(w%d, w%d >> 8u, w%d >> 16u, w%d >> 24u) & vec4u(0xFFu));\n",
+            reg, s, reg, reg, reg, reg, reg, reg);
+        break;
+    case GFX_SHORT2:
+        sb_printf(b, "  var w%d: i32 = bitcast<i32>(s%d.w[p%d]);\n  var v%d: vec4f = vec4f(f32((w%d << 16u) >> 16u), f32(w%d >> 16u), 0.0, 1.0);\n",
+            reg, s, reg, reg, reg, reg);
+        break;
+    case GFX_SHORT4:
+        sb_printf(b,
+            "  var w%d: i32 = bitcast<i32>(s%d.w[p%d]);\n  var x%d: i32 = bitcast<i32>(s%d.w[p%d + 1]);\n"
+            "  var v%d: vec4f = vec4f(f32((w%d << 16u) >> 16u), f32(w%d >> 16u), f32((x%d << 16u) >> 16u), f32(x%d >> 16u));\n",
+            reg, s, reg, reg, s, reg, reg, reg, reg, reg, reg);
+        break;
+    default: sb_printf(b, "  var v%d: vec4f = vec4f(0.0, 0.0, 0.0, 1.0);\n", reg); break;
+    }
+}
+
 /* v# for an element: a float4 read from its stream */
 static void emit_fetch(Sb* b, const GfxVsKey* k, int reg)
 {
@@ -350,6 +445,11 @@ static void emit_fetch(Sb* b, const GfxVsKey* k, int reg)
     if (!e->used)
     {
         sb_printf(b, "  float4 v%d = float4(0, 0, 0, 1);\n", reg);
+        return;
+    }
+    if (WGSL(b))
+    {
+        wgsl_fetch(b, e, reg);
         return;
     }
     if (b->glsl)
@@ -434,7 +534,7 @@ void gfx_msl_vs_return(Sb* b, const GfxVsKey* k)
         sb_printf(b, b->glsl ? "  gl_Position = float4(0, 0, 0, 1);\n  gl_PointSize = 1.0;\n}\n" : "}\n");
         return;
     }
-    if (b->glsl)
+    if (GLSL(b))
     {
         sb_printf(b, "  gl_Position = o.pos;\n  gl_PointSize = o.psize;\n");
         glsl_copy_varyings(b, k, "vo", "o");
@@ -446,6 +546,12 @@ void gfx_msl_vs_return(Sb* b, const GfxVsKey* k)
 
 static void emit_vs_signature(Sb* b, const GfxVsKey* k)
 {
+    if (WGSL(b)) /* the streams and the shadow matrix are module bindings (gfx_wgsl_generate) */
+    {
+        sb_printf(b, "@vertex fn vs_main(@builtin(vertex_index) vid: u32) -> VOut {\n  var o: VOut;\n"
+                     "  var vi: i32 = i32(vid) + u.vofs.x;\n");
+        return;
+    }
     if (b->glsl)
     {
         sb_printf(b, "void main() {\n  VOut o;\n");
@@ -521,20 +627,26 @@ static void emit_lighting(Sb* b, const GfxVsKey* k, int pixel, int which)
         int t = k->light_type[i];
         if ((which == 1 && t != 3) || (which == 2 && t == 3))
             continue;
-        sb_printf(b, b->glsl ? "  {\n    Light L = u.light[%d];\n" : "  {\n    constant Light& L = u.light[%d];\n", i);
+        sb_printf(b, WGSL(b) ? "  {\n    let L = u.light[%d];\n" : b->glsl ? "  {\n    Light L = u.light[%d];\n" : "  {\n    constant Light& L = u.light[%d];\n", i);
         if (t == 3)
             sb_printf(b, "    float3 l = L.dir.xyz;\n    float a = 1.0;\n");
         else
         {
-            sb_printf(b,
-                "    float3 lv = L.pos.xyz - pe;\n    float d = length(lv);\n    float3 l = lv / max(d, 1e-20);\n"
-                "    float a = d > L.pos.w ? 0.0 : 1.0 / max(L.att.x + L.att.y * d + L.att.z * d * d, 1e-20);\n");
+            sb_printf(b, "    float3 lv = L.pos.xyz - pe;\n    float d = length(lv);\n    float3 l = lv / max(d, 1e-20);\n");
+            if (WGSL(b))
+                sb_printf(b, "    float a = select(1.0 / max(L.att.x + L.att.y * d + L.att.z * d * d, 1e-20), 0.0, d > L.pos.w);\n");
+            else
+                sb_printf(b, "    float a = d > L.pos.w ? 0.0 : 1.0 / max(L.att.x + L.att.y * d + L.att.z * d * d, 1e-20);\n");
             /* per pixel, D3D's hard edge at the range is a ring, and its attenuation near the light (far
              * over 1, where no vertex ever was) a white spot - both flash as the game's lights flicker
              * and move: the last quarter of the range fades, and the light is at most its colour */
             if (pixel)
                 sb_printf(b, "    a = min(a, 1.0) * saturate((L.pos.w - d) / max(0.25 * L.pos.w, 1e-6));\n");
-            if (t == 2)
+            if (t == 2 && WGSL(b))
+                sb_printf(b,
+                    "    float rho = dot(-l, L.dir.xyz);\n"
+                    "    a *= select(select(pow(saturate((rho - L.spot.y) / (L.spot.x - L.spot.y)), L.dir.w), 0.0, rho <= L.spot.y), 1.0, rho > L.spot.x);\n");
+            else if (t == 2)
                 sb_printf(b,
                     "    float rho = dot(-l, L.dir.xyz);\n"
                     "    a *= rho > L.spot.x ? 1.0 : rho <= L.spot.y ? 0.0 : pow(saturate((rho - L.spot.y) / (L.spot.x - L.spot.y)), L.dir.w);\n");
@@ -559,8 +671,8 @@ static void emit_ff_vs(Sb* b, const GfxVsKey* k)
     gfx_msl_vs_begin(b, k);
     if (k->rhw)
     {
+        sb_printf(b, WGSL(b) ? "  float w = select(1.0, 1.0 / v0.w, v0.w != 0.0);\n" : "  float w = v0.w != 0.0 ? 1.0 / v0.w : 1.0;\n");
         sb_printf(b,
-            "  float w = v0.w != 0.0 ? 1.0 / v0.w : 1.0;\n"
             "  float2 ndc = float2((v0.x - u.vp.x) / u.vp.z * 2.0 - 1.0, 1.0 - (v0.y - u.vp.y) / u.vp.w * 2.0);\n"
             "  o.pos = float4(ndc * w, v0.z * w, w);\n"
             "  float3 pe = float3(0, 0, w);\n"
@@ -725,7 +837,9 @@ static void op_expr(char* out, size_t n, int op, const char* a1, const char* a2,
 /* a texture stage sampled at coord (the stage's own texture and sampler) */
 void gfx_msl_sample(char* out, size_t n, const Sb* b, unsigned stage, const char* coord)
 {
-    if (b->glsl)
+    if (WGSL(b))
+        snprintf(out, n, "textureSample(tx%u, sp%u, %s)", stage, stage, coord);
+    else if (b->glsl)
         snprintf(out, n, "texture(tx%u, %s)", stage, coord);
     else
         snprintf(out, n, "tx%u.sample(sp%u, %s)", stage, stage, coord);
@@ -734,7 +848,7 @@ void gfx_msl_sample(char* out, size_t n, const Sb* b, unsigned stage, const char
 /* per component: x op y ? bv : a (op one of < <= > >= == !=) */
 void gfx_msl_select(char* out, size_t n, const Sb* b, const char* a, const char* bv, const char* x, const char* op, const char* y)
 {
-    if (!b->glsl)
+    if (!GLSL(b)) /* MSL's select and WGSL's take the same arguments */
     {
         snprintf(out, n, "select(%s, %s, %s %s %s)", a, bv, x, op, y);
         return;
@@ -747,7 +861,9 @@ void gfx_msl_select(char* out, size_t n, const Sb* b, const char* a, const char*
 static void emit_fs_signature(Sb* b, const GfxFsKey* k, const GfxVsKey* vk)
 {
     int pix = pixel_lit(vk);
-    if (b->glsl) /* the textures are globals (generate); the inputs are copied into I, which `in.` becomes */
+    if (WGSL(b)) /* the textures are module bindings; the inputs are copied into I, which `in.` becomes */
+        sb_printf(b, "@fragment fn fs_main(vin: VOut) -> @location(0) vec4f {\n  var I = vin;\n");
+    else if (b->glsl) /* the textures are globals (generate); the inputs are copied into I, which `in.` becomes */
     {
         sb_printf(b, "void main() {\n  VOut I;\n  I.pos = gl_FragCoord;\n  I.psize = 1.0;\n");
         glsl_copy_varyings(b, vk, "I", "vi");
@@ -796,11 +912,14 @@ static void emit_fs_tail(Sb* b, const GfxFsKey* k, const char* col)
             sb_printf(b, "  float f;\n  float fd = abs(in.ez);\n");
             emit_fog_factor(b, "f", k->fog, "fd");
         }
-        sb_printf(b, "  %s.rgb = mix(u.fogcolor.rgb, %s.rgb, f);\n", col, col);
+        if (WGSL(b))
+            sb_printf(b, "  %s = float4(mix(u.fogcolor.rgb, %s.rgb, f), %s.a);\n", col, col, col);
+        else
+            sb_printf(b, "  %s.rgb = mix(u.fogcolor.rgb, %s.rgb, f);\n", col, col);
     }
-    if (k->water)
+    if (k->water && !WGSL(b))
         emit_water(b, k, col);
-    sb_printf(b, b->glsl ? "  oc = %s;\n}\n" : "  return %s;\n}\n", col);
+    sb_printf(b, GLSL(b) ? "  oc = %s;\n}\n" : "  return %s;\n}\n", col);
 }
 
 static void emit_ff_fs(Sb* b, const GfxFsKey* k, const GfxVsKey* vk)
@@ -848,7 +967,7 @@ static void emit_ff_fs(Sb* b, const GfxFsKey* k, const GfxVsKey* vk)
             sb_printf(b, "  { float3 c = saturate(%s.rgb); %s = float4(c, %s.a); }\n", ce, dst, i ? "cur" : "in.d");
     }
     if (k->specular_add)
-        sb_printf(b, "  cur.rgb = saturate(cur.rgb + in.s.rgb);\n");
+        sb_printf(b, WGSL(b) ? "  cur = float4(saturate(cur.rgb + in.s.rgb), cur.a);\n" : "  cur.rgb = saturate(cur.rgb + in.s.rgb);\n");
     emit_fs_tail(b, k, "cur");
 }
 
@@ -862,6 +981,201 @@ static void glsl_rename_in(char* s)
             continue;
         memcpy(p, "I. ", 3); /* "I. d" reads as I.d */
     }
+}
+
+/* --- WGSL: C-like statements into WGSL's ---------------------------------------------------------------
+ * The emitters write declarations as C does (`float4 a = x, b = y;`, `float f;`), lists of assignments
+ * joined by commas, and ifs whose body is one statement. Split into statements at the top level
+ * (outside parentheses), each becomes WGSL's: a `var` per declarator, one statement per assignment,
+ * the if's body in braces; discard_fragment() is discard and psize (WGSL has no point size) goes. */
+static const char* const WGSL_TYPES[][2] = { { "float4x4", "mat4x4f" }, { "float4", "vec4f" }, { "float3", "vec3f" },
+    { "float2", "vec2f" }, { "float", "f32" }, { "int", "i32" }, { "uint", "u32" } };
+
+static const char* wgsl_decl_type(const char* st, size_t* len)
+{
+    for (size_t i = 0; i < sizeof WGSL_TYPES / sizeof *WGSL_TYPES; ++i)
+    {
+        size_t n = strlen(WGSL_TYPES[i][0]);
+        if (!strncmp(st, WGSL_TYPES[i][0], n) && st[n] == ' ')
+        {
+            *len = n;
+            return WGSL_TYPES[i][1];
+        }
+    }
+    return NULL;
+}
+
+/* the top-level comma-separated parts of s (n chars) into parts; returns how many */
+static int wgsl_split_commas(const char* s, size_t n, const char** at, size_t* len, int max)
+{
+    int k = 0, depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= n && k < max; ++i)
+    {
+        char c = i < n ? s[i] : ',';
+        if (c == '(' || c == '[')
+            depth++;
+        else if (c == ')' || c == ']')
+            depth--;
+        else if (c == ',' && depth == 0)
+        {
+            at[k] = s + start, len[k] = i - start, k++;
+            start = i + 1;
+        }
+    }
+    return k;
+}
+
+static void wgsl_statement(Sb* o, const char* s, size_t n)
+{
+    while (n && (*s == ' ' || *s == '\n'))
+        s++, n--;
+    while (n && (s[n - 1] == ' ' || s[n - 1] == '\n'))
+        n--;
+    if (!n)
+        return;
+    if (strstr(s, "psize") && (size_t)(strstr(s, "psize") - s) < n)
+        return;
+    if (n >= 18 && !strncmp(s, "discard_fragment()", 18))
+    {
+        sb_printf(o, "  discard;\n");
+        return;
+    }
+    if (n > 3 && !strncmp(s, "if ", 3) && s[3] == '(') /* if (cond) statement */
+    {
+        int depth = 0;
+        size_t i = 3;
+        for (; i < n; ++i)
+        {
+            if (s[i] == '(')
+                depth++;
+            else if (s[i] == ')' && --depth == 0)
+                break;
+        }
+        sb_printf(o, "  if %.*s {\n", (int)(i + 1 - 3), s + 3);
+        wgsl_statement(o, s + i + 1, n - i - 1);
+        sb_printf(o, "  }\n");
+        return;
+    }
+    const char* at[24];
+    size_t len[24];
+    size_t tl = 0;
+    const char* type = wgsl_decl_type(s, &tl);
+    if (type)
+    {
+        int k = wgsl_split_commas(s + tl + 1, n - tl - 1, at, len, 24);
+        for (int i = 0; i < k; ++i)
+        {
+            const char* d = at[i];
+            size_t dn = len[i];
+            while (dn && *d == ' ')
+                d++, dn--;
+            const char* eq = memchr(d, '=', dn);
+            if (eq)
+            {
+                size_t nl = (size_t)(eq - d);
+                while (nl && d[nl - 1] == ' ')
+                    nl--;
+                sb_printf(o, "  var %.*s: %s = %.*s;\n", (int)nl, d, type, (int)(dn - (size_t)(eq + 1 - d)), eq + 1);
+            }
+            else
+                sb_printf(o, "  var %.*s: %s;\n", (int)dn, d, type);
+        }
+        return;
+    }
+    int k = wgsl_split_commas(s, n, at, len, 24);
+    for (int i = 0; i < k; ++i)
+    {
+        const char* d = at[i];
+        size_t dn = len[i];
+        while (dn && *d == ' ')
+            d++, dn--;
+        sb_printf(o, "  %.*s;\n", (int)dn, d);
+    }
+}
+
+/* the body (everything after the prelude) as WGSL statements */
+static char* wgsl_fix(const char* s)
+{
+    Sb o = { 0 };
+    int depth = 0;
+    size_t start = 0, n = strlen(s);
+    for (size_t i = 0; i < n; ++i)
+    {
+        char c = s[i];
+        if (c == '(' || c == '[')
+            depth++;
+        else if (c == ')' || c == ']')
+            depth--;
+        else if (depth == 0 && (c == ';' || c == '{' || c == '}'))
+        {
+            if (c == ';')
+                wgsl_statement(&o, s + start, i - start);
+            else
+            {
+                /* a block's head (fn ..., if (...), struct, or a bare block) or its end: as written */
+                const char* h = s + start;
+                size_t hn = i - start;
+                while (hn && (*h == ' ' || *h == '\n'))
+                    h++, hn--;
+                while (hn && (h[hn - 1] == ' ' || h[hn - 1] == '\n'))
+                    hn--;
+                if (hn > 3 && !strncmp(h, "if ", 3) && h[3] == '(')
+                    sb_printf(&o, "  if %.*s ", (int)(hn - 3), h + 3);
+                else if (hn)
+                    sb_printf(&o, "%.*s ", (int)hn, h);
+                sb_printf(&o, "%c\n", c);
+            }
+            start = i + 1;
+        }
+    }
+    return o.s;
+}
+
+char* gfx_wgsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens)
+{
+    Sb b = { 0 };
+    b.glsl = 2;
+    emit_vout(&b, vk);
+    sb_printf(&b, "struct SB { w: array<u32>, };\n");
+    for (int s = 0; s < GFX_NSTREAMS; ++s)
+        sb_printf(&b, "@group(0) @binding(%d) var<storage, read> s%d: SB;\n", 1 + s, s);
+    if (vk->shadow)
+        sb_printf(&b, "@group(0) @binding(5) var<uniform> sm: mat4x4f;\n");
+    for (int i = 0; i < 8; ++i)
+    {
+        int t = fk->prog || i < fk->nstages ? fk->st[i].tex : 0;
+        if (t)
+            sb_printf(&b, "@group(0) @binding(%d) var tx%d: texture_%s<f32>;\n@group(0) @binding(%d) var sp%d: sampler;\n", 8 + i, i,
+                t == 2 ? "cube" : "2d", 24 + i, i);
+    }
+    size_t decls = b.len; /* the module's declarations, as written; the functions go through wgsl_fix */
+    if (vk->prog)
+    {
+        if (!gfx_msl_vs1(&b, vk, vs_tokens))
+            goto fail;
+    }
+    else
+        emit_ff_vs(&b, vk);
+    if (fk->prog)
+    {
+        emit_fs_signature(&b, fk, vk);
+        if (!gfx_msl_ps1(&b, fk, ps_tokens))
+            goto fail;
+        emit_fs_tail(&b, fk, "r0");
+    }
+    else
+        emit_ff_fs(&b, fk, vk);
+    glsl_rename_in(b.s + decls);
+    char* body = wgsl_fix(b.s + decls);
+    Sb out = { 0 };
+    sb_printf(&out, "%s%.*s%s", WGSL_PRELUDE, (int)decls, b.s, body ? body : "");
+    free(body);
+    free(b.s);
+    return out.s;
+fail:
+    free(b.s);
+    return NULL;
 }
 
 char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens)
