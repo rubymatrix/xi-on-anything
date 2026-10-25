@@ -27,6 +27,9 @@ sign-in screen's Settings.
 Experimental: an [Android build](docs/android.md), tested on a Pixel Fold. Desktop defaults are
 unchanged.
 
+**Step-by-step guides for every platform** (macOS, Linux, Steam Deck, Windows, web browser, iOS,
+Xbox One and PS4) are in [docs/platforms](docs/platforms/README.md).
+
 ## What's better than the original
 
 - **A Modern page in the game's own Config menu**, next to Gameplay, Windows and the rest:
