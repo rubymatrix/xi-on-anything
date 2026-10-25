@@ -827,11 +827,11 @@ static void chat_keyboard(void)
     if (want)
     {
         /* the chat line, at the foot of the game, as the text input area: while iOS's keyboard is up,
-         * SDL slides the view up just far enough to keep it above the keyboard */
+         * SDL slides the view up just far enough to keep it above the keyboard, with 12 points to spare */
         SDL_Rect safe, line;
         if (SDL_GetWindowSafeArea(win, &safe))
         {
-            line = (SDL_Rect){ safe.x, safe.y + safe.h - 32, safe.w, 32 };
+            line = (SDL_Rect){ safe.x, safe.y + safe.h - 32, safe.w, 32 + 12 };
             SDL_SetTextInputArea(win, &line, 0);
         }
         SDL_PropertiesID p = SDL_CreateProperties();
