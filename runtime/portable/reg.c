@@ -583,6 +583,13 @@ void reg_set_string(const char* path, const char* name, const char* value)
         set_value(k, name, REG_SZ, value, (uint32_t)strlen(value) + 1);
 }
 
+void reg_set_dword(const char* path, const char* name, uint32_t v)
+{
+    RegKey* k = key_from_header(path, 1);
+    if (k)
+        set_value(k, name, REG_DWORD, &v, 4);
+}
+
 int reg_get_dword(const char* path, const char* name, uint32_t* out)
 {
     RegKey* k = key_from_header(path, 0);

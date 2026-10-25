@@ -35,7 +35,8 @@ MIN_IOS = '17.0'
 APP_NAME = 'XI on Anything'
 APP_ID = 'com.rubymatrix.xionanything'
 LIBS = ('sdl3-ios', 'mbedtls', 'luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
-FRAMEWORKS = ['Metal', 'QuartzCore', 'Foundation', 'Security']  # Security: the sign-in's saved passwords
+# Security: the sign-in's saved passwords; CoreText: the touch controls' labels (gfx_metal.m)
+FRAMEWORKS = ['Metal', 'QuartzCore', 'Foundation', 'Security', 'CoreText', 'CoreGraphics']
 ENTITLEMENTS = {
     'com.apple.developer.kernel.extended-virtual-addressing': True,
     'com.apple.developer.kernel.increased-memory-limit': True,
@@ -183,7 +184,7 @@ def host(t):
     sources = build_posix.PORTABLE + build_posix.HOST_SOURCES + build_posix.ADDON_SOURCES
     objs += t.compile([s for s in sources if s != 'host/host64.c'], 'host', ours)
     objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
-    objs += t.compile(['host/ios_main.c'], 'entry', ours)
+    objs += t.compile(['host/ios_main.c', 'host/ios_touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
     exe = os.path.join(t.out, 'host64')
     fw = sum((['-framework', f] for f in FRAMEWORKS), [])
     run(t.cc + ['-o', exe] + objs + archives + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',

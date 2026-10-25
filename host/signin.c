@@ -1405,6 +1405,17 @@ static void hover(Ui* u, int i, int o)
 }
 
 /* the left button, or the pointer moving; x, y in the window's pixels */
+/* Text input on: names and passwords, with no capital first letter and no corrections, which iOS's
+ * keyboard makes */
+static void start_typing(SDL_Window* win)
+{
+    SDL_PropertiesID tp = SDL_CreateProperties();
+    SDL_SetNumberProperty(tp, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
+    SDL_SetBooleanProperty(tp, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
+    SDL_StartTextInputWithProperties(win, tp);
+    SDL_DestroyProperties(tp);
+}
+
 static void mouse(Ui* u, const SDL_Event* e, float d)
 {
     int o;
@@ -1431,6 +1442,17 @@ static void mouse(Ui* u, const SDL_Event* e, float d)
     {
         int i = hit(u, e->button.x * d, e->button.y * d, &o);
         u->dragging = 0, u->down_w = -1;
+#ifdef FFXI_IOS
+        {
+            /* iOS's keyboard: back with a tap on a field, away with a tap anywhere else */
+            SDL_Window* win = SDL_GetWindowFromID(e->button.windowID);
+            int on_field = i >= 0 && u->w[i].text;
+            if (win && on_field && !SDL_TextInputActive(win))
+                start_typing(win);
+            else if (win && !on_field && SDL_TextInputActive(win))
+                SDL_StopTextInput(win);
+        }
+#endif
         if (i < 0)
             return;
         Widget* w = &u->w[i];
@@ -1585,8 +1607,10 @@ static void key_act(Ui* u, const SDL_KeyboardEvent* e)
     {
         if (u->screen == SCREEN_SETTINGS)
             u->screen = SCREEN_SIGNIN, build(u), focus_on(u, 0), u->anim_at = SDL_GetTicks(), sound(u, SND_CANCEL);
+#ifndef FFXI_IOS /* an iOS app is never closed from inside it: there, nothing to go back to */
         else if (!busy())
             begin_close(u, 0), sound(u, SND_CANCEL);
+#endif
     }
     else if (k == SDLK_TAB || k == SDLK_DOWN || k == SDLK_UP)
     {
@@ -1816,12 +1840,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     /* start where there is something to type */
     build(u);
     focus_on(u, !c->user[0] ? 0 : !u->password[0] ? 1 : 3);
-    /* names and passwords: no capital first letter and no corrections, which iOS's keyboard makes */
-    SDL_PropertiesID tp = SDL_CreateProperties();
-    SDL_SetNumberProperty(tp, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
-    SDL_SetBooleanProperty(tp, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
-    SDL_StartTextInputWithProperties(win, tp);
-    SDL_DestroyProperties(tp);
+    start_typing(win);
     if (read_keychain)
     {
         SDL_SetAtomicInt(&g_keyread.state, 1);

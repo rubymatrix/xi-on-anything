@@ -43,7 +43,8 @@ LIBS = {
                        'AudioToolbox', 'AVFoundation', 'Foundation', 'GameController', 'Metal', 'QuartzCore'],
         'weak_frameworks': ['UniformTypeIdentifiers', 'CoreHaptics'],
     },
-    # the same release for iPhone (tools/build_ios.py): UIKit + Metal view, CoreAudio, GameController.
+    # the same release for iPhone (tools/build_ios.py): UIKit + Metal view, CoreAudio, GameController, and
+    # virtual joysticks (the touch controls' gamepad, host/ios_touch.c).
     # One tree serves the device and the simulator; TARGET_OS_SIMULATOR picks at compile time.
     'sdl3-ios': {
         'version': '3.4.16',
@@ -54,7 +55,7 @@ LIBS = {
                   '-DSDL_CAMERA=OFF', '-DSDL_GPU=OFF', '-DSDL_RENDER=OFF', '-DSDL_SENSOR=OFF', '-DSDL_DIALOG=OFF',
                   '-DSDL_TRAY=OFF', '-DSDL_OPENGL=OFF', '-DSDL_OPENGLES=OFF', '-DSDL_VULKAN=OFF',
                   '-DSDL_DISKAUDIO=OFF', '-DSDL_DUMMYAUDIO=OFF', '-DSDL_DUMMYVIDEO=OFF', '-DSDL_OFFSCREEN=OFF',
-                  '-DSDL_HIDAPI=OFF', '-DSDL_DEPS_SHARED=OFF', '-DCMAKE_SYSTEM_NAME=iOS',
+                  '-DSDL_HIDAPI=ON', '-DSDL_HIDAPI_JOYSTICK=OFF', '-DSDL_VIRTUAL_JOYSTICK=ON', '-DSDL_DEPS_SHARED=OFF', '-DCMAKE_SYSTEM_NAME=iOS',
                   '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DCMAKE_OSX_DEPLOYMENT_TARGET=17.0'],
         # the trial build's target (vendor() otherwise compiles for macOS)
         'trial': ['-target', 'arm64-apple-ios17.0', '-isysroot', 'iphoneos'],

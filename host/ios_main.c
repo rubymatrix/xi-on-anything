@@ -11,6 +11,7 @@
 #include <SDL3/SDL_main.h>
 
 int xi_host_main(int argc, char** argv);
+void ios_touch_init(void); /* ios_touch.c */
 
 #define MAX_ARGS 64
 
@@ -72,6 +73,7 @@ int main(int argc, char** argv)
     }
     if (!has_arg(n, args, "--game"))
         fprintf(stderr, "[ios] no game folder: copy \"FINAL FANTASY XI\" into the app's Documents (Files app)\n");
+    ios_touch_init();
     /* no Discord app to talk to on iOS */
     setenv("FFXI_DISCORD", "0", 0);
     args[n] = NULL;

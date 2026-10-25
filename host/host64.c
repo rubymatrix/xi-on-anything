@@ -109,6 +109,11 @@
 #include "geometry_guest.h"
 #include "watermark.h"
 #include "scene.h"
+#ifdef FFXI_IOS
+#include <SDL3/SDL.h>
+#include "display_fit.h"
+void ios_touch_frame(int in_game); /* ios_touch.c: the touch controls, each frame of the game */
+#endif
 #include "build.h" /* FFXI_VERSION */
 #if defined(FFXI_ANDROID_VULKAN)
 #include "benchmark.h"
@@ -752,6 +757,55 @@ static void shadow_focus(void)
     }
 }
 
+#ifdef FFXI_IOS
+static void* g_signin_window; /* the window the game takes over: display_fit_start */
+
+/* a tap on the screen while the player types in the chat line: the keyboard away, or back */
+static SDL_AtomicInt g_chat_taps;
+
+static bool SDLCALL chat_tap(void* unused, SDL_Event* e)
+{
+    (void)unused;
+    if (e->type == SDL_EVENT_FINGER_UP) /* the keyboard's own keys are not the game's fingers */
+        SDL_AddAtomicInt(&g_chat_taps, 1);
+    return true;
+}
+
+/* iOS's keyboard while the game's chat line is typed in (with a hardware keyboard none shows); off the
+ * rest of the time, when it would cover the game. A tap on the game puts it away, the next brings it
+ * back; iPad's key that hides it works too, and the next time the line opens it shows again. */
+static void chat_keyboard(void)
+{
+    static int typing, want, set, watching;
+    SDL_Window* win = (SDL_Window*)user32_sdl_window(d3d8_window());
+    if (!win)
+        return;
+    if (!watching)
+        watching = SDL_AddEventWatch(chat_tap, NULL);
+    int taps = SDL_SetAtomicInt(&g_chat_taps, 0);
+    int active = SDL_TextInputActive(win) ? 1 : 0;
+    if (active != set) /* put away or brought back without us (iPad's key, Return) */
+        want = set = active;
+    int now = xi_chat_typing();
+    if (now != typing)
+        typing = now, want = now; /* the line opened (shown) or closed (away) */
+    else if (typing && (taps & 1))
+        want = !active;
+    if (want == active)
+        return;
+    set = want;
+    if (want)
+    {
+        SDL_PropertiesID p = SDL_CreateProperties();
+        SDL_SetBooleanProperty(p, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
+        SDL_StartTextInputWithProperties(win, p);
+        SDL_DestroyProperties(p);
+    }
+    else
+        SDL_StopTextInput(win);
+}
+#endif
+
 static void present_hook(void)
 {
 #if defined(FFXI_ANDROID_VULKAN)
@@ -778,6 +832,11 @@ static void present_hook(void)
         addons_frame();
     discord_frame();
     watermark_frame();
+#ifdef FFXI_IOS
+    display_fit_frame();
+    chat_keyboard();
+    ios_touch_frame(1);
+#endif
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */
     extern int web_take_resize(int* w, int* h, int* menu_w, int* menu_h);
@@ -1147,6 +1206,9 @@ int main(int argc, char** argv)
         {
             game_server = sr.server;
             user32_adopt_window(sr.window);
+#ifdef FFXI_IOS
+            g_signin_window = sr.window;
+#endif
             if (!nfinals)
                 finals[nfinals++] = strdup(sr.settings_reg);
             /* its folder for host64's files and the game's saved settings, the bundled registry
@@ -1253,6 +1315,9 @@ int main(int argc, char** argv)
     reg_init(regs, nregs, overlay);
     for (unsigned i = 0; i < nfinals; ++i)
         reg_load_final(finals[i]);
+#ifdef FFXI_IOS
+    display_fit_start(g_signin_window); /* the game's size from the screen, whatever the file says */
+#endif
     {
         /* The install folders are where the game is now, whatever the imported registry says (it
          * comes from another machine or folder); the game checks them (FFXI-9001). Retail writes

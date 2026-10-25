@@ -265,6 +265,9 @@ static void scale_for(int ww, int wh)
 static int mouse(int msg, float px, float py, int delta)
 {
     int x = (int)(px * g_sx), y = (int)(py * g_sy);
+    float vx = px, vy = py;
+    if (user32_view_point(&vx, &vy)) /* presented into part of the window (iOS's safe area) */
+        x = (int)vx, y = (int)vy;
     int taken = xi_gui_mouse(msg, x, y, delta);
     XiEvent e;
     memset(&e, 0, sizeof e);

@@ -217,7 +217,8 @@ typedef struct GfxDraw
 } GfxDraw;
 
 /* The SDL_WindowFlags a window the back end draws into must be created with (SDL_WINDOW_VULKAN for
- * Vulkan; 0 for the others). */
+ * Vulkan; SDL_WINDOW_HIGH_PIXEL_DENSITY for Metal on iOS, drawn at the screen's pixels; 0 for the
+ * others). */
 uint64_t gfx_window_flags(void);
 /* Brings the device up on an SDL window. 0 on failure (nothing is drawn, nothing fails). */
 int gfx_init(void* sdl_window, int vsync);
@@ -519,6 +520,35 @@ int gfx_rt_supported(void);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);
+/* Metal only (iOS: the screen's safe area, host/display_fit.c): the rectangle of the drawable, in
+ * its pixels, the back buffer is presented into, the rest black; w 0 for all of it. */
+void gfx_set_present_rect(int x, int y, int w, int h);
+/* Metal only (iOS, host/ios_touch.c): the touch controls drawn over every frame, in the drawable's
+ * pixels; copied, so the caller's array may change after. n 0 for none. */
+enum
+{
+    GFX_TOUCH_BACK,   /* round, a chevron pointing left */
+    GFX_TOUCH_BUTTON, /* round, a symbol (sym) or a label */
+    GFX_TOUCH_PILL,   /* rounded, hw by hh, a label */
+    GFX_TOUCH_RING,   /* a stick's base */
+    GFX_TOUCH_KNOB,   /* a stick's knob */
+};
+enum
+{
+    GFX_SYM_NONE,
+    GFX_SYM_CROSS, GFX_SYM_CIRCLE, GFX_SYM_SQUARE, GFX_SYM_TRIANGLE, /* the face buttons */
+    GFX_SYM_UP, GFX_SYM_DOWN, GFX_SYM_LEFT, GFX_SYM_RIGHT,           /* the D-pad's */
+    GFX_SYM_PAD,                                                     /* a gamepad: the controls' toggle */
+};
+typedef struct GfxTouchShape
+{
+    float x, y, hw, hh; /* the centre, and half the width and height (round: hw) */
+    int kind, sym, pressed;
+    float alpha;        /* 0..1: the whole shape's */
+    char label[8];      /* PILL and BUTTON without a symbol */
+} GfxTouchShape;
+#define GFX_TOUCH_MAX 24
+void gfx_set_touch_shapes(const GfxTouchShape* shapes, int n);
 /* Waits for the GPU (tests). */
 void gfx_finish(void);
 /* Tests: build each pipeline in place, before its first draw, and keep no pipeline cache file. */
