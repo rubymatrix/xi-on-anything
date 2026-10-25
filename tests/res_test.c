@@ -157,6 +157,13 @@ static const char* const g_script =
     "expect('to_utf8 element icon', res.to_utf8('\\239\\031+10') == 'Fire+10')\n"
     "expect('to_utf8 FFXI latin', res.to_utf8('Fu\\133Rs') == 'Fu\\226\\128\\153s')\n"
     "expect('to_utf8 auto-translate', res.to_utf8('\\253\\002\\002\\001\\001\\253') == '{Nice to meet you.}')\n"
+    "-- a Japanese sender's token (lang byte 01) reads in the reader's language\n"
+    "expect('to_utf8 auto-translate from ja', res.to_utf8('\\253\\002\\001\\001\\001\\253') == '{Nice to meet you.}')\n"
+    "expect('auto-translate default en', res.auto_translate(2, 0, 1, 1, true) == 'Nice to meet you.')\n"
+    "res.set_default_lang(1)\n"
+    "expect('auto-translate default ja', res.auto_translate(2, 0, 1, 1, true) == res.auto_translate(2, 1, 1, 1, true))\n"
+    "expect('to_utf8 auto-translate en to ja', res.to_utf8('\\253\\002\\002\\001\\001\\253') == '{' .. res.auto_translate(2, 1, 1, 1, true) .. '}')\n"
+    "res.set_default_lang(2)\n"
     "return failed\n";
 
 int main(int argc, char** argv)

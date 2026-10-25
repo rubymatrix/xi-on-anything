@@ -73,9 +73,11 @@ The resulting `build/host64` runs on the host if its SDL3 and glibc are recent e
 ## Signing in
 
 The sign-in screen comes first unless `--user` or `--session` is given: username, password and
-one-time code, with the server in its **Settings**. Linux has no password store yet
-(`host/keychain.c` keeps passwords only in the macOS Keychain), so "remember password" and
-`--trust on` keep nothing here: you type the password each time, or give it in `FFXI_PASSWORD`.
+one-time code, with the server in its **Settings**. "Remember password" and `--trust on` keep
+their secrets in the desktop's Secret Service (GNOME Keyring, KWallet, KeePassXC), through
+libsecret (`libsecret-1.so.0`, loaded when needed; `secret-tool search service "FINAL FANTASY XI
+sign-in"` lists them). Without libsecret or a running Secret Service nothing is kept, and the
+Settings screen says so: you type the password each time, or give it in `FFXI_PASSWORD`.
 
 ## Files
 

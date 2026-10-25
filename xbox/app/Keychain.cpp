@@ -59,3 +59,8 @@ extern "C" void keychain_delete(const char* key)
     {
     }
 }
+
+extern "C" int keychain_available(void)
+{
+    return 1;
+}

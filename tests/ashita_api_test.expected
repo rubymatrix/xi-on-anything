@@ -48,6 +48,14 @@
 [harness] key 3b down
 [harness] key 3b up
 [harness] key 3c down (blocked)
+[harness] key 02 down
+[harness] key 02 up
+[harness] key 03 down
+[harness] key 03 up
+[harness] key 04 down
+[harness] key 04 up
+[harness] key 05 down
+[harness] key 05 up
 [harness] mouse 201
 [chat 1] ashtest: packet_in 00A size=8 chunk=8 injected=false
 [chat 1] ashtest: packet_in 0AB size=8 chunk=8 injected=false
@@ -59,6 +67,22 @@
 [chat 1] ashtest: key_data 3B down=false
 [chat 1] ashtest: key wparam=71 up=false
 [chat 1] ashtest: key_data 3C down=true
+[chat 1] ashtest: key_data 2 down=true
+[chat 1] ashtest: key_data 2 down=false
+[chat 1] ashtest: key_data 3 down=true
+[chat 1] ashtest: key_data 3 down=false
+[chat 1] ashtest: key wparam=33 up=false
+[chat 1] ashtest: key_data 4 down=true
+[chat 1] ashtest: key wparam=33 up=true
+[chat 1] ashtest: key_data 4 down=false
+[chat 1] ashtest: key wparam=34 up=false
+[chat 1] ashtest: key_data 5 down=true
+[chat 1] ashtest: key wparam=34 up=true
+[chat 1] ashtest: key_data 5 down=false
+[chat 207]   ^F1 -> /echo bound
+[chat 207]   5 -> /echo five
+[chat 207]   %^F1 -> /echo bound
+[chat 207]   %5 -> /echo five
 [chat 1] ashtest: mouse 201 at 12,34
 [chat 1] ashtest: plugin_event hello size=7 data=payload
 [chat 1] ashtest: unload after some presents

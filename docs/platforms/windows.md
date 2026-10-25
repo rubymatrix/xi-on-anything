@@ -64,8 +64,8 @@ build\host64.exe --game "C:\Program Files (x86)\PlayOnline\SquareEnix\FINAL FANT
 
 The sign-in screen comes first (username, password, one-time code; the server in its Settings). To
 skip it: `--user <account>` with the password in `FFXI_PASSWORD` (`set FFXI_PASSWORD=...`), so it
-stays out of your shell history. Windows has no password store in host64 yet, so "remember
-password" and `--trust on` keep nothing.
+stays out of your shell history. "Remember password" and `--trust on` keep their secrets in the
+Windows Credential Manager (generic credentials named `FINAL FANTASY XI sign-in:...`).
 
 To start it with a double-click, make a shortcut to `host64.exe` and put the options in its
 **Target** field.
