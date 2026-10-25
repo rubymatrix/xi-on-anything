@@ -18,6 +18,10 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <SDL3/SDL.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <CoreText/CoreText.h> /* the touch controls' labels */
+#endif
 #include <limits.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -79,6 +83,7 @@ struct GfxTex
     int type, use, conv;
     uint32_t fmt, w, h, levels;
     uint32_t block;  /* bytes per 4x4 block for the compressed formats, else 0 */
+    uint32_t bc;     /* a DXT format kept decoded, as BGRA8, on a GPU without BC (iPhones), else 0 */
     uint32_t texel;  /* bytes per texel in Metal's layout */
     uint64_t used;   /* the last frame serial that referenced it */
     int has_stencil, x8;
@@ -112,6 +117,34 @@ static id<MTLDevice> g_dev;
 static id<MTLCommandQueue> g_queue;
 static CAMetalLayer* g_layer;
 static SDL_MetalView g_view;
+static int g_bc; /* the GPU samples BC (DXT) textures: every Mac; on iOS, M-series iPads */
+static struct
+{
+    int x, y, w, h;
+} g_present_rect; /* gfx_set_present_rect: w 0 for the whole drawable */
+static GfxTouchShape g_touch[GFX_TOUCH_MAX]; /* gfx_set_touch_shapes: what is drawn over the frame */
+static int g_ntouch;
+static pthread_mutex_t g_touch_lock = PTHREAD_MUTEX_INITIALIZER; /* set from the sign-in's thread or the game's */
+static id<MTLRenderPipelineState> g_touch_pipe;
+static struct
+{
+    uint8_t* rgba; /* gfx_set_wallpaper's, until its texture is made on the present's thread */
+    int w, h;
+    id<MTLTexture> tex;
+    pthread_mutex_t lock;
+} g_wall = { .lock = PTHREAD_MUTEX_INITIALIZER };
+static id<MTLRenderPipelineState> g_wall_pipe;
+
+/* Whether a depth format carries stencil. iOS has no 24-bit depth. */
+static int format_has_stencil(MTLPixelFormat df)
+{
+#if TARGET_OS_OSX
+    if (df == MTLPixelFormatDepth24Unorm_Stencil8)
+        return 1;
+#endif
+    return df == MTLPixelFormatDepth32Float_Stencil8 || df == MTLPixelFormatX32_Stencil8;
+}
+
 static SDL_Window* g_window;
 static id<MTLCommandBuffer> g_cmd;
 static id<MTLRenderCommandEncoder> g_enc;
@@ -453,6 +486,73 @@ static MTLPixelFormat pixel_format(uint32_t fmt, int use, int* conv, uint32_t* b
     return MTLPixelFormatBGRA8Unorm;
 }
 
+/* One DXT1-5 block into 16 pixels, BGRA8 (as gfx_vulkan.cpp's decode_block). */
+static uint32_t expand5(uint32_t v) { return (v << 3) | (v >> 2); }
+static uint32_t expand6(uint32_t v) { return (v << 2) | (v >> 4); }
+static uint32_t color565(uint16_t p) { return 0xff000000u | expand5(p >> 11) << 16 | expand6((p >> 5) & 63) << 8 | expand5(p & 31); }
+
+static void decode_dxt_block(const uint8_t* data, uint32_t fmt, uint32_t px[16])
+{
+    int dxt1 = fmt == FOURCC('D', 'X', 'T', '1');
+    int explicit_alpha = fmt == FOURCC('D', 'X', 'T', '2') || fmt == FOURCC('D', 'X', 'T', '3');
+    int interp_alpha = fmt == FOURCC('D', 'X', 'T', '4') || fmt == FOURCC('D', 'X', 'T', '5');
+    const uint8_t* c = data + (dxt1 ? 0 : 8);
+    uint16_t c0 = (uint16_t)(c[0] | c[1] << 8), c1 = (uint16_t)(c[2] | c[3] << 8);
+    uint32_t pal[4] = { color565(c0), color565(c1), 0, 0 };
+    int four = !dxt1 || c0 > c1;
+    for (unsigned shift = 0; shift < 24; shift += 8)
+    {
+        unsigned a = (pal[0] >> shift) & 255, b = (pal[1] >> shift) & 255;
+        pal[2] |= (four ? (2 * a + b) / 3 : (a + b) / 2) << shift;
+        if (four)
+            pal[3] |= ((a + 2 * b) / 3) << shift;
+    }
+    pal[2] |= 0xff000000u;
+    if (four)
+        pal[3] |= 0xff000000u;
+    uint32_t idx = (uint32_t)c[4] | (uint32_t)c[5] << 8 | (uint32_t)c[6] << 16 | (uint32_t)c[7] << 24;
+    uint8_t alpha[8] = { 0 };
+    uint64_t abits = 0;
+    if (interp_alpha)
+    {
+        alpha[0] = data[0], alpha[1] = data[1];
+        if (alpha[0] > alpha[1])
+            for (unsigned i = 2; i < 8; ++i)
+                alpha[i] = (uint8_t)(((8 - i) * alpha[0] + (i - 1) * alpha[1]) / 7);
+        else
+        {
+            for (unsigned i = 2; i < 6; ++i)
+                alpha[i] = (uint8_t)(((6 - i) * alpha[0] + (i - 1) * alpha[1]) / 5);
+            alpha[6] = 0, alpha[7] = 255;
+        }
+        for (unsigned i = 0; i < 6; ++i)
+            abits |= (uint64_t)data[2 + i] << (8 * i);
+    }
+    for (unsigned i = 0; i < 16; ++i)
+    {
+        px[i] = pal[(idx >> (2 * i)) & 3];
+        if (explicit_alpha)
+            px[i] = (px[i] & 0xffffffu) | (uint32_t)(((data[i / 2] >> ((i % 2) * 4)) & 15) * 17) << 24;
+        else if (interp_alpha)
+            px[i] = (px[i] & 0xffffffu) | (uint32_t)alpha[(abits >> (3 * i)) & 7] << 24;
+    }
+}
+
+/* A w x h region of DXT blocks (rows of blocks pitch bytes apart) into tightly packed BGRA8. */
+static void decode_dxt(uint32_t fmt, const uint8_t* src, uint32_t pitch, uint32_t w, uint32_t h, uint8_t* out)
+{
+    uint32_t block = fmt == FOURCC('D', 'X', 'T', '1') ? 8 : 16;
+    for (uint32_t by = 0; by < (h + 3) / 4; ++by)
+        for (uint32_t bx = 0; bx < (w + 3) / 4; ++bx)
+        {
+            uint32_t px[16];
+            decode_dxt_block(src + (size_t)by * pitch + (size_t)bx * block, fmt, px);
+            for (uint32_t yy = 0; yy < 4 && by * 4 + yy < h; ++yy)
+                for (uint32_t xx = 0; xx < 4 && bx * 4 + xx < w; ++xx)
+                    memcpy(out + ((size_t)(by * 4 + yy) * w + bx * 4 + xx) * 4, &px[yy * 4 + xx], 4);
+        }
+}
+
 static uint32_t d3d_bpp(uint32_t fmt)
 {
     switch (fmt)
@@ -560,6 +660,8 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
         int swizzled;
         MTLPixelFormat pf = pixel_format(fmt, use, &t->conv, &t->block, &t->texel, &sw, &swizzled);
         t->type = type, t->use = use, t->fmt = fmt, t->w = w ? w : 1, t->h = h ? h : 1, t->levels = levels ? levels : 1;
+        if (t->block && !g_bc)
+            t->bc = fmt, t->block = 0, t->texel = 4, pf = MTLPixelFormatBGRA8Unorm;
         t->has_stencil = pf == MTLPixelFormatDepth32Float_Stencil8;
         t->x8 = fmt == F_X8R8G8B8;
         MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
@@ -654,6 +756,19 @@ void gfx_tex_upload_rect(GfxTex* t, uint32_t face, uint32_t level, uint32_t x, u
             w = lw - x;
         if (y + h > lh)
             h = lh - y;
+        if (t->bc) /* blocks to BGRA8 first; then an upload like any other */
+        {
+            static uint8_t* decoded;
+            static size_t decoded_cap;
+            if ((size_t)w * h * 4 > decoded_cap)
+            {
+                free(decoded);
+                decoded_cap = (size_t)w * h * 4;
+                decoded = (uint8_t*)malloc(decoded_cap);
+            }
+            decode_dxt(t->bc, (const uint8_t*)src, pitch, w, h, decoded);
+            src = decoded, pitch = w * 4;
+        }
         uint32_t rows = t->block ? (h + 3) / 4 : h;
         uint32_t row_bytes = t->block ? ((w + 3) / 4) * t->block : w * t->texel;
         /* the bytes in Metal's layout: as given, or widened (16-bit formats) - into the ring when they go
@@ -750,7 +865,7 @@ static void queue_readback(GfxTex* t, uint32_t face, uint32_t level, uint32_t w,
 
 void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch)
 {
-    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block)
+    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block || t->bc)
         return;
     @autoreleasepool
     {
@@ -774,7 +889,7 @@ void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t 
  * another probe's pixels. */
 void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch)
 {
-    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block)
+    if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block || t->bc)
         return;
     @autoreleasepool
     {
@@ -1896,6 +2011,88 @@ static const char CLEAR_MSL[] =
     "    if ((FONT[ch * 7 + uint(gy)] >> (4 - gx)) & 1) return float4(1.0, 0.85, 0.2, 1.0);\n"
     "  }\n"
     "  return float4(0, 0, 0, 0.55);\n"
+    "}\n"
+    /* iOS's touch controls (gfx_set_touch_shapes), one quad each: a body of dark glass, lighter at the top,
+     * with a thin light rim and a soft shadow; on it a symbol drawn as distances (the face buttons'
+     * PlayStation shapes, the D-pad's arrows, Back's chevron) or a label from the atlas (the system
+     * font's, drawn on the CPU). The body fills 0.86 of the quad, the shadow the rest; every edge is
+     * smoothed over a pixel and a half. */
+    "struct TU { float4 rect; float4 cell; uint kind, sym, pressed; float alpha; };\n"
+    "struct TO { float4 pos [[position]]; };\n"
+    "vertex TO touch_vs(uint vid [[vertex_id]], constant TU& u [[buffer(0)]], constant float2& size [[buffer(1)]]) {\n"
+    "  float2 c = u.rect.xy + float2((vid & 1) ? u.rect.z : 0.0, (vid & 2) ? u.rect.w : 0.0);\n"
+    "  TO o; o.pos = float4(c.x / size.x * 2.0 - 1.0, 1.0 - c.y / size.y * 2.0, 0, 1); return o;\n"
+    "}\n"
+    "static float seg(float2 p, float2 a, float2 b) {\n"
+    "  float2 pa = p - a, ba = b - a; return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));\n"
+    "}\n"
+    "static float tri(float2 p, float r) {\n" /* an equilateral triangle, apex up (y up): inside < 0 */
+    "  const float k = sqrt(3.0); p.x = abs(p.x) - r; p.y = p.y + r / k;\n"
+    "  if (p.x + k * p.y > 0.0) p = float2(p.x - k * p.y, -k * p.x - p.y) / 2.0;\n"
+    "  p.x -= clamp(p.x, -2.0 * r, 0.0); return -length(p) * sign(p.y);\n"
+    "}\n"
+    "static float body_sd(uint kind, float2 d, float2 hf, float r) {\n" /* pixels from the body's edge */
+    "  if (kind == 2u) { float2 q = abs(d) - float2(max(hf.x * 0.86 - r, 0.0), 0.0); return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }\n"
+    "  return length(d) - r;\n"
+    "}\n"
+    "fragment float4 touch_fs(TO in [[stage_in]], constant TU& u [[buffer(0)]], texture2d<float> labels [[texture(0)]],\n"
+    "                         sampler s [[sampler(0)]]) {\n"
+    "  float2 hf = u.rect.zw * 0.5, c = u.rect.xy + hf, d = in.pos.xy - c;\n"
+    "  float r = min(hf.x, hf.y) * 0.86, sd = body_sd(u.kind, d, hf, r);\n"
+    "  float body = 1.0 - smoothstep(-1.5, 0.0, sd);\n"
+    "  float shadow = (1.0 - smoothstep(0.0, r * 0.2, body_sd(u.kind, d - float2(0.0, r * 0.06), hf, r))) * 0.3;\n"
+    "  float rim = body * (1.0 - smoothstep(0.5, 2.0, abs(sd + 1.25)));\n"
+    "  float2 p = d / r; float aa = 1.5 / r;\n"
+    "  float ink = 0.0; float3 inkc = float3(1.0);\n"
+    "  if (u.kind == 0u) {\n"
+    "    float2 q = float2(p.x + 0.06, abs(p.y));\n"
+    "    ink = 1.0 - smoothstep(0.065 - aa, 0.065 + aa, seg(q, float2(-0.2, 0.0), float2(0.14, 0.34)));\n"
+    "  } else if (u.sym != 0u) {\n"
+    "    float g;\n"
+    "    if (u.sym == 1u) { g = min(seg(p, float2(-0.32, -0.32), float2(0.32, 0.32)), seg(p, float2(-0.32, 0.32), float2(0.32, -0.32))) - 0.075; inkc = float3(0.49, 0.70, 0.95); }\n"
+    "    else if (u.sym == 2u) { g = abs(length(p) - 0.34) - 0.075; inkc = float3(1.0, 0.45, 0.45); }\n"
+    "    else if (u.sym == 3u) { g = abs(max(abs(p.x), abs(p.y)) - 0.29) - 0.07; inkc = float3(0.93, 0.62, 0.86); }\n"
+    "    else if (u.sym == 4u) { g = abs(tri(float2(p.x, -p.y - 0.06), 0.36)) - 0.07; inkc = float3(0.30, 0.90, 0.66); }\n"
+    "    else if (u.sym == 9u) {\n" /* a gamepad's outline, filled: body and grips, the D-pad and buttons cut out */
+    "      float2 b = abs(p - float2(0.0, -0.02)) - float2(0.30, 0.10);\n"
+    "      float body = min(length(max(b, 0.0)) + min(max(b.x, b.y), 0.0) - 0.12, length(float2(abs(p.x) - 0.33, p.y - 0.12)) - 0.17);\n"
+    "      float2 dp = abs(p - float2(-0.27, -0.02));\n"
+    "      float plus = min(max(dp.x - 0.10, dp.y - 0.032), max(dp.x - 0.032, dp.y - 0.10));\n"
+    "      float dots = min(length(p - float2(0.24, -0.07)), length(p - float2(0.33, 0.02))) - 0.045;\n"
+    "      g = max(body, -min(plus, dots));\n"
+    "    }\n"
+    "    else if (u.sym == 10u || u.sym == 11u) {\n" /* a padlock: body, shackle (open: lifted, to the right) */
+    "      float2 b = abs(p - float2(0.0, 0.14)) - float2(0.28, 0.2);\n"
+    "      float body = length(max(b, 0.0)) + min(max(b.x, b.y), 0.0) - 0.05;\n"
+    "      float2 q = p - (u.sym == 10u ? float2(0.0, -0.1) : float2(0.12, -0.22));\n"
+    "      float arc = q.y < 0.0 ? abs(length(q) - 0.18) - 0.06 : max(abs(abs(q.x) - 0.18) - 0.06, q.y - 0.14);\n"
+    "      g = min(body, arc);\n"
+    "    }\n"
+    "    else {\n"
+    "      float2 q = u.sym == 5u ? float2(p.x, -p.y) : u.sym == 6u ? p : u.sym == 7u ? float2(p.y, -p.x) : float2(p.y, p.x);\n"
+    "      g = tri(q, 0.3);\n"
+    "    }\n"
+    "    ink = 1.0 - smoothstep(-aa, aa, g);\n"
+    "  } else if (u.cell.z > 0.0) {\n"
+    "    float lw = u.kind == 2u ? hf.x * 1.5 : r * 1.7, lh = lw * 0.375;\n" /* the atlas's cells are 8:3 */
+    "    float2 uv = (d + float2(lw, lh) * 0.5) / float2(lw, lh);\n"
+    "    if (all(uv >= 0.0) && all(uv <= 1.0)) ink = labels.sample(s, u.cell.xy + uv * u.cell.zw).r;\n"
+    "  }\n"
+    "  float top = saturate(p.y * 0.5 + 0.5);\n"
+    "  float3 glass = mix(float3(0.30, 0.30, 0.33), float3(0.11, 0.11, 0.13), top);\n"
+    "  float fill = 0.6;\n"
+    "  if (u.pressed != 0u) glass = mix(glass, float3(0.75), 0.45), fill = 0.8;\n"
+    "  if (u.kind == 3u) { glass = float3(0.1); fill = 0.22; rim *= 1.6; }\n" /* the stick's base: faint, a stronger rim */
+    "  if (u.kind == 4u) { glass = mix(float3(0.85), float3(0.6), top); fill = 0.85; }\n"
+    "  float3 col = mix(mix(glass, float3(1.0), rim * 0.35), inkc, ink);\n"
+    "  float a = max(body * mix(fill, 0.97, ink), shadow * (1.0 - body)) * u.alpha;\n"
+    "  return float4(body > 0.0 ? col : float3(0.0), a);\n"
+    "}\n"
+    /* the wallpaper behind a present rectangle (gfx_set_wallpaper): the part of the picture that fills
+     * the drawable (uv: its origin and size), dimmed so the game stands out */
+    "fragment float4 wallpaper_fs(PO in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]],\n"
+    "                             constant float4& uv [[buffer(0)]]) {\n"
+    "  return float4(t.sample(s, uv.xy + in.uv * uv.zw).rgb * 0.7, 1.0);\n"
     "}\n"
     "fragment float4 present_fs(PO in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return float4(t.sample(s, in.uv).rgb, 1.0);\n"
@@ -7385,7 +7582,7 @@ static int post_glow(GfxTex* color)
         rp.depthAttachment.loadAction = MTLLoadActionLoad;
         rp.depthAttachment.storeAction = MTLStoreActionDontCare;
         MTLPixelFormat df = depth.pixelFormat;
-        if (df == MTLPixelFormatDepth32Float_Stencil8 || df == MTLPixelFormatDepth24Unorm_Stencil8 || df == MTLPixelFormatX32_Stencil8)
+        if (format_has_stencil(df))
         {
             rp.stencilAttachment.texture = depth;
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
@@ -8087,7 +8284,8 @@ static void fps_tick(void)
     }
 }
 
-static void draw_overlay(id<MTLRenderCommandEncoder> e, double w, double h)
+/* over a w x h drawable, its top-left corner at (x, y) (the present rectangle's) */
+static void draw_overlay(id<MTLRenderCommandEncoder> e, double w, double h, double x, double y)
 {
     struct
     {
@@ -8101,8 +8299,12 @@ static void draw_overlay(id<MTLRenderCommandEncoder> e, double w, double h)
             : *c == 'm' ? 13 : *c == 's' ? 14 : *c == '.' ? 15 : 16;
         u.text[u.n++] = k;
     }
+#if TARGET_OS_IPHONE
+    u.scale = (float)(h >= 1100 ? 3 : 2); /* a phone's screen is 3x: as large as on a Mac */
+#else
     u.scale = (float)(h >= 1400 ? 3 : 2);
-    u.rect[0] = u.rect[1] = 4 * u.scale;
+#endif
+    u.rect[0] = (float)x + 4 * u.scale, u.rect[1] = (float)y + 4 * u.scale;
     u.rect[2] = (float)(u.n * 6 + 3) * u.scale, u.rect[3] = 11 * u.scale;
     float size[2] = { (float)w, (float)h };
     [e setRenderPipelineState:g_overlay_pipe];
@@ -8111,6 +8313,139 @@ static void draw_overlay(id<MTLRenderCommandEncoder> e, double w, double h)
     [e setFragmentBytes:&u length:sizeof u atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
+
+#if TARGET_OS_IPHONE
+/* The touch controls' labels: each text drawn once with the system font (bold), white on black, into a
+ * cell of an 8-bit atlas */
+enum
+{
+    LABEL_W = 256,
+    LABEL_H = 96,
+    LABEL_COLS = 4,
+    LABEL_ROWS = 4,
+};
+static id<MTLTexture> g_labels;
+static char g_label_text[LABEL_COLS * LABEL_ROWS][8];
+static int g_nlabels;
+
+static int label_cell(const char* text)
+{
+    for (int i = 0; i < g_nlabels; ++i)
+        if (!strcmp(g_label_text[i], text))
+            return i;
+    if (g_nlabels == LABEL_COLS * LABEL_ROWS || !g_labels)
+        return -1;
+    uint8_t* px = (uint8_t*)calloc(LABEL_W * LABEL_H, 1);
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGContextRef ctx = CGBitmapContextCreate(px, LABEL_W, LABEL_H, 8, LABEL_W, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontEmphasizedSystem, 64.0, NULL);
+    CGFloat white_c[2] = { 1.0, 1.0 };
+    CGColorRef white = CGColorCreate(gray, white_c);
+    CFStringRef str = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
+    const void* keys[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
+    const void* vals[] = { font, white };
+    CFDictionaryRef attrs = CFDictionaryCreate(NULL, keys, vals, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFAttributedStringRef as = CFAttributedStringCreate(NULL, str, attrs);
+    CTLineRef line = CTLineCreateWithAttributedString(as);
+    CGRect b = CTLineGetImageBounds(line, ctx);
+    double k = fmin(1.0, fmin((LABEL_W - 16) / fmax(b.size.width, 1), (LABEL_H - 16) / fmax(b.size.height, 1)));
+    CGContextTranslateCTM(ctx, LABEL_W * 0.5, LABEL_H * 0.5);
+    CGContextScaleCTM(ctx, k, k);
+    CGContextSetTextPosition(ctx, -b.origin.x - b.size.width * 0.5, -b.origin.y - b.size.height * 0.5);
+    CTLineDraw(line, ctx);
+    int i = g_nlabels++;
+    snprintf(g_label_text[i], sizeof g_label_text[i], "%s", text);
+    [g_labels replaceRegion:MTLRegionMake2D((NSUInteger)(i % LABEL_COLS) * LABEL_W, (NSUInteger)(i / LABEL_COLS) * LABEL_H, LABEL_W, LABEL_H)
+                mipmapLevel:0 withBytes:px bytesPerRow:LABEL_W];
+    CFRelease(line), CFRelease(as), CFRelease(attrs), CFRelease(str), CGColorRelease(white), CFRelease(font);
+    CGContextRelease(ctx), CGColorSpaceRelease(gray);
+    free(px);
+    return i;
+}
+
+/* The wallpaper over the whole drawable, cropped to fill it, before the game goes into its rectangle */
+static void draw_wallpaper(id<MTLRenderCommandEncoder> e, NSUInteger w, NSUInteger h)
+{
+    pthread_mutex_lock(&g_wall.lock);
+    if (g_wall.rgba) /* new pixels: its texture, here on the present's thread */
+    {
+        [g_wall.tex release];
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+            width:(NSUInteger)g_wall.w height:(NSUInteger)g_wall.h mipmapped:NO];
+        d.storageMode = MTLStorageModeShared;
+        g_wall.tex = [g_dev newTextureWithDescriptor:d];
+        [g_wall.tex replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)g_wall.w, (NSUInteger)g_wall.h) mipmapLevel:0
+                        withBytes:g_wall.rgba bytesPerRow:(NSUInteger)g_wall.w * 4];
+        free(g_wall.rgba);
+        g_wall.rgba = NULL;
+    }
+    id<MTLTexture> t = g_wall.tex;
+    float iw = (float)g_wall.w, ih = (float)g_wall.h;
+    pthread_mutex_unlock(&g_wall.lock);
+    if (!t || !g_wall_pipe || !w || !h)
+        return;
+    float dw = (float)w / (float)h, pa = iw / ih, uv[4] = { 0, 0, 1, 1 };
+    if (pa > dw) /* wider than the screen: its middle across */
+        uv[2] = dw / pa, uv[0] = (1.0f - uv[2]) * 0.5f;
+    else
+        uv[3] = pa / dw, uv[1] = (1.0f - uv[3]) * 0.5f;
+    [e setRenderPipelineState:g_wall_pipe];
+    [e setFragmentBytes:uv length:sizeof uv atIndex:0];
+    [e setFragmentTexture:t atIndex:0];
+    [e setFragmentSamplerState:g_present_samp atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
+static void draw_touch(id<MTLRenderCommandEncoder> e, NSUInteger w, NSUInteger h)
+{
+    GfxTouchShape shapes[GFX_TOUCH_MAX];
+    pthread_mutex_lock(&g_touch_lock);
+    int n = g_ntouch;
+    memcpy(shapes, g_touch, sizeof *shapes * (size_t)n);
+    pthread_mutex_unlock(&g_touch_lock);
+    if (!n || !g_touch_pipe)
+        return;
+    if (!g_labels)
+    {
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+            width:LABEL_W * LABEL_COLS height:LABEL_H * LABEL_ROWS mipmapped:NO];
+        d.storageMode = MTLStorageModeShared;
+        g_labels = [g_dev newTextureWithDescriptor:d];
+    }
+    float size[2] = { (float)w, (float)h };
+    [e setViewport:(MTLViewport){ 0, 0, w, h, 0, 1 }];
+    [e setRenderPipelineState:g_touch_pipe];
+    [e setVertexBytes:size length:sizeof size atIndex:1];
+    [e setFragmentTexture:g_labels atIndex:0];
+    [e setFragmentSamplerState:g_present_samp atIndex:0];
+    for (int i = 0; i < n; ++i)
+    {
+        const GfxTouchShape* t = &shapes[i];
+        struct
+        {
+            float rect[4], cell[4];
+            uint32_t kind, sym, pressed;
+            float alpha;
+        } u;
+        memset(&u, 0, sizeof u);
+        float hw = t->hw, hh = t->kind == GFX_TOUCH_PILL ? t->hh : t->hw;
+        u.rect[0] = t->x - hw / 0.86f, u.rect[1] = t->y - hh / 0.86f; /* the body 0.86 of the quad */
+        u.rect[2] = 2 * hw / 0.86f, u.rect[3] = 2 * hh / 0.86f;
+        u.kind = t->kind == GFX_TOUCH_PILL ? 2u : t->kind == GFX_TOUCH_RING ? 3u : t->kind == GFX_TOUCH_KNOB ? 4u
+               : t->kind == GFX_TOUCH_BACK ? 0u : 1u;
+        u.sym = (uint32_t)t->sym, u.pressed = t->pressed != 0, u.alpha = t->alpha;
+        int cell = t->label[0] && !t->sym ? label_cell(t->label) : -1;
+        if (cell >= 0)
+        {
+            u.cell[0] = (float)(cell % LABEL_COLS) / LABEL_COLS, u.cell[1] = (float)(cell / LABEL_COLS) / LABEL_ROWS;
+            u.cell[2] = 1.0f / LABEL_COLS, u.cell[3] = 1.0f / LABEL_ROWS;
+        }
+        [e setVertexBytes:&u length:sizeof u atIndex:0];
+        [e setFragmentBytes:&u length:sizeof u atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+}
+#endif
 
 void gfx_present(GfxTex* bb)
 {
@@ -8136,10 +8471,18 @@ void gfx_present(GfxTex* bb)
             {
                 MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
                 p.colorAttachments[0].texture = drawable.texture;
-                p.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                int boxed = g_present_rect.w > 0; /* into a rectangle, black around it */
+                p.colorAttachments[0].loadAction = boxed ? MTLLoadActionClear : MTLLoadActionDontCare;
+                p.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
                 p.colorAttachments[0].storeAction = MTLStoreActionStore;
                 ts_mark(p, GFX_PASS_PRESENT);
                 id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:p];
+#if TARGET_OS_IPHONE
+                if (boxed)
+                    draw_wallpaper(e, drawable.texture.width, drawable.texture.height);
+#endif
+                if (boxed)
+                    [e setViewport:(MTLViewport){ g_present_rect.x, g_present_rect.y, g_present_rect.w, g_present_rect.h, 0, 1 }];
                 float sharpen = g_fxs.fx != 0.0f ? g_fxs.sharpen : 0.0f;
                 [e setRenderPipelineState:sharpen > 0.0f && g_present_cas_pipe ? g_present_cas_pipe : g_present_pipe];
                 [e setFragmentBytes:&sharpen length:sizeof sharpen atIndex:0];
@@ -8147,9 +8490,49 @@ void gfx_present(GfxTex* bb)
                 [e setFragmentSamplerState:g_present_samp atIndex:0];
                 [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
                 if (g_fxs.fps != 0.0f && g_overlay_pipe)
-                    draw_overlay(e, drawable.texture.width, drawable.texture.height);
+                {
+                    /* the gauge's shader works in the drawable's pixels: the whole of it, the gauge at
+                     * the rectangle's corner */
+                    if (boxed)
+                        [e setViewport:(MTLViewport){ 0, 0, drawable.texture.width, drawable.texture.height, 0, 1 }];
+                    int gx = boxed ? g_present_rect.x : 0, gy = boxed ? g_present_rect.y : 0;
+                    pthread_mutex_lock(&g_touch_lock);
+                    for (int i = 0; i < g_ntouch; ++i) /* beside the Back button, not under it */
+                        if (g_touch[i].kind == GFX_TOUCH_BACK && gx < g_touch[i].x + g_touch[i].hw && gy < g_touch[i].y + g_touch[i].hh)
+                            gx = (int)(g_touch[i].x + g_touch[i].hw);
+                    pthread_mutex_unlock(&g_touch_lock);
+                    draw_overlay(e, drawable.texture.width, drawable.texture.height, gx, gy);
+                }
+#if TARGET_OS_IPHONE
+                draw_touch(e, drawable.texture.width, drawable.texture.height);
+#endif
                 [e endEncoding];
+#if TARGET_OS_IPHONE
+                /* at most FFXI_MAX_FPS frames a second (60 unless set; 0 none): the layer runs at the
+                 * display's rate, 120 on a ProMotion phone, and the phone's battery and heat go with it */
+                static double min_frame = -1.0;
+                if (min_frame < 0.0)
+                {
+                    const char* m = getenv("FFXI_MAX_FPS");
+                    double fps = m && *m ? atof(m) : 60.0;
+                    min_frame = fps > 0.0 ? 1.0 / fps : 0.0;
+                }
+                if (min_frame > 0.0 && [drawable respondsToSelector:@selector(presentAfterMinimumDuration:)])
+                {
+                    /* the drawable's own (the simulator's command buffers have no
+                     * presentDrawable:afterMinimumDuration:), once the GPU has the frame */
+                    id<CAMetalDrawable> d = drawable;
+                    double t = min_frame;
+                    [cmd() addScheduledHandler:^(id<MTLCommandBuffer> done) {
+                        (void)done;
+                        [d presentAfterMinimumDuration:t];
+                    }];
+                }
+                else
+                    [cmd() presentDrawable:drawable];
+#else
                 [cmd() presentDrawable:drawable];
+#endif
                 bb->used = g_serial;
             }
         }
@@ -8178,7 +8561,50 @@ void gfx_resize(uint32_t w, uint32_t h)
         g_layer.drawableSize = CGSizeMake(w, h);
 }
 
-uint64_t gfx_window_flags(void) { return 0; }
+uint64_t gfx_window_flags(void)
+{
+#if TARGET_OS_IPHONE
+    return SDL_WINDOW_HIGH_PIXEL_DENSITY; /* else UIKit's view is one pixel a point, enlarged */
+#else
+    return 0;
+#endif
+}
+
+void gfx_set_wallpaper(const uint8_t* rgba, int w, int h)
+{
+    uint8_t* copy = rgba && w > 0 && h > 0 ? (uint8_t*)malloc((size_t)w * h * 4) : NULL;
+    if (copy)
+        memcpy(copy, rgba, (size_t)w * h * 4);
+    pthread_mutex_lock(&g_wall.lock);
+    free(g_wall.rgba);
+    g_wall.rgba = copy, g_wall.w = w, g_wall.h = h;
+    pthread_mutex_unlock(&g_wall.lock);
+}
+
+void gfx_set_touch_shapes(const GfxTouchShape* shapes, int n)
+{
+    if (n > GFX_TOUCH_MAX)
+        n = GFX_TOUCH_MAX;
+    pthread_mutex_lock(&g_touch_lock);
+    memcpy(g_touch, shapes, sizeof *shapes * (size_t)(n > 0 ? n : 0));
+    g_ntouch = n > 0 ? n : 0;
+    pthread_mutex_unlock(&g_touch_lock);
+}
+
+void gfx_set_present_rect(int x, int y, int w, int h)
+{
+    g_present_rect.x = x, g_present_rect.y = y, g_present_rect.w = w > 0 && h > 0 ? w : 0, g_present_rect.h = h;
+}
+
+/* The present interval. iOS has no switch: its layer always waits for the display (docs/ios.md). */
+static void layer_vsync(int vsync)
+{
+#if TARGET_OS_OSX
+    g_layer.displaySyncEnabled = vsync ? YES : NO;
+#else
+    (void)vsync;
+#endif
+}
 
 int gfx_init(void* window, int vsync)
 {
@@ -8186,7 +8612,7 @@ int gfx_init(void* window, int vsync)
     {
         /* up already (host64's sign-in screen, on this same window): the game's present interval */
         if (g_layer)
-            g_layer.displaySyncEnabled = vsync ? YES : NO;
+            layer_vsync(vsync);
         return 1;
     }
     @autoreleasepool
@@ -8198,6 +8624,10 @@ int gfx_init(void* window, int vsync)
             return 0;
         }
         g_queue = [g_dev newCommandQueue];
+        const char* bc = getenv("FFXI_BC"); /* 0: decode DXT as an iPhone must (to test that on a Mac) */
+        g_bc = g_dev.supportsBCTextureCompression && !(bc && bc[0] == '0');
+        if (!g_bc)
+            fprintf(stderr, "[recomp] gfx: no BC textures on this GPU: DXT decoded on upload\n");
         g_frames_sem = dispatch_semaphore_create(FRAMES);
         g_dummy = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
         g_util = compile(CLEAR_MSL);
@@ -8215,6 +8645,12 @@ int gfx_init(void* window, int vsync)
         ff = [g_util newFunctionWithName:@"present_cas_fs"];
         pd.fragmentFunction = ff;
         g_present_cas_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:NULL];
+#if TARGET_OS_IPHONE
+        [ff release];
+        ff = [g_util newFunctionWithName:@"wallpaper_fs"];
+        pd.fragmentFunction = ff;
+        g_wall_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:NULL];
+#endif
         [vf release];
         [ff release];
         [pd release];
@@ -8235,7 +8671,15 @@ int gfx_init(void* window, int vsync)
         pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
         pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
         g_overlay_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:NULL];
+        [ff release];
         [vf release];
+#if TARGET_OS_IPHONE
+        vf = [g_util newFunctionWithName:@"touch_vs"], ff = [g_util newFunctionWithName:@"touch_fs"];
+        pd.vertexFunction = vf;
+        pd.fragmentFunction = ff;
+        g_touch_pipe = [g_dev newRenderPipelineStateWithDescriptor:pd error:NULL];
+        [vf release];
+#endif
         [ff release];
         [pd release];
         MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
@@ -8252,7 +8696,7 @@ int gfx_init(void* window, int vsync)
                 g_layer.device = g_dev;
                 g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
                 g_layer.framebufferOnly = YES;
-                g_layer.displaySyncEnabled = vsync ? YES : NO;
+                layer_vsync(vsync);
                 int pw = 0, ph = 0;
                 SDL_GetWindowSizeInPixels(g_window, &pw, &ph);
                 if (pw > 0 && ph > 0)
