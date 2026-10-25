@@ -44,7 +44,7 @@ LIBS = {
         'weak_frameworks': ['UniformTypeIdentifiers', 'CoreHaptics'],
     },
     # the same release for iPhone (tools/build_ios.py): UIKit + Metal view, CoreAudio, GameController, and
-    # virtual joysticks (the touch controls' gamepad, host/ios_touch.c).
+    # virtual joysticks (the touch controls' gamepad, host/touch.c).
     # One tree serves the device and the simulator; TARGET_OS_SIMULATOR picks at compile time.
     'sdl3-ios': {
         'version': '3.4.16',

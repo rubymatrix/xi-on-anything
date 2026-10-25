@@ -1416,7 +1416,7 @@ static void start_typing(SDL_Window* win)
     SDL_DestroyProperties(tp);
 }
 
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
 /* The focused field as the text input area: while iOS's keyboard is up, SDL slides the view up just
  * far enough to keep it above the keyboard (SDL_uikitviewcontroller.m updateKeyboard) */
 static void typing_area(Ui* u, SDL_Window* win)
@@ -1460,7 +1460,7 @@ static void mouse(Ui* u, const SDL_Event* e, float d)
     {
         int i = hit(u, e->button.x * d, e->button.y * d, &o);
         u->dragging = 0, u->down_w = -1;
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
         {
             /* iOS's keyboard: back with a tap on a field, away with a tap anywhere else */
             SDL_Window* win = SDL_GetWindowFromID(e->button.windowID);
@@ -1625,7 +1625,7 @@ static void key_act(Ui* u, const SDL_KeyboardEvent* e)
     {
         if (u->screen == SCREEN_SETTINGS)
             u->screen = SCREEN_SIGNIN, build(u), focus_on(u, 0), u->anim_at = SDL_GetTicks(), sound(u, SND_CANCEL);
-#ifndef FFXI_IOS /* an iOS app is never closed from inside it: there, nothing to go back to */
+#ifndef FFXI_MOBILE /* a phone app is never closed from inside it: there, nothing to go back to */
         else if (!busy())
             begin_close(u, 0), sound(u, SND_CANCEL);
 #endif
@@ -1787,6 +1787,9 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     if (ww < 640 || wh < 480)
         ww = 1280, wh = 720;
     int full = mode == 0 || mode == 3;
+#ifdef __ANDROID__
+    full = 1; /* an Android app fills its screen: SDL hides the system bars only for a full-screen window */
+#endif
     /* a macOS Space is only for a window with a frame (full screen hides it) */
     SDL_Window* win = SDL_CreateWindow("FINAL FANTASY XI", ww, wh,
         (mode >= 2 && !(full && c->space) ? SDL_WINDOW_BORDERLESS : 0) | (SDL_WindowFlags)gfx_window_flags());
@@ -1926,7 +1929,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         }
         if (!u->closing && open_progress(u) >= 1)
             stick(u, win), build(u);
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
         typing_area(u, win);
 #endif
 

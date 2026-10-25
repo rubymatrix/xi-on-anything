@@ -34,10 +34,11 @@ BOOLEANS = {
 
 def cases(worker, geometry):
     # Each tuple specifies argv, exit code, and optionally an environment key/value.
-    yield [], 3, None
-    yield ['--user', 'tester'], 3, None
-    yield ['--user', 'tester', '--pass', ''], 3, None
-    yield ['--user', '', '--pass', 'synthetic'], 3, None
+    # no account, or part of one: the host's sign-in screen
+    yield [], 42, None
+    yield ['--user', 'tester'], 42, None
+    yield ['--user', 'tester', '--pass', ''], 42, None
+    yield ['--user', '', '--pass', 'synthetic'], 42, None
     yield ['--user', 'other', '--pass', 'synthetic-test-only'], 42, None
     yield LOGIN, 42, None
     for option in ('session', 'auth'):
@@ -115,7 +116,7 @@ def main():
         out = Path(directory)
         (out / 'SDL3').mkdir()
         (out / 'SDL3/SDL.h').write_text(
-            '#define SDL_HINT_ENABLE_SCREEN_KEYBOARD "keyboard"\n'
+            '#define SDL_HINT_ANDROID_TRAP_BACK_BUTTON "trap-back"\n'
             'static inline int SDL_SetHint(const char* k, const char* v) {(void)k; (void)v; return 1;}\n'
             'static inline void SDL_SetMainReady(void) {}\n'
         )
@@ -154,12 +155,16 @@ def main():
                 log = (data / 'host64.log').read_text()
                 assert result.returncode == expected, (worker, geometry, args, result.returncode, expected, log)
                 if expected == 42:
-                    assert 'test:arg=tester\n' in log or 'test:arg=other\n' in log, log
-                    assert 'test:arg=synthetic-test-only\n' in log, log
+                    assert 'test:mobile\n' in log, log
+                    for i, arg in enumerate(args[:-1]):
+                        if arg in ('--user', '--pass'):
+                            assert f'test:arg={args[i + 1]}\n' in log, (args, log)
                     if setting:
                         assert f'test:env={setting[1]}\n' in log, (setting, log)
                 if expected >= 42 and worker:
                     assert 'test:shutdown\n' in log, log
+                if expected != 42:
+                    assert 'test:mobile' not in log, log
                 if expected < 42:
                     assert 'test:arg=' not in log and 'test:shutdown' not in log, log
                 count += 1

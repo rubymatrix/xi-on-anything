@@ -1,8 +1,9 @@
-/* Touch controls on iOS (docs/ios.md): a gamepad on the screen, for playing without a controller
- * or a keyboard, and Back everywhere.
+/* Touch controls on iOS and Android (docs/ios.md, docs/android.md): a gamepad on the screen, for
+ * playing without a controller or a keyboard, and Back everywhere.
  *
  * The gamepad is SDL's virtual one: the game sees an Xbox pad like any other (input.c, dinput.c), with
- * its own button mapping (ffxi.reg padsin000). Drawn by the Metal back end (gfx_set_touch_shapes):
+ * its own button mapping (ffxi.reg padsin000). Drawn by gfx_set_touch_shapes: on iOS the Metal back
+ * end, over the frame; on Android a view over the game's surface (host/android_overlay.c):
  *   - the left stick floats: it starts where the thumb lands in the lower left, and moves the player
  *   - a drag anywhere else on the game turns the camera (the right stick, from where the finger landed)
  *   - the face buttons (PlayStation's shapes, as FFXI's console pads), the D-pad, L1/R1, L2/R2 (the
@@ -12,12 +13,16 @@
  * pad while they are (input_prefer_pad); a real controller in use hides them and is the game's, and a
  * touch on the screen brings them back.
  *
- * Back (Escape) is also iOS's back gesture, a swipe in from the left edge. Escape is let go KEY_MS
- * after it is pressed: the game reads the keyboard's state once a frame, and would miss both in one.
+ * Back (Escape) is also iOS's back gesture, a swipe in from the left edge, and Android's Back (its
+ * gesture or button, which SDL gives as AC_BACK). Escape is let go KEY_MS after it is pressed: the
+ * game reads the keyboard's state once a frame, and would miss both in one.
+ *
+ * Layouts are in points: iOS's window coordinates; Android's are pixels, its points (dp) pixels over
+ * the display's density (g_scale).
  *
  * While the controls are up the mouse SDL makes of touches is dropped (fingers are handled here), and
  * a pointer's (the simulator's from a Mac, an iPad trackpad's) is taken as one more finger. Finger events come on the main thread (an event watch);
- * the controls are laid out and drawn from there and from the game's frame (ios_touch_frame); g_lock
+ * the controls are laid out and drawn from there and from the game's frame (touch_frame); g_lock
  * keeps the two apart. */
 #include <math.h>
 #include <stdlib.h>
@@ -30,11 +35,17 @@
 #include "gwin.h"
 #include "input.h"
 
-void ios_touch_init(void);
-void ios_touch_frame(int in_game);
+void touch_init(void);
+void touch_frame(int in_game);
 static void refresh(SDL_Window* win);
 static void draw(void);
 
+/* iOS's back gesture, ours; Android's is the system's, and comes as AC_BACK */
+#ifdef __ANDROID__
+#define BACK_SWIPE 0
+#else
+#define BACK_SWIPE 1
+#endif
 #define EDGE 0.12f  /* the back gesture: starts within this of the left edge */
 #define SWIPE 0.15f /* and goes this far across */
 enum
@@ -104,6 +115,7 @@ static int g_nctl;
 static int g_shown;              /* the controls are up (the game, no real controller) */
 static int g_hidden;             /* put away with the toggle */
 static float g_density = 1.0f;   /* the window's pixels a point */
+static float g_scale = 1.0f;     /* the window's coordinates a point (Android: its density; iOS 1) */
 static float g_stick_x, g_stick_y; /* the stick's resting place */
 static int g_editing;            /* the layout is being edited (the toggle held) */
 static int g_group;              /* the group add() puts controls in */
@@ -154,7 +166,7 @@ static void escape(SDL_WindowID window, const char* why)
     k.key.down = true;
     SDL_PushEvent(&k);
     SDL_AddTimer(KEY_MS, escape_up, (void*)(uintptr_t)window);
-    fprintf(stderr, "[ios] %s: Escape\n", why);
+    fprintf(stderr, "[touch] %s: Escape\n", why);
 }
 
 #define CLICK_MOUSE ((SDL_MouseID)0x58490001) /* our clicks' mouse: the game's (keep_event) */
@@ -182,6 +194,7 @@ static Uint32 SDLCALL click_up(void* unused, SDL_TimerID timer, Uint32 interval)
 /* A left click at (x, y), in points, as a mouse's (not a touch's: the filter keeps it) */
 static void click(SDL_WindowID window, float x, float y)
 {
+    x *= g_scale, y *= g_scale; /* the window's coordinates */
     g_click.window = window, g_click.x = x, g_click.y = y;
     SDL_Event m;
     SDL_zero(m);
@@ -219,7 +232,7 @@ static void pad_attach(void)
     g_pad = g_vid ? SDL_OpenJoystick(g_vid) : NULL;
     memset(g_down, 0, sizeof g_down);
     if (!g_pad)
-        fprintf(stderr, "[ios] touch controls: no virtual pad: %s\n", SDL_GetError());
+        fprintf(stderr, "[touch] no virtual pad: %s\n", SDL_GetError());
 }
 
 /* every button up, the triggers too (the sticks follow the fingers: sticks()) */
@@ -249,7 +262,7 @@ static void controller_event(const SDL_Event* e)
         return;
     if (SDL_GetAtomicInt(&g_pad_used))
         return;
-    fprintf(stderr, "[ios] controller in use: %s\n", SDL_GetGamepadNameForID(id));
+    fprintf(stderr, "[touch] controller in use: %s\n", SDL_GetGamepadNameForID(id));
     SDL_SetAtomicInt(&g_pad_used, 1);
     SDL_LockMutex(g_lock);
     refresh(SDL_GetKeyboardFocus());
@@ -267,8 +280,28 @@ static void add(enum Ctl ctl, int btn, int kind, int sym, const char* label, flo
  * the move in fractions of the safe area, a layout for each shape of window (a phone's, an iPad's) */
 static void layout_path(char* out, size_t n)
 {
+#ifdef __ANDROID__
+    const char* files = SDL_GetAndroidExternalStoragePath(); /* the app's files folder, beside run.args */
+    snprintf(out, n, "%s/touch-layout.txt", files ? files : ".");
+#else
     const char* home = getenv("HOME");
     snprintf(out, n, "%s/Documents/touch-layout.txt", home ? home : ".");
+#endif
+}
+
+/* The window in points (w, h), and g_scale for it */
+static int window_points(SDL_Window* win, int* w, int* h)
+{
+    int cw = 0, ch = 0;
+    *w = *h = 0;
+    if (!win || !SDL_GetWindowSize(win, &cw, &ch) || cw <= 0 || ch <= 0)
+        return 0;
+#ifdef __ANDROID__
+    float k = SDL_GetWindowDisplayScale(win);
+    g_scale = k > 0.0f ? k : 1.0f;
+#endif
+    *w = (int)lroundf((float)cw / g_scale), *h = (int)lroundf((float)ch / g_scale);
+    return 1;
 }
 
 static void load_layout(void)
@@ -313,14 +346,14 @@ static void layout(SDL_Window* win, int controls)
 {
     int w = 0, h = 0, pw = 0;
     SDL_Rect safe;
-    SDL_GetWindowSize(win, &w, &h);
     SDL_GetWindowSizeInPixels(win, &pw, NULL);
-    if (w <= 0 || h <= 0 || !SDL_GetWindowSafeArea(win, &safe))
+    if (!window_points(win, &w, &h) || !SDL_GetWindowSafeArea(win, &safe))
         return;
     g_density = (float)pw / (float)w;
     g_nctl = 0;
     g_win = win;
-    float sx = (float)safe.x, sy = (float)safe.y, sw = (float)safe.w, sh = (float)safe.h;
+    float sx = (float)safe.x / g_scale, sy = (float)safe.y / g_scale, sw = (float)safe.w / g_scale,
+          sh = (float)safe.h / g_scale;
     g_safe = (SDL_FRect){ sx, sy, sw, sh };
     char shape[32];
     snprintf(shape, sizeof shape, "%dx%d", w, h);
@@ -328,7 +361,7 @@ static void layout(SDL_Window* win, int controls)
         snprintf(g_shape, sizeof g_shape, "%s", shape), load_layout();
     g_group = G_NONE;
     /* the toggle: in a phone's black bar left of the game, else in the safe area's top-left corner */
-    int bar = safe.x >= TOGGLE + 8;
+    int bar = sx >= TOGGLE + 8;
     float tx = bar ? sx * 0.5f : sx + TOGGLE_MARGIN + TOGGLE * 0.5f;
     float ty = sy + (bar ? BAR_TOP : TOGGLE_MARGIN) + TOGGLE * 0.5f;
     add(C_TOGGLE, 0, GFX_TOUCH_BUTTON, GFX_SYM_PAD, NULL, tx, ty, TOGGLE * 0.5f, TOGGLE * 0.5f);
@@ -643,7 +676,7 @@ static int pointer(const SDL_Event* e)
     {
         if (!f)
             return 1; /* hovering: the game's cursor */
-        finger_moved(f, e->motion.x, e->motion.y);
+        finger_moved(f, e->motion.x / g_scale, e->motion.y / g_scale);
         draw();
         return 0;
     }
@@ -651,13 +684,12 @@ static int pointer(const SDL_Event* e)
     SDL_zero(t);
     t.fingerID = POINTER_FINGER, t.timestamp = e->button.timestamp, t.windowID = e->button.windowID;
     int w = 0, h = 0;
-    SDL_Window* win = SDL_GetWindowFromID(t.windowID);
-    if (win)
-        SDL_GetWindowSize(win, &w, &h);
+    window_points(SDL_GetWindowFromID(t.windowID), &w, &h);
+    float x = e->button.x / g_scale, y = e->button.y / g_scale;
     if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && !f)
-        finger_down(&t, e->button.x, e->button.y, w, h);
+        finger_down(&t, x, y, w, h);
     else if (e->type == SDL_EVENT_MOUSE_BUTTON_UP && f)
-        finger_up(&t, f, e->button.x, e->button.y);
+        finger_up(&t, f, x, y);
     draw();
     return 0;
 }
@@ -673,7 +705,7 @@ static bool SDLCALL keep_event(void* unused, SDL_Event* e)
     SDL_MouseID which = button ? e->button.which : e->motion.which;
     if (which == CLICK_MOUSE)
         return true;
-    float x = button ? e->button.x : e->motion.x, y = button ? e->button.y : e->motion.y;
+    float x = (button ? e->button.x : e->motion.x) / g_scale, y = (button ? e->button.y : e->motion.y) / g_scale;
     SDL_LockMutex(g_lock);
     int keep;
     int i = hit(x, y);
@@ -708,6 +740,11 @@ static bool SDLCALL touch(void* unused, SDL_Event* e)
         controller_event(e);
         return true;
     }
+    if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_AC_BACK && !e->key.repeat)
+    {
+        escape(e->key.windowID, "Back");
+        return true;
+    }
     if (e->type == SDL_EVENT_SCREEN_KEYBOARD_SHOWN || e->type == SDL_EVENT_SCREEN_KEYBOARD_HIDDEN)
     {
         SDL_LockMutex(g_lock);
@@ -727,15 +764,13 @@ static bool SDLCALL touch(void* unused, SDL_Event* e)
         return true;
     }
     int w = 0, h = 0;
-    SDL_Window* win = SDL_GetWindowFromID(e->tfinger.windowID);
-    if (win)
-        SDL_GetWindowSize(win, &w, &h);
+    window_points(SDL_GetWindowFromID(e->tfinger.windowID), &w, &h);
     float x = e->tfinger.x * (float)w, y = e->tfinger.y * (float)h;
     SDL_LockMutex(g_lock);
     Finger* f = finger(e->tfinger.fingerID);
     if (e->type == SDL_EVENT_FINGER_DOWN)
     {
-        if (!swiping && e->tfinger.x < EDGE && hit(x, y) < 0)
+        if (!swiping && BACK_SWIPE && e->tfinger.x < EDGE && hit(x, y) < 0)
             swiping = e->tfinger.fingerID, sx0 = e->tfinger.x, sy0 = e->tfinger.y, start = e->tfinger.timestamp;
         else if (swiping)
             swiping = 0; /* a second finger: not the back gesture */
@@ -839,7 +874,7 @@ static void refresh(SDL_Window* win)
         else
             memset(g_fingers, 0, sizeof g_fingers), sticks(), pad_release();
         input_prefer_pad(show ? (uint32_t)g_vid : 0);
-        fprintf(stderr, "[ios] touch controls %s\n", show ? "on" : g_hidden ? "off (put away)" : "off (a controller in use)");
+        fprintf(stderr, "[touch] controls %s\n", show ? "on" : g_hidden ? "off (put away)" : "off (a controller in use)");
     }
     if (win)
         layout(win, g_shown);
@@ -848,7 +883,7 @@ static void refresh(SDL_Window* win)
 
 /* Each frame of the game (host64's present hook): laid out again twice a second (the window may
  * have turned), drawn every frame */
-void ios_touch_frame(int in_game)
+void touch_frame(int in_game)
 {
     static int frames;
     (void)in_game;
@@ -860,18 +895,20 @@ void ios_touch_frame(int in_game)
     else
         draw();
     SDL_UnlockMutex(g_lock);
+#ifdef FFXI_IOS
     if (frames % 600 == 0) /* the guest's memory, against the 2 GB window (gwin.c), when it grew */
     {
         static uint32_t said;
         GwinStats s;
         gwin_stats(&s);
         if (s.top > said)
-            said = s.top, fprintf(stderr, "[ios] guest memory: %llu MB committed, peak %llu MB, top %08x of 80000000\n",
+            said = s.top, fprintf(stderr, "[touch] guest memory: %llu MB committed, peak %llu MB, top %08x of 80000000\n",
                 (unsigned long long)(s.committed >> 20), (unsigned long long)(s.committed_peak >> 20), s.top);
     }
+#endif
 }
 
-void ios_touch_init(void)
+void touch_init(void)
 {
     g_lock = SDL_CreateMutex();
     SDL_SetEventFilter(keep_event, NULL);

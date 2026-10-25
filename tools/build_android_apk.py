@@ -115,6 +115,8 @@ def main():
                 '-f',
                 '-M',
                 manifest,
+                '-S',
+                ROOT / 'android/app/src/main/res',
                 '-I',
                 ANDROID_JAR,
                 '-F',

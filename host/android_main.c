@@ -1,5 +1,6 @@
-/* SDL entry point of the Android test app (docs/android.md): Android defaults, the --android-*
- * options, then the portable host. Saved sign-in is disabled; the login comes from the arguments. */
+/* SDL entry point of the Android app (docs/android.md): Android defaults, the --android-* options,
+ * the touch controls (android_overlay.c), then the portable host: its sign-in screen, or the
+ * LandSandBoat account the arguments give. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,7 @@ int xi_async_test_main(void);
 int xi_area_test_main(void);
 int xi_pass_plan_test_main(void);
 int xi_visibility_storage_test_main(void);
+void android_mobile_init(void); /* android_overlay.c: the touch controls and the wallpaper */
 
 enum AndroidOptionType
 {
@@ -211,8 +213,10 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
             "[android] visibility storage requires readback=1, worker=0, planner=0, bounded-area=0, trace/querydiag off\n");
         return 4;
     }
-    /* Physical keyboard/controller baseline: do not open IME at every game window. */
-    SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
+    /* The on-screen keyboard where text is typed: the sign-in's fields, the game's chat line
+     * (host64.c chat_keyboard). Back, a gesture or a button, is Escape (host/touch.c), never the
+     * activity's end. */
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetMainReady();
     for (int i = 1; i < argc; i++)
     {
@@ -239,25 +243,15 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char** argv)
         fprintf(stderr, "[android] game worker mailbox requires async readback=1\n");
         return 4;
     }
-    /* a LandSandBoat account given in run.args: the sign-in screen and saved sessions are untried here */
-    int user = 0, password = 0;
+    /* the sign-in screen, or a LandSandBoat account given in run.args; a session from the command
+     * line is untried here */
     for (int i = 1; i + 1 < argc; ++i)
-    {
-        if (!strcmp(argv[i], "--user") && argv[i + 1][0])
-            user = 1;
-        if (!strcmp(argv[i], "--pass") && argv[i + 1][0])
-            password = 1;
         if (!strcmp(argv[i], "--session") || !strcmp(argv[i], "--auth"))
         {
-            fprintf(stderr, "[android] sign in with --user and --pass\n");
+            fprintf(stderr, "[android] sign in on the sign-in screen, or with --user and --pass\n");
             return 3;
         }
-    }
-    if (!user || !password)
-    {
-        fprintf(stderr, "[android] supply --user and --pass in private run.args\n");
-        return 3;
-    }
+    android_mobile_init();
     fprintf(
         stderr,
         "[android] render policy fast-sync=%s trim-uniforms=%s dont-care-loads=%s cache-sampled=%s bounded-area=%s\n",

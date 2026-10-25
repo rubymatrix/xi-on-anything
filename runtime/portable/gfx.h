@@ -520,14 +520,15 @@ int gfx_rt_supported(void);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);
-/* Metal only (iOS: the screen's safe area, host/display_fit.c): the rectangle of the drawable, in
- * its pixels, the back buffer is presented into, the rest black; w 0 for all of it. */
+/* Metal and Android's C++ Vulkan (the screen's safe area, host/display_fit.c): the rectangle of the
+ * drawable, in its pixels, the back buffer is presented into, the rest black; w 0 for all of it
+ * (Android: the letterbox present_rect.h makes). */
 void gfx_set_present_rect(int x, int y, int w, int h);
-/* Metal only (iOS, host/ios_main.c): a picture (RGBA8, w x h, copied) drawn behind the present
- * rectangle, filling the drawable; NULL for none (black). */
+/* iOS's Metal (host/ios_main.c) and Android's overlay (host/android_overlay.c): a picture (RGBA8,
+ * w x h, copied) drawn behind the present rectangle, filling the drawable; NULL for none (black). */
 void gfx_set_wallpaper(const uint8_t* rgba, int w, int h);
-/* Metal only (iOS, host/ios_touch.c): the touch controls drawn over every frame, in the drawable's
- * pixels; copied, so the caller's array may change after. n 0 for none. */
+/* iOS's Metal and Android's overlay (host/touch.c): the touch controls drawn over every frame, in the
+ * drawable's pixels; copied, so the caller's array may change after. n 0 for none. */
 enum
 {
     GFX_TOUCH_BACK,   /* round, a chevron pointing left */
