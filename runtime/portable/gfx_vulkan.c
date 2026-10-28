@@ -5678,8 +5678,8 @@ static struct
     {
         uint32_t key[2];
         VkPipeline p;
-    } pipe[256];
-    uint32_t npipe;
+    } *pipe; /* (grown: each setting's combination is another) */
+    uint32_t npipe, cappipe;
 } g_world;
 
 static const VkDynamicState WORLD_DYNAMIC[] = {
@@ -5773,8 +5773,9 @@ static VkPipeline world_pipeline(int chars, uint32_t k, int blend, GfxTex* depth
     for (uint32_t i = 0; i < g_world.npipe; ++i)
         if (g_world.pipe[i].key[0] == key[0] && g_world.pipe[i].key[1] == key[1])
             return g_world.pipe[i].p;
-    if (g_world.npipe == sizeof g_world.pipe / sizeof g_world.pipe[0])
-        return VK_NULL_HANDLE;
+    if (g_world.npipe == g_world.cappipe)
+        g_world.cappipe = g_world.cappipe ? 2 * g_world.cappipe : 64,
+        g_world.pipe = realloc(g_world.pipe, g_world.cappipe * sizeof *g_world.pipe);
     VkShaderModule vs = world_module(chars, k, 0), fs = world_module(chars, k, 1);
     VkPipeline p = VK_NULL_HANDLE;
     if (vs && fs)
@@ -6403,6 +6404,8 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
         g_shd.cdone = f->chars->nitem;
         g_shd.lf = *f, g_shd.lc = *f->chars, g_shd.lf.chars = &g_shd.lc, g_shd.lnch = nch, g_shd.lserial = g_serial;
     }
+    else if (f->chars && g_shd.lserial == g_serial)
+        g_shd.lc = *f->chars; /* (the frame's characters so far, in arrays the host may have grown since) */
     if (f->redraw >= 0 && f->redraw < (int32_t)nc)
         shadow_zone(f); /* (between the game's draws: its pass is taken up again after) */
     /* the characters' layers they read: last frame's, when it drew them */
@@ -6795,7 +6798,7 @@ static int sao_init(void)
     if (g_sao.tried)
         return g_sao.ok;
     g_sao.tried = 1;
-    if (!fx_init())
+    if (!fs_init())
         return 0;
     g_sao.prep = sao_pipeline("SAO_PREP", VK_FORMAT_R32_SFLOAT);
     g_sao.gtao = sao_pipeline("SAO_GTAO", VK_FORMAT_R16_SFLOAT);
@@ -7284,11 +7287,11 @@ static void lamp_zone_cubes(void)
     if (!g_lamps.nsh || g_lamps.sh_serial != g_serial || g_lamps.zc_serial != g_serial || !g_lamps.nzi || !g_shd.zone[0] ||
         !g_shd.zone[1])
         return;
-    int same = g_lamps.zn == g_lamps.nsh && g_lamps.z_serial && g_serial - g_lamps.z_serial < 600 &&
-        !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
+    uint32_t size = g_lamps.lsize;
+    int same = g_lamps.zn == g_lamps.nsh && g_lamps.z_serial && g_serial - g_lamps.z_serial < 600 && g_lamps.zlsm &&
+        g_lamps.zlsm->w == size && !memcmp(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos[0] * g_lamps.nsh);
     if (same)
         return;
-    uint32_t size = g_lamps.lsize;
     if (!g_lamps.zlsm || g_lamps.zlsm->w != size)
     {
         end_pass();
@@ -9955,7 +9958,7 @@ static struct
 
 static void hdr_swap(GfxTex* t, VkFormat vf)
 {
-    if (t->vf == vf || !post_init(t->vf))
+    if (t->vf == vf || !fs_init())
         return;
     VkPipeline cp = fmt_pipe(vf, FP_HDR_COPY);
     if (!cp)
@@ -9999,7 +10002,7 @@ static void hdr_update(GfxTex* color)
     if (want && color->vf == VK_FORMAT_B8G8R8A8_UNORM)
         hdr_swap(color, VK_FORMAT_R16G16B16A16_SFLOAT), g_hdr.t = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? color : NULL;
     else if (!want && g_hdr.t == color && color->vf == VK_FORMAT_R16G16B16A16_SFLOAT)
-        hdr_swap(color, VK_FORMAT_B8G8R8A8_UNORM), g_hdr.t = NULL;
+        hdr_swap(color, VK_FORMAT_B8G8R8A8_UNORM), g_hdr.t = color->vf == VK_FORMAT_R16G16B16A16_SFLOAT ? color : NULL;
     if (!g_hdr.t && g_hdr.src) /* (the tonemap's copy, once no target is float) */
         gfx_tex_destroy(g_hdr.src), g_hdr.src = NULL;
 }
