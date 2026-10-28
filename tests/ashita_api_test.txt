@@ -19,6 +19,26 @@ packet_in ad 00 01 00 55 66 77 88
 key 3b 1
 key 3b 0
 key 3c 1
+# Block keybinds during game input (on by default): with the chat line open the key handlers
+# don't see presses, and a key they didn't see pressed isn't shown released
+lua ashtest xi.chat.input = function() return '', true end
+key 02 1
+key 02 0
+key 03 1
+lua ashtest xi.chat.input = function() return '', false end
+key 03 0
+key 04 1
+lua ashtest xi.chat.input = function() return '', true end
+key 04 0
+lua ashtest AshitaCore:GetInputManager():GetKeyboard():SetBlockBindsDuringInput(false)
+key 05 1
+key 05 0
+lua ashtest AshitaCore:GetInputManager():GetKeyboard():Bind(0x06, true, false, false, false, false, false, false, false, '/echo five')
+command /bind list
+lua ashtest AshitaCore:GetInputManager():GetKeyboard():SetBlockBindsDuringInput(true)
+command /bind list
+lua ashtest AshitaCore:GetInputManager():GetKeyboard():Unbind(0x06, true, false, false, false, false, false, false, false)
+lua ashtest xi.chat.input = function() return '', false end
 mouse 201 12 34
 lua ashtest AshitaCore:GetPluginManager():RaiseEvent('hello', 'payload')
 frames 2

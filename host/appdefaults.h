@@ -17,7 +17,8 @@
  *   FFXICexi             "off", "items" or "full": a CatsEyeXI-style server's custom ids (--cexi)
  *
  * They are defaults: what the player saved (signin.cfg, settings.reg) and the command line win.
- * Elsewhere, and outside a bundle, there are none. */
+ * The UWP app gives the same keys from its xbox.cfg (xbox/app/Options.cpp). Elsewhere, and outside a
+ * bundle, there are none. */
 #pragma once
 
 #include <stddef.h>

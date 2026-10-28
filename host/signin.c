@@ -3,7 +3,8 @@
  * Two windows drawn as the game's Config pages are: Sign in (the LandSandBoat username, the
  * password, the one-time code, Sign in and Settings) and Settings (the server, remembering the
  * password, trusting this computer, the window theme, full screen). Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
- * picks, Escape goes back or quits; the mouse clicks.
+ * picks, Escape goes back or quits; the mouse clicks. A controller: the D-pad moves, A picks or opens
+ * the on-screen keyboard over a field, B goes back, Start signs in.
  *
  * What it remembers is in signin.cfg (key=value lines) beside settings.reg, the password in the
  * keychain (keychain.h). The sign-in runs on a worker thread so the window keeps drawing. */
@@ -378,7 +379,11 @@ static void keysave_thread(void* arg)
 {
     Keysave* k = arg;
     if (k->remember)
-        keychain_set(k->key, k->password);
+    {
+        if (!keychain_set(k->key, k->password))
+            fprintf(stderr, "[signin] the password was not saved: %s\n",
+                    keychain_available() ? "the store refused it" : "no password store here");
+    }
     else
         keychain_delete(k->key);
     memset(k->password, 0, sizeof k->password);
@@ -497,6 +502,11 @@ typedef struct Ui
     SePlayer* se;               /* the menus' sounds (SND_*), if there is audio */
     SeWave snd[4];
     float se_gain;              /* at the player's volume */
+    float mouse_x, mouse_y;     /* where the pointer last was: only a move hovers */
+    SDL_Gamepad* pad;           /* the controller, for its left stick */
+    int stick;                  /* the D-pad button the stick stands for, plus 1; 0 when centred */
+    Uint64 stick_at;            /* when it repeats */
+    int keyboard_id;            /* the field an on-screen keyboard was opened over, else -1 */
 } Ui;
 
 /* The menus' sounds, as the game's menus play them: their effect ids (ROM/0/0.DAT's "0001".."0004") */
@@ -670,7 +680,11 @@ static void choose(Ui* u, int id, int v)
     if (v == choice_value(u, id))
         return;
     if (id == ID_REMEMBER)
+    {
         u->cfg.remember = v == 0;
+        if (u->cfg.remember && !keychain_available())
+            set_status(u, "No keyring here: the username is remembered, the password isn't.", 1);
+    }
     else if (id == ID_TRUST)
     {
         u->cfg.trust = v == 0;
@@ -713,7 +727,11 @@ static void activate(Ui* u, int i)
     if (w->kind == W_CHOICE)
         choose(u, w->id, u->sub);
     else if (w->id == ID_SETTINGS && !busy())
+    {
         u->screen = SCREEN_SETTINGS, set_status(u, "", 0), build(u), focus_on(u, 0), u->anim_at = SDL_GetTicks();
+        if (u->cfg.remember && !keychain_available())
+            set_status(u, "No keyring here: the username is remembered, the password isn't.", 0);
+    }
     else if (w->id == ID_BACK)
         u->screen = SCREEN_SIGNIN, build(u), focus_on(u, 0), u->anim_at = SDL_GetTicks();
     else if (u->screen == SCREEN_SIGNIN)
@@ -1399,11 +1417,45 @@ static void hover(Ui* u, int i, int o)
 }
 
 /* the left button, or the pointer moving; x, y in the window's pixels */
+/* Text input on: names and passwords, with no capital first letter and no corrections, which iOS's
+ * keyboard makes */
+static void start_typing(SDL_Window* win)
+{
+    SDL_PropertiesID tp = SDL_CreateProperties();
+    SDL_SetNumberProperty(tp, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
+    SDL_SetBooleanProperty(tp, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
+    SDL_StartTextInputWithProperties(win, tp);
+    SDL_DestroyProperties(tp);
+}
+
+#ifdef FFXI_IOS
+/* The focused field as the text input area: while iOS's keyboard is up, SDL slides the view up just
+ * far enough to keep it above the keyboard (SDL_uikitviewcontroller.m updateKeyboard) */
+static void typing_area(Ui* u, SDL_Window* win)
+{
+    static SDL_Rect last;
+    Widget* f = field(u);
+    if (!f || !SDL_TextInputActive(win))
+        return;
+    float d = SDL_GetWindowPixelDensity(win);
+    SDL_Rect r = { (int)(f->x0 / d), (int)(f->y0 / d), (int)((f->x1 - f->x0) / d), (int)((f->y1 - f->y0) / d) + 12 };
+    if (!memcmp(&r, &last, sizeof r))
+        return;
+    last = r;
+    SDL_SetTextInputArea(win, &r, 0);
+}
+#endif
+
 static void mouse(Ui* u, const SDL_Event* e, float d)
 {
     int o;
     if (e->type == SDL_EVENT_MOUSE_MOTION)
     {
+        /* a pointer that reports where it already was (a console's, with no mouse) would hold the
+         * cursor under it against the keys and the D-pad */
+        if (e->motion.x == u->mouse_x && e->motion.y == u->mouse_y)
+            return;
+        u->mouse_x = e->motion.x, u->mouse_y = e->motion.y;
         Widget* f = field(u);
         if (u->dragging && f && (e->motion.state & SDL_BUTTON_LMASK))
         {
@@ -1420,6 +1472,17 @@ static void mouse(Ui* u, const SDL_Event* e, float d)
     {
         int i = hit(u, e->button.x * d, e->button.y * d, &o);
         u->dragging = 0, u->down_w = -1;
+#ifdef FFXI_IOS
+        {
+            /* iOS's keyboard: back with a tap on a field, away with a tap anywhere else */
+            SDL_Window* win = SDL_GetWindowFromID(e->button.windowID);
+            int on_field = i >= 0 && u->w[i].text;
+            if (win && on_field && !SDL_TextInputActive(win))
+                start_typing(win);
+            else if (win && !on_field && SDL_TextInputActive(win))
+                SDL_StopTextInput(win);
+        }
+#endif
         if (i < 0)
             return;
         Widget* w = &u->w[i];
@@ -1453,6 +1516,104 @@ static void mouse(Ui* u, const SDL_Event* e, float d)
 }
 
 static void key_act(Ui* u, const SDL_KeyboardEvent* e);
+static void key(Ui* u, const SDL_KeyboardEvent* e);
+
+/* The on-screen keyboard over the focused field (a console's, a Steam Deck's), given the field's
+ * text so far ("xi.textinput.text"): a host that can sends the whole text back as it changes
+ * (SIGNIN_KEYBOARD_TEXT, keyboard_text), others type it as keys. */
+static void screen_keyboard(Ui* u, SDL_Window* win)
+{
+    Widget* f = field(u);
+    if (!f || busy())
+        return;
+    u->keyboard_id = f->id;
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_SetNumberProperty(p, SDL_PROP_TEXTINPUT_TYPE_NUMBER,
+        f->kind == W_SECRET ? SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN
+        : f->id == ID_USER  ? SDL_TEXTINPUT_TYPE_TEXT_USERNAME
+        : f->id == ID_OTP   ? SDL_TEXTINPUT_TYPE_NUMBER
+                            : SDL_TEXTINPUT_TYPE_TEXT);
+    SDL_SetNumberProperty(p, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
+    SDL_SetBooleanProperty(p, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
+    SDL_SetStringProperty(p, "xi.textinput.text", f->text);
+    SDL_StopTextInput(win);
+    SDL_StartTextInputWithProperties(win, p);
+    SDL_DestroyProperties(p);
+    sound(u, SND_CONFIRM);
+}
+
+/* All of the text of the field the on-screen keyboard was opened over, wherever the cursor is now */
+static void keyboard_text(Ui* u, const char* s)
+{
+    for (int i = 0; i < u->nw; ++i)
+    {
+        Widget* w = &u->w[i];
+        if (w->id != u->keyboard_id || !w->text || busy())
+            continue;
+        size_t n = 0;
+        for (; *s && n + 1 < w->cap; ++s)
+            if (*s >= ' ' && *s <= '~') /* the font's ASCII */
+                w->text[n++] = *s;
+        w->text[n] = 0;
+        if (i == u->focus)
+            u->caret = u->anchor = (int)n;
+        u->focus_time = SDL_GetTicks();
+        return;
+    }
+}
+
+/* A controller's button, as the keys it stands for: the D-pad moves, A picks (over a field, it opens
+ * the on-screen keyboard), B goes back, Start signs in. */
+static void pad_button(Ui* u, SDL_Window* win, int button)
+{
+    SDL_KeyboardEvent k;
+    memset(&k, 0, sizeof k);
+    k.type = SDL_EVENT_KEY_DOWN;
+    k.down = true;
+    fprintf(stderr, "[signin] controller button %d on control %d\n", button, u->focus);
+    switch (button)
+    {
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: k.key = SDLK_UP; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: k.key = SDLK_DOWN; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: k.key = SDLK_LEFT; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: k.key = SDLK_RIGHT; break;
+    case SDL_GAMEPAD_BUTTON_EAST: k.key = SDLK_ESCAPE; break;
+    case SDL_GAMEPAD_BUTTON_SOUTH:
+        if (field(u))
+        {
+            screen_keyboard(u, win);
+            return;
+        }
+        k.key = SDLK_RETURN;
+        break;
+    case SDL_GAMEPAD_BUTTON_START:
+        if (u->screen == SCREEN_SIGNIN && !busy())
+            sound(u, SND_CONFIRM), start_signin(u);
+        return;
+    default: return;
+    }
+    key(u, &k);
+}
+
+/* The left stick as the D-pad: pushed past half way it moves once, then again every 150 ms after
+ * it has been held for 400 ms. */
+static void stick(Ui* u, SDL_Window* win)
+{
+    if (!u->pad)
+        return;
+    int x = SDL_GetGamepadAxis(u->pad, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(u->pad, SDL_GAMEPAD_AXIS_LEFTY);
+    int ax = abs(x), ay = abs(y), past = u->stick ? 8000 : 16000; /* it lets go nearer the centre */
+    int dir = ay >= ax && ay > past ? (y < 0 ? SDL_GAMEPAD_BUTTON_DPAD_UP : SDL_GAMEPAD_BUTTON_DPAD_DOWN)
+            : ax > ay && ax > past  ? (x < 0 ? SDL_GAMEPAD_BUTTON_DPAD_LEFT : SDL_GAMEPAD_BUTTON_DPAD_RIGHT)
+                                    : -1;
+    Uint64 now = SDL_GetTicks();
+    if (dir < 0)
+        u->stick = 0;
+    else if (dir + 1 != u->stick)
+        u->stick = dir + 1, u->stick_at = now + 400, pad_button(u, win, dir);
+    else if (now >= u->stick_at)
+        u->stick_at = now + 150, pad_button(u, win, dir);
+}
 
 /* a key; the cursor's moving sounds as the game's does */
 static void key(Ui* u, const SDL_KeyboardEvent* e)
@@ -1476,8 +1637,10 @@ static void key_act(Ui* u, const SDL_KeyboardEvent* e)
     {
         if (u->screen == SCREEN_SETTINGS)
             u->screen = SCREEN_SIGNIN, build(u), focus_on(u, 0), u->anim_at = SDL_GetTicks(), sound(u, SND_CANCEL);
+#ifndef FFXI_IOS /* an iOS app is never closed from inside it: there, nothing to go back to */
         else if (!busy())
             begin_close(u, 0), sound(u, SND_CANCEL);
+#endif
     }
     else if (k == SDLK_TAB || k == SDLK_DOWN || k == SDLK_UP)
     {
@@ -1572,6 +1735,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     if (!u)
         return -1;
     u->host_game = setup->host_game;
+    u->keyboard_id = -1;
     /* where it keeps its files */
     char dir[1024], cfg_path[1100];
     if (setup->data_dir)
@@ -1609,7 +1773,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, c->space ? "1" : "0");
     /* a held key repeats, not macOS's accent menu; read when SDL starts, so the game's window too */
     SDL_SetHint(SDL_HINT_MAC_PRESS_AND_HOLD, "0");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD))
     {
         fprintf(stderr, "[signin] SDL_Init: %s\n", SDL_GetError());
         free(u);
@@ -1706,7 +1870,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     /* start where there is something to type */
     build(u);
     focus_on(u, !c->user[0] ? 0 : !u->password[0] ? 1 : 3);
-    SDL_StartTextInput(win);
+    start_typing(win);
     if (read_keychain)
     {
         SDL_SetAtomicInt(&g_keyread.state, 1);
@@ -1744,17 +1908,39 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         {
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                 done = 1;
+            else if (e.type == SDL_EVENT_GAMEPAD_ADDED)
+            {
+                /* for its buttons' events and its stick; left open for the game's input */
+                SDL_Gamepad* p = SDL_OpenGamepad(e.gdevice.which);
+                if (p && !u->pad)
+                    u->pad = p;
+            }
+            else if (e.type == SDL_EVENT_GAMEPAD_REMOVED && u->pad && SDL_GetGamepadFromID(e.gdevice.which) == u->pad)
+                u->pad = NULL, u->stick = 0;
+            else if (e.type == SDL_EVENT_USER && e.user.code == SIGNIN_KEYBOARD_TEXT)
+            {
+                if (!u->closing)
+                    keyboard_text(u, (const char*)e.user.data1);
+                SDL_free(e.user.data1);
+            }
             else if (u->closing || open_progress(u) < 1)
                 continue; /* nothing to act on while the window opens or closes */
             else if (e.type == SDL_EVENT_TEXT_INPUT)
                 type(u, e.text.text);
             else if (e.type == SDL_EVENT_KEY_DOWN)
                 key(u, &e.key);
+            else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN)
+                pad_button(u, win, e.gbutton.button);
             else if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                      e.type == SDL_EVENT_MOUSE_BUTTON_UP)
                 mouse(u, &e, SDL_GetWindowPixelDensity(win));
             build(u);
         }
+        if (!u->closing && open_progress(u) >= 1)
+            stick(u, win), build(u);
+#ifdef FFXI_IOS
+        typing_area(u, win);
+#endif
 
         /* the saved password, when macOS has let us read it: into an empty field */
         if (SDL_GetAtomicInt(&g_keyread.state) == 2)

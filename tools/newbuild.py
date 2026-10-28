@@ -58,7 +58,7 @@ def pe_timestamp(path):
 
 
 def label_of(ts):
-    """New labels are the UTC date of FFXiMain.dll's PE timestamp (README, Rules)."""
+    """New labels are the UTC date of FFXiMain.dll's PE timestamp (docs/new-client-version.md)."""
     return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime('%Y-%m-%d')
 
 

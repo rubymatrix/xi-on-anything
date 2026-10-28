@@ -10,6 +10,13 @@ void user32_adopt_window(void* sdl_window);
 /* A full-screen device (D3D8 Windowed = FALSE) on hwnd: its window covers the display, in the
  * desktop's own mode. */
 void user32_set_fullscreen(uint32_t hwnd, int on);
+/* The part of the SDL window, in its units, the game's client is presented into (iOS: the screen's
+ * safe area, host/display_fit.c): the pointer is mapped from it to the client's pixels, and the
+ * client may be any size. w 0 (the default): the client is the window, unit for unit. */
+void user32_set_view(float x, float y, float w, float h);
+/* A point in the window's units -> the focused client's pixels, when a view is set: 1; else 0, the
+ * point unchanged. */
+int user32_view_point(float* x, float* y);
 /* The SDL_Window behind a guest HWND (for the graphics layer), or NULL. */
 void* user32_sdl_window(uint32_t hwnd);
 /* A window's client size (unchanged if hwnd is not ours); the desktop's mode. */

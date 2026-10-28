@@ -5418,9 +5418,16 @@ static int make_device(void)
 }
 
 #if defined(FFXI_UWP)
-/* UWP: no window handle; the swap chain is for composition, and the app shows it in a SwapChainPanel */
+/* UWP: no window handle; the swap chain is on the app's CoreWindow (no XAML). It is made once, by the
+ * sign-in screen, and the game draws on into it. */
 static void make_swap_chain(SDL_Window* win)
 {
+    IUnknown* core = (IUnknown*)uwp_core_window();
+    if (!core || !g_factory)
+    {
+        fprintf(stderr, "[recomp] gfx: no CoreWindow for the swap chain\n");
+        return;
+    }
     int pw = 0, ph = 0;
     SDL_GetWindowSizeInPixels(win, &pw, &ph);
     DXGI_SWAP_CHAIN_DESC1 sd;
@@ -5433,15 +5440,14 @@ static void make_swap_chain(SDL_Window* win)
     sd.Scaling = DXGI_SCALING_STRETCH;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-    g_tearing = 0; /* composition swap chains cannot tear */
+    g_tearing = 0; /* presented in time with the TV, as the console wants */
     IDXGISwapChain1* sc1 = NULL;
-    HRESULT hr = IDXGIFactory4_CreateSwapChainForComposition(g_factory, (IUnknown*)g_queue, &sd, NULL, &sc1);
+    HRESULT hr = IDXGIFactory4_CreateSwapChainForCoreWindow(g_factory, (IUnknown*)g_queue, core, &sd, NULL, &sc1);
     if (FAILED(hr))
     {
         fprintf(stderr, "[recomp] gfx: swap chain failed (%08lx)\n", (unsigned long)hr);
         return;
     }
-    uwp_attach_swapchain(sc1);
     IDXGISwapChain1_QueryInterface(sc1, &IID_IDXGISwapChain3, (void**)&g_swap);
     IDXGISwapChain1_Release(sc1);
     g_swap_w = sd.Width, g_swap_h = sd.Height;

@@ -145,6 +145,32 @@ static void mouse_give(const Wnd* w, int x, int y)
     g_given_n += g_given_n < USER32_MOUSE_GIVEN;
 }
 
+/* user32_set_view: the rectangle of the SDL window the client is presented into; g_view_w 0 for none */
+static float g_view_x, g_view_y, g_view_w, g_view_h;
+
+void user32_set_view(float x, float y, float w, float h)
+{
+    g_view_x = x, g_view_y = y, g_view_w = w > 0 && h > 0 ? w : 0, g_view_h = h;
+}
+
+/* A point in the window's units -> the client's pixels, kept on the client: 1 when a view is set */
+static int view_map(const Wnd* w, float* x, float* y)
+{
+    if (!w || g_view_w <= 0)
+        return 0;
+    float cx = (*x - g_view_x) * (float)w->w / g_view_w, cy = (*y - g_view_y) * (float)w->h / g_view_h;
+    *x = cx < 0 ? 0 : cx > (float)(w->w - 1) ? (float)(w->w - 1) : cx;
+    *y = cy < 0 ? 0 : cy > (float)(w->h - 1) ? (float)(w->h - 1) : cy;
+    return 1;
+}
+
+/* The reverse: a client pixel -> the window's units */
+static void view_unmap(const Wnd* w, float* x, float* y)
+{
+    *x = g_view_x + (*x + 0.5f) * g_view_w / (float)w->w;
+    *y = g_view_y + (*y + 0.5f) * g_view_h / (float)w->h;
+}
+
 /* The client point (*x, *y) made the one to give the game: unsqueezed across in a wider window, down
  * in a taller one, over the interface; as it is over the world. */
 static void ui_unsqueeze(const Wnd* w, int* x, int* y)
@@ -649,7 +675,9 @@ static void pump(void)
             w = wnd_of_sdl(e.motion.windowID);
             if (w)
             {
-                int mx = (int)e.motion.x, my = (int)e.motion.y;
+                float fx = e.motion.x, fy = e.motion.y;
+                view_map(w, &fx, &fy);
+                int mx = (int)fx, my = (int)fy;
                 ui_unsqueeze(w, &mx, &my);
                 post(w->tid, w->hwnd, WM_MOUSEMOVE, mouse_keys(e.motion.state & ~g_overlay_buttons),
                     ((uint32_t)(uint16_t)my << 16) | (uint16_t)mx);
@@ -668,7 +696,9 @@ static void pump(void)
                                                                  : 0;
             if (!msg)
                 break;
-            int bx = (int)e.button.x, by = (int)e.button.y;
+            float fx = e.button.x, fy = e.button.y;
+            view_map(w, &fx, &fy);
+            int bx = (int)fx, by = (int)fy;
             ui_unsqueeze(w, &bx, &by);
             uint32_t lp = ((uint32_t)(uint16_t)by << 16) | (uint16_t)bx;
             g_mouse_held = SDL_GetMouseState(NULL, NULL) != 0;
@@ -678,8 +708,12 @@ static void pump(void)
         case SDL_EVENT_MOUSE_WHEEL:
             w = wnd_of_sdl(e.wheel.windowID);
             if (w)
+            {
+                float fx = e.wheel.mouse_x, fy = e.wheel.mouse_y;
+                view_map(w, &fx, &fy);
                 post(w->tid, w->hwnd, WM_MOUSEWHEEL, ((uint32_t)(uint16_t)(int16_t)(e.wheel.y * 120) << 16),
-                    ((uint32_t)(uint16_t)(int)e.wheel.mouse_y << 16) | (uint16_t)(int)e.wheel.mouse_x);
+                    ((uint32_t)(uint16_t)(int)fy << 16) | (uint16_t)(int)fx);
+            }
             break;
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
@@ -997,7 +1031,13 @@ static int show_window(Wnd* w, int show)
              * sign-in screen (host/signin.c) keeps it, for the password. */
             SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
             SDL_SetHint(SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD, "0");
+#ifdef FFXI_IOS
+            /* iOS shows its keyboard whenever text input is on, whatever the hint: off (the sign-in's,
+             * on this same window, with it), and on only while the chat line is open (host64.c) */
+            SDL_StopTextInput(w->sdl);
+#else
             SDL_StartTextInput(w->sdl);
+#endif
         }
         call_wndproc(w, WM_SHOWWINDOW, 1, 0);
         call_wndproc(w, WM_ACTIVATEAPP, 1, 0);
@@ -1069,7 +1109,18 @@ static void sh_GetCursorPos(Guest* g)
     if (g_sdl_up)
         SDL_GetGlobalMouseState(&x, &y);
     Wnd* w = wnd(g_focus);
-    if (w && x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h)
+    if (w && w->sdl && g_view_w > 0)
+    {
+        /* the window's units, from where SDL has it, to the client's pixels through the view */
+        int wx = 0, wy = 0;
+        SDL_GetWindowPosition(w->sdl, &wx, &wy);
+        float lx = x - (float)wx, ly = y - (float)wy;
+        view_map(w, &lx, &ly);
+        int cx = (int)lx, cy = (int)ly;
+        ui_unsqueeze(w, &cx, &cy);
+        x = (float)(w->x + cx), y = (float)(w->y + cy);
+    }
+    else if (w && x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h)
     {
         int cx = (int)x - w->x, cy = (int)y - w->y;
         ui_unsqueeze(w, &cx, &cy);
@@ -1559,6 +1610,14 @@ static void sh_SetCursorPos(Guest* g)
         int cx = (int)x - w->x, cy = (int)y - w->y;
         ui_squeeze_point(w, &cx, &cy);
         x = (float)(w->x + cx), y = (float)(w->y + cy);
+        if (w->sdl && g_view_w > 0) /* back through the view, to where SDL has the window */
+        {
+            int wx = 0, wy = 0;
+            float lx = (float)cx, ly = (float)cy;
+            view_unmap(w, &lx, &ly);
+            SDL_GetWindowPosition(w->sdl, &wx, &wy);
+            x = (float)wx + lx, y = (float)wy + ly;
+        }
     }
     if (g_sdl_up)
         SDL_WarpMouseGlobal(x, y);
@@ -1996,6 +2055,8 @@ void user32_init(void)
 {
     thunk_register(USER32);
 }
+
+int user32_view_point(float* x, float* y) { return view_map(wnd(g_focus), x, y); }
 
 void* user32_sdl_window(uint32_t hwnd)
 {

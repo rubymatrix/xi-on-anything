@@ -27,3 +27,5 @@ int reg_get_dword(const char* path, const char* name, uint32_t* out);
 int reg_get_string(const char* path, const char* name, char* out, size_t n);
 /* Sets a string value (REG_SZ), creating the key: what the host knows better than the imported file. */
 void reg_set_string(const char* path, const char* name, const char* value);
+/* Sets a DWORD value, the same way. */
+void reg_set_dword(const char* path, const char* name, uint32_t value);

@@ -26,9 +26,12 @@ MIN_MACOS = '12.0'
 # the compilers: clang, or what XI_CC / XI_CXX name (the Linux kit's zig cc, tools/linux/kit.sh)
 CC = shlex.split(os.environ.get('XI_CC', 'clang'))
 CXX = shlex.split(os.environ.get('XI_CXX', 'clang++'))
+AR = shlex.split(os.environ.get('XI_AR', 'ar'))
+# where the archives go: XI_TP_DIR for another target's (the browser build's: build/web/third_party)
+OUT = os.environ.get('XI_TP_DIR') or os.path.join(ROOT, 'build', 'third_party')
 # Linux: everything position-independent, so host64 links as a PIE and lies above 4 GB, where its addresses
 # can't be taken for the guest's (#74: zig cc, the kit's compiler, makes position-dependent code by default)
-PIE = ['-fPIE'] if sys.platform.startswith('linux') else []
+PIE = ['-fPIE'] if sys.platform.startswith('linux') and 'emcc' not in CC[0] else []
 
 
 def manifest(name):
@@ -37,7 +40,7 @@ def manifest(name):
 
 
 def archive(name):
-    return os.path.join(ROOT, 'build', 'third_party', name + '.a')
+    return os.path.join(OUT, name + '.a')
 
 
 # SDL3 is vendored for macOS only (its Cocoa, CoreAudio and Metal sources); elsewhere it is the
@@ -82,7 +85,7 @@ def tree_stamp(name):
 def build_make(name, m, out, stamp, key):
     """LuaJIT: its makefile, static, in a copy of third_party/<name> (the tree stays clean)."""
     import shutil
-    work = os.path.join(ROOT, 'build', 'third_party', name + '-src')
+    work = os.path.join(OUT, name + '-src')
     if os.path.exists(work):
         shutil.rmtree(work)
     shutil.copytree(os.path.join(ROOT, 'third_party', name), work)
@@ -110,14 +113,15 @@ def build(name, progress=None):
                          ' '.join(CC + CXX + PIE).encode()).hexdigest()
     if os.path.exists(out) and os.path.exists(stamp) and open(stamp).read() == key:
         return out
-    os.makedirs(os.path.join(ROOT, 'build', 'third_party'), exist_ok=True)
+    os.makedirs(OUT, exist_ok=True)
     if m.get('kind') == 'make':
         return build_make(name, m, out, stamp, key)
-    objdir = os.path.join(ROOT, 'build', 'third_party', name)
+    objdir = os.path.join(OUT, name)
     os.makedirs(objdir, exist_ok=True)
     jobs = []
     for n, g in enumerate(m['groups']):
-        base = (CC + PIE + ['-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' else [])
+        base = (CC + PIE + ['-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' and 'emcc' not in CC[0] else [])
+                + shlex.split(os.environ.get('XI_TP_CFLAGS', ''))
                 + g['flags']
                 + ['-I' + os.path.join(lib, d) for d in g['include']]
                 + sum((['-idirafter', os.path.join(lib, d)] for d in g['idirafter']), []))
@@ -139,7 +143,7 @@ def build(name, progress=None):
                 progress(name, done, len(jobs))
     if os.path.exists(out):
         os.remove(out)
-    subprocess.run(['ar', 'rcs', out] + [j[0] for j in jobs], check=True)
+    subprocess.run(AR + ['rcs', out] + [j[0] for j in jobs], check=True)
     with open(stamp, 'w') as f:
         f.write(key)
     return out

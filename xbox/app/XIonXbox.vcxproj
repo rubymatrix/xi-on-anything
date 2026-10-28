@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The UWP app: a CoreWindow, no XAML. C++/WinRT from the Windows SDK's own headers: no NuGet
+     packages. The game, with its sign-in screen, is build\uwp\ffxi_uwp.lib, from
+     `python tools\build.py uwp-lib` in this repo. -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{05AEC10A-B923-458E-A4D2-383B6E7A1330}</ProjectGuid>
+    <RootNamespace>XIonXbox</RootNamespace>
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
+    <AppContainerApplication>true</AppContainerApplication>
+    <ApplicationType>Windows Store</ApplicationType>
+    <ApplicationTypeRevision>10.0</ApplicationTypeRevision>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformMinVersion>10.0.19041.0</WindowsTargetPlatformMinVersion>
+    <!-- the repo's root -->
+    <XiDir>$(MSBuildThisFileDirectory)..\..\</XiDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Debug'">true</UseDebugLibraries>
+    <WholeProgramOptimization Condition="'$(Configuration)' == 'Release'">true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(XiDir)build\xbox\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(XiDir)build\xbox\obj\$(Platform)\$(Configuration)\</IntDir>
+    <!-- sideloaded as a loose layout (Add-AppxPackage -Register) in developer mode: no signing -->
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <GenerateAppInstallerFile>false</GenerateAppInstallerFile>
+    <AppxPackageDir>$(XiDir)build\xbox\packages\</AppxPackageDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <CompileAsWinRT>false</CompileAsWinRT>
+      <WarningLevel>Level3</WarningLevel>
+      <AdditionalOptions>/bigobj /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\cppwinrt;$(XiDir)runtime\portable;$(XiDir)host;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <Optimization Condition="'$(Configuration)' == 'Release'">MaxSpeed</Optimization>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <!-- tools/sample_report.py resolves FFXI_SAMPLE's addresses with it -->
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(OutDir)$(TargetName).map</MapFileName>
+      <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
+      <!-- WindowsApp.lib is the only Windows import library: an unresolved import is a Win32 call UWP
+           does not allow -->
+      <AdditionalDependencies>$(XiDir)build\uwp\ffxi_uwp.lib;WindowsApp.lib;xaudio2.lib;d3d12.lib;dxgi.lib;d3dcompiler.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="Audio.h" />
+    <ClInclude Include="Display.h" />
+    <ClInclude Include="Game.h" />
+    <ClInclude Include="GameFolder.h" />
+    <ClInclude Include="Input.h" />
+    <ClInclude Include="Options.h" />
+    <ClInclude Include="TextInput.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="App.cpp" />
+    <ClCompile Include="Audio.cpp" />
+    <ClCompile Include="Display.cpp" />
+    <ClCompile Include="Game.cpp" />
+    <ClCompile Include="GameFolder.cpp" />
+    <ClCompile Include="Input.cpp" />
+    <ClCompile Include="Keychain.cpp" />
+    <ClCompile Include="Options.cpp" />
+    <ClCompile Include="TextInput.cpp" />
+    <ClCompile Include="Tls.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Image Include="Assets\*.png" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

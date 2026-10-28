@@ -48,6 +48,10 @@ local traceback = debug.traceback
 
 local M = {}
 
+-- IKeyboard:SetBlockBindsDuringInput sets this (ashita_core.lua)
+M.block_during_input = true
+local hidden = {} -- DIK -> true: its press was kept from the key handlers
+
 local handlers = {} -- ashita name -> list of { alias, fn }
 
 -- Runs fn(...) as a coroutine; if it sleeps, the rest continues from xi.tasks.
@@ -251,6 +255,20 @@ local EVENTS = {
         xi = 'key',
         run = function(xe)
             local code = xe.key or 0
+            -- Ashita's "Block keybinds during game input" (IKeyboard:SetBlockBindsDuringInput, on
+            -- by default): while the chat line is open the handlers don't see keys, so typing a
+            -- bound digit doesn't fire a hotbar, and the game still gets the key. A key whose
+            -- press they didn't see isn't shown released either; one they saw pressed is.
+            if xe.down then
+                if M.block_during_input and select(2, xi.chat.input()) then
+                    hidden[code] = true
+                    return
+                end
+                hidden[code] = nil
+            elseif hidden[code] then
+                hidden[code] = nil
+                return
+            end
             local lparam = xe.flags
             if not lparam or lparam == 0 then
                 -- repeat 1, scan code, extended, previous state / transition when released

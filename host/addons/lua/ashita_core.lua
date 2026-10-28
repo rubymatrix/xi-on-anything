@@ -342,9 +342,10 @@ CHAT.AddChatMessage = CHAT.Write
 function CHAT:ParseAutoTranslate(msg, use_brackets)
     msg = tostring(msg or '')
     return (msg:gsub('\xFD(.)(.)(.)(.)\xFD', function(k, l, b2, b3)
-        -- one we cannot read as a ?, not its raw bytes: addons that split lines on control bytes
-        -- (timestamp, on 07 and 0A) would cut the code in two
-        local s = xi.res.auto_translate(k:byte(), l:byte(), b2:byte(), b3:byte()) or '?'
+        -- in the reader's language (0, the default), not the sender's (the token's own byte), as
+        -- the game shows it. One we cannot read as a ?, not its raw bytes: addons that split lines
+        -- on control bytes (timestamp, on 07 and 0A) would cut the code in two
+        local s = xi.res.auto_translate(k:byte(), 0, b2:byte(), b3:byte()) or '?'
         if use_brackets then return '\xEF\x27' .. s .. '\xEF\x28' end
         return s
     end))
@@ -497,22 +498,37 @@ local function bind_text(key, down, alt, apps, ctrl, shift, win, closed, open)
         (shift and '+' or '') .. (closed and '%' or '') .. (open and '$' or '') .. name, down
 end
 
+-- With block_binds_during_input a bind that names neither chat state runs only with the chat line
+-- closed, as Ashita's do; the host gets it with '%'.
+local open_any = {} -- key text -> { text with '%', command, up }: such binds, to redo when it changes
+local function host_bind(text, command, up, any)
+    local host = text
+    if any then
+        open_any[text .. (up and ':up' or '')] = { '%' .. text, command, up }
+        if kb.block_binds_during_input then host = '%' .. text end
+    end
+    xi.input.bind(host, command, up)
+end
+
 local KB = {}
 function KB:Bind(key, down, alt, apps, ctrl, shift, win, closed, open, command)
     local text = bind_text(key, down, alt, apps, ctrl, shift, win, closed, open)
     if not text then return end
     binds[text .. (down == false and ':up' or '')] = tostring(command or '')
-    xi.input.bind(text, tostring(command or ''), down == false)
+    host_bind(text, tostring(command or ''), down == false, not closed and not open)
 end
 function KB:Unbind(key, down, alt, apps, ctrl, shift, win, closed, open)
     local text = bind_text(key, down, alt, apps, ctrl, shift, win, closed, open)
     if not text then return end
     binds[text] = nil
     binds[text .. ':up'] = nil
+    open_any[text] = nil
+    open_any[text .. ':up'] = nil
     xi.input.unbind(text)
 end
 function KB:UnbindAll()
     binds = {}
+    open_any = {}
     xi.input.unbind()
 end
 function KB:IsBound(key, down, alt, apps, ctrl, shift, win, closed, open)
@@ -535,7 +551,15 @@ function KB:SetBlockInput(v)
     end
 end
 function KB:GetBlockBindsDuringInput() return kb.block_binds_during_input end
-function KB:SetBlockBindsDuringInput(v) kb.block_binds_during_input = v and true or false end
+function KB:SetBlockBindsDuringInput(v)
+    v = v and true or false
+    if v == kb.block_binds_during_input then return end
+    kb.block_binds_during_input = v
+    events.block_during_input = v
+    for text, b in pairs(open_any) do
+        xi.input.bind(v and b[1] or b[1]:sub(2), b[2], b[3])
+    end
+end
 function KB:GetSilentBinds() return kb.silent end
 function KB:SetSilentBinds(v) kb.silent = v and true or false end
 local Keyboard = object(class('IKeyboard', KB))

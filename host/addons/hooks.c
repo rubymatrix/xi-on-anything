@@ -425,6 +425,13 @@ int xi_chat_input_open(void)
     return m ? rd32(m + 0xF108) != 1 : 0;
 }
 
+int xi_chat_typing(void)
+{
+    uint32_t m = chat_manager();
+    uint32_t state = m ? rd32(m + 0xF108) : 0;
+    return state == 4 || state == 5;
+}
+
 void xi_chat_set_input(const char* text)
 {
     uint32_t m = chat_manager();

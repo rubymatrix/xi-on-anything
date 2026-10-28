@@ -614,8 +614,9 @@ function windower.to_shift_jis(s) return native.utf8_to_sjis(tostring(s)) end
 function windower.convert_auto_trans(s)
     s = tostring(s)
     return (s:gsub('\253(....)\253', function(code)
-        -- one we cannot read as a ?, not its raw bytes (see ashita_core.lua's ParseAutoTranslate)
-        return native.res.auto_translate(code:byte(1), code:byte(2), code:byte(3), code:byte(4)) or '?'
+        -- in the reader's language, and one we cannot read as a ? (see ashita_core.lua's
+        -- ParseAutoTranslate)
+        return native.res.auto_translate(code:byte(1), 0, code:byte(3), code:byte(4)) or '?'
     end))
 end
 

@@ -10,7 +10,7 @@
   python tools/build.py host64-headless
                                    the same host with no graphics (gfx_null.c), for measuring the
                                    game's CPU time alone: build/host64-headless.exe
-  python tools/build.py uwp-lib    host64 as a library for the UWP app (FFXIXbox): build/uwp/ffxi_uwp.lib
+  python tools/build.py uwp-lib    host64 as a library for the UWP app (xbox/): build/uwp/ffxi_uwp.lib
   python tools/build.py gfxtest    the Direct3D 12 back end and the D3D8 front end, offscreen, without
                                    the game (tests/gfx_test.c, tests/d3d8_test.c); needs no prepare
 
@@ -93,7 +93,7 @@ def write_build_h():
         f.write(text)
 
 
-PORTABLE = ['runtime\\runtime.c', 'runtime\\portable\\plat_win.c', 'runtime\\portable\\gwin.c',
+PORTABLE = ['runtime\\runtime.c', 'runtime\\portable\\plat_win.c', 'runtime\\portable\\gwin.c', 'runtime\\portable\\watermark.c',
             'runtime\\portable\\gthread.c', 'runtime\\portable\\thunk.c', 'runtime\\portable\\pe.c',
             'runtime\\portable\\k32.c', 'runtime\\portable\\gamecore.c', 'runtime\\portable\\vfs.c',
             'runtime\\portable\\kobj.c', 'runtime\\portable\\k32_io.c', 'runtime\\portable\\gamecore_slots.c',
@@ -254,7 +254,7 @@ SIGNIN_SCREEN = ['host\\signin.c', 'host\\sewave.c', 'host\\modern.c', 'host\\da
 HOST_LIBS = ['synchronization.lib', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'secur32.lib'] + GFX_LIBS
 
 
-# The addon host (host/addons/, docs/addon-compat-design.md): its C and C++ sources, the embedded Lua
+# The addon host (host/addons/, docs/addons.md): its C and C++ sources, the embedded Lua
 # (tools/embed_lua.py), and the vendored libraries it links: LuaJIT (its own msvcbuild.bat, in a copy of
 # its tree), Dear ImGui, LuaSocket (Winsock back end) and LuaFileSystem.
 ADDON_DIR = os.path.join(ROOT, 'host', 'addons')
@@ -384,7 +384,7 @@ def host64_headless(env):
     print('built build\\host64-headless.exe')
 
 
-# The UWP app (FFXIXbox) links the game as a library: the dynamic CRT (/MD) that UWP apps must use, no
+# The UWP app (xbox/) links the game as a library: the dynamic CRT (/MD) that UWP apps must use, no
 # SDL3 (sdl_uwp.c in its place; SDL3's headers still give the types), the sign-in's TLS from the app,
 # and host64's main renamed host_main for the app to call. Which Win32 calls UWP allows is checked
 # when the app links, against WindowsApp.lib alone.
@@ -392,17 +392,17 @@ UWP_CFLAGS = [f for f in CFLAGS64 if f != '/MT'] + ['/MD', '/DFFXI_UWP']
 
 
 def uwp_lib(env):
-    """build/uwp/ffxi_uwp.lib: host64 for the UWP app, drawing with Direct3D 12 into its SwapChainPanel."""
+    """build/uwp/ffxi_uwp.lib: host64 for the UWP app, drawing with Direct3D 12 on its CoreWindow."""
     translate()
     gen = ['generated\\all\\' + f for f in sorted(os.listdir(os.path.join(ROOT, 'generated', 'all'))) if f.endswith('.c')]
     gen_ffxi = ['generated\\ffxi\\' + f for f in sorted(os.listdir(os.path.join(ROOT, 'generated', 'ffxi'))) if f.endswith('.c')]
     objs = compile_stale(env, gen, 'build\\uwp\\all', ['/I', 'generated\\all'], UWP_CFLAGS)
     objs += compile_stale(env, gen_ffxi, 'build\\uwp\\ffxi', ['/I', 'generated\\ffxi'], UWP_CFLAGS)
     sdl_inc = ['/I', os.path.join(SDL3, 'include')]
-    # the app signs in itself (its own login screen): no sign-in screen
-    host = [s for s in HOST_SOURCES if s not in SIGNIN_SCREEN] + ['host\\signin_none.c', 'runtime\\portable\\sdl_uwp.c']
+    # the sign-in screen as on every other host, drawn on the app's CoreWindow
+    host = HOST_SOURCES + ['runtime\\portable\\sdl_uwp.c']
     rt_shaders(env)
-    objs += compile_stale(env, PORTABLE + host, 'build\\uwp\\host', sdl_inc + ['/Dmain=host_main'], UWP_CFLAGS)
+    objs += compile_stale(env, PORTABLE + host, 'build\\uwp\\host', sdl_inc + HOST_INCLUDES + ['/Dmain=host_main'], UWP_CFLAGS)
     objs += addon_objects(env, UWP_CFLAGS, 'build\\uwp', uwp=True)
     run(['lib', '/nologo', '/OUT:build\\uwp\\ffxi_uwp.lib'] + objs, env)
     print('built build\\uwp\\ffxi_uwp.lib')

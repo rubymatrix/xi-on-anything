@@ -61,6 +61,7 @@ CFLAGS = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-fno-strict-aliasing', 
           '-I', 'generated', '-I', 'third_party/stb']
 if sys.platform != 'darwin':
     CFLAGS.append('-D_GNU_SOURCE')  # glibc hides POSIX (strdup, getaddrinfo, sigaction) under -std=c11
+CFLAGS += shlex.split(os.environ.get('XI_CFLAGS', ''))  # e.g. -DRT_WATERMARK
 CFLAGS += thirdparty.PIE
 PIE_LINK = ['-pie'] if thirdparty.PIE else []  # host64 above 4 GB (thirdparty.PIE)
 # the generated C: every label and local is emitted whether used or not
@@ -88,7 +89,7 @@ HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime
                 'runtime/portable/input.c', 'runtime/portable/dinput.c', 'runtime/portable/ws2.c', 'host/host64.c',
                 'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/cexi.c', 'host/discord.c', 'host/frame.c', 'host/scene.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c',
                 'runtime/portable/geometry_hooks.c'] + GFX_SOURCES
-# the addon host (host/addons/, docs/addon-compat-design.md): C, C++ (ImGui) and its embedded Lua
+# the addon host (host/addons/, docs/addons.md): C, C++ (ImGui) and its embedded Lua
 ADDON_SOURCES = sorted('host/addons/' + f for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'host', 'addons'))
                        if f.endswith('.c') or f.endswith('.cpp')) + ['generated/addons_lua.c']
 ADDON_LIBS = ('luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
@@ -468,7 +469,7 @@ def bundle_dylibs(exe, frameworks):
     return sorted(seen)
 
 
-# A self-signed code-signing certificate in the login keychain, made once per machine (README):
+# A self-signed code-signing certificate in the login keychain, made once per machine (docs/building.md):
 # signed with it, every build of the app is the same app to macOS, so the keychain's "Always Allow"
 # for its saved passwords survives rebuilds. Ad hoc otherwise.
 LOCAL_IDENTITY = 'FFXI Local Code Signing'

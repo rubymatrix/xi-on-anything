@@ -5,6 +5,11 @@
 
 #include <stdint.h>
 
+/* An SDL_EVENT_USER the host may send while an on-screen keyboard it opened is up: code
+ * SIGNIN_KEYBOARD_TEXT, data1 the whole of the field's text (malloc'd; the screen frees it). The
+ * screen sets the field the keyboard was opened over to it. The UWP build's sdl_uwp.c sends it. */
+#define SIGNIN_KEYBOARD_TEXT 0x5849 /* "XI" */
+
 typedef struct SigninSetup
 {
     const char* host_game; /* the FINAL FANTASY XI folder */

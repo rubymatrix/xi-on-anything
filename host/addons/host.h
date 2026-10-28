@@ -121,6 +121,8 @@ void xi_hooks_frame(void);            /* chat lines and commands queued for the 
 /* The chat input line: text, open state. */
 int xi_chat_input(char* out, size_t n);
 int xi_chat_input_open(void);
+/* Whether the player is typing in the chat line (its state 4 or 5; 3 idle): iOS shows its keyboard. */
+int xi_chat_typing(void);
 void xi_chat_set_input(const char* text);
 /* Packets queued for the next buffer (whole packets: header included), handled by the addons there. */
 void xi_packet_inject(int outgoing, const uint8_t* p, size_t n);

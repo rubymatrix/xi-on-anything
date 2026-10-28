@@ -13,12 +13,21 @@ unsigned char* rt_guest_base;
 #define PAGE 0x1000u
 #define LOW_RESERVED 0x00100000u   /* never handed out: null pointer region */
 #define HIGH_RESERVED 0xFFF00000u  /* never handed out: the thunk range and the top */
+/* The window's size. iOS: the 2 GB of a 32-bit process (all the game asks for: GetSystemInfo says
+ * 0x7FFEFFFF, k32_misc.c), as an app may reserve without the Extended Virtual Addressing entitlement;
+ * nothing is handed out above it. The thunks above (thunk.h) are call targets, never memory. */
+#if defined(FFXI_IOS)
+#define WINDOW 0x80000000ull
+#else
+#define WINDOW 0x100000000ull
+#endif
 
 static uint32_t g_res[GRANULES];   /* granules in the reservation starting here, else 0 */
 static uint8_t g_used[GRANULES];   /* granule belongs to a reservation */
 static uint8_t g_committed[GRANULES * (GRANULE / PAGE) / 8];
 static volatile uint32_t g_lock;
 static uint32_t g_hint = LOW_RESERVED / GRANULE;
+static uint32_t g_pages, g_pages_peak, g_top; /* committed pages now and at most; end of the highest reservation */
 
 static void lock(void)
 {
@@ -33,13 +42,22 @@ static void unlock(void)
 
 int gwin_init(void)
 {
-    /* 4 GB plus a guard page: an unaligned access at 0xFFFFFFFF reaches past the window. */
-    rt_guest_base = (unsigned char*)plat_reserve(0x100000000ull + PAGE);
+#if defined(RT_GUEST_WINDOW)
+    /* the window plus a guard page: an unaligned access at its last byte reaches past it */
+    rt_guest_base = (unsigned char*)plat_reserve(WINDOW + PAGE);
     if (!rt_guest_base)
         return 0;
     for (uint32_t g = 0; g < LOW_RESERVED / GRANULE; ++g)
         g_used[g] = 1;
-    for (uint32_t g = HIGH_RESERVED / GRANULE; g < GRANULES; ++g)
+#else
+    /* Flat (the browser): guest addresses are host addresses, and the host's own memory is everything
+     * below PLAT_HOST_TOP. The guest gets what is above it, first fit from the bottom, so the memory
+     * (which only grows) tracks the guest's working set. */
+    for (uint32_t g = 0; g < PLAT_HOST_TOP / GRANULE; ++g)
+        g_used[g] = 1;
+    g_hint = PLAT_HOST_TOP / GRANULE;
+#endif
+    for (uint32_t g = (uint32_t)(WINDOW < HIGH_RESERVED ? WINDOW : HIGH_RESERVED) / GRANULE; g < GRANULES; ++g)
         g_used[g] = 1;
     return 1;
 }
@@ -87,11 +105,15 @@ uint32_t gwin_reserve(uint32_t addr, uint32_t size)
             unlock();
             return 0;
         }
+#if defined(RT_GUEST_WINDOW)
         g_hint = start + n;
+#endif
     }
     for (uint32_t g = start; g < start + n; ++g)
         g_used[g] = 1;
     g_res[start] = n;
+    if ((start + n) * GRANULE > g_top)
+        g_top = (start + n) * GRANULE;
     unlock();
     return start * GRANULE;
 }
@@ -99,11 +121,14 @@ uint32_t gwin_reserve(uint32_t addr, uint32_t size)
 int gwin_commit(uint32_t addr, uint32_t size)
 {
     uint32_t lo = addr & ~(PAGE - 1), hi = (uint32_t)(((uint64_t)addr + size + PAGE - 1) & ~(uint64_t)(PAGE - 1));
-    if (!plat_commit(rt_guest_base + lo, (size_t)hi - lo))
+    if (!plat_commit(GUEST_PTR(lo), (size_t)hi - lo))
         return 0;
     lock();
     for (uint32_t p = lo / PAGE; p < hi / PAGE; ++p)
-        g_committed[p >> 3] |= (uint8_t)(1u << (p & 7));
+        if (!(g_committed[p >> 3] & (1u << (p & 7))))
+            g_committed[p >> 3] |= (uint8_t)(1u << (p & 7)), ++g_pages;
+    if (g_pages > g_pages_peak)
+        g_pages_peak = g_pages;
     unlock();
     return 1;
 }
@@ -111,10 +136,11 @@ int gwin_commit(uint32_t addr, uint32_t size)
 void gwin_decommit(uint32_t addr, uint32_t size)
 {
     uint32_t lo = addr & ~(PAGE - 1), hi = (uint32_t)(((uint64_t)addr + size + PAGE - 1) & ~(uint64_t)(PAGE - 1));
-    plat_decommit(rt_guest_base + lo, (size_t)hi - lo);
+    plat_decommit(GUEST_PTR(lo), (size_t)hi - lo);
     lock();
     for (uint32_t p = lo / PAGE; p < hi / PAGE; ++p)
-        g_committed[p >> 3] &= (uint8_t)~(1u << (p & 7));
+        if (g_committed[p >> 3] & (1u << (p & 7)))
+            g_committed[p >> 3] &= (uint8_t)~(1u << (p & 7)), --g_pages;
     unlock();
 }
 
@@ -142,6 +168,15 @@ uint32_t gwin_alloc(uint32_t size)
         return 0;
     }
     return a;
+}
+
+void gwin_stats(GwinStats* s)
+{
+    lock();
+    s->committed = (uint64_t)g_pages * PAGE;
+    s->committed_peak = (uint64_t)g_pages_peak * PAGE;
+    s->top = g_top;
+    unlock();
 }
 
 int gwin_is_committed(uint32_t addr)
