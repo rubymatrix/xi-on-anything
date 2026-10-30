@@ -297,7 +297,9 @@ static int window_points(SDL_Window* win, int* w, int* h)
     if (!win || !SDL_GetWindowSize(win, &cw, &ch) || cw <= 0 || ch <= 0)
         return 0;
 #ifdef __ANDROID__
-    float k = SDL_GetWindowDisplayScale(win);
+    /* the display's density, which SDL has from the start (the window's own scale is 1 until SDL
+     * notices it, after the first layout) */
+    float k = SDL_GetDisplayContentScale(SDL_GetDisplayForWindow(win));
     g_scale = k > 0.0f ? k : 1.0f;
 #endif
     *w = (int)lroundf((float)cw / g_scale), *h = (int)lroundf((float)ch / g_scale);
@@ -728,7 +730,7 @@ static bool SDLCALL touch(void* unused, SDL_Event* e)
     static Uint64 start;
     (void)unused;
     if (e->type == SDL_EVENT_WINDOW_SHOWN || e->type == SDL_EVENT_WINDOW_SAFE_AREA_CHANGED ||
-        e->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
+        e->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED || e->type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED)
     {
         SDL_LockMutex(g_lock);
         refresh(SDL_GetWindowFromID(e->window.windowID));
