@@ -1,8 +1,8 @@
 # Options catalog
 
 Every setting the client has, grouped by what it changes rather than where it lives. In game, the
-player-facing ones are under **Config › Advanced** (`host/modern.c`), in nine pages: Display,
-Graphics, Shadows, Lighting, Atmosphere, Water, Legacy, Interface and Addons. The tree is at the end.
+player-facing ones are under **Config › Advanced** (`host/modern.c`), in ten pages: Display,
+Graphics, Shadows, Lighting, Atmosphere, Water, Legacy, Interface, Gamepad and Addons. The tree is at the end.
 
 Sources, as the tables abbreviate them:
 
@@ -144,6 +144,23 @@ the Lighting and Atmosphere pages.
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
 
+### Gamepad
+
+The game's own button map, registry `padsin000`, which on Windows only `FFXiPadConfig.exe` sets. The
+Gamepad buttons in the title screen's Config window and in Config (item 13) open **Config › Gamepad**
+in its place; it is also in the Advanced list. Each row is a function, set to a button (None, A, B, X,
+Y, LB, RB, LT, RT, L Stick, R Stick, Start, Back, the D-pad). A button given to one function is taken
+from the function that had it, which gets the old one's. A change is written at once and the game
+reads the map again (window message `0x800b`), so it applies without a restart. Button names are an
+Xbox pad's; SDL lays every pad out as one (A is the bottom face button).
+
+| Rows | Default |
+|---|---|
+| [Buttons] Select / Confirm, Cancel, Active Window, Main Menu, Autorun, Macro Palette (Ctrl), Macro Palette (Alt), Heal / Lock Target, Change View, Target Nearby NPC, Map, Hide Menus, Logout, Soft Keyboard (not on iOS) | A, B, Y, X, LB, LT, RT, L Stick, R Stick, none, none, Back, Start, RB |
+| [Menu Directions] Up, Down, Left, Right | the D-pad |
+
+The sticks (movement and camera) and the button combinations (`padexsin000`) are not on the page.
+
 ## 9. Textures & game data
 
 | Setting | CLI | App / Env | Notes |
@@ -253,6 +270,11 @@ Config
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
     │   └── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    ├── Gamepad (also the game's Gamepad buttons)
+    │   ├── [Buttons] ....... Select / Confirm, Cancel, Active Window, Main Menu, Autorun,
+    │   │                     Macro Palette (Ctrl), Macro Palette (Alt), Heal / Lock Target,
+    │   │                     Change View, Target Nearby NPC, Map, Hide Menus, Logout, Soft Keyboard
+    │   └── [Menu Directions] Up, Down, Left, Right
     └── Addons .............. one row an installed addon (xi, Ashita, Windower)
 ```
 
