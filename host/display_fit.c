@@ -70,7 +70,7 @@ static int read_window(SDL_Window* win, DisplayIn* in)
     if (cw <= 0 || ch <= 0)
         return 0;
 #ifdef __ANDROID__
-    float k = SDL_GetWindowDisplayScale(win); /* a point: a dp, the display's density in pixels */
+    float k = SDL_GetDisplayContentScale(SDL_GetDisplayForWindow(win)); /* a point: a dp, the display's density */
     g_coords = k > 0.0f ? k : 1.0f;
 #endif
     in->win_w = (int)lroundf((float)cw / g_coords), in->win_h = (int)lroundf((float)ch / g_coords);
