@@ -35,11 +35,11 @@ sign-in screen's Settings.
 | **Steam Deck** | ✅ Supported | Launcher (the line above, in Desktop Mode), played from Game Mode | [Steam Deck](docs/platforms/steam-deck.md) |
 | **Linux**, x86_64 | ✅ Supported | Launcher (the line above), or build from source | [Linux](docs/platforms/linux.md) |
 | **iPhone / iPad** | ✅ Supported | Build on a Mac, install with a free Apple account | [iPhone and iPad](docs/platforms/ios.md) |
-| **Windows**, x64 | 🛠 Build from source | Visual Studio or llvm-mingw | [Windows](docs/platforms/windows.md) |
+| **Windows**, x64 | ✅ Supported | Build from source (Visual Studio or llvm-mingw) | [Windows](docs/platforms/windows.md) |
 | **Web browser** | 🧪 Experimental, self-hosted only | Build and host it yourself | [Web browser](docs/platforms/web.md) |
 | **Xbox One / Series** | 🧪 Experimental | Developer Mode, sideloaded | [Xbox](docs/platforms/xbox-one.md) |
 | **Android**, ARM64 | 🧪 Experimental (tested on a Pixel Fold) | Debug APK | [Android](docs/android.md) |
-| **PS4** | 🧪 Experimental, not yet run on a console | Jailbroken console, fake PKG (branch `port/ps4`) | [PS4](docs/platforms/ps4.md) |
+| **PS4** | 🧪 Experimental | Jailbroken console, fake PKG (branch `port/ps4`) | [PS4](docs/platforms/ps4.md) |
 
 Every platform needs your own copy of the game (a `FINAL FANTASY XI` folder of a
 [supported build](docs/new-client-version.md#supported-builds), with `FFXiMain.dll` and `ROM` in it)

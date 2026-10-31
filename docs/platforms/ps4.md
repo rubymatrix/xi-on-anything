@@ -1,4 +1,4 @@
-# PS4 (homebrew, experimental, not yet run on a console)
+# PS4 (homebrew, experimental)
 
 The recompiled game for a jailbroken PS4 that installs fake PKGs, built with the OpenOrbis toolchain.
 The PS4's CPU is x86-64, so the translation is the desktop one; the platform under it changes.
@@ -7,10 +7,10 @@ Branch: `port/ps4` (`git checkout port/ps4`). Developer notes, the GPU back end 
 in `docs/ps4.md` and `docs/ps4-gnm-research.md` on that branch.
 
 > [!IMPORTANT]
-> **Status**: everything below works in the **shadPS4 emulator**: it signs in to LandSandBoat, draws
-> the title, lobby and character creation at about 58 fps, makes a character and logs in to Southern
-> San d'Oria (about 38 fps in town). **None of it has run on a real console yet.** The console steps
-> are what the build is made for, not what has been tested. The PS5 is not a target.
+> **Status**: experimental. It has run on a real console, and in the **shadPS4 emulator** it signs in
+> to LandSandBoat, draws the title, lobby and character creation at about 58 fps, makes a character
+> and logs in to Southern San d'Oria (about 38 fps in town). Expect rough edges. The PS5 is not a
+> target.
 
 ## What you need
 
