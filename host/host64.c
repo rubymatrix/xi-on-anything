@@ -109,10 +109,10 @@
 #include "geometry_guest.h"
 #include "watermark.h"
 #include "scene.h"
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
 #include <SDL3/SDL.h>
 #include "display_fit.h"
-void ios_touch_frame(int in_game); /* ios_touch.c: the touch controls, each frame of the game */
+void touch_frame(int in_game); /* touch.c: the touch controls, each frame of the game */
 #endif
 #include "build.h" /* FFXI_VERSION */
 #if defined(FFXI_ANDROID_VULKAN)
@@ -757,7 +757,7 @@ static void shadow_focus(void)
     }
 }
 
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
 static void* g_signin_window; /* the window the game takes over: display_fit_start */
 
 /* The game's own soft keyboard (the PS2 client's: ffxi-pc client/systems/soft-keyboard.md) off for
@@ -870,10 +870,10 @@ static void present_hook(void)
         addons_frame();
     discord_frame();
     watermark_frame();
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
     display_fit_frame();
     chat_keyboard();
-    ios_touch_frame(1);
+    touch_frame(1);
 #endif
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */
@@ -1244,7 +1244,7 @@ int main(int argc, char** argv)
         {
             game_server = sr.server;
             user32_adopt_window(sr.window);
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
             g_signin_window = sr.window;
 #endif
             if (!nfinals)
@@ -1353,7 +1353,7 @@ int main(int argc, char** argv)
     reg_init(regs, nregs, overlay);
     for (unsigned i = 0; i < nfinals; ++i)
         reg_load_final(finals[i]);
-#ifdef FFXI_IOS
+#ifdef FFXI_MOBILE
     display_fit_start(g_signin_window); /* the game's size from the screen, whatever the file says */
     soft_keyboard_off();
 #endif

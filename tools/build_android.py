@@ -43,6 +43,7 @@ FLAGS = [
     '-fno-strict-aliasing',
     '-DRT_GUEST_WINDOW',
     '-DFFXI_ANDROID_VULKAN',
+    '-DFFXI_MOBILE',
     '-I' + str(ROOT / 'runtime'),
     '-I' + str(ROOT / 'runtime/portable'),
     '-I' + str(OUT / 'generated'),
@@ -233,7 +234,11 @@ def main():
             raise RuntimeError('missing translation: generated/' + part)
         objs += compile_many(sources, part, ['-I' + str(ROOT / 'generated' / part)])
     objs += compile_many(
-        PORTABLE + HOST + ADDONS + gfx + ['host/android_main.c', 'host/benchmark.c'],
+        PORTABLE
+        + HOST
+        + ADDONS
+        + gfx
+        + ['host/android_main.c', 'host/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c'],
         'host',
         extra + ['-Dmain=xi_host_main'],
     )

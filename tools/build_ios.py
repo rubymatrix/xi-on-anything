@@ -180,7 +180,7 @@ def host(t):
         archives.append(a)
         inc += i
         frameworks += [x for x in f if x not in frameworks or x in ('-framework', '-weak_framework')]
-    base = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-DFFXI_IOS', '-fno-strict-aliasing', '-I', 'runtime',
+    base = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-DFFXI_IOS', '-DFFXI_MOBILE', '-fno-strict-aliasing', '-I', 'runtime',
             '-I', 'runtime/portable', '-I', 'generated', '-I', 'third_party/stb']
     objs = t.compile(build_posix.generated('all'), 'all', base + build_posix.GEN_WARNINGS + ['-I', 'generated/all'], True)
     objs += t.compile(build_posix.generated('ffxi'), 'ffxi', base + build_posix.GEN_WARNINGS + ['-I', 'generated/ffxi'], True)
@@ -188,7 +188,7 @@ def host(t):
     sources = build_posix.PORTABLE + build_posix.HOST_SOURCES + build_posix.ADDON_SOURCES
     objs += t.compile([s for s in sources if s != 'host/host64.c'], 'host', ours)
     objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
-    objs += t.compile(['host/ios_main.c', 'host/ios_touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
+    objs += t.compile(['host/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
     exe = os.path.join(t.out, 'host64')
     fw = sum((['-framework', f] for f in FRAMEWORKS), [])
     run(t.cc + ['-o', exe] + objs + archives + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
