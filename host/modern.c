@@ -45,6 +45,7 @@
 #include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
 #include "gthread.h"
 #include "gwin.h"
+#include "k32.h"
 #include "modern.h"
 #include "plat.h"
 #include "thunk.h"
@@ -115,6 +116,7 @@ enum
                                                 * entry shown. The game draws it with the window (the Effects page's) */
     VTBL_SLOTS = 17,
     CONFIG_ITEMS = 13,          /* the Config list's own */
+    CONFIG_GAMEPAD = 13,        /* its Gamepad, the last */
     CONFIG_OURS = 1,            /* ours after them: Advanced */
     EV_DOWN = 1, EV_UP = 2, EV_RIGHT = 3, EV_LEFT = 4, EV_SELECT = 5, /* a menu's input events (OnInput); the game's own sliders go up on 3 */
     EV_WHEEL_UP = 22, EV_WHEEL_DOWN = 23, /* a step of the mouse wheel over the window (the game's Effects page
@@ -141,6 +143,7 @@ enum
     CHOICE, /* a button an option */
     SLIDER, /* Min to Max */
     LIST,   /* one of a list (List): a slider along it, its value's words after Max */
+    PICK,   /* one of a list (List) in a box with arrows: left and right step it round, select steps on */
     HEADER, /* no setting: the name of the group of rows under it */
 };
 
@@ -230,7 +233,89 @@ static int g_display_live; /* the window's mode or size changed: display_apply, 
  * that refused it: user32_resize_hook), for this run only; 0 when it is the one chosen */
 static int g_now_w, g_now_h;
 
-static List* list_of(const char* key) { return !strcmp(key, "@res") ? &g_res : !strcmp(key, "@menu") ? &g_scale : NULL; }
+/* ---- the gamepad: the game's own button map (registry padsin000), as FFXiPadConfig.exe sets it ----
+ * 32 numbers (the game's default, and older files, 27: the rest none), one a function in the order
+ * the game reads them (10005130), each the button that does it: under XInput 0 B, 1 X, 2 Y, 3 A,
+ * 4 right, 5 left, 6 up, 7 down, 8 LB, 9 LT, 10 L stick, 11 RB, 12 RT, 13 R stick, 14 Start, 15 Back
+ * (the table at 10329810), -1 none; 32 lX, 33 lY, 35 lRx, 36 lRy a stick (negated: its up or left). Config > Gamepad's rows are the functions a button does ("@pad<n>": function n), a list
+ * of the buttons each; a button given to one function is taken from the one that had it, which gets
+ * this one's. Written at once, and the game told (its window's message 0x800b reads the pad's values
+ * again, as the tool's saving does): no restart. */
+static const char PAD_KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI",
+                  PAD_DEFAULT[] = "8,9,13,12,10,0,1,3,2,15,-1,-1,14,-33,-33,32,32,-36,-36,35,35,6,7,5,4,11,-1";
+enum
+{
+    PAD_FUNCS = 32,
+    PAD_RELOAD = 0x800b, /* the game's window procedure (10016870): the pad's registry values again */
+};
+static const struct
+{
+    const char* name;
+    int code;
+} PAD_BUTTONS[] = {
+    { "None", -1 }, { "A", 3 }, { "B", 0 }, { "X", 1 }, { "Y", 2 }, { "LB", 8 }, { "RB", 11 }, { "LT", 9 },
+    { "RT", 12 }, { "L Stick", 10 }, { "R Stick", 13 }, { "Start", 14 }, { "Back", 15 }, { "D-Pad Up", 6 },
+    { "D-Pad Down", 7 }, { "D-Pad Left", 5 }, { "D-Pad Right", 4 },
+};
+enum
+{
+    PAD_NBUTTONS = sizeof PAD_BUTTONS / sizeof PAD_BUTTONS[0],
+};
+static List g_pad = { "@pad" };
+
+/* the map as the registry has it (the game's default when it has none) */
+static void pad_read(int v[PAD_FUNCS])
+{
+    char s[256];
+    const char* p = reg_get_string(PAD_KEY, "padsin000", s, sizeof s) ? s : PAD_DEFAULT;
+    for (int i = 0; i < PAD_FUNCS; ++i)
+    {
+        char* end;
+        long n = strtol(p, &end, 10);
+        v[i] = end == p ? -1 : (int)n;
+        p = *end == ',' ? end + 1 : end;
+    }
+}
+
+/* the button function f has: its place in PAD_BUTTONS, or None for a stick's direction */
+static int pad_get(int f)
+{
+    int v[PAD_FUNCS];
+    pad_read(v);
+    for (int i = 0; f >= 0 && f < PAD_FUNCS && i < PAD_NBUTTONS; ++i)
+        if (PAD_BUTTONS[i].code == v[f])
+            return i;
+    return 0;
+}
+
+static void pad_set(int f, int i)
+{
+    if (f < 0 || f >= PAD_FUNCS || i < 0 || i >= PAD_NBUTTONS)
+        return;
+    int v[PAD_FUNCS], code = PAD_BUTTONS[i].code;
+    pad_read(v);
+    if (v[f] == code)
+        return;
+    for (int k = 0; k < PAD_FUNCS && code >= 0; ++k)
+        if (k != f && v[k] == code)
+            v[k] = v[f] >= 0 && v[f] < 32 ? v[f] : -1; /* the one that had it gets this one's button */
+    v[f] = code;
+    char s[256];
+    size_t n = 0;
+    for (int k = 0; k < PAD_FUNCS && n < sizeof s; ++k)
+        n += (size_t)snprintf(s + n, sizeof s - n, k ? ",%d" : "%d", v[k]);
+    reg_set_string(PAD_KEY, "padsin000", s);
+    reg_flush();
+    uint32_t hwnd = d3d8_window();
+    if (hwnd)
+        user32_post(hwnd, PAD_RELOAD, 0, 0);
+    fprintf(stderr, "[modern] gamepad: padsin000 %s\n", s);
+}
+
+static List* list_of(const char* key)
+{
+    return !strcmp(key, "@res") ? &g_res : !strcmp(key, "@menu") ? &g_scale : !strncmp(key, "@pad", 4) ? &g_pad : NULL;
+}
 
 /* the menus' size for a window and a scale: w x h over it, as wide as the interface's shape */
 static void menu_size(int ww, int wh, float scale, int* mw, int* mh)
@@ -312,6 +397,8 @@ static int quality_now(void)
 
 static float get(const Row* r)
 {
+    if (!strncmp(r->key, "@pad", 4))
+        return (float)pad_get(atoi(r->key + 4));
     const List* l = list_of(r->key);
     if (l)
         return (float)list_at(l);
@@ -359,7 +446,9 @@ static void fx_put(const char* key, float v)
 static void set(const Row* r, float v)
 {
     List* l = list_of(r->key);
-    if (l || !strcmp(r->key, "@bg") || !strcmp(r->key, "@mode"))
+    if (l == &g_pad)
+        pad_set(atoi(r->key + 4), (int)v);
+    else if (l || !strcmp(r->key, "@bg") || !strcmp(r->key, "@mode"))
     {
         if (l)
             list_set(l, (int)v);
@@ -619,6 +708,37 @@ static const Row LEGACY_ROWS[] = {
 };
 #endif
 
+/* Config > Gamepad: a row a function of padsin000 a button does, in FFXiPadConfig.exe's words (its
+ * slots: the dialog's control ids, 0x6ef318). Not here: the sticks' directions (13-20), the tool's
+ * movement-control toggles (10, 11, 26), Shutdown (27), Jump (30) and the button combination (29,
+ * padexsin000). 25 is the tool's Take Screenshot; this game opens its soft keyboard with it (action
+ * 0x24), and iOS keeps it at none (host64.c soft_keyboard_off). */
+#define PAD_ROW(label, f, help) { label, "@pad" #f, PICK, 0, { 0 }, { 0 }, 0, 0, help }
+static const Row GAMEPAD_ROWS[] = {
+    HEADER_ROW("Buttons"),
+    PAD_ROW("Select / Confirm", 7, "Select or confirm; target the nearest; talk to an NPC."),
+    PAD_ROW("Cancel", 5, "Cancel or go back."),
+    PAD_ROW("Active Window", 8, "Switch the active window; open a window's options."),
+    PAD_ROW("Main Menu", 6, "Open the main menu."),
+    PAD_ROW("Autorun", 0, "Run on while moving."),
+    PAD_ROW("Macro Palette (Ctrl)", 1, "Hold for the first macro palette."),
+    PAD_ROW("Macro Palette (Alt)", 3, "Hold for the second macro palette."),
+    PAD_ROW("Heal / Lock Target", 4, "Heal with no target; lock on with one."),
+    PAD_ROW("Change View", 2, "First or third person."),
+    PAD_ROW("Target Nearby NPC", 28, "Target the nearest NPC."),
+    PAD_ROW("Map", 31, "Open the map."),
+    PAD_ROW("Hide Menus", 9, "Hide every window; again to show them."),
+    PAD_ROW("Logout", 12, "The logout menu."),
+#ifndef FFXI_IOS
+    PAD_ROW("Soft Keyboard", 25, "The game's on-screen keyboard, to type with the pad."),
+#endif
+    HEADER_ROW("Menu Directions"),
+    PAD_ROW("Up", 21, "Up in menus."),
+    PAD_ROW("Down", 22, "Down in menus."),
+    PAD_ROW("Left", 23, "Left in menus."),
+    PAD_ROW("Right", 24, "Right in menus."),
+};
+
 static const Row INTERFACE_ROWS[] = {
     HEADER_ROW("Nameplates"),
     { "Shape", "@nameplates", CHOICE, 2, { "Fixed", "Stretched" }, { 1, 0 }, 0, 0,
@@ -850,6 +970,9 @@ static void res_add(int w, int h)
  * size the settings file has; a few common ones when SDL knows of no display yet */
 static void lists_fill(void)
 {
+    if (!g_pad.n)
+        for (int i = 0; i < PAD_NBUTTONS; ++i)
+            SDL_strlcpy(g_pad.text[g_pad.n++], PAD_BUTTONS[i].name, sizeof g_pad.text[0]);
     if (!g_scale.n)
         for (int i = 0; i <= 10; ++i)
         {
@@ -1014,7 +1137,7 @@ enum
 
 static struct
 {
-    uint8_t p[256 * 1024];
+    uint8_t p[512 * 1024];
     size_t n, count_at;
     int sprites, overflow;
 } S;
@@ -1232,6 +1355,8 @@ static Page PAGES[] = {
 #endif
     { "menu    interfaw", "Interface", "Nameplates, and items of the game's own menus shown or hidden.", 0x1c0201u,
         INTERFACE_ROWS, sizeof INTERFACE_ROWS / sizeof INTERFACE_ROWS[0] },
+    { "menu    gamepadw", "Gamepad", "Which button does what: the game's gamepad settings.", 0x1c0209u,
+        GAMEPAD_ROWS, sizeof GAMEPAD_ROWS / sizeof GAMEPAD_ROWS[0] },
     /* last: there only with the addon host (g_npages) */
     { "menu    addonw10", "Addons", "Turn the installed addons (Ashita, Windower and xi) on and off.", 0x1c0201u,
         ADDON_ROWS, ADDON_VIS },
@@ -1240,6 +1365,7 @@ enum
 {
     NPAGES = sizeof PAGES / sizeof PAGES[0],
     PAGE_DISPLAY = 0, /* the one the lobby's Config window opens */
+    PAGE_GAMEPAD = NPAGES - 2, /* the one the game's Gamepad buttons open */
     PAGE_ADDONS = NPAGES - 1,
 };
 
@@ -1298,6 +1424,12 @@ static void layout_items(Page* p)
             continue;
         if (row->kind == SLIDER)
             p->items[p->nitems++] = (Item){ r, -1, p->cx + 32, TRACK_W, 0 };
+        else if (row->kind == PICK)
+        {
+            p->items[p->nitems++] = (Item){ r, -1, p->cx + 32, TRACK_W, 0 };
+            if (p->cx + 32 + TRACK_W + 16 > p->w)
+                p->w = p->cx + 32 + TRACK_W + 16;
+        }
         else if (row->kind == LIST)
         {
             const List* l = list_of(row->key);
@@ -1358,6 +1490,13 @@ static int panel_sprite(const Page* p, int nrows)
             part(tx + TRACK_W, y, tx + TRACK_W + 8, y + 16, 4, 8, 4, 8, WHITE, M_GAUGE, GAUGE);
             part(tx, y, tx + TRACK_W, y + 16, 64, 8, 0, 0, SHADOW, M_ITEM, GAUGE);
         }
+        else if (p->rows[r].kind == PICK)
+        {
+            /* a box, an arrow at each end: the value is drawn in it (page_draw) */
+            part(tx, y, tx + TRACK_W, y + 16, 64, 8, 0, 0, SHADOW, M_ITEM, GAUGE);
+            words(tx + 4, y + 2, "<", 0);
+            words(tx + TRACK_W - 4 - text_width(">"), y + 2, ">", 0);
+        }
     }
     for (int k = 0; k < p->row_item[nrows]; ++k)
         if (p->items[k].opt >= 0)
@@ -1384,7 +1523,7 @@ static void page_sprites(Page* p)
     for (int r = 0; r < p->nrows; ++r)
     {
         p->spr_line[r] = -1;
-        if (p->rows[r].kind != SLIDER && p->rows[r].kind != LIST && p->rows[r].kind != HEADER)
+        if (p->rows[r].kind != SLIDER && p->rows[r].kind != LIST && p->rows[r].kind != PICK && p->rows[r].kind != HEADER)
             p->spr_line[r] = underline_sprite(p->items[p->row_item[r]].w);
     }
     for (int i = 0; i < p->nitems; ++i)
@@ -1402,7 +1541,10 @@ static void list_sprites(List* l)
     for (int i = 0; i < l->n; ++i)
     {
         l->spr[i] = sprite_begin();
-        words(LIST_VALUE_X - 32 - 0x25, 2 - 4, l->text[i], 0);
+        if (l == &g_pad) /* a PICK row's: centred in its box */
+            words((TRACK_W - text_width(l->text[i])) / 2 - 0x25, 2 - 4, l->text[i], 0);
+        else
+            words(LIST_VALUE_X - 32 - 0x25, 2 - 4, l->text[i], 0);
     }
 }
 
@@ -1449,6 +1591,7 @@ static int build_sheet(void)
     part(0, 0, 6, 4, 64, 6, 0, 1, 0x60607f7fu, M_GAUGE, GAUGE);
     list_sprites(&g_res);
     list_sprites(&g_scale);
+    list_sprites(&g_pad);
     g_spr_main = button_sprite("Advanced", 88);
     g_spr_adv_title = title_sprite("Advanced", ADV_W, &g_adv_tab_x, &g_adv_tab_w);
     S.p[count] = (uint8_t)S.sprites, S.p[count + 1] = (uint8_t)(S.sprites >> 8);
@@ -1841,6 +1984,8 @@ static void config_input(Guest* g)
     uint32_t self = g->ecx, ev = ARG(0), item = ARG(1);
     if ((int16_t)ev == EV_SELECT && (int16_t)item == CONFIG_ITEMS + 1)
         guest_thiscall(MENU_OPEN, MGR, 3, (uint32_t[]){ g_adv_str, 1, 0 });
+    else if ((int16_t)ev == EV_SELECT && (int16_t)item == CONFIG_GAMEPAD)
+        open_page(PAGE_GAMEPAD); /* the game's runs FFXiPadConfig.exe (101bcb60): Windows' alone */
     else
         guest_thiscall(g_config_slots[6], self, 2, (uint32_t[]){ ev, item });
     RET(0, 2);
@@ -1880,9 +2025,18 @@ static void page_draw(Guest* g)
         const List* l = list_of(row->key);
         if (row->kind == HEADER)
             continue;
-        if (row->kind == LIST && l && l->n)
+        if (row->kind == PICK && l && l->n)
         {
-            int at = list_at(l);
+            uint32_t value = sprite(l->spr[(int)get(row)]);
+            if (value)
+            {
+                wr32(self + 0x14, value);
+                guest_thiscall(PAGE_MARK, self, 3, (uint32_t[]){ 0, id, id });
+            }
+        }
+        else if (row->kind == LIST && l && l->n)
+        {
+            int at = (int)get(row);
             float t = l->n > 1 ? (float)at / (float)(l->n - 1) : 1.0f;
             uint32_t bits, value = sprite(l->spr[at]);
             memcpy(&bits, &t, 4);
@@ -1939,9 +2093,17 @@ static void page_input(Guest* g)
         const Item* it = &p->items[id - 1];
         const Row* row = &p->rows[it->row];
         const List* l = list_of(row->key);
-        if (row->kind == LIST && l && l->n)
+        if (row->kind == PICK && l && l->n)
         {
-            int at = list_at(l);
+            int at = (int)get(row);
+            if (ev == EV_LEFT)
+                set(row, (float)((at + l->n - 1) % l->n));
+            else if (ev == EV_RIGHT || ev == EV_SELECT)
+                set(row, (float)((at + 1) % l->n));
+        }
+        else if (row->kind == LIST && l && l->n)
+        {
+            int at = (int)get(row);
             if (ev == EV_LEFT || ev == EV_RIGHT)
                 set(row, (float)(ev == EV_RIGHT ? (at + 1 < l->n ? at + 1 : at) : at > 0 ? at - 1 : 0));
         }
@@ -2347,8 +2509,11 @@ static uint8_t* lobby_layout(size_t* out_size)
 static void lobby_input(Guest* g)
 {
     uint32_t self = g->ecx, ev = ARG(0), item = ARG(1);
-    if ((int16_t)ev == EV_SELECT && (int16_t)item == LOBBY_OURS && !rd8(self + 0x24) && !rd8(self + 0x2c))
+    int idle = !rd8(self + 0x24) && !rd8(self + 0x2c); /* no slider of its own held */
+    if ((int16_t)ev == EV_SELECT && (int16_t)item == LOBBY_OURS && idle)
         open_page(PAGE_DISPLAY);
+    else if ((int16_t)ev == EV_SELECT && (int16_t)item == LOBBY_GAMEPAD && idle)
+        open_page(PAGE_GAMEPAD); /* the game's runs FFXiPadConfig.exe (101bcb60): Windows' alone */
     else
         guest_thiscall(g_lobby_slots[6], self, 2, (uint32_t[]){ ev, item });
     /* on ours, no help (the game's help for an id past its own is the volume's) */
@@ -2511,7 +2676,12 @@ static int setup(void)
         fprintf(stderr, "[modern] window_scroll is not the function known: Config > Addons draws its own scroll bar\n");
     lists_fill();
     size_t csize;
-    uint8_t* c = build_sheet() ? config_layout(&csize) : NULL;
+    if (!build_sheet())
+    {
+        fprintf(stderr, "[modern] the menus' sprite sheet is over %zu bytes: no Config > Modern\n", sizeof S.p);
+        return 0;
+    }
+    uint8_t* c = config_layout(&csize);
     if (!c)
     {
         fprintf(stderr, "[modern] the Config list in %s\\ROM\\119\\51.DAT is not the one known\n", g_game);

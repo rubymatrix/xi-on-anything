@@ -590,6 +590,8 @@ void reg_set_dword(const char* path, const char* name, uint32_t v)
         set_value(k, name, REG_DWORD, &v, 4);
 }
 
+void reg_flush(void) { save(); }
+
 int reg_get_dword(const char* path, const char* name, uint32_t* out)
 {
     RegKey* k = key_from_header(path, 0);
