@@ -72,6 +72,7 @@ if sys.platform == 'darwin':
     GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_scene.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
                    'runtime/portable/gfx_metal.m']
     GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation',
+                '-weak_framework', 'MetalFX',  # MetalFX: the upscaler (macOS 13 on)
                 '-framework', 'Security']  # Security: the sign-in screen's saved passwords
 else:
     # Vulkan 1.3 (gfx_vulkan.c), its shaders compiled with glslang, memory through VMA (third_party/vma)
