@@ -190,7 +190,7 @@ def host(t):
     objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
     objs += t.compile(['host/ios_main.c', 'host/ios_touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
     exe = os.path.join(t.out, 'host64')
-    fw = sum((['-framework', f] for f in FRAMEWORKS), [])
+    fw = sum((['-framework', f] for f in FRAMEWORKS), []) + ['-weak_framework', 'MetalFX']  # the upscaler (iOS 16 on)
     run(t.cc + ['-o', exe] + objs + archives + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
                                                                               '-Wl,-export_dynamic'])
     return exe
