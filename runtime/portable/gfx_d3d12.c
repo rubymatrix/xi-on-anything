@@ -258,7 +258,8 @@ typedef struct FxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft,
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
-        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt, contact_steps;
+        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt, contact_steps,
+        upscale, upscale_scale, upscale_sharpen;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -1039,6 +1040,8 @@ static void release_views(GfxTex* t)
     t->views = NULL;
 }
 
+static void fsr_forget(const GfxTex* t);
+
 void gfx_tex_destroy(GfxTex* t)
 {
     if (!t)
@@ -1048,6 +1051,7 @@ void gfx_tex_destroy(GfxTex* t)
     if (g_ds == t)
         g_ds = NULL, g_targets_bound = 0;
     sun_cache_forget_tex(t);
+    fsr_forget(t);
     defer((IUnknown*)t->res, NULL, -1);
     defer(NULL, &g_srv, t->srv);
     defer(NULL, &g_srv, t->mip_srv);
@@ -2374,6 +2378,8 @@ void gfx_draw(const GfxDraw* d)
         g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws++;
 }
 
+static int32_t fsr_srv(GfxTex* t, const uint32_t vp[6]);
+
 static void draw_encode(const GfxDraw* d)
 {
     if (!bind_targets())
@@ -2402,6 +2408,13 @@ static void draw_encode(const GfxDraw* d)
         if (!wanted)
             continue;
         GfxSampler sk = d->samp[i];
+        /* the world put on a larger target (FSR 1): what is read in its place, made up first */
+        int32_t fsr = t && t != g_rt && wanted == 1 && d->vs.rhw && g_fxs.upscale >= 0.5f ? fsr_srv(t, d->vp) : -1;
+        if (fsr >= 0)
+        {
+            bind[8 + i] = sampler(i, &sk), bind[i] = (uint32_t)fsr;
+            continue;
+        }
         int32_t srv = t ? t->srv : -1;
         if (t && g_fxs.fx != 0.0f)
         {
@@ -2775,6 +2788,9 @@ static const struct
     FXS(rt, 0.0f),
     /* the contact shadows' steps a frame, 1 to 16; 0 follows ao_quality (gfx_fx.c's) */
     FXS(contact_steps, 0.0f),
+    /* not an effect: FSR 1 (gfx_fx.c's notes): the world drawn smaller (host64's upscale_background) and made up
+     * to the screen through EASU and RCAS (fsr_srv); upscale_scale is read at start, by the host */
+    FXS(upscale, 0.0f), FXS(upscale_scale, 0.67f), FXS(upscale_sharpen, 0.25f),
 };
 #undef FXS
 
@@ -4777,6 +4793,77 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     color->scene = 0; /* its mips are behind (scene_mips) */
 }
 
+/* FSR 1 (upscale): the world drawn at fewer pixels than the screen (host64 made its background smaller,
+ * upscale_background) and made up to the size the game puts it at, where it does (from draw_encode): EASU
+ * into a, RCAS from a into b, as gfx_vulkan.c's fsr_view (its notes there: the world's corner of its target,
+ * made larger in a target the same factor larger) */
+static struct
+{
+    GfxTex* world;
+    uint32_t vw, vh;
+    int tried, said;
+    ID3D12PipelineState *easu, *rcas;
+    FxTex a, b;
+} g_fsr;
+
+static void fsr_forget(const GfxTex* t)
+{
+    if (g_fsr.world == t)
+        g_fsr.world = NULL;
+}
+
+static int32_t fsr_srv(GfxTex* t, const uint32_t vp[6])
+{
+    uint32_t ow = vp[2], oh = vp[3], rw = g_rt->w >> g_rt_level, rh = g_rt->h >> g_rt_level;
+    /* the world: the scene's target (with its viewport), or a target the quad puts over all of the one drawn
+     * to, of its shape (gfx_vulkan.c's fsr_view) */
+    uint32_t cw = t == g_fsr.world ? g_fsr.vw : t->w, ch = t == g_fsr.world ? g_fsr.vh : t->h;
+    if (t->use != GFX_USE_RT || t->type != GFX_TEX_2D || !cw || !ch || t->srv < 0 || t->dxfmt != FX_COLOR ||
+        (t != g_fsr.world && (vp[0] || vp[1] || ow != rw || oh != rh || fabsf((float)cw * oh - (float)ch * ow) > 0.02f * (float)cw * oh)))
+        return -1;
+    if (!g_fsr.said)
+        g_fsr.said = 1, fprintf(stderr, "[recomp] gfx: FSR 1: the world %ux%u of a %ux%u target, put at %ux%u\n", cw, ch, t->w, t->h, ow, oh);
+    if ((ow <= cw + cw / 16 && oh <= ch + ch / 16) || ow > 8192 || oh > 8192)
+        return -1; /* not made larger */
+    uint32_t tw = (uint32_t)((uint64_t)t->w * ow / cw), th = (uint32_t)((uint64_t)t->h * oh / ch);
+    if (tw > 16384 || th > 16384)
+        return -1;
+    if (!g_fsr.tried)
+    {
+        g_fsr.tried = 1;
+        ID3DBlob* vs = compile(gfx_hlsl_fx, "fx_vs", "vs_5_1");
+        if (vs)
+        {
+            g_fsr.easu = fx_pipeline(vs, "fx_easu", FX_COLOR);
+            g_fsr.rcas = fx_pipeline(vs, "fx_rcas", FX_COLOR);
+            ID3D10Blob_Release(vs);
+        }
+        fprintf(stderr, "[recomp] gfx: upscaling the world from %ux%u to %ux%u (FSR 1)%s\n", cw, ch, ow, oh,
+            g_fsr.easu ? "" : ": its pipeline failed");
+    }
+    float sharpen = fminf(g_fxs.upscale_sharpen, 1.0f);
+    int rcas = sharpen > 0.0f && g_fsr.rcas;
+    if (!g_fsr.easu || !fx_tex(&g_fsr.a, FX_COLOR, tw, th, 1) || (rcas && !fx_tex(&g_fsr.b, FX_COLOR, tw, th, 1)))
+        return -1;
+    FxU u;
+    memset(&u, 0, sizeof u);
+    u.vp[0] = (float)cw, u.vp[1] = (float)ch, u.vp[2] = (float)ow, u.vp[3] = (float)oh;
+    /* RCAS's strength: upscale_sharpen 1 the most it gives, each quarter less half a stop less */
+    u.size[0] = (float)t->w, u.size[1] = (float)t->h, u.size[2] = exp2f(-2.0f * (1.0f - sharpen));
+    D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&u);
+    if (!ua)
+        return -1;
+    tex_state(t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    uint32_t in = (uint32_t)t->srv;
+    fx_pass(fx_out(&g_fsr.a, 0), g_fsr.easu, 0, 0, (float)ow, (float)oh, ua, &in, 1, 0, 0);
+    if (rcas)
+    {
+        in = fx_in(&g_fsr.a, 0);
+        fx_pass(fx_out(&g_fsr.b, 0), g_fsr.rcas, 0, 0, (float)ow, (float)oh, ua, &in, 1, 0, 0);
+    }
+    return (int32_t)fx_in(rcas ? &g_fsr.b : &g_fsr.a, 0);
+}
+
 static void scene_fx(GfxTex* color, const GfxScene* s)
 {
     GfxTex* depth = color->depth_world ? color->depth_world : color->depth_seen;
@@ -5139,6 +5226,9 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
         return;
+    g_fsr.world = color;
+    g_fsr.vw = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[2] && s->vp[2] <= color->w ? s->vp[2] : color->w;
+    g_fsr.vh = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[3] && s->vp[3] <= color->h ? s->vp[3] : color->h;
     uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
     if (g_fxs.fx != 0.0f)
     {
