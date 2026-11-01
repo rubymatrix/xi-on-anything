@@ -1130,4 +1130,18 @@ const char gfx_hlsl_fx[] =
     "  float rcpL = fsr_rcp_med(4.0 * lobe + 1.0);\n"
     "  return float4((lobe * (b + d + h + f) + e) * rcpL, ea.a);\n"
     "}\n"
+    /* the FSR SDK's inputs (upscale 2, gfx_d3d12.c fsr_sdk_frame): the world's depth as R32F (its own is D24S8),
+     * and the camera's motion at each of its pixels - the point the depth puts there, drawn hist.xy pixels aside
+     * (the jitter), where the frame before's camera saw it (reproj) less where this frame's does (lmat: this
+     * frame's projection), in the viewport's uv, y down; the sky as far off (gfx_metal.m's up_motion) */
+    "float4 fx_zcopy(FO fi) : SV_Target { return float4(TX(0).Load(int3(int2(fi.pos.xy), 0)).r, 0, 0, 0); }\n"
+    "float4 fx_motion(FO fi) : SV_Target {\n"
+    "  float2 px = floor(fi.pos.xy) + 0.5;\n"
+    "  float z = view_z(TX(0).Load(int3(int2(px), 0)).r);\n"
+    "  if (z == 0.0) z = 4000.0 * u.hand.x;\n"
+    "  float3 P = view_pos(px - u.hist.xy, z);\n"
+    "  float4 c = mul(u.lmat, float4(P, 1.0)), p = mul(u.reproj, float4(P, 1.0));\n"
+    "  if (c.w <= 1e-4 || p.w <= 1e-4) return float4(0, 0, 0, 0);\n"
+    "  return float4((p.xy / p.w - c.xy / c.w) * float2(0.5, -0.5), 0, 0);\n"
+    "}\n"
     ;
