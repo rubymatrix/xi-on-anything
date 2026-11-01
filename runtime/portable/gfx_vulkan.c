@@ -1023,6 +1023,7 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
 
 static void sun_cache_forget_tex(const GfxTex* t);
 static void water_forget(const GfxTex* t);
+static void fsr_forget(const GfxTex* t);
 
 void gfx_tex_destroy(GfxTex* t)
 {
@@ -1051,6 +1052,7 @@ void gfx_tex_destroy(GfxTex* t)
         }
     sun_cache_forget_tex(t);
     water_forget(t);
+    fsr_forget(t);
     if (t->levelv)
         for (uint32_t i = 0; i < t->mips; ++i)
             trash(1, (uint64_t)(uintptr_t)t->levelv[i], NULL);
@@ -2201,8 +2203,19 @@ static int water_mode(const GfxDraw* d);
 static int water_capture(void);
 static uint32_t water_bind(VkWriteDescriptorSet* w, VkDescriptorBufferInfo* bi, VkDescriptorImageInfo* ii);
 
+static VkImageView fsr_view(GfxTex* t, const uint32_t vp[6]);
+
 static void draw_encode(const GfxDraw* d)
 {
+    /* the world put on a larger target (FSR 1): what is sampled in its place, made up first (it ends the pass) */
+    VkImageView fsr[8] = { 0 };
+    if (g_fxs.upscale >= 0.5f && d->vs.rhw && g_rt)
+        for (int i = 0; i < 8; ++i)
+        {
+            int wanted = d->fs.prog || i < d->fs.nstages ? d->fs.st[i].tex : 0;
+            if (wanted == 1 && d->tex[i] && d->tex[i] != g_rt)
+                fsr[i] = fsr_view(d->tex[i], d->vp);
+        }
     int water = g_rt ? water_mode(d) : 0;
     if (water && !water_capture())
         water = 0;
@@ -2340,6 +2353,8 @@ static void draw_encode(const GfxDraw* d)
         GfxSampler sk = d->samp[i];
         if (!t || t->use == GFX_USE_DEPTH || (wanted == 2) != (t->type == GFX_TEX_CUBE))
             view = wanted == 2 ? g_dummycube->view : g_dummy2d->view;
+        else if (fsr[i])
+            view = fsr[i], t->used = g_serial, t->rec = g_cb_index;
         else
         {
             view = t->view;
@@ -2864,6 +2879,112 @@ static const char FX_GLSL[] =
     "}\n"
     "#endif\n"
     "\n"
+    /* FSR 1 (upscale on the back ends other than Metal; the host draws the world smaller, upscale_background):
+     * EASU makes the world up to the size the game puts it at, RCAS sharpens it. AMD FidelityFX Super
+     * Resolution 1.0, ported from third_party/fsr1/ffx_fsr1.h (the 32-bit float paths). Copyright (c) 2021
+     * Advanced Micro Devices, Inc. All rights reserved; MIT license (third_party/fsr1/license.txt).
+     * u.vp: the input's size, the output's; u.size: the input texture's size, RCAS's strength (its con). */
+    "#if defined(FX_EASU) || defined(FX_RCAS)\n"
+    "float fsr_rcp_lo(float a) { return uintBitsToFloat(0x7ef07ebbu - floatBitsToUint(a)); }\n"
+    "float fsr_rcp_med(float a) { float b = uintBitsToFloat(0x7ef19fffu - floatBitsToUint(a)); return b * (-b * a + 2.0); }\n"
+    "float fsr_rsq_lo(float a) { return uintBitsToFloat(0x5f347d74u - (floatBitsToUint(a) >> 1u)); }\n"
+    "#endif\n"
+    "#ifdef FX_EASU\n"
+    "void easu_tap(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len, float lob, float clp, vec3 c) {\n"
+    "  vec2 v = vec2(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x) * len;\n"
+    "  float d2 = min(v.x * v.x + v.y * v.y, clp);\n"
+    "  float wB = 2.0 / 5.0 * d2 - 1.0, wA = lob * d2 - 1.0;\n"
+    "  wB *= wB, wA *= wA;\n"
+    "  wB = 25.0 / 16.0 * wB - (25.0 / 16.0 - 1.0);\n"
+    "  float w = wB * wA;\n"
+    "  aC += c * w, aW += w;\n"
+    "}\n"
+    "void easu_set(inout vec2 dir, inout float len, float w, float lA, float lB, float lC, float lD, float lE) {\n"
+    "  float dc = lD - lC, cb = lC - lB;\n"
+    "  float lenX = fsr_rcp_lo(max(abs(dc), abs(cb)));\n"
+    "  float dirX = lD - lB;\n"
+    "  dir.x += dirX * w;\n"
+    "  lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);\n"
+    "  len += lenX * lenX * w;\n"
+    "  float ec = lE - lC, ca = lC - lA;\n"
+    "  float lenY = fsr_rcp_lo(max(abs(ec), abs(ca)));\n"
+    "  float dirY = lE - lA;\n"
+    "  dir.y += dirY * w;\n"
+    "  lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);\n"
+    "  len += lenY * lenY * w;\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 ip = floor(gl_FragCoord.xy);\n"
+    "  vec2 k = u.vp.xy / u.vp.zw, rcp = 1.0 / u.size.xy;\n"
+    "  vec2 pp = ip * k + (0.5 * k - 0.5);\n"
+    "  vec2 fp = floor(pp);\n"
+    "  pp -= fp;\n"
+    "  vec2 p0 = fp * rcp + vec2(rcp.x, -rcp.y);\n"
+    "  vec2 p1 = p0 + vec2(-1.0, 2.0) * rcp, p2 = p0 + vec2(1.0, 2.0) * rcp, p3 = p0 + vec2(0.0, 4.0) * rcp;\n"
+    "  vec4 bczzR = textureGather(t0, p0, 0), bczzG = textureGather(t0, p0, 1), bczzB = textureGather(t0, p0, 2);\n"
+    "  vec4 ijfeR = textureGather(t0, p1, 0), ijfeG = textureGather(t0, p1, 1), ijfeB = textureGather(t0, p1, 2);\n"
+    "  vec4 klhgR = textureGather(t0, p2, 0), klhgG = textureGather(t0, p2, 1), klhgB = textureGather(t0, p2, 2);\n"
+    "  vec4 zzonR = textureGather(t0, p3, 0), zzonG = textureGather(t0, p3, 1), zzonB = textureGather(t0, p3, 2);\n"
+    "  vec4 bczzL = bczzB * 0.5 + (bczzR * 0.5 + bczzG), ijfeL = ijfeB * 0.5 + (ijfeR * 0.5 + ijfeG);\n"
+    "  vec4 klhgL = klhgB * 0.5 + (klhgR * 0.5 + klhgG), zzonL = zzonB * 0.5 + (zzonR * 0.5 + zzonG);\n"
+    "  float bL = bczzL.x, cL = bczzL.y, iL = ijfeL.x, jL = ijfeL.y, fL = ijfeL.z, eL = ijfeL.w;\n"
+    "  float kL = klhgL.x, lL = klhgL.y, hL = klhgL.z, gL = klhgL.w, oL = zzonL.z, nL = zzonL.w;\n"
+    "  vec2 dir = vec2(0.0);\n"
+    "  float len = 0.0;\n"
+    "  easu_set(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);\n"
+    "  easu_set(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);\n"
+    "  easu_set(dir, len, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);\n"
+    "  easu_set(dir, len, pp.x * pp.y, gL, jL, kL, lL, oL);\n"
+    "  vec2 dir2 = dir * dir;\n"
+    "  float dirR = dir2.x + dir2.y;\n"
+    "  bool zro = dirR < 1.0 / 32768.0;\n"
+    "  dirR = zro ? 1.0 : fsr_rsq_lo(dirR);\n"
+    "  dir.x = zro ? 1.0 : dir.x;\n"
+    "  dir *= dirR;\n"
+    "  len = len * 0.5;\n"
+    "  len *= len;\n"
+    "  float stretch = (dir.x * dir.x + dir.y * dir.y) * fsr_rcp_lo(max(abs(dir.x), abs(dir.y)));\n"
+    "  vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);\n"
+    "  float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;\n"
+    "  float clp = fsr_rcp_lo(lob);\n"
+    "  vec3 f = vec3(ijfeR.z, ijfeG.z, ijfeB.z), g = vec3(klhgR.w, klhgG.w, klhgB.w);\n"
+    "  vec3 j = vec3(ijfeR.y, ijfeG.y, ijfeB.y), kk = vec3(klhgR.x, klhgG.x, klhgB.x);\n"
+    "  vec3 min4 = min(min(f, g), min(j, kk)), max4 = max(max(f, g), max(j, kk));\n"
+    "  vec3 aC = vec3(0.0);\n"
+    "  float aW = 0.0;\n"
+    "  easu_tap(aC, aW, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, vec3(bczzR.x, bczzG.x, bczzB.x));\n"
+    "  easu_tap(aC, aW, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, vec3(bczzR.y, bczzG.y, bczzB.y));\n"
+    "  easu_tap(aC, aW, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, vec3(ijfeR.x, ijfeG.x, ijfeB.x));\n"
+    "  easu_tap(aC, aW, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, j);\n"
+    "  easu_tap(aC, aW, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, f);\n"
+    "  easu_tap(aC, aW, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, vec3(ijfeR.w, ijfeG.w, ijfeB.w));\n"
+    "  easu_tap(aC, aW, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, kk);\n"
+    "  easu_tap(aC, aW, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, vec3(klhgR.y, klhgG.y, klhgB.y));\n"
+    "  easu_tap(aC, aW, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, vec3(klhgR.z, klhgG.z, klhgB.z));\n"
+    "  easu_tap(aC, aW, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, g);\n"
+    "  easu_tap(aC, aW, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, vec3(zzonR.z, zzonG.z, zzonB.z));\n"
+    "  easu_tap(aC, aW, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, vec3(zzonR.w, zzonG.w, zzonB.w));\n"
+    "  oc = vec4(min(max4, max(min4, aC / aW)), textureLod(t0, (fp + pp + 0.5) * rcp, 0.0).a);\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef FX_RCAS\n"
+    "void main() {\n"
+    "  ivec2 sp = ivec2(gl_FragCoord.xy), hi = ivec2(u.vp.zw) - 1;\n"
+    "  vec3 b = texelFetch(t0, clamp(sp + ivec2(0, -1), ivec2(0), hi), 0).rgb;\n"
+    "  vec3 d = texelFetch(t0, clamp(sp + ivec2(-1, 0), ivec2(0), hi), 0).rgb;\n"
+    "  vec4 ea = texelFetch(t0, sp, 0);\n"
+    "  vec3 e = ea.rgb;\n"
+    "  vec3 f = texelFetch(t0, clamp(sp + ivec2(1, 0), ivec2(0), hi), 0).rgb;\n"
+    "  vec3 h = texelFetch(t0, clamp(sp + ivec2(0, 1), ivec2(0), hi), 0).rgb;\n"
+    "  vec3 mn4 = min(min(b, d), min(f, h)), mx4 = max(max(b, d), max(f, h));\n"
+    "  vec3 hitMin = min(mn4, e) / (4.0 * mx4);\n"
+    "  vec3 hitMax = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0);\n"
+    "  vec3 lobeC = max(-hitMin, hitMax);\n"
+    "  float lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobeC.r, max(lobeC.g, lobeC.b)), 0.0)) * u.size.z;\n"
+    "  float rcpL = fsr_rcp_med(4.0 * lobe + 1.0);\n"
+    "  oc = vec4((lobe * (b + d + h + f) + e) * rcpL, ea.a);\n"
+    "}\n"
+    "#endif\n"
     "#ifdef FX_FXAA\n"
     "const float FXAA_Q[10] = float[10](1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 4.0, 8.0);\n"
     "float luma(vec2 p) { return dot(texture(t0, p).rgb, LUMA); }\n"
@@ -5150,10 +5271,83 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
 
 static void scene_fx(GfxTex* color, const GfxScene* s);
 
+/* FSR 1 (upscale): the world drawn at fewer pixels than the screen (the host made its background smaller,
+ * upscale_background) and made up to the size the game puts it at, where it does (fsr_view, from draw_encode):
+ * EASU into a, RCAS from a into b. The world is its target and the viewport within it the scene was last done
+ * at (gfx_scene_done): the game's target can be larger than the background it draws (a padded size), and the
+ * quad that puts it on the screen reads that corner of it, so what is read in its place has the same corner,
+ * made larger, in a target the same factor larger */
+static struct
+{
+    GfxTex* world;
+    uint32_t vw, vh; /* the scene's viewport within it, from its corner */
+    VkPipeline easu, rcas;
+    VkFormat fmt;
+    GfxTex *a, *b;
+    int said;
+} g_fsr;
+
+static void fsr_forget(const GfxTex* t)
+{
+    if (g_fsr.world == t)
+        g_fsr.world = NULL;
+}
+
+static VkImageView fsr_view(GfxTex* t, const uint32_t vp[6])
+{
+    uint32_t ow = vp[2], oh = vp[3], rw, rh;
+    color_size(&rw, &rh);
+    /* the world: the scene's target (with its viewport), or a target the quad puts over all of the one drawn
+     * to, of its shape (FFXI's background onto the back buffer; the front end may not have named the scene) */
+    uint32_t cw = t == g_fsr.world ? g_fsr.vw : t->w, ch = t == g_fsr.world ? g_fsr.vh : t->h;
+    if (t->use != GFX_USE_RT || t->type != GFX_TEX_2D || !cw || !ch ||
+        (t != g_fsr.world && (vp[0] || vp[1] || ow != rw || oh != rh || fabsf((float)cw * oh - (float)ch * ow) > 0.02f * (float)cw * oh)))
+        return VK_NULL_HANDLE;
+    if (!g_fsr.said)
+        g_fsr.said = 1, fprintf(stderr, "[recomp] gfx: FSR 1: the world %ux%u of a %ux%u target, put at %ux%u\n", cw, ch, t->w, t->h, ow, oh);
+    if ((ow <= cw + cw / 16 && oh <= ch + ch / 16) || ow > 8192 || oh > 8192 || !fx_init())
+        return VK_NULL_HANDLE; /* not made larger */
+    /* the whole target at the factor the corner is made larger by */
+    uint32_t tw = (uint32_t)((uint64_t)t->w * ow / cw), th = (uint32_t)((uint64_t)t->h * oh / ch);
+    if (tw > 16384 || th > 16384)
+        return VK_NULL_HANDLE;
+    if (!g_fsr.easu || g_fsr.fmt != t->vf)
+    {
+        g_fsr.easu = fx_pipeline("EASU", t->vf);
+        g_fsr.rcas = fx_pipeline("RCAS", t->vf);
+        g_fsr.fmt = t->vf;
+        fprintf(stderr, "[recomp] gfx: upscaling the world from %ux%u to %ux%u (FSR 1)\n", cw, ch, ow, oh);
+    }
+    float sharpen = fminf(g_fxs.upscale_sharpen, 1.0f);
+    int rcas = sharpen > 0.0f && g_fsr.rcas;
+    if (!g_fsr.easu || !fx_tex(&g_fsr.a, t->vf, tw, th, GFX_USE_RT, 1) || (rcas && !fx_tex(&g_fsr.b, t->vf, tw, th, GFX_USE_RT, 1)))
+        return VK_NULL_HANDLE;
+    flush_pass();
+    FxU u;
+    memset(&u, 0, sizeof u);
+    u.vp[0] = (float)cw, u.vp[1] = (float)ch, u.vp[2] = (float)ow, u.vp[3] = (float)oh;
+    /* RCAS's strength: upscale_sharpen 1 the most it gives, each quarter less half a stop less */
+    u.size[0] = (float)t->w, u.size[1] = (float)t->h, u.size[2] = exp2f(-2.0f * (1.0f - sharpen));
+    fx_uniforms(&u);
+    uint32_t mip_in = g_fx.mip_in;
+    g_fx.mip_in = 0;
+    g_pass = GFX_PASS_COMP;
+    float ov[4] = { 0, 0, (float)ow, (float)oh };
+    fx_pass(g_fsr.a, 0, 0, g_fsr.easu, ov, &t->view, 1, NULL, NULL);
+    if (rcas)
+        fx_pass(g_fsr.b, 0, 0, g_fsr.rcas, ov, &g_fsr.a->view, 1, NULL, NULL);
+    g_fx.mip_in = mip_in;
+    GfxTex* out = rcas ? g_fsr.b : g_fsr.a;
+    return out->view;
+}
+
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
         return;
+    g_fsr.world = color;
+    g_fsr.vw = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[2] && s->vp[2] <= color->w ? s->vp[2] : color->w;
+    g_fsr.vh = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[3] && s->vp[3] <= color->h ? s->vp[3] : color->h;
     if (g_fxs.fx != 0.0f)
         scene_fx(color, s);
     scene_aa(color, s);

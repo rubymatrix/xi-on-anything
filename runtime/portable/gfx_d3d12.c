@@ -38,6 +38,12 @@
 
 #include "cachedir.h"
 #include "gfx.h"
+/* AMD's FSR SDK (upscale 2): its C API, the DLLs loaded at run time (fsr_sdk_load) */
+#define _WINDOWS
+#include "../../third_party/fsr_sdk/ffx_api.h"
+#include "../../third_party/fsr_sdk/ffx_api_loader.h"
+#include "../../third_party/fsr_sdk/ffx_upscale.h"
+#include "../../third_party/fsr_sdk/dx12/ffx_api_dx12.h"
 #include "gfx_hlsl.h"
 #include "gfx_rt_dxil.h"
 
@@ -258,7 +264,8 @@ typedef struct FxSettings
         fog_g, bloom, threshold, rays, rays_decay, rays_length, light, shadow, shadow_length, sun, sun_distance, sun_soft,
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
-        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt, contact_steps;
+        water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt, contact_steps,
+        upscale, upscale_scale, upscale_sharpen;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -605,6 +612,19 @@ static void frame_begin(void)
     g_frame_open = 1;
 }
 
+/* the list's heaps, root signature and tables, as every draw expects them: at its start, and after
+ * something else set its own (the FSR SDK's dispatch) */
+static void list_bind(void)
+{
+    ID3D12DescriptorHeap* heaps[2] = { g_srv.heap, g_samp.heap };
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(g_list, 2, heaps);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(g_list, g_root);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_TEX2D, g_srv.gpu);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_TEXCUBE, g_srv.gpu);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_SAMPLERS, g_samp.gpu);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_CMP, g_samp.gpu);
+}
+
 /* the command list being recorded, opened (and set up) if none is */
 static ID3D12GraphicsCommandList* list(void)
 {
@@ -613,13 +633,7 @@ static ID3D12GraphicsCommandList* list(void)
         return g_list;
     Frame* f = &g_frames[g_frame];
     ID3D12GraphicsCommandList_Reset(g_list, f->alloc, NULL);
-    ID3D12DescriptorHeap* heaps[2] = { g_srv.heap, g_samp.heap };
-    ID3D12GraphicsCommandList_SetDescriptorHeaps(g_list, 2, heaps);
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(g_list, g_root);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_TEX2D, g_srv.gpu);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_TEXCUBE, g_srv.gpu);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_SAMPLERS, g_samp.gpu);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(g_list, ROOT_CMP, g_samp.gpu);
+    list_bind();
     if (gfx_profiling && g_queries && !f->timed)
     {
         ID3D12GraphicsCommandList_EndQuery(g_list, g_queries, D3D12_QUERY_TYPE_TIMESTAMP, 2 * g_frame);
@@ -1039,6 +1053,9 @@ static void release_views(GfxTex* t)
     t->views = NULL;
 }
 
+static void fsr_forget(const GfxTex* t);
+static void fsr_sdk_forget(const GfxTex* t);
+
 void gfx_tex_destroy(GfxTex* t)
 {
     if (!t)
@@ -1048,6 +1065,8 @@ void gfx_tex_destroy(GfxTex* t)
     if (g_ds == t)
         g_ds = NULL, g_targets_bound = 0;
     sun_cache_forget_tex(t);
+    fsr_forget(t);
+    fsr_sdk_forget(t);
     defer((IUnknown*)t->res, NULL, -1);
     defer(NULL, &g_srv, t->srv);
     defer(NULL, &g_srv, t->mip_srv);
@@ -1867,10 +1886,22 @@ static D3D12_TEXTURE_ADDRESS_MODE address(uint32_t a)
     }
 }
 
-/* the sampler heap slot for a key: made on first use, kept */
-static uint32_t sampler_slot(const GfxSampler* k)
+/* the sampler heap slot for a key, its mips picked bias levels finer (the FSR SDK's world: negative; 0 the
+ * game's own): made on first use, kept */
+static Map g_bsamplers;
+static uint32_t sampler_slot_bias(const GfxSampler* k, float bias)
 {
-    void* s = map_get(&g_samplers, k, sizeof *k);
+    struct
+    {
+        GfxSampler k;
+        float bias;
+    } bk;
+    memset(&bk, 0, sizeof bk);
+    bk.k = *k, bk.bias = bias;
+    Map* m = bias != 0.0f ? &g_bsamplers : &g_samplers;
+    const void* key = bias != 0.0f ? (const void*)&bk : (const void*)k;
+    size_t klen = bias != 0.0f ? sizeof bk : sizeof *k;
+    void* s = map_get(m, key, klen);
     if (s)
         return (uint32_t)(uintptr_t)s - 1;
     int32_t slot = heap_alloc(&g_samp);
@@ -1897,10 +1928,13 @@ static uint32_t sampler_slot(const GfxSampler* k)
     sd.MaxLOD = k->mip == 0 ? (float)k->max_level : D3D12_FLOAT32_MAX; /* no mipmapping: that one level */
     if (k->lod_cap && sd.MaxLOD > (float)(k->lod_cap - 1)) /* a texture pack's glyph sheet: not its smallest mips */
         sd.MaxLOD = (float)(k->lod_cap - 1);
+    sd.MipLODBias = bias;
     ID3D12Device_CreateSampler(g_dev, &sd, heap_cpu(&g_samp, slot));
-    map_put(&g_samplers, k, sizeof *k, (void*)(uintptr_t)(slot + 1));
+    map_put(m, key, klen, (void*)(uintptr_t)(slot + 1));
     return (uint32_t)slot;
 }
+
+static uint32_t sampler_slot(const GfxSampler* k) { return sampler_slot_bias(k, 0.0f); }
 
 /* a stage's sampler is usually the one it had on the last draw: that is checked before hashing */
 static uint32_t sampler(int stage, const GfxSampler* k)
@@ -1915,6 +1949,17 @@ static uint32_t sampler(int stage, const GfxSampler* k)
 }
 
 /* --- drawing --------------------------------------------------------------------------------------------------- */
+/* The FSR SDK's frame (upscale 2, fsr_sdk_frame): this frame's draws into the world's target are drawn a
+ * fraction of a pixel aside (the viewport's origin: jit, in its pixels) and sample their textures bias mips
+ * finer, as at the size the world is made up to */
+static struct
+{
+    GfxTex* rt; /* the world's target; NULL: none this frame */
+    float jit[2], bias;
+} g_fsrj;
+
+static int fsr_jittered(void) { return g_fsrj.rt && g_rt == g_fsrj.rt && !g_rt_level && !g_rt_face; }
+
 static void set_viewport(const uint32_t vp[6])
 {
     float zmin, zmax;
@@ -1931,6 +1976,8 @@ static void set_viewport(const uint32_t vp[6])
         vw = w - x;
     if (y + vh > h)
         vh = h - y;
+    if (fsr_jittered())
+        x += g_fsrj.jit[0], y += g_fsrj.jit[1];
     D3D12_VIEWPORT v = { x, y, vw, vh, zmin, zmax };
     if (g_bound_valid && !memcmp(&v, &g_bound_vp, sizeof v))
         return;
@@ -2374,6 +2421,8 @@ void gfx_draw(const GfxDraw* d)
         g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws++;
 }
 
+static int32_t fsr_srv(GfxTex* t, const uint32_t vp[6]);
+
 static void draw_encode(const GfxDraw* d)
 {
     if (!bind_targets())
@@ -2402,6 +2451,13 @@ static void draw_encode(const GfxDraw* d)
         if (!wanted)
             continue;
         GfxSampler sk = d->samp[i];
+        /* the world put on a larger target (FSR 1): what is read in its place, made up first */
+        int32_t fsr = t && t != g_rt && wanted == 1 && d->vs.rhw && g_fxs.upscale >= 0.5f ? fsr_srv(t, d->vp) : -1;
+        if (fsr >= 0)
+        {
+            bind[8 + i] = sampler(i, &sk), bind[i] = (uint32_t)fsr;
+            continue;
+        }
         int32_t srv = t ? t->srv : -1;
         if (t && g_fxs.fx != 0.0f)
         {
@@ -2416,7 +2472,9 @@ static void draw_encode(const GfxDraw* d)
             else if (t->scene && t->mip_srv >= 0)
                 sk.min = 3, sk.mag = 2, sk.mip = 2, sk.max_aniso = 16, sk.max_level = 0, srv = t->mip_srv;
         }
-        bind[8 + i] = sampler(i, &sk);
+        /* the world drawn for the FSR SDK: its textures at the mips of the size it is made up to */
+        bind[8 + i] = !d->vs.rhw && t && t->levels > 1 && g_fsrj.bias != 0.0f && fsr_jittered() ? sampler_slot_bias(&sk, g_fsrj.bias)
+                                                                                            : sampler(i, &sk);
         if (!t || srv < 0 || t == g_rt || (wanted == 2) != (t->type == GFX_TEX_CUBE))
             continue; /* unbound, or the target being drawn to: reads as the null view */
         tex_state(t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2775,6 +2833,9 @@ static const struct
     FXS(rt, 0.0f),
     /* the contact shadows' steps a frame, 1 to 16; 0 follows ao_quality (gfx_fx.c's) */
     FXS(contact_steps, 0.0f),
+    /* not an effect: FSR 1 (gfx_fx.c's notes): the world drawn smaller (host64's upscale_background) and made up
+     * to the screen through EASU and RCAS (fsr_srv); upscale_scale is read at start, by the host */
+    FXS(upscale, 0.0f), FXS(upscale_scale, 0.67f), FXS(upscale_sharpen, 0.25f),
 };
 #undef FXS
 
@@ -2941,6 +3002,7 @@ typedef struct FxTex
     ID3D12Resource* res;
     DXGI_FORMAT fmt;
     uint32_t w, h, levels;
+    int uav; /* also an unordered-access target (the FSR SDK's output) */
     D3D12_RESOURCE_STATES state[4];
     int32_t srv, lsrv[4], rtv[4]; /* the whole; one level each (lsrv: only with more than one) */
 } FxTex;
@@ -3078,17 +3140,19 @@ static void fx_tex_free(FxTex* t)
     memset(t, 0, sizeof *t);
 }
 
-/* a target of this format, size and levels (1, or 4) in *t, made again when any of them changes */
-static int fx_tex(FxTex* t, DXGI_FORMAT fmt, uint32_t w, uint32_t h, uint32_t levels)
+/* a target of this format, size and levels (1, or 4) in *t, made again when any of them changes; uav: also
+ * an unordered-access one */
+static int fx_tex_uav(FxTex* t, DXGI_FORMAT fmt, uint32_t w, uint32_t h, uint32_t levels, int uav)
 {
-    if (t->res && t->fmt == fmt && t->w == w && t->h == h && t->levels == levels)
+    if (t->res && t->fmt == fmt && t->w == w && t->h == h && t->levels == levels && t->uav == uav)
         return 1;
     fx_tex_free(t);
     if (!w || !h)
         return 0;
     D3D12_HEAP_PROPERTIES hp = { D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0 };
     D3D12_RESOURCE_DESC rd = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, w, h, 1, (UINT16)levels, fmt, { 1, 0 },
-        D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET };
+        D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | (uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE) };
     if (FAILED(ID3D12Device_CreateCommittedResource(g_dev, &hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
             NULL, &IID_ID3D12Resource, (void**)&t->res)))
     {
@@ -3096,7 +3160,7 @@ static int fx_tex(FxTex* t, DXGI_FORMAT fmt, uint32_t w, uint32_t h, uint32_t le
         t->res = NULL;
         return 0;
     }
-    t->fmt = fmt, t->w = w, t->h = h, t->levels = levels;
+    t->fmt = fmt, t->w = w, t->h = h, t->levels = levels, t->uav = uav;
     t->srv = heap_alloc(&g_srv);
     int ok = t->srv >= 0;
     D3D12_SHADER_RESOURCE_VIEW_DESC v;
@@ -3132,6 +3196,11 @@ static int fx_tex(FxTex* t, DXGI_FORMAT fmt, uint32_t w, uint32_t h, uint32_t le
         fx_tex_free(t);
     }
     return ok;
+}
+
+static int fx_tex(FxTex* t, DXGI_FORMAT fmt, uint32_t w, uint32_t h, uint32_t levels)
+{
+    return fx_tex_uav(t, fmt, w, h, levels, 0);
 }
 
 /* level (-1: every level) of t into a state */
@@ -4777,6 +4846,333 @@ static void scene_aa(GfxTex* color, const GfxScene* s)
     color->scene = 0; /* its mips are behind (scene_mips) */
 }
 
+/* FSR 1 (upscale): the world drawn at fewer pixels than the screen (host64 made its background smaller,
+ * upscale_background) and made up to the size the game puts it at, where it does (from draw_encode): EASU
+ * into a, RCAS from a into b, as gfx_vulkan.c's fsr_view (its notes there: the world's corner of its target,
+ * made larger in a target the same factor larger) */
+static struct
+{
+    GfxTex* world;
+    uint32_t vw, vh;
+    int tried, said;
+    ID3D12PipelineState *easu, *rcas;
+    FxTex a, b;
+} g_fsr;
+
+static void fsr_forget(const GfxTex* t)
+{
+    if (g_fsr.world == t)
+        g_fsr.world = NULL;
+    if (g_fsrj.rt == t)
+        g_fsrj.rt = NULL;
+}
+
+static int32_t fsr_sdk_upscale(GfxTex* t, uint32_t cw, uint32_t ch, uint32_t ow, uint32_t oh, uint32_t tw, uint32_t th);
+
+static int32_t fsr_srv(GfxTex* t, const uint32_t vp[6])
+{
+    uint32_t ow = vp[2], oh = vp[3], rw = g_rt->w >> g_rt_level, rh = g_rt->h >> g_rt_level;
+    /* the world: the scene's target (with its viewport), or a target the quad puts over all of the one drawn
+     * to, of its shape (gfx_vulkan.c's fsr_view) */
+    uint32_t cw = t == g_fsr.world ? g_fsr.vw : t->w, ch = t == g_fsr.world ? g_fsr.vh : t->h;
+    if (t->use != GFX_USE_RT || t->type != GFX_TEX_2D || !cw || !ch || t->srv < 0 || t->dxfmt != FX_COLOR ||
+        (t != g_fsr.world && (vp[0] || vp[1] || ow != rw || oh != rh || fabsf((float)cw * oh - (float)ch * ow) > 0.02f * (float)cw * oh)))
+        return -1;
+    if (!g_fsr.said)
+        g_fsr.said = 1, fprintf(stderr, "[recomp] gfx: FSR 1: the world %ux%u of a %ux%u target, put at %ux%u\n", cw, ch, t->w, t->h, ow, oh);
+    if ((ow <= cw + cw / 16 && oh <= ch + ch / 16) || ow > 8192 || oh > 8192)
+        return -1; /* not made larger */
+    uint32_t tw = (uint32_t)((uint64_t)t->w * ow / cw), th = (uint32_t)((uint64_t)t->h * oh / ch);
+    if (tw > 16384 || th > 16384)
+        return -1;
+    int32_t sdk = fsr_sdk_upscale(t, cw, ch, ow, oh, tw, th);
+    if (sdk >= 0)
+        return sdk;
+    if (!g_fsr.tried)
+    {
+        g_fsr.tried = 1;
+        ID3DBlob* vs = compile(gfx_hlsl_fx, "fx_vs", "vs_5_1");
+        if (vs)
+        {
+            g_fsr.easu = fx_pipeline(vs, "fx_easu", FX_COLOR);
+            g_fsr.rcas = fx_pipeline(vs, "fx_rcas", FX_COLOR);
+            ID3D10Blob_Release(vs);
+        }
+        fprintf(stderr, "[recomp] gfx: upscaling the world from %ux%u to %ux%u (FSR 1)%s\n", cw, ch, ow, oh,
+            g_fsr.easu ? "" : ": its pipeline failed");
+    }
+    float sharpen = fminf(g_fxs.upscale_sharpen, 1.0f);
+    int rcas = sharpen > 0.0f && g_fsr.rcas;
+    if (!g_fsr.easu || !fx_tex(&g_fsr.a, FX_COLOR, tw, th, 1) || (rcas && !fx_tex(&g_fsr.b, FX_COLOR, tw, th, 1)))
+        return -1;
+    FxU u;
+    memset(&u, 0, sizeof u);
+    u.vp[0] = (float)cw, u.vp[1] = (float)ch, u.vp[2] = (float)ow, u.vp[3] = (float)oh;
+    /* RCAS's strength: upscale_sharpen 1 the most it gives, each quarter less half a stop less */
+    u.size[0] = (float)t->w, u.size[1] = (float)t->h, u.size[2] = exp2f(-2.0f * (1.0f - sharpen));
+    D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&u);
+    if (!ua)
+        return -1;
+    tex_state(t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    uint32_t in = (uint32_t)t->srv;
+    fx_pass(fx_out(&g_fsr.a, 0), g_fsr.easu, 0, 0, (float)ow, (float)oh, ua, &in, 1, 0, 0);
+    if (rcas)
+    {
+        in = fx_in(&g_fsr.a, 0);
+        fx_pass(fx_out(&g_fsr.b, 0), g_fsr.rcas, 0, 0, (float)ow, (float)oh, ua, &in, 1, 0, 0);
+    }
+    return (int32_t)fx_in(rcas ? &g_fsr.b : &g_fsr.a, 0);
+}
+
+/* FSR 3.1 / 4 (upscale 2): AMD's FSR SDK, its amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_upscaler_dx12.dll
+ * beside the game (tools/build.py fsr_dlls). The SDK picks the upscaler the GPU has: FSR 4 (a learned model) on a
+ * Radeon RX 6000 or later with AMD's driver, FSR 3.1 everywhere else. It takes the world as drawn this frame -
+ * jittered (g_fsrj, from fsr_sdk_frame), with its depth (as R32F: fx_zcopy) and the camera's motion (fx_motion) -
+ * and makes it up where the game puts it on the screen (fsr_srv). Without the DLLs, or without this frame's scene
+ * (its depth and camera), the world goes through FSR 1. */
+static struct
+{
+    int loaded; /* -1 not looked at, 0 not there, 1 there */
+    ffxFunctions fn;
+    ffxContext ctx;
+    uint32_t rw, rh, ow, oh; /* what ctx was made for */
+    ID3D12PipelineState *zcopy, *motion;
+    FxTex z, mv, out;
+    GfxScene scene; /* the world's, this frame (gfx_scene_done) */
+    GfxTex* depth;
+    uint64_t scene_serial;
+    float prev_view[16], prev_proj[16];
+    uint64_t prev_serial; /* the frame the camera above was kept */
+    int32_t phase;
+    uint64_t last_ns, used_serial; /* the last frame it made the world up: the jitter goes on while it does */
+} g_sdk = { .loaded = -1 };
+
+static void fsr_sdk_forget(const GfxTex* t)
+{
+    if (g_sdk.depth == t)
+        g_sdk.depth = NULL;
+}
+
+static int fsr_sdk_load(void)
+{
+    if (g_sdk.loaded >= 0)
+        return g_sdk.loaded;
+    g_sdk.loaded = 0;
+    HMODULE m = LoadLibraryW(L"amd_fidelityfx_loader_dx12.dll");
+    if (!m)
+    {
+        fprintf(stderr, "[recomp] gfx: FSR SDK: amd_fidelityfx_loader_dx12.dll is not beside the game: FSR 1 instead\n");
+        return 0;
+    }
+    ffxLoadFunctions(&g_sdk.fn, m);
+    if (!g_sdk.fn.CreateContext || !g_sdk.fn.DestroyContext || !g_sdk.fn.Query || !g_sdk.fn.Dispatch)
+    {
+        fprintf(stderr, "[recomp] gfx: FSR SDK: its loader has no ffxCreateContext: FSR 1 instead\n");
+        return 0;
+    }
+    /* the upscalers this GPU has, the one used first */
+    uint64_t n = 8, ids[8] = { 0 };
+    const char* names[8] = { 0 };
+    struct ffxQueryDescGetVersions q;
+    memset(&q, 0, sizeof q);
+    q.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+    q.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    q.device = g_dev;
+    q.outputCount = &n, q.versionIds = ids, q.versionNames = names;
+    if (g_sdk.fn.Query(NULL, &q.header) != FFX_API_RETURN_OK || !n)
+    {
+        fprintf(stderr, "[recomp] gfx: FSR SDK: no upscaler for this GPU: FSR 1 instead\n");
+        return 0;
+    }
+    for (uint64_t i = 0; i < n && i < 8; ++i)
+        fprintf(stderr, "[recomp] gfx: FSR SDK: %s%s\n", names[i] ? names[i] : "?", i ? "" : " (used)");
+    ID3DBlob* vs = compile(gfx_hlsl_fx, "fx_vs", "vs_5_1");
+    if (vs)
+    {
+        g_sdk.zcopy = fx_pipeline(vs, "fx_zcopy", DXGI_FORMAT_R32_FLOAT);
+        g_sdk.motion = fx_pipeline(vs, "fx_motion", DXGI_FORMAT_R16G16_FLOAT);
+        ID3D10Blob_Release(vs);
+    }
+    if (!g_sdk.zcopy || !g_sdk.motion)
+        return 0;
+    g_sdk.loaded = 1;
+    return 1;
+}
+
+static struct FfxApiResource fsr_res(ID3D12Resource* r, uint32_t fmt, uint32_t w, uint32_t h, uint32_t state, uint32_t usage)
+{
+    struct FfxApiResource x;
+    memset(&x, 0, sizeof x);
+    x.resource = r;
+    x.description.type = FFX_API_RESOURCE_TYPE_TEXTURE2D, x.description.format = fmt;
+    x.description.width = w, x.description.height = h, x.description.depth = 1, x.description.mipCount = 1;
+    x.description.flags = FFX_API_RESOURCE_FLAGS_NONE, x.description.usage = usage;
+    x.state = state;
+    return x;
+}
+
+/* the world's cw x ch corner of t made up to ow x oh, into the corner of a tw x th target: its heap slot, or -1 */
+static int32_t fsr_sdk_upscale(GfxTex* t, uint32_t cw, uint32_t ch, uint32_t ow, uint32_t oh, uint32_t tw, uint32_t th)
+{
+    const GfxScene* s = &g_sdk.scene;
+    GfxTex* depth = g_sdk.depth;
+    if (g_fxs.upscale < 1.5f || g_sdk.scene_serial != g_serial || t != g_fsr.world || !depth || depth->srv < 0 ||
+        depth->w != t->w || depth->h != t->h || s->proj[11] == 0.0f || t->dxfmt != FX_COLOR || !fsr_sdk_load())
+        return -1;
+    if (!g_sdk.ctx || g_sdk.rw != cw || g_sdk.rh != ch || g_sdk.ow != ow || g_sdk.oh != oh)
+    {
+        if (g_sdk.ctx)
+        {
+            submit(1); /* nothing in flight uses it */
+            g_sdk.fn.DestroyContext(&g_sdk.ctx, NULL);
+            g_sdk.ctx = NULL;
+        }
+        struct ffxCreateBackendDX12Desc be;
+        memset(&be, 0, sizeof be);
+        be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+        be.device = g_dev;
+        struct ffxCreateContextDescUpscale cd;
+        memset(&cd, 0, sizeof cd);
+        cd.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+        cd.header.pNext = &be.header;
+        cd.flags = FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE; /* the world as shown: in the display's gamma */
+        cd.maxRenderSize.width = cw, cd.maxRenderSize.height = ch;
+        cd.maxUpscaleSize.width = ow, cd.maxUpscaleSize.height = oh;
+        ffxReturnCode_t r = g_sdk.fn.CreateContext(&g_sdk.ctx, &cd.header, NULL);
+        if (r != FFX_API_RETURN_OK)
+        {
+            fprintf(stderr, "[recomp] gfx: FSR SDK: no context for %ux%u to %ux%u (%u): FSR 1 instead\n", cw, ch, ow, oh, r);
+            g_sdk.ctx = NULL, g_sdk.loaded = 0;
+            return -1;
+        }
+        g_sdk.rw = cw, g_sdk.rh = ch, g_sdk.ow = ow, g_sdk.oh = oh, g_sdk.prev_serial = 0;
+        fprintf(stderr, "[recomp] gfx: upscaling the world from %ux%u to %ux%u (FSR SDK)\n", cw, ch, ow, oh);
+    }
+    if (!fx_tex(&g_sdk.z, DXGI_FORMAT_R32_FLOAT, t->w, t->h, 1) || !fx_tex(&g_sdk.mv, DXGI_FORMAT_R16G16_FLOAT, t->w, t->h, 1) ||
+        !fx_tex_uav(&g_sdk.out, DXGI_FORMAT_R8G8B8A8_UNORM, tw, th, 1, 1))
+        return -1;
+    /* the frame before's camera: continuous when it was the frame just before and the camera did not jump */
+    float vinv[16], m[16];
+    int cont = mat_inverse(vinv, s->view) && g_sdk.prev_serial && g_sdk.prev_serial + 1 == g_serial;
+    if (cont)
+    {
+        float pinv[16];
+        if (mat_inverse(pinv, g_sdk.prev_view))
+        {
+            float dx = vinv[12] - pinv[12], dy = vinv[13] - pinv[13], dz = vinv[14] - pinv[14];
+            cont = dx * dx + dy * dy + dz * dz < 10.0f * 10.0f;
+        }
+    }
+    float minz, maxz;
+    memcpy(&minz, &s->vp[4], 4);
+    memcpy(&maxz, &s->vp[5], 4);
+    if (maxz <= minz)
+        minz = 0, maxz = 1;
+    float jx = g_fsrj.rt == t ? g_fsrj.jit[0] : 0.0f, jy = g_fsrj.rt == t ? g_fsrj.jit[1] : 0.0f;
+    FxU u;
+    memset(&u, 0, sizeof u);
+    u.proj[0] = s->proj[0], u.proj[1] = s->proj[5], u.proj[2] = s->proj[8], u.proj[3] = s->proj[9];
+    u.zp[0] = s->proj[10], u.zp[1] = s->proj[14], u.zp[2] = minz, u.zp[3] = maxz;
+    u.vp[0] = 0, u.vp[1] = 0, u.vp[2] = (float)cw, u.vp[3] = (float)ch;
+    u.size[0] = (float)t->w, u.size[1] = (float)t->h;
+    u.hand[0] = s->proj[11] < 0.0f ? -1.0f : 1.0f;
+    memcpy(u.lmat, s->proj, 64);
+    if (cont)
+    {
+        mat_mul(m, vinv, g_sdk.prev_view);
+        mat_mul(u.reproj, m, g_sdk.prev_proj);
+    }
+    else
+        memcpy(u.reproj, s->proj, 64);
+    u.hist[0] = jx, u.hist[1] = jy;
+    D3D12_GPU_VIRTUAL_ADDRESS ua = fx_uniforms(&u);
+    if (!ua)
+        return -1;
+    uint32_t in = fx_depth(depth);
+    fx_pass(fx_out(&g_sdk.z, 0), g_sdk.zcopy, 0, 0, (float)t->w, (float)t->h, ua, &in, 1, 0, 0);
+    fx_pass(fx_out(&g_sdk.mv, 0), g_sdk.motion, 0, 0, (float)cw, (float)ch, ua, &in, 1, 0, 0);
+    const D3D12_RESOURCE_STATES rd = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    tex_state(t, rd);
+    fx_state(&g_sdk.z, 0, rd);
+    fx_state(&g_sdk.mv, 0, rd);
+    fx_state(&g_sdk.out, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    /* the camera: its near and far planes and vertical field of view from the projection (D3D's, row vectors) */
+    float p10 = s->proj[10], p14 = s->proj[14];
+    float zn = p10 != 0.0f ? fabsf(p14 / p10) : 0.1f;
+    float zf = fabsf(p10) != 1.0f ? fabsf(p14 / (p10 + (p10 > 0.0f ? -1.0f : 1.0f))) : 10000.0f;
+    uint64_t now = gfx_now_ns();
+    struct ffxDispatchDescUpscale dd;
+    memset(&dd, 0, sizeof dd);
+    dd.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
+    dd.commandList = list();
+    dd.color = fsr_res(t->res, FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM, t->w, t->h, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ,
+        FFX_API_RESOURCE_USAGE_READ_ONLY);
+    dd.depth = fsr_res(g_sdk.z.res, FFX_API_SURFACE_FORMAT_R32_FLOAT, t->w, t->h, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ,
+        FFX_API_RESOURCE_USAGE_READ_ONLY);
+    dd.motionVectors = fsr_res(g_sdk.mv.res, FFX_API_SURFACE_FORMAT_R16G16_FLOAT, t->w, t->h,
+        FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ, FFX_API_RESOURCE_USAGE_READ_ONLY);
+    dd.output = fsr_res(g_sdk.out.res, FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM, tw, th, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS,
+        FFX_API_RESOURCE_USAGE_UAV);
+    /* where in its pixel each was drawn: the viewport's offset (set_viewport), x right, y down, as the SDK's
+     * projection jitter (2 x / width, -2 y / height) moves the picture */
+    dd.jitterOffset.x = jx, dd.jitterOffset.y = jy;
+    dd.motionVectorScale.x = (float)cw, dd.motionVectorScale.y = (float)ch;
+    dd.renderSize.width = cw, dd.renderSize.height = ch;
+    dd.upscaleSize.width = ow, dd.upscaleSize.height = oh;
+    dd.enableSharpening = g_fxs.upscale_sharpen > 0.0f;
+    dd.sharpness = fminf(g_fxs.upscale_sharpen, 1.0f);
+    dd.frameTimeDelta = g_sdk.last_ns && now > g_sdk.last_ns ? (float)((now - g_sdk.last_ns) / 1e6) : 16.7f;
+    dd.preExposure = 1.0f;
+    dd.reset = !cont;
+    dd.cameraNear = zn, dd.cameraFar = zf;
+    dd.cameraFovAngleVertical = s->proj[5] != 0.0f ? 2.0f * atanf(1.0f / fabsf(s->proj[5])) : 1.0f;
+    dd.viewSpaceToMetersFactor = 1.0f;
+    dd.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+    ffxReturnCode_t r = g_sdk.fn.Dispatch(&g_sdk.ctx, &dd.header);
+    /* the SDK set its own heaps and root signature: ours again for the game's draws */
+    list_bind();
+    g_targets_bound = 0, g_bound_pso = NULL, g_bound_topo = -1;
+    unbind();
+    if (r != FFX_API_RETURN_OK)
+    {
+        static int said;
+        if (!said)
+            said = 1, fprintf(stderr, "[recomp] gfx: FSR SDK: the upscale failed (%u): FSR 1 instead\n", r);
+        return -1;
+    }
+    memcpy(g_sdk.prev_view, s->view, 64), memcpy(g_sdk.prev_proj, s->proj, 64);
+    g_sdk.prev_serial = g_serial, g_sdk.last_ns = now, g_sdk.used_serial = g_serial;
+    return (int32_t)fx_in(&g_sdk.out, 0);
+}
+
+/* At each Present: the next frame's jitter, while the SDK makes the world up (the frame just done or the one
+ * before), from its own sequence for these sizes, and its textures' mip bias */
+static void fsr_sdk_frame(void)
+{
+    memset(&g_fsrj, 0, sizeof g_fsrj);
+    if (g_fxs.upscale < 1.5f || g_sdk.loaded != 1 || !g_sdk.ctx || !g_sdk.used_serial || g_serial - g_sdk.used_serial > 1 ||
+        !g_fsr.world || !g_sdk.ow)
+        return;
+    int32_t phases = 0;
+    struct ffxQueryDescUpscaleGetJitterPhaseCount pc;
+    memset(&pc, 0, sizeof pc);
+    pc.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTERPHASECOUNT;
+    pc.renderWidth = g_sdk.rw, pc.displayWidth = g_sdk.ow, pc.pOutPhaseCount = &phases;
+    if (g_sdk.fn.Query(&g_sdk.ctx, &pc.header) != FFX_API_RETURN_OK || phases <= 0)
+        return;
+    g_sdk.phase = (g_sdk.phase + 1) % phases;
+    float jx = 0.0f, jy = 0.0f;
+    struct ffxQueryDescUpscaleGetJitterOffset jo;
+    memset(&jo, 0, sizeof jo);
+    jo.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GETJITTEROFFSET;
+    jo.index = g_sdk.phase, jo.phaseCount = phases, jo.pOutX = &jx, jo.pOutY = &jy;
+    if (g_sdk.fn.Query(&g_sdk.ctx, &jo.header) != FFX_API_RETURN_OK)
+        return;
+    g_fsrj.rt = g_fsr.world, g_fsrj.jit[0] = jx, g_fsrj.jit[1] = jy;
+    /* AMD's: log2 of the render size over the display's, less one */
+    g_fsrj.bias = log2f((float)g_sdk.rw / (float)g_sdk.ow) - 1.0f;
+}
+
 static void scene_fx(GfxTex* color, const GfxScene* s)
 {
     GfxTex* depth = color->depth_world ? color->depth_world : color->depth_seen;
@@ -5139,6 +5535,11 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
         return;
+    g_fsr.world = color;
+    g_fsr.vw = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[2] && s->vp[2] <= color->w ? s->vp[2] : color->w;
+    g_fsr.vh = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[3] && s->vp[3] <= color->h ? s->vp[3] : color->h;
+    g_sdk.scene = *s, g_sdk.scene_serial = g_serial;
+    g_sdk.depth = color->depth_world ? color->depth_world : color->depth_seen;
     uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
     if (g_fxs.fx != 0.0f)
     {
@@ -5218,6 +5619,7 @@ void gfx_present(GfxTex* bb)
     }
     fps_tick();
     fx_reload();
+    fsr_sdk_frame();
     frame_end();
     if (presented)
     {
