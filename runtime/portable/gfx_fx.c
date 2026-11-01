@@ -277,7 +277,7 @@ static const struct
     { "scene_ao_chars", offsetof(GfxFxSettings, scene_ao_chars), 1.0f },
     /* 1: the zone and characters show the occlusion alone */
     { "scene_ao_debug", offsetof(GfxFxSettings, scene_ao_debug), 0.0f },
-    /* not an effect: the world drawn at fewer pixels and made up to the back buffer's (gfx_metal.m up_*), 0 off
+    /* not an effect: the world drawn at fewer pixels and made up to the back buffer's, 0 off
      * (the game's background resolution, as it was), 1 spatial (MetalFX's spatial scaler: one frame at a time),
      * 2 temporal (MetalFX's temporal scaler: the frames before too, through jittered pixels, the depth and the
      * camera's motion; anti-aliased as well). upscale_scale: the world's pixels across against the back
@@ -285,7 +285,10 @@ static const struct
      * picture softens, the spatial scaler's most of all. Temporal: the world's textures are sampled at the
      * mips of the back buffer's size, not the smaller one's (a negative mip bias), and upscale_sharpen is a
      * contrast-adaptive sharpening of what comes out (0 none; the spatial scaler sharpens on its own).
-     * Metal only. */
+     * Metal: MetalFX (gfx_metal.m up_*). Direct3D 12 and Linux's Vulkan: FSR 1 for either mode (the host
+     * draws the world smaller, host64.c upscale_background; EASU and RCAS make it up where the game puts
+     * it on the screen, fsr_view / fsr_srv), RCAS at upscale_sharpen; upscale_scale is read at start
+     * there. Android's Vulkan and WebGPU: none yet. */
     { "upscale", offsetof(GfxFxSettings, upscale), 0.0f },
     { "upscale_scale", offsetof(GfxFxSettings, upscale_scale), 0.67f },
     { "upscale_sharpen", offsetof(GfxFxSettings, upscale_sharpen), 0.25f },

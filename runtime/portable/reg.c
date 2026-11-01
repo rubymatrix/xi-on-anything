@@ -383,12 +383,57 @@ static void sh_RegCloseKey(Guest* g)
     RET(ERROR_SUCCESS, 1);
 }
 
+/* DWORDs the game reads in place of the tree's (reg_override_dword): never written to the overlay */
+static struct
+{
+    RegKey* k;
+    char name[16];
+    uint32_t v;
+} g_over[8];
+static int g_nover;
+
+void reg_override_dword(const char* path, const char* name, uint32_t v)
+{
+    RegKey* k = key_from_header(path, 1);
+    if (!k || strlen(name) >= sizeof g_over[0].name)
+        return;
+    int i = 0;
+    while (i < g_nover && !(g_over[i].k == k && ieq(g_over[i].name, name, strlen(name) + 1)))
+        i++;
+    if (i == g_nover)
+    {
+        if (g_nover == (int)(sizeof g_over / sizeof g_over[0]))
+            return;
+        g_nover++;
+    }
+    g_over[i].k = k, g_over[i].v = v;
+    snprintf(g_over[i].name, sizeof g_over[i].name, "%s", name);
+}
+
 static void sh_RegQueryValueExA(Guest* g)
 {
     RegKey* k = key_of(ARG(0));
     uint32_t type_p = ARG(3), data = ARG(4), size_p = ARG(5);
     if (!k)
         RET(ERROR_INVALID_HANDLE, 6);
+    const char* name = ARG(1) ? ARGS(1) : "";
+    for (int i = 0; i < g_nover; ++i)
+        if (g_over[i].k == k && ieq(g_over[i].name, name, strlen(name) + 1))
+        {
+            if (type_p)
+                wr32(type_p, REG_DWORD);
+            uint32_t r = ERROR_SUCCESS;
+            if (data)
+            {
+                if (!size_p || rd32(size_p) < 4)
+                    r = ERROR_MORE_DATA;
+                else
+                    memcpy(GUEST_PTR(data), &g_over[i].v, 4);
+            }
+            if (size_p)
+                wr32(size_p, 4);
+            RET(r, 6);
+        }
     RegValue* v = value(k, ARG(1) ? ARGS(1) : NULL, 0);
     if (!v)
         RET(ERROR_FILE_NOT_FOUND, 6);
