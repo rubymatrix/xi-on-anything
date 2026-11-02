@@ -93,16 +93,82 @@ python tools\build.py boot64                                                 # t
 | test | result | detail |
 | --- | --- | --- |
 | Differential (`difftest`, `tests/difftest.c`) | **PASS** | 15 CRT-slice functions translated, 0 unimplemented instructions; **133,681 calls, 0 mismatches**; exit 0 |
-| Boot (`boot64`, `tests/boot64.c`) | **FAIL — exit 1, environment precondition** | see below |
+| Boot (`boot64`, `tests/boot64.c`) | **PASS** | `registry: FinalFantasyXI\0001 = 2560`, `DllMain(PROCESS_ATTACH) -> 1`, `DllGetClassObject(GameMain): 00000000 00580058`, `CreateInstance(IUnknown): 00000000 00600088`, gamecore `QI(US)` table matches, `udp port 54090`, lobby resolve `-> 7f000001`; **`BOOT64 OK`**, exit 0 |
 
-`boot64` printed only `guest window at …` and `registry: FinalFantasyXI\0001 missing 0`.
-Cause: `build.py` exports this machine's `HKLM\SOFTWARE\WOW6432Node\PlayOnlineUS` into
-`build\ffxi.reg` and `boot64.c` requires a DWORD `0001` under
-`…\SquareEnix\FinalFantasyXI`, returning 1 if absent. This machine's PlayOnline registration
-came from a **HorizonXI** install (`InstallFolder "0001"="C:\HorizonXI\Game\…"`) and has no such
-value. The check runs **before `pe_load()` and before any guest code executes**, so it says
-nothing about the translated functions. Making it pass would need registry writes to HKLM, which
-was not done. Re-run it on a machine whose PlayOnline registry keys match a real install.
+### The boot test's registry dependency, and how it was fixed
+
+`boot64` originally exited 1 after two lines: `guest window at .` and
+`registry: FinalFantasyXI\0001 missing 0`. `tools/build.py` filled `build\ffxi.reg` with
+`reg export HKLM\SOFTWARE\WOW6432Node\PlayOnlineUS`, so the test inherited whatever FFXI
+registration the build machine happened to have. On this box that key is a stale HorizonXI
+left-over holding only `0022`, `0034`, `0042` and the pad values - **no `0001` at all** - and the
+assertion fires before `pe_load()`, so no translated function ever ran.
+
+Fixed by `tools/cow/mkreg.py`, which builds that `.reg` from the install instead of from HKLM.
+`build.py`'s `boot64()` now calls it at that one site; nothing else in `build.py` changed and
+`tests/boot64.c` was **not** modified, because the key it checks is the right one (see below).
+
+**Which vendor key the client reads - read out of the code, not guessed.** `f_10018ee0`
+(`generated/all/funcs_001.c`, line 29347) composes the subkey with the format string `'%s%s'`
+(`0x10350ff8`) from a pointer table at `0x10350fec`, indexed by the dword at `[0x10456a28] + 4`
+(the region struct that `f_100157e0` installs at `0x10456984`), and appends `"FinalFantasyXI"`
+(`0x10351000`):
+
+| index | string | region |
+| --- | --- | --- |
+| 0 | `0x1032a000` = `SOFTWARE\PlayOnline\SQUARE\` | JP |
+| 1 | `0x1032a01c` = `SOFTWARE\PlayOnlineUS\SquareEnix\` | US |
+| 2 | `0x1032a040` = `SOFTWARE\PlayOnlineEU\SquareEnix\` | EU |
+
+The deciding factor is therefore a **runtime language index** - not the `Interface` value, and not
+a config file the client reads directly. (The index's initial value cannot be read from
+`generated/FFXiMain.unpacked.dll`, because `prepare.py` unpacks only `.text`; that `.data` is
+still compressed, so the static bytes there are meaningless.)
+
+The install's own launcher documents the same numbering: `bootloader/xiloader.exe` and
+`bootloader/phoenix-loader.exe` are the same binary (both 1,303,040 B) and carry
+`--lang  (optional) The language of your FFXI install: JP/US/EU (0/1/2).` alongside the three
+`SOFTWARE\PlayOnline...` roots and the template `HKLM\%s\InstallFolder`. `pol.exe` holds the same
+roots plus `Square`/`SquareEnix`.
+
+**Where Phoenix keeps its game settings.** The launcher is Ashita-driven (`Ashita.dll` is the
+module that mentions the `ffxi.registry` section) and its config is
+`C:\PhoenixXI\config\boot\phoenix-launch.ini`, whose **`[ffxi.registry]`** section holds the whole
+`0000`-`0045` set that gets injected into `FinalFantasyXI` (`0001=2560`, `0002=1440`, `0034=2`,
+`0037=2560`, `0038=1440`, `0042=C:\PhoenixXI\SquareEnix\FINAL FANTASY XI`, ...) plus the pad
+values. `[sandbox.paths]` gives `ffxi`/`pol`/`common`. There is no `pol.cfg`/`pol.ini` in
+`SquareEnix\PlayOnlineViewer`, and `bootloader\.phoenix-render-stage.json` only pins d3d shim
+hashes. Region: `[ashita.language] playonline = 2`, which Ashita's own documentation defines as
+`0 = Default, 1 = Japanese, 2 = English, 3 = European` - so this install runs as the
+**English/US** client: index **1**, i.e.
+`HKLM\...\WOW6432Node\PlayOnlineUS\SquareEnix\FinalFantasyXI` - exactly the key `tests/boot64.c`
+already checks. That is why `boot64.c` was left alone rather than remapped.
+
+**mkreg.py sourcing rules** (HKLM is only read, never written):
+
+| data | source |
+| --- | --- |
+| `FinalFantasyXI` values | `[ffxi.registry]` of the launcher ini (51 values); then live HKLM; then the upstream fixture |
+| `InstallFolder`, `Interface`, `CommonFilesFolder` | live `reg query` of the install's own keys |
+| `FinalFantasyXI\0042`, `InstallFolder\0001` | forced to the `--game` path |
+| `InstallFolder\1000` | the `PlayOnlineViewer` folder beside `--game` |
+
+It writes UTF-16LE **with the `FF FE` BOM** - `reg.c:143` narrows UTF-16 only when the BOM is
+present, so a BOM-less file parses as ANSI garbage - emits `dword:`/`hex:`/quoted strings per
+value type, and aborts if a value the test needs exists in none of the three sources. Fallbacks
+are always printed. For this install exactly one value came from outside the ini: `bFirst`, taken
+from live HKLM. `InstallFolder\0002` still carries the machine's
+`C:\HorizonXI\Game\SquareEnix\TetraMaster` (TetraMaster is not part of the Phoenix install and the
+client never reads it here).
+
+The upstream `ffxi.reg` fixture is a last resort only, and is **not** equivalent to the real
+install: it sets `Interface "0001"="0"`, which the kuluu notes
+(`vendor/kuluu/.agents/skills/retail-observe/references/host-macos.md`) flag as a failure
+condition for the `patch.ver` interface-id check, and its `0001`/`0002` are 3440x1440 rather than
+this machine's 2560x1440.
+
+Reproduce with: `python tools\cow\mkreg.py --game "C:\PhoenixXI\SquareEnix\FINAL FANTASY XI"`
+(`--lang jp|us|eu`, `--ini`, `--out` available). Output lands in `build/`, which is gitignored.
 
 ## 7. Vendors (read-only reference, pinned)
 
@@ -205,6 +271,9 @@ python tools\cow\ledger.py
 python tools\cow\status.py
 ```
 
+`mkreg.py` flags: `--game PATH` (required), `--lang jp|us|eu|0|1|2` (default `us`), `--ini PATH`,
+`--fixture PATH`, `--out PATH`. Run it by hand to inspect the `.reg` the boot test is given; it
+prints which source each value came from and never writes to the registry.
 `ledger.py` flags: `--build YYYY-MM-DD`, `--generated DIR`, `--out FILE`, `--repo PATH`.
 `status.py` flags: `--ledger FILE`, `--out FILE`, `--repo PATH`. Both are rerunnable and never
 hand-edited. **Run `status.py` before every commit that will be pushed, and commit

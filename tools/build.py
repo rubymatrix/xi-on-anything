@@ -189,9 +189,13 @@ def boot64(env):
     gen = ['generated\\all\\' + f for f in sorted(os.listdir(os.path.join(ROOT, 'generated', 'all'))) if f.endswith('.c')]
     objs = compile_stale(env, gen + PORTABLE + ['tests\\boot64.c'], 'build\\all64', ['/I', 'generated\\all'], CFLAGS64)
     run(['link', '/nologo', '/OUT:build\\boot64.exe', '/MACHINE:X64', 'synchronization.lib'] + objs, env)
-    # the game's registry keys, as a Mac player would bring them (build/ is gitignored)
+    # the game's registry keys, as a Mac player would bring them (build/ is gitignored).
+    # tools/cow/mkreg.py sources them from the install itself: a raw `reg export` of
+    # HKLM made the boot test depend on whatever FFXI registration this machine happens
+    # to carry, and here that key is a stale partial record with no 0001 at all.
     reg = os.path.join(ROOT, 'build', 'ffxi.reg')
-    subprocess.call(['reg', 'export', r'HKLM\SOFTWARE\WOW6432Node\PlayOnlineUS', reg, '/y'], stdout=subprocess.DEVNULL)
+    subprocess.call([sys.executable, os.path.join(ROOT, 'tools', 'cow', 'mkreg.py'),
+                     '--game', BUILD['game'], '--out', reg])
     run(['build\\boot64.exe', RETAIL, BUILD['game']] + ([reg] if os.path.exists(reg) else []), env)
 
 
