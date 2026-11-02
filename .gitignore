@@ -21,3 +21,9 @@ __pycache__/
 # Jython compiles the discovery scripts next to themselves
 *$py.class
 .DS_Store
+
+# The player's own game install, linked in with junctions: never commit it.
+vendor/game-files/
+watch.log
+*.orig
+

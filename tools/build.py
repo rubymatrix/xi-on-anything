@@ -169,11 +169,27 @@ def difftest(env):
     run(['build\\difftest.exe'], env)
 
 
+# The stand-in is loaded by the retail launcher, so nothing supplies the game's gamecore/COM
+# object the way the 64-bit hosts do for themselves: the game's COM calls arrive at ffximain.c's
+# four exports and have to be answered here. The 64-bit targets take these layers from PORTABLE;
+# without them a gamecore call returns E_FAIL (80004005) and the guest's failure path jumps into
+# code the translation never registered as an entry.
+HOST32_SERVICE = ['runtime\\portable\\gamecore.c', 'runtime\\portable\\gamecore_slots.c',
+                  'runtime\\portable\\gamecore_files.c', 'runtime\\portable\\gamecore_presence.c',
+                  'runtime\\portable\\ole.c', 'runtime\\portable\\kobj.c', 'runtime\\portable\\reg.c',
+                  'runtime\\portable\\vfs.c', 'runtime\\portable\\k32.c', 'runtime\\portable\\k32_io.c',
+                  'runtime\\portable\\k32_misc.c', 'runtime\\portable\\thunk.c', 'runtime\\portable\\pe.c',
+                  # the platform layer the k32/gamecore shims above call into: plat_* and the gwin
+                  # window/heap allocator (gwin_alloc, gwin_release, gheap_size)
+                  'runtime\\portable\\plat_win.c', 'runtime\\portable\\gwin.c', 'runtime\\portable\\gthread.c']
+
+
 def host(env):
     recomp('generated/all', ['--all'])
     gen = ['generated\\all\\' + f for f in sorted(os.listdir(os.path.join(ROOT, 'generated', 'all'))) if f.endswith('.c')]
     objs = compile_stale(env, gen + ['runtime\\runtime.c', 'runtime\\win32\\bridge.c', 'runtime\\win32\\loader.c',
-                                     'host\\ffximain.c'], 'build\\all', ['/I', 'generated\\all'])
+                                     'host\\ffximain.c'] + HOST32_SERVICE,
+                                     'build\\all', ['/I', 'generated\\all', '/I', 'runtime\\portable'])
     os.makedirs(os.path.join(ROOT, 'build', 'host'), exist_ok=True)
     # Fixed base, out of the way of the game image's preferred 0x10000000 (it may still be relocated).
     run(['link', '/nologo', '/DLL', '/DEF:host\\ffximain.def', '/OUT:build\\host\\FFXiMain.dll', '/MACHINE:X86',

@@ -10,3 +10,6 @@
 [submodule "vendor/POLUtils"]
 	path = vendor/POLUtils
 	url = https://github.com/Windower/POLUtils.git
+[submodule "vendor/Ashita-v4beta"]
+	path = vendor/Ashita-v4beta
+	url = https://github.com/AshitaXI/Ashita-v4beta.git

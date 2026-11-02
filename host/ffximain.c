@@ -178,3 +178,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         bridge_trace_dump();
     return TRUE;
 }
+
+/* Gamepad count for the WMI enumerator in runtime/portable/ole.c (it answers the game's
+ * IsXInputDevice query with one object per pad). runtime/portable/input.c owns this and is
+ * bound to SDL3, which the 64-bit hosts bring with them; the stand-in has no SDL layer, and
+ * under the launcher the game's own dinput path owns controllers. Report none. */
+int input_pad_count(void)
+{
+    return 0;
+}
