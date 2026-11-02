@@ -1,0 +1,9 @@
+[submodule "vendor/kuluu"]
+	path = vendor/kuluu
+	url = https://github.com/cowrevenge/kuluu-ffxi
+[submodule "vendor/xi-on-anything"]
+	path = vendor/xi-on-anything
+	url = https://github.com/rubymatrix/xi-on-anything
+[submodule "vendor/xi-tools"]
+	path = vendor/xi-tools
+	url = https://github.com/vekien/xi-tools
