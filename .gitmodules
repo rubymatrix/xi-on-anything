@@ -7,3 +7,6 @@
 [submodule "vendor/xi-tools"]
 	path = vendor/xi-tools
 	url = https://github.com/vekien/xi-tools
+[submodule "vendor/POLUtils"]
+	path = vendor/POLUtils
+	url = https://github.com/Windower/POLUtils.git

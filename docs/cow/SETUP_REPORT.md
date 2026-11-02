@@ -114,9 +114,12 @@ no nested `submodule update --init`). None built, none modified.
 | `vendor/kuluu` | `cowrevenge/kuluu-ffxi` | `a7752b3a6a9c570b5af0011e89af6268615e8c14` (`v0.2.0-1670`) — oracle: names and meaning |
 | `vendor/xi-on-anything` | `rubymatrix/xi-on-anything` | `db2a1e2968ff211b2b5b51aacf366e5da17b6dd3` — pristine reference, same commit our fork started from |
 | `vendor/xi-tools` | `vekien/xi-tools` | `954617dfcf6603c59d4e62d81a512397f06918dd` (`v1.15.0-11`) — DAT tools, third priority |
+| `vendor/POLUtils` | `Windower/POLUtils` | `b2e8b10933544e1e0cd37afd4e0bb3f34649f898` (`1.1.6805.10201-8`) — DAT lookup reference; the same project kuluu vendors at its own `vendor/POLUtils` |
 
 `vendor/kuluu` declares 10 nested submodules (`vendor/server`, `vendor/POLUtils`,
 `research/XiEvents`, …); all ten directories are **empty**, confirming they were not initialised.
+`vendor/POLUtils` is therefore ours (a top-level submodule), not kuluu's nested copy — the two
+paths are independent and kuluu's stays vacant.
 
 ## 8. Ledger
 
