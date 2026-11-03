@@ -157,6 +157,15 @@ static void s421_language(Guest* g) { RETC(1); }
 /* 460 (0x10044380): a flag only the viewer sets; its value without a viewer. */
 static void s460_viewer_flag(Guest* g) { RETC(0xFFFFFFFFu); }
 
+/* 441 (0x100183e0): *out = a counter that only slots 410, 411 and 444 change. FFXI calls none of
+ * them, so without a viewer it stays 0; returns 0. Only the 2010 client calls it (FFXiMain
+ * 0x100d5235), keeping the low word; later builds dropped the call. */
+static void s441_counter(Guest* g)
+{
+    wr32(ARG(0), 0);
+    RETC(0);
+}
+
 /* 969 (0x1004a440) / 1026 (0x1004a450): the exit code, and a message, for the host to read
  * after GameStart returns. */
 static void s969_set_exit(Guest* g)
@@ -199,6 +208,7 @@ static const GamecoreSlot SESSION[] = {
     { 0xd18, s838_signin_state },
     { 0x694, s421_language },
     { 0x730, s460_viewer_flag },
+    { 0x6e4, s441_counter },
     { 0xf24, s969_set_exit },
     { 0x1008, s1026_set_exit_message },
     { 0xf54, s981_patch_size },
