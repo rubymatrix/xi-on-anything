@@ -58,7 +58,7 @@ def write_build_h():
         lines.append('#define FFXI_SHA256 "%s" /* the FFXiMain.dll this client is recompiled from */' % BUILD['ffximain_sha'])
     for k, v in BUILD['addresses'].items():
         lines.append('#define FFXI_%s 0x%08xu' % (k.upper(), int(v, 16)))
-    for k, v in dict(OFFSETS, **{k: int(v, 16) for k, v in BUILD['offsets'].items()}).items():
+    for k, v in dict(OFFSETS, **{k: int(v, 16) for k, v in BUILD.get('offsets', {}).items()}).items():
         lines.append('#define FFXI_OFFSET_%s 0x%xu' % (k.upper(), v))
     for k, v in BUILD['hooks'].items():
         lines.append('#define FFXI_HOOK_%s 0x%08xu /* rt_hook_%s runs here */' % (k.upper(), int(v, 16), k))
