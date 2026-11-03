@@ -44,7 +44,7 @@ def record(label, game):
 
 
 def current(required=True):
-    """{'build', 'game', 'ffximain_meta', 'ffxi_meta', 'ffximain_sha', 'ffxi_sha', 'addresses', 'hooks', 'crt',
+    """{'build', 'game', 'ffximain_meta', 'ffxi_meta', 'ffximain_sha', 'ffxi_sha', 'addresses', 'offsets', 'hooks', 'crt',
     'modern', 'modern_keys'}, ('modern_keys': every name a build's modern section has, so build.h
     names them all whichever this build is)
     or None if tools/prepare.py has not run and not required."""
@@ -65,6 +65,7 @@ def current(required=True):
         'ffxi_sha': b['FFXi.dll']['sha256'],
         'version': b['version'],
         'addresses': b['addresses'],
+        'offsets': b.get('offsets', {}),
         'hooks': b.get('hooks', {}),
         'wraps': b.get('wraps', {}),
         'geometry': b.get('geometry', {}),
