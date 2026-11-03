@@ -44,6 +44,10 @@ CFLAGS = ['/nologo', '/O2', '/MT', '/W3', '/std:c11', '/bigobj', '/I', 'runtime'
 CFLAGS64 = ['/nologo', '/O2', '/MT', '/W3', '/std:c11', '/bigobj', '/DRT_GUEST_WINDOW', '/I', 'runtime', '/I',
             'runtime\\portable', '/I', 'generated']
 
+# Struct offsets the runtime reads, as every build since 2025 has them; a build's "offsets" in
+# meta/builds.json overrides them (2010-03-16's character list sits 0x970 earlier).
+OFFSETS = {'chars_table': 0x13820}
+
 
 def write_build_h():
     """generated/build.h: the addresses of this build that the runtime and tests name directly."""
@@ -54,6 +58,8 @@ def write_build_h():
         lines.append('#define FFXI_SHA256 "%s" /* the FFXiMain.dll this client is recompiled from */' % BUILD['ffximain_sha'])
     for k, v in BUILD['addresses'].items():
         lines.append('#define FFXI_%s 0x%08xu' % (k.upper(), int(v, 16)))
+    for k, v in dict(OFFSETS, **{k: int(v, 16) for k, v in BUILD['offsets'].items()}).items():
+        lines.append('#define FFXI_OFFSET_%s 0x%xu' % (k.upper(), v))
     for k, v in BUILD['hooks'].items():
         lines.append('#define FFXI_HOOK_%s 0x%08xu /* rt_hook_%s runs here */' % (k.upper(), int(v, 16), k))
     for k, v in BUILD['wraps'].items():
