@@ -29,3 +29,5 @@ int reg_get_string(const char* path, const char* name, char* out, size_t n);
 void reg_set_string(const char* path, const char* name, const char* value);
 /* Sets a DWORD value, the same way. */
 void reg_set_dword(const char* path, const char* name, uint32_t value);
+/* The values set so far written to the overlay file, as the game's own changes are: kept for the next run. */
+void reg_flush(void);
