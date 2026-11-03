@@ -289,6 +289,20 @@ Native: return 0xffffffff (the value with no Viewer, i.e. what FFXI sees if the 
   it) unless a Viewer-equivalent decision says otherwise. Block +0x44 gets 0xff.
 
 --------------------------------------------------------------------------------------------
++0x06e4  slot 441  gamecore 0x100183e0   read a counter (2010 client only)           conf HIGH (read),
+                                                                                    LOW (meaning)
+--------------------------------------------------------------------------------------------
+Convention: cdecl. int get_counter441(uint32_t* out). *out = [0x100aa828]; returns 0.
+gamecore: 0x100aa828 is zero-initialised and only slots 410 (+0x668, set), 411 (+0x66c, add 1
+  when flag 0x100aa830 bit 0 is set) and 444 (+0x6f0, subtract when the same flag is set) change
+  it; slots 1173/1174 read and set the flag. FFXI has no thunk for any of those five, so only
+  the Viewer could move it.
+Caller: the 2010 FFXiMain (build 2010-03-16) only, 0x100d5235: on 0 it stores the low word of
+  *out at +0xe of the object it is setting up. Later builds dropped the call (2025-11-12's same
+  function, 0x100f1b5e, goes straight on).
+Native: *out = 0, return 0 (the value with no Viewer).
+
+--------------------------------------------------------------------------------------------
 +0x0f24  slot 969  gamecore 0x1004a440   set exit/error code                         conf HIGH
 +0x1008  slot 1026 gamecore 0x1004a450   set exit/error code + message
 --------------------------------------------------------------------------------------------
