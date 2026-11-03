@@ -1354,6 +1354,13 @@ static void fx_draw(Guest* g)
     ++g_count.fx_calls;
 }
 #endif
+#else
+/* A build without the scene addresses: the game draws every instance it picks */
+uint32_t scene_zone_pick(uint32_t inst, uint32_t model, uint32_t lights, int moving)
+{
+    (void)inst, (void)lights, (void)moving;
+    return model;
+}
 #endif /* HAVE_SCENE */
 
 void scene_setup(void)
