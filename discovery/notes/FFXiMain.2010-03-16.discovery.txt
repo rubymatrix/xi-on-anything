@@ -87,12 +87,19 @@ scaled-index switches             696             774               942
 tail_jumps                        -               1,876             2,152
 FFXi.dll                          functions 366, switches 42, tail jumps 17 (2025-11-12: 374, 42, 17)
 
-What the runtime will meet in a client this old (not verified by running it)
---------------------------------------------------------------------------------
-  - The character table is at [chars_ptr]+0x12eb0, not +0x13820 (same 0x8c stride; checked at
-    the getter 0x100d2bb0 and the record reader near 0x100d2719). gamecore_presence.c hard-codes
-    0x13820, so slot 177 would read the wrong records.
-  - FFXiMain calls gamecore slot 441 (+0x6e4, one caller, 0x100d5235), which no later build
-    calls and our gamecore does not implement: it would trap. The other 141 slots the 2025-11-12
-    build calls are all called here too.
-  - No write_line, and chat_add has another arity: addons get no chat text_in.
+What the runtime meets in a client this old
+-------------------------------------------
+  - The character table is at [chars_ptr]+0x12eb0, not +0x13820 (same 0x8c stride and entry
+    layout; checked at the getter 0x100d2bb0 and the record reader near 0x100d2719). Handled:
+    meta/builds.json "offsets" chars_table, written to build.h as FFXI_OFFSET_CHARS_TABLE, which
+    slot 177 reads.
+  - FFXiMain calls gamecore slot 441 (+0x6e4, one caller, 0x100d5235), which no later build calls.
+    Handled: it reads a counter only the viewer changes, so our slot returns 0 (see
+    specs/gamecore-slots.session.txt). The other 141 slots the 2025-11-12 build calls are all
+    called here too.
+  - Known gap: no write_line, and chat_add has another arity, so addons get no chat text_in.
+  - Known gap: the addon game layer (host/addons/game.c) finds its structures by Ashita's patterns
+    and reads them with Ashita's layouts (entity_t, player, party, the char block's inventory at
+    +0x9868, ...), taken from today's client. Most are likely different or missing in 2010; a
+    pattern that does not match only turns that getter off. Not checked for this build.
+  - Neither fix has been run in game yet: host64 builds and boot64 passes (BOOT64 OK).
