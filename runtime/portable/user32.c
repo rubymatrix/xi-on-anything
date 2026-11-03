@@ -2066,6 +2066,13 @@ void* user32_sdl_window(uint32_t hwnd)
 
 void user32_set_ui_aspect(float aspect) { g_ui_aspect = aspect; }
 
+void user32_post(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lparam)
+{
+    Wnd* w = wnd(hwnd);
+    if (w)
+        post(w->tid, w->hwnd, msg, wparam, lparam);
+}
+
 float user32_ui_aspect(void) { return g_ui_aspect; }
 
 float user32_ui_squeeze(uint32_t hwnd)
