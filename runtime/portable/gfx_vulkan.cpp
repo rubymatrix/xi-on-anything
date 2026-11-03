@@ -3422,6 +3422,14 @@ extern "C"
     {
         (void)l, (void)n;
     }
+    void gfx_gi_zone(const GfxGiZone* z)
+    {
+        (void)z;
+    }
+    void gfx_gi_frame(const GfxGiFrame* f)
+    {
+        (void)f;
+    }
     void gfx_set_fixed_light(int fixed)
     {
         (void)fixed;
