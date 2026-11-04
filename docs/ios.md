@@ -96,7 +96,7 @@ goes to `Documents/host64.log` unless the app runs with a terminal (`run`).
 
 ## Touch controls
 
-`host/ios_touch.c` draws a gamepad over the game, from the sign-in screen on. It is SDL's virtual
+`host/touch.c` draws a gamepad over the game, from the sign-in screen on. It is SDL's virtual
 gamepad, so the game sees an Xbox pad and uses its own button mapping.
 - **Left stick:** it starts where the thumb lands in the lower left.
 - **Camera:** a drag anywhere else on the game turns it (the right stick).

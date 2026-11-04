@@ -13,6 +13,11 @@ void gfx_worker_shutdown(void)
     puts("test:shutdown");
 }
 
+void android_mobile_init(void)
+{
+    puts("test:mobile");
+}
+
 int xi_host_main(int argc, char** argv)
 {
     assert(argv[argc] == NULL);
