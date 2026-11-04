@@ -335,6 +335,11 @@ static uint32_t put(uint32_t buf, int32_t size, const char* s)
     return (uint32_t)n;
 }
 
+void gamecore_path(uint32_t id, char* out, size_t n)
+{
+    core_path(id, 0, NULL, out, n);
+}
+
 /* 126 GetPath(id, buf, size, extra) */
 static void s126_path(Guest* g)
 {
