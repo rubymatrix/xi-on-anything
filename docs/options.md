@@ -183,7 +183,7 @@ The sticks (movement and camera) and the button combinations (`padexsin000`) are
 | Setting | CLI | App / Env |
 |---|---|---|
 | Server / lobby host | `--server` (`--lobby` old name) | `FFXIServer` |
-| Launcher session | `--session`, `--auth` | |
+| Launcher session | `--session`, `--auth`; `--pol-status stdio` | |
 | LandSandBoat sign-in | `--user`, `--pass`, `--otp`, `--login-token` | `FFXI_PASSWORD`, `FFXI_LSB_SESSION` |
 | Ports | `--authport` 54231, `--dataport` 54230, `--viewport` 54001 | |
 | Trust server cert | `--trust on\|off` | |

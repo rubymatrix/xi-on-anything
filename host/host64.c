@@ -12,6 +12,9 @@
  *               [--server <name or a.b.c.d>]
  *               [--session <V: 16 characters, or 32 hex digits>]                   a launcher's sign-in
  *                [--auth <the authCode block: 104 hex digits>]
+ *                [--pol-status stdio]   the game's PlayOnline status requests through the launcher
+ *                                      (and FFXI_POL_CONTENTS, FFXI_POL_HANDLES, FFXI_POL_STATUS: the
+ *                                      member's content and handle tables, status and id)
  *               [--user <name> [--pass <password>] [--otp <code>] [--login-token <t>]   LandSandBoat servers
  *                [--authport 54231] [--dataport 54230] [--viewport 54001] [--trust on|off]]
  *               [--dats <folder>]...   DAT overlays, as XIPivot: the first folder given wins
@@ -373,6 +376,109 @@ static int parse_hex(const char* s, uint8_t* out, size_t n)
     }
     return 1;
 }
+
+/* --pol-status stdio: the game's PlayOnline requests go to the launcher that holds the PlayOnline
+ * session, which sends them on it as retail's core does on its own: the status requests (slots
+ * 195/196, the request: at the lobby, at character select, on leaving the world) and the in-game
+ * message client's (slots 278/275/280: list, read and delete the member's messages). One line out
+ * on stdout per request,
+ *     [pol-req] begin <id> <verb> <data: hex>
+ * and one back on stdin,
+ *     pol-req <id> <result> [<payload: hex>]
+ * result > 0 done, < 0 the error the slot returns; the payload is the reply's data (gamecore_config.h
+ * GamecoreRequestHost lists the verbs). A request with no answer in 100 s fails with -260, retail's
+ * request timeout. */
+#define POL_REQ_SLOTS 8
+#define POL_REQ_TIMEOUT_MS 100000
+#define POL_REQ_MAX 0x4000 /* the largest payload: a message body (polcore reads at most 0x2000) */
+typedef struct PolReqSlot
+{
+    volatile uint32_t state; /* 0 free, 1 waiting for the launcher, 2 answered */
+    uint32_t gen;            /* in the id, so a late answer for a slot used again is dropped */
+    uint64_t started;
+    int32_t result;
+    uint32_t got;
+    uint8_t payload[POL_REQ_MAX];
+} PolReqSlot;
+static PolReqSlot g_pol_req[POL_REQ_SLOTS];
+
+static int32_t pol_req_stdio_begin(void* ctx, const char* verb, const uint8_t* data, uint32_t n)
+{
+    (void)ctx;
+    for (int i = 0; i < POL_REQ_SLOTS; ++i)
+    {
+        PolReqSlot* s = &g_pol_req[i];
+        if (plat_atomic_cas32(&s->state, 0, 1) != 0)
+            continue;
+        s->gen = (s->gen + 1) & 0xFFFFF;
+        s->started = plat_wall_ms();
+        s->got = 0;
+        int32_t id = (int32_t)(s->gen << 4 | (uint32_t)i);
+        printf("[pol-req] begin %d %s ", id, verb);
+        for (uint32_t k = 0; k < n; ++k)
+            printf("%02x", data[k]);
+        printf("\n");
+        fflush(stdout);
+        return id;
+    }
+    return -256; /* no free request slot, as retail's 0x1001eba0 */
+}
+
+static int32_t pol_req_stdio_poll(void* ctx, int32_t id, uint8_t* out, uint32_t cap, uint32_t* got)
+{
+    (void)ctx;
+    PolReqSlot* s = &g_pol_req[id & (POL_REQ_SLOTS - 1)];
+    *got = 0;
+    if (id < 0 || (uint32_t)id >> 4 != s->gen || s->state == 0)
+        return -5136; /* not in use */
+    if (s->state == 1)
+    {
+        if (plat_wall_ms() - s->started < POL_REQ_TIMEOUT_MS)
+            return 0;
+        if (plat_atomic_cas32(&s->state, 1, 0) == 1)
+            return -260;
+    }
+    int32_t r = s->result;
+    uint32_t n = s->got < cap ? s->got : cap;
+    if (n)
+        memcpy(out, s->payload, n);
+    *got = n;
+    s->state = 0;
+    return r;
+}
+
+/* the launcher's answers, read on a thread of their own (stdin blocks) */
+static void pol_req_stdio_reader(void* arg)
+{
+    (void)arg;
+    static char line[2 * POL_REQ_MAX + 128];
+    while (fgets(line, sizeof line, stdin))
+    {
+        int id, result, at = 0;
+        if (sscanf(line, "pol-req %d %d%n", &id, &result, &at) < 2 || id < 0)
+            continue;
+        PolReqSlot* s = &g_pol_req[id & (POL_REQ_SLOTS - 1)];
+        if ((uint32_t)id >> 4 != s->gen || s->state != 1)
+            continue;
+        const char* hex = line + at;
+        while (*hex == ' ')
+            ++hex;
+        uint32_t n = 0;
+        unsigned b;
+        while (n < POL_REQ_MAX && sscanf(hex + 2 * n, "%2x", &b) == 1)
+            s->payload[n++] = (uint8_t)b;
+        s->got = n;
+        s->result = result;
+        plat_atomic_cas32(&s->state, 1, 2);
+    }
+    /* the launcher is gone: whatever is waiting fails now rather than at the timeout */
+    for (int i = 0; i < POL_REQ_SLOTS; ++i)
+    {
+        g_pol_req[i].result = -260;
+        plat_atomic_cas32(&g_pol_req[i].state, 1, 2);
+    }
+}
+
 
 /* w:h (16:9), wxh, w/h, or a ratio (1.778); 0 if it is none of those */
 static double parse_shape(const char* s)
@@ -1056,6 +1162,45 @@ int main(int argc, char** argv)
                 return 2;
             }
             gamecore_set_auth_block(block);
+        }
+        else if (!strcmp(argv[i], "--pol-status"))
+        {
+            if (strcmp(argv[i + 1], "stdio"))
+            {
+                fprintf(stderr, "--pol-status: stdio\n");
+                return 2;
+            }
+            GamecoreRequestHost h = { pol_req_stdio_begin, pol_req_stdio_poll, NULL };
+            gamecore_set_request_host(&h);
+            plat_thread_start(pol_req_stdio_reader, NULL);
+            /* the member as the launcher's session keeps it: content table (slot 177), handle table
+             * (slot 173), status (slots 189/190/204/206/207) and id (slot 283) */
+            const char* contents = getenv("FFXI_POL_CONTENTS");
+            static uint8_t table[64 * 0x68];
+            if (contents && parse_hex(contents, table, sizeof table))
+                gamecore_set_contents(table);
+            else if (contents)
+                fprintf(stderr, "FFXI_POL_CONTENTS: %u hex digits (64 records of 0x68 bytes)\n", (unsigned)(2 * sizeof table));
+            const char* handles = getenv("FFXI_POL_HANDLES");
+            static uint8_t htable[64 * 0x28];
+            if (handles && parse_hex(handles, htable, sizeof htable))
+                gamecore_set_handles(htable);
+            else if (handles)
+                fprintf(stderr, "FFXI_POL_HANDLES: %u hex digits (64 records of 0x28 bytes)\n", (unsigned)(2 * sizeof htable));
+            const char* status = getenv("FFXI_POL_STATUS");
+            int st[5];
+            unsigned long long id;
+            unsigned long long key;
+            if (status &&
+                sscanf(status, "%d %d %d %d %d %llx %llx", &st[0], &st[1], &st[2], &st[3], &st[4], &id, &key) == 7)
+            {
+                gamecore_set_presence(st[0], st[1], st[2], st[3], st[4]);
+                gamecore_set_member_id((uint64_t)id);
+                gamecore_set_member_key((uint64_t)key);
+            }
+            else if (status)
+                fprintf(stderr, "FFXI_POL_STATUS: <handle> <chr> <mode> <openstat> <class> <id hex> <key hex>\n");
+            have_session = 1; /* the lobby's session value comes from the game's own request */
         }
         else if (!strcmp(argv[i], "--server") || !strcmp(argv[i], "--lobby"))
         {
