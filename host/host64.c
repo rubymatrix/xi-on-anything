@@ -1037,6 +1037,7 @@ static void report_overlay(const char* name, unsigned files)
 #ifndef _WIN32
 #include <SDL3/SDL.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -1077,7 +1078,8 @@ int main(int argc, char** argv)
 #endif
 #ifdef __APPLE__
     /* started from Finder or the Dock (an app bundle, no terminal): the log goes to host64.log
-     * beside the sign-in screen's files */
+     * beside the sign-in screen's files. stdout stays where it is when it is a pipe: a launcher
+     * reads it (--pol-status stdio sends the game's PlayOnline requests there). */
     if (app_bundled() && !isatty(2))
     {
         char* pref = SDL_GetPrefPath("FFXIRecompile", "FFXI");
@@ -1087,7 +1089,9 @@ int main(int argc, char** argv)
             snprintf(log, sizeof log, "%shost64.log", pref);
             if (freopen(log, "w", stderr))
                 setvbuf(stderr, NULL, _IOLBF, 0);
-            freopen(log, "a", stdout);
+            struct stat out;
+            if (fstat(1, &out) != 0 || !S_ISFIFO(out.st_mode))
+                freopen(log, "a", stdout);
             setvbuf(stdout, NULL, _IOLBF, 0);
             SDL_free(pref);
         }
