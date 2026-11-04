@@ -25,12 +25,14 @@ static int g_lobby_resolved; /* slot 221's answer: 1 found, -1 not */
 static uint32_t g_lobby_found;
 static int32_t g_exit_code;
 static char g_exit_message[1024];
+static int32_t g_status_request = -1; /* the request host's id for the request 196 polls */
 
 void gamecore_set_session(const uint8_t v[16])
 {
     memcpy(g_session, v, 16);
     g_have_session = 1;
 }
+
 
 void gamecore_set_auth_block(const uint8_t block[0x34])
 {
@@ -92,7 +94,10 @@ static void s222_dns_poll(Guest* g)
 }
 
 /* 195 (0x1001db60): begin the presence status request (handle, chr, mode, openstat, friendauth,
- * class; -2 = keep). Range checks as retail; the request itself needs no network here. */
+ * class; -2 = keep). Range checks as retail. With a status host (a PlayOnline sign-in) the request
+ * goes to PlayOnline as retail's does, cmd 4 sub 5 on the member's session: at the lobby (class 1,
+ * no character), at character select (the handle and the character in it) and on leaving the world
+ * (no character). Without one it needs no network. */
 static void s195_status_begin(Guest* g)
 {
     int32_t handle = (int32_t)ARG(0), chr = (int32_t)ARG(1), mode = (int32_t)ARG(2), openstat = (int32_t)ARG(3);
@@ -106,13 +111,52 @@ static void s195_status_begin(Guest* g)
         RETC(0xFFFFE3EFu);
     /* what 189/190/204/206/207 report from now on (gamecore_presence.c) */
     presence_update(handle, chr, mode, openstat, (int32_t)ARG(5));
+    const GamecoreRequestHost* host = gamecore_request_host();
+    if (host)
+    {
+        int32_t args[6] = { handle, chr, mode, openstat, (int32_t)ARG(4), (int32_t)ARG(5) };
+        uint8_t data[24];
+        for (int i = 0; i < 6; ++i)
+            for (int b = 0; b < 4; ++b)
+                data[4 * i + b] = (uint8_t)((uint32_t)args[i] >> (8 * b));
+        int32_t id = host->begin(host->ctx, "status", data, sizeof data);
+        rt_log("[recomp] gamecore: status request %d (handle %d, chr %d, mode %d, openstat %d, friendauth %d, class %d)\n",
+            id, args[0], args[1], args[2], args[3], args[4], args[5]);
+        if (id < 0)
+            RETC((uint32_t)id);
+        g_status_request = id;
+    }
     RETC(0);
 }
 
-/* 196 (0x1001df10): poll it. 1 = complete, with V available to 1003. Without a session value
- * the lobby cannot log in: report "not signed in" (-515), as retail does without the online session's crypto. */
+/* 196 (0x1001df10): poll it. 1 = complete, with V available to 1003; a reply that went over the
+ * network brings a new V and authCode, as retail's (state 5 copies them out of every reply). Without
+ * a session value the lobby cannot log in: report "not signed in" (-515), as retail does without
+ * the online session's crypto. */
 static void s196_status_poll(Guest* g)
 {
+    const GamecoreRequestHost* host = gamecore_request_host();
+    if (host && g_status_request >= 0)
+    {
+        uint8_t reply[16 + 0x34];
+        uint32_t got = 0;
+        int32_t r = host->poll(host->ctx, g_status_request, reply, sizeof reply, &got);
+        int has_v = got == sizeof reply;
+        const uint8_t *v = reply, *auth = reply + 16;
+        if (r == 0)
+            RETC(0);
+        g_status_request = -1;
+        if (r < 0)
+        {
+            rt_log("[recomp] gamecore: the status request failed (%d)\n", r);
+            RETC((uint32_t)r);
+        }
+        if (has_v)
+        {
+            gamecore_set_session(v);
+            gamecore_set_auth_block(auth);
+        }
+    }
     if (!g_have_session)
     {
         rt_log("[recomp] gamecore: the lobby asked for the session value, but the host has not supplied one\n");
