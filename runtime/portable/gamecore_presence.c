@@ -418,6 +418,8 @@ static int32_t msg_poll(int32_t h, int kind)
             memcpy(GUEST_PTR(m->dst), buf, got < m->cap ? got : m->cap);
         else if (r > 0 && kind == 175 && got == sizeof g_contents)
             gamecore_set_contents(buf); /* what 177 hands out from now on, as polcore's table */
+        else if (r == -5136 && kind == 175)
+            r = 1; /* a launcher from before "contentlist" does not know it: the table stays as it is */
         m->id = -1;
     }
     free(buf);
