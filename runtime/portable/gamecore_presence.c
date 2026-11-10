@@ -397,7 +397,7 @@ static int32_t msg_poll(int32_t h, int kind)
     if (h < 0 || h >= 4 || g_msg[h].id < 0 || g_msg[h].kind != kind)
         return -5136; /* not in use */
     MsgRequest* m = &g_msg[h];
-    uint32_t room = kind == 278 ? m->cap * 0x48 : kind == 275 ? m->cap : 0, got = 0;
+    uint32_t room = kind == 278 ? m->cap * 0x48 : kind == 275 ? m->cap : kind == 175 ? sizeof g_contents : 0, got = 0;
     uint8_t* buf = room ? (uint8_t*)malloc(room) : NULL;
     int32_t r = g_request_host.poll(g_request_host.ctx, m->id, buf, room, &got);
     if (r != 0)
@@ -416,6 +416,8 @@ static int32_t msg_poll(int32_t h, int kind)
         }
         else if (r > 0 && kind == 275 && got)
             memcpy(GUEST_PTR(m->dst), buf, got < m->cap ? got : m->cap);
+        else if (r > 0 && kind == 175 && got == sizeof g_contents)
+            gamecore_set_contents(buf); /* what 177 hands out from now on, as polcore's table */
         m->id = -1;
     }
     free(buf);
@@ -435,6 +437,18 @@ static void s278_fetch_headers(Guest* g)
 }
 
 static void s279_fetch_poll(Guest* g) { RETC(g_have_request_host ? (uint32_t)msg_poll((int32_t)ARG(0), 278) : 1u); }
+
+/* 175 (0x1001e520 -> 0x1001d2f0): load the member's content ID list again (the request); the
+ * request's handle. In the game, after the lobby's status, retail's core sends it on its own; its
+ * reply refills the table 177 reads. 176 (0x1001e540 -> 0x1001d340) polls it: 0 busy, 1 done. */
+static void s175_content_begin(Guest* g)
+{
+    if (!g_have_request_host)
+        RETC(0);
+    RETC((uint32_t)msg_begin(175, "contentlist", NULL, 0, 0, 0));
+}
+
+static void s176_content_poll(Guest* g) { RETC(g_have_request_host ? (uint32_t)msg_poll((int32_t)ARG(0), 175) : 1u); }
 
 /* 275 (0x1001bfc0): read a message (the request), a0 = its header, a1 = the body (header +0x38 bytes) */
 static void s275_read(Guest* g)
@@ -781,7 +795,7 @@ static void s_settings_fail(Guest* g) { RETC(0xFFFFFF00u); } /* 1535/1536: no se
 #define SLOT(n, f) { 4 * (n), f }
 static const GamecoreSlot PRESENCE[] = {
     SLOT(165, s_start), SLOT(166, s_poll_done), SLOT(167, s167_friend_a), SLOT(169, s169_friend_b),
-    SLOT(173, s173_handle), SLOT(174, s_zero), SLOT(175, s_start), SLOT(176, s_poll_done), SLOT(177, s177_character),
+    SLOT(173, s173_handle), SLOT(174, s_zero), SLOT(175, s175_content_begin), SLOT(176, s176_content_poll), SLOT(177, s177_character),
     SLOT(179, s_start), SLOT(180, s_poll_done), SLOT(181, s_start), SLOT(182, s_poll_done), SLOT(183, s_zero),
     SLOT(184, s_zero), SLOT(185, s_zero), SLOT(186, s_zero), SLOT(187, s_zero), SLOT(188, s_zero),
     SLOT(189, s189_presence_sub), SLOT(190, s190_presence_chan), SLOT(197, s_zero), SLOT(199, s_zero),
