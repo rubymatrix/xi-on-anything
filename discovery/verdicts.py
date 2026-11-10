@@ -110,6 +110,25 @@ VERDICTS = {
         'REDECODE': [0x100067c8],
         'SWITCHES': {},
     },
+    # Carried over from 2026-10-05 by tools/newbuild.py carry; re-checked by the discovery pass.
+    # Read by hand (newbuild.py dis, both builds), all in meta/builds.json, none a verdict:
+    # patches ahcolors 0x101f6acd (mov ebp,0x80808080 imm), quicksets 0x101a9132 (jne after call),
+    # statustimers 0x10229a6a (test eax,eax / je), trimspells 0x101afff6 (push 1), cexi_slots 0x101688b7,
+    # 0x1022c8c4 (cmp esi,<recast+0x802>), 0x1022c688 (mov ax,[eax*2+recast]): same instructions, neighbours'
+    # delta (+0x15b6, +0x15d0, +0x1610). frame_net 0x100fa2d0 (+0x150; same body, stores cexi_player),
+    # page_ctor 0x10197f50 (+0x15d0). The menu table grew (menus_end +0x10cc): menus_conf1win is the second
+    # "menu    conf1win" entry 0x10376130, menus_display "tkdebug dbdelsel" 0x10376bd8, menus_addons
+    # "menu    oplev" 0x10375134 (each unique). cexi_fx_spell_edi 0x100a8e9c and cexi_region unchanged.
+    ('ffximain', '2026-11-02'): {
+        'NOT_CODE': [0x1030f580, 0x10310580, 0x103105f0, 0x10312540, 0x103113d0, 0x1015d4b0, 0x101b01d8, 0x100657d0, 0x100f47f0, 0x1015edb0],
+        'REDECODE': [0x1015d4ad, 0x101b01d7, 0x10312538, 0x100657ce],
+        'SWITCHES': {0x10006412: 21, 0x10006ff7: 11, 0x1022382d: 9, 0x102a8908: 4, 0x102bc329: 6},
+    },
+    ('ffxi', '2026-11-02'): {
+        'NOT_CODE': [0x100067d0],
+        'REDECODE': [0x100067c8],
+        'SWITCHES': {},
+    },
     # 2010-03-16: a 2010 retail install (patch.ver 30100317_3), carried from 2025-11-12 and each site
     # checked by disassembly. Two 2025-11-12 sites have no counterpart in this build: the 11-case switch
     # (cmp edx,-5 / jb ; cmp edx,5 / ja) and the `mov [edi+0xccc],esi` false start.
