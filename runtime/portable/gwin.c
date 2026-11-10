@@ -228,6 +228,10 @@ uint32_t gheap_alloc(uint32_t size, int zero)
     {
         h = g_free[c];
         g_free[c] = rd32(h + 8);
+        /* A recycled block is cleared like new memory. The game sends some heap blocks it never
+         * fills (the 4 bytes after the version in the lobby login), and what our own code left
+         * in them would go out with it. */
+        zero = 1;
     }
     else
     {
