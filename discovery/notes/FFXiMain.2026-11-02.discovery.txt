@@ -1,0 +1,100 @@
+FFXiMain.dll / FFXi.dll build 2026-11-02: R1 function discovery for static recompilation
+=====================================================================================
+
+Retail files  the retail install in ffxi-pc/retail/FINAL FANTASY XI after the game's November
+              update (FFXiMain.dll, FFXi.dll and patch.ver)
+  FFXiMain.dll  SHA-256 d809ebe333019395ad43ab7ec1d94d9f58fe1f62c2ae730334f730fa8e7d48fb
+                PE timestamp 0x6ae818b4 (2026-11-02); unpacked .text 0x10001000-0x10329c2e,
+                real entry 0x10317d6f
+  FFXi.dll      SHA-256 4174a494067c058d9190b73a0212deb934625838f625ac360b5784c43bd8ffd7
+                PE timestamp 0x6ae818a3
+Metadata      FFXiMain.2026-11-02.meta.json, FFXi.2026-11-02.meta.json (ffxi-recomp-meta/1)
+Version       30261102_0, read from patch.ver
+
+What changed from 2026-10-05
+----------------------------
+FFXi.dll: rebuilt, but its unpacked .text is byte-identical to 2026-10-05's (and 2026-09-03's).
+Its metadata is 2026-10-05's with the new hash and label (tools/newbuild.py meta).
+
+FFXiMain.dll: a larger update than 2026-10-05. .text is 0x1600 bytes longer (0x32762e ->
+0x328c2e). Code below ~0x100a9000 mostly keeps its address (the Present call site, the frame
+getters, the file-sum loop 0x100185a0 and its caller); above that it moves by +0x140 / +0x150
+(0x100e6000..0x100fa000), +0x15b6..+0x15d0 (0x1015b000..0x101f6000) and +0x1600 / +0x1610
+(0x1021e000 up, the CRT slice). Every later section moves by +0x1000 (.rdata 0x1032a000, .data
+0x10350000) and grows a little; the data the runtime names moved by +0x1000..+0x11b0 (chars_ptr
+0x104df770 -> 0x104e0920, cexi_player 0x104dfd98 -> 0x104e0f48, scene_mgr +0x11b8).
+
+Carrying addresses over
+-----------------------
+tools/newbuild.py carry --from 2026-10-05 --to 2026-11-02 --write mapped everything except 14,
+read by hand with newbuild.py dis in both builds:
+  cexi_region          not an image address: cexi_sites.py's fixed REGION (0xfe000000), kept
+  cexi_fx_spell_edi    no unique byte window; `add edi,0xaf0 ; push 0x34 ; mov [esp+0x18],edi ;
+                       call <malloc>` at the same address in both builds -> 0x100a8e9c
+  frame_net            `sub esp,0x10c ; push ebx/esi/edi ; xor bl,bl ; call 0x100dc120 ; ...
+                       mov [cexi_player],esi`: same body, +0x150 (neighbours +0x140) -> 0x100fa2d0;
+                       tools/frame_sites.py later found the same address on its own
+  page_ctor            `push esi ; mov esi,ecx ; lea ecx,[esi+4] ; call ...` -> 0x10197f50 (+0x15d0)
+  patches (bytes unchanged; the address is where the same instruction now sits):
+    ahcolors           the imm32 of `mov ebp,0x80808080` after `mov eax,[esi+0x14d0]`
+                       0x101f5517 -> 0x101f6acd (+0x15b6, as its two neighbours)
+    quicksets_101a7af0 `jne` after `call ; test al,al` 0x101a7b62 -> 0x101a9132 (+0x15d0)
+    statustimers_10228440  `test eax,eax ; je` after `call ; add esp,4` 0x1022845a -> 0x10229a6a
+    trimspells         `push 1` imm after `push 0x100` 0x101aea26 -> 0x101afff6 (+0x15d0)
+    cexi_slots         0x101672e7 -> 0x101688b7 (+0x15d0, identical bytes around it);
+                       0x1022b2b4 -> 0x1022c8c4, the imm32 of `cmp esi,<spell_recast+0x802>`;
+                       0x1022b078 -> 0x1022c688, the disp32 of `mov ax,[eax*2+<spell_recast>]`
+                       (+0x1610; the operands carry the moved spell_recast global, which is why
+                       there was no unique byte window; the patch bytes point into cexi_region
+                       and are unchanged)
+  menus_conf1win       menu-table entries no code references. The table grew this time
+  menus_display        (menus_end 0x10376270 -> 0x1037733c, +0x10cc), so each was found by its
+  menus_addons         text: the second "menu    conf1win" entry (the one host/modern.c's
+                       ADVANCED_ENTRY means; the first is 0x10376104) -> 0x10376130;
+                       "tkdebug dbdelsel" (unique) -> 0x10376bd8; "menu    oplev" (unique) ->
+                       0x10375134 (+0x1048: entries were added before it)
+  character table pointer 0x104e0920 (1,533 of 1,533 sites agree), Present call site 0x100035cb.
+The 32 scene renderer addresses, the CRT slice (15) and every manual verdict (10 NOT_CODE,
+4 REDECODE, 5 switch overrides) mapped automatically.
+
+file_sum is not carried; read by hand. The caller at 0x10011420 (`push 0x13 ; push ".\FFXiMain.dll"
+; lea ecx,[eax+0x190] ; call 0x100185a0`, then `mov edx,[ptr] ; mov [edx+0x20],ecx`) and the sum
+loop are unchanged; ptr 0x10456a28 -> 0x10457bd8 (222 of 222 mapped reference sites agree),
+offset 0x20. The loop sums each byte sign-extended and shifted left by (i mod 20)*4 (mod 32);
+that reproduces 2026-10-05's recorded 0x43fa0718 from its retail file, and gives 0x74f0058f for
+this build's retail FFXiMain.dll.
+
+After prepare, tools/frame_sites.py and tools/cexi_sites.py (without --slots) found their sites
+by shape. Every hook, wrap and cexi address they report equals the carried one; they added
+frame_look_once (2), frame_cam_once (2), frame_int_sites (123), frame_wait_sites (9) and
+frame_net_clock 0x10493fc0, the same counts as 2026-10-05. The cexi_slots patches (91) are carry's
+byte-window mapping plus the three above; no cexidats checkout was at hand to re-derive them
+with --slots.
+
+Method
+------
+Ghidra 11.3.2 headless (JDK 21), tools/discover.py, as for 2026-10-05.
+The carried verdicts were enough: round 1 and round 2 both ended with 0 conflicts, 0 suspect
+functions, switch review 0. No new verdicts.
+
+Results
+-------
+                                  auto-analysis   after discovery   2026-10-05 after discovery
+functions in .text                14,188          21,802            21,761
+instructions                      892,278         997,940           996,147
+instruction bytes                 83.3%           93.0%             93.0%
+instructions outside functions    152,918         0                 0
+scaled-index switches             861             947               943
+tail_jumps                        -               2,164             2,165
+
+Verification
+------------
+macOS arm64, the retail install above:
+tools/build_posix.py prepare -> build 2026-11-02.
+boot64: translated 21,932 entries (211 with unimplemented instructions, all MMX/3DNow!/SSE;
+21,776 jmp and 156 int3 entry patches); BOOT64 OK.
+host64: built build/host64, no compiler warnings; generated/build.h has the FFXI_FILE_SUM_* and
+every FFXI_SCENE_* define.
+No geometry section (as 2026-10-05), so no geometry replay test. Windows targets (difftest, host,
+boot64, host64) not run. Not yet run in-game (sign in, zone in, fight, zone again); the file-sum
+check will log whether the game's own sum matches 0x74f0058f at lobby login.
