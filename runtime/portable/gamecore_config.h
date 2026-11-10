@@ -42,8 +42,9 @@ void gamecore_set_member_key(uint64_t key);
  * failed) with the reply's payload in out (*got bytes, at most cap). Verbs: "status" (slot 195's
  * six int32s; payload V and the authCode when the request went out), "msglist" (u16 cap; payload
  * the 0x48-byte headers of the member's PlayOnline messages, wire form), "msgread" and "msgdelete"
- * (a header, wire form; payload the message body). Called on the game thread with the guest lock
- * held: neither may block. */
+ * (a header, wire form; payload the message body), "contentlist" (no data; payload the member's
+ * content table, 64 records of 0x68, as slot 177 hands them out). Called on the game thread with
+ * the guest lock held: neither may block. */
 typedef struct GamecoreRequestHost
 {
     int32_t (*begin)(void* ctx, const char* verb, const uint8_t* data, uint32_t n);

@@ -169,9 +169,27 @@ static void s196_status_poll(Guest* g)
  * (0x26) and hashes into RequestSelectChr (0x07): whatever the host was given
  * (gamecore_set_auth_block: a launcher that signed in made it), zeros otherwise. LSB reads none of it; the call succeeding is what matters
  * there, since it switches FFXiMain to hashing V as a fixed 16 bytes. */
+/* Where retail's FFXiMain was loaded in a captured retail session: it is moved off its preferred base
+ * there, while ours sits at it. */
+#define kRetailMainBase 0x0dc00000u
+
 static void s936_auth_block(Guest* g)
 {
-    memcpy(ARGP(0), g_auth_block, sizeof g_auth_block);
+    uint8_t* out = ARGP(0);
+    memcpy(out, g_auth_block, sizeof g_auth_block);
+    /* FFXiMain copies 0x40 bytes from this buffer into 0x26 and 0x07 (0x100d0c00, 0x100f63f0), but the
+     * block is 0x34: the last 12 bytes are its own stack, left there by earlier calls, and they hold
+     * addresses in its image. Retail's image sits elsewhere, so they are moved to where it was. */
+    for (unsigned i = sizeof g_auth_block; i + 4 <= 0x40; i += 4)
+    {
+        uint32_t v;
+        memcpy(&v, out + i, 4);
+        if (v >= rt_image_lo && v < rt_image_hi)
+        {
+            v = v - rt_image_lo + kRetailMainBase;
+            memcpy(out + i, &v, 4);
+        }
+    }
     RETC(0);
 }
 
