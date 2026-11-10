@@ -379,8 +379,9 @@ static int parse_hex(const char* s, uint8_t* out, size_t n)
 
 /* --pol-status stdio: the game's PlayOnline requests go to the launcher that holds the PlayOnline
  * session, which sends them on it as retail's core does on its own: the status requests (slots
- * 195/196, cmd 4 sub 5: at the lobby, at character select, on leaving the world) and the in-game
- * message client's (slots 278/275/280: list, read and delete the member's messages). One line out
+ * 195/196, cmd 4 sub 5: at the lobby, at character select, on leaving the world), the content ID
+ * list (slots 175/176, cmd 1 sub 3: loaded again in the game) and the in-game message client's
+ * (slots 278/275/280: list, read and delete the member's messages). One line out
  * on stdout per request,
  *     [pol-req] begin <id> <verb> <data: hex>
  * and one back on stdin,
