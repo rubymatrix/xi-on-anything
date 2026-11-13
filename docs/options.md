@@ -167,6 +167,7 @@ The sticks (movement and camera) and the button combinations (`padexsin000`) are
 | Setting | CLI | App / Env | Notes |
 |---|---|---|---|
 | Texture packs | `--textures <dir>` (×8) | `FFXI_BUNDLED_TEXTURES` | default `<data dir>/textures`, then bundled `assets/textures` (font, slot bar) |
+| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/vicons.c`). A texture pack's entry for the same icon wins |
 | DAT overlays (XIPivot-style) | `--dats <dir>` (×8) | `FFXIDats` | first folder wins |
 | Custom server items | `--cexi off\|items\|full` | `FFXICexi` | CatsEyeXI-style ids |
 
