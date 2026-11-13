@@ -263,6 +263,22 @@ static uint32_t g_pending_clear; /* D3DCLEAR flags for the next pass's load ops 
 static float g_clear_color[4], g_clear_z;
 static uint32_t g_clear_stencil;
 static VkPipeline g_bound;
+/* The dynamic state draw_encode last set in the frame's command buffer: what is the same is not set again
+ * (valid 0 once anything else binds a pipeline, which sets them its own way, or a new buffer begins).
+ * Setting each at every draw cost RADV GPU time as well: 10-15% of the frame in crowds on a Radeon 8060S. */
+static struct
+{
+    int valid;
+    VkBool32 zt, zw, st, dbe;
+    VkCompareOp zop, sop;
+    VkStencilOp sf, sp, sz;
+    uint32_t sread, swrite, sref;
+    VkCullModeFlags cull;
+    VkPrimitiveTopology topo;
+    float bias;
+    VkViewport vp;
+    VkRect2D sc;
+} g_dyn;
 
 /* the window */
 static SDL_Window* g_window;
@@ -741,7 +757,7 @@ static VkCommandBuffer cmd(void)
     {
         g_cb = new_cb();
         g_dirty = 1; /* the work submitted before it may still be writing */
-        g_bound = VK_NULL_HANDLE;
+        g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
         ts_frame_start(g_cb);
         if (g_gt_on > 0 && !g_gt[g_frame].n)
             gt_mark(GT_FRAME);
@@ -1581,7 +1597,7 @@ static int begin_pass(void)
         g_pass_ts = ts_begin(g_cb, g_pass_next), g_pass_next = -1;
     vkCmdBeginRendering(g_cb, &ri);
     g_in_pass = 1;
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     g_rt->used = g_serial, g_rt->rec = g_cb_index;
     if (!g_rt_face && !g_rt_level)
         g_rt->scene = 0; /* drawn to: its mips are behind */
@@ -2246,7 +2262,8 @@ static int set_viewport(const uint32_t vp[6])
     if (vw <= 0 || vh <= 0)
         return 0;
     VkViewport v = { (float)x, (float)(y + vh), (float)vw, (float)-vh, zmin, zmax };
-    vkCmdSetViewport(g_cb, 0, 1, &v);
+    if (!g_dyn.valid || memcmp(&g_dyn.vp, &v, sizeof v))
+        vkCmdSetViewport(g_cb, 0, 1, &v), g_dyn.vp = v;
     g_set_vp = v;
     return 1;
 }
@@ -2273,7 +2290,8 @@ static void set_scissor(const int32_t sc[4])
             y0 = y1;
     }
     VkRect2D r = { { (int32_t)x0, (int32_t)y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
-    vkCmdSetScissor(g_cb, 0, 1, &r);
+    if (!g_dyn.valid || memcmp(&g_dyn.sc, &r, sizeof r))
+        vkCmdSetScissor(g_cb, 0, 1, &r), g_dyn.sc = r;
     g_set_sc = r;
 }
 
@@ -2571,33 +2589,48 @@ static void draw_encode(const GfxDraw* d)
     GfxDepthKey dk = d->depth;
     if (!depth)
         memset(&dk, 0, sizeof dk);
-    vkCmdSetDepthTestEnable(cb, dk.zenable ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthWriteEnable(cb, dk.zenable && dk.zwrite ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthCompareOp(cb, dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS);
-    int stencil = dk.stencil && depth && depth->has_stencil;
-    vkCmdSetStencilTestEnable(cb, stencil ? VK_TRUE : VK_FALSE);
-    if (stencil)
+    int stencil = dk.stencil && depth && depth->has_stencil, v = g_dyn.valid;
+    VkBool32 zt = dk.zenable ? VK_TRUE : VK_FALSE, zw = dk.zenable && dk.zwrite ? VK_TRUE : VK_FALSE;
+    VkCompareOp zop = dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS;
+    if (!v || g_dyn.zt != zt)
+        vkCmdSetDepthTestEnable(cb, zt), g_dyn.zt = zt;
+    if (!v || g_dyn.zw != zw)
+        vkCmdSetDepthWriteEnable(cb, zw), g_dyn.zw = zw;
+    if (!v || g_dyn.zop != zop)
+        vkCmdSetDepthCompareOp(cb, zop), g_dyn.zop = zop;
+    VkBool32 st = stencil ? VK_TRUE : VK_FALSE;
+    if (!v || g_dyn.st != st)
+        vkCmdSetStencilTestEnable(cb, st), g_dyn.st = st;
+    VkStencilOp sf = stencil ? stencil_op(dk.sfail) : VK_STENCIL_OP_KEEP;
+    VkStencilOp sp = stencil ? stencil_op(dk.spass) : VK_STENCIL_OP_KEEP, sz = stencil ? stencil_op(dk.szfail) : VK_STENCIL_OP_KEEP;
+    VkCompareOp sop = stencil ? compare(dk.sfunc) : VK_COMPARE_OP_ALWAYS;
+    uint32_t sread = stencil ? dk.sread : 0xFF, swrite = stencil ? dk.swrite : 0, sref = stencil ? d->stencil_ref : 0;
+    if (!v || g_dyn.sf != sf || g_dyn.sp != sp || g_dyn.sz != sz || g_dyn.sop != sop)
     {
-        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, stencil_op(dk.sfail), stencil_op(dk.spass), stencil_op(dk.szfail),
-            compare(dk.sfunc));
-        vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, dk.sread);
-        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, dk.swrite);
-        vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, d->stencil_ref);
+        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, sf, sp, sz, sop);
+        g_dyn.sf = sf, g_dyn.sp = sp, g_dyn.sz = sz, g_dyn.sop = sop;
     }
-    else
-    {
-        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP,
-            VK_COMPARE_OP_ALWAYS);
-        vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
-        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
-        vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
-    }
+    if (!v || g_dyn.sread != sread)
+        vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, sread), g_dyn.sread = sread;
+    if (!v || g_dyn.swrite != swrite)
+        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, swrite), g_dyn.swrite = swrite;
+    if (!v || g_dyn.sref != sref)
+        vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, sref), g_dyn.sref = sref;
     /* D3D's front faces are clockwise on screen; CULL_CCW (the default) culls the back ones */
-    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
-    vkCmdSetCullMode(cb, d->cull == 3 ? VK_CULL_MODE_BACK_BIT : d->cull == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE);
-    vkCmdSetDepthBiasEnable(cb, d->zbias ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthBias(cb, -(float)d->zbias, 0.0f, -(float)d->zbias * 0.5f);
-    vkCmdSetPrimitiveTopology(cb, vk_prim(d->prim));
+    if (!v)
+        vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    VkCullModeFlags cull = d->cull == 3 ? VK_CULL_MODE_BACK_BIT : d->cull == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+    if (!v || g_dyn.cull != cull)
+        vkCmdSetCullMode(cb, cull), g_dyn.cull = cull;
+    VkBool32 dbe = d->zbias ? VK_TRUE : VK_FALSE;
+    if (!v || g_dyn.dbe != dbe)
+        vkCmdSetDepthBiasEnable(cb, dbe), g_dyn.dbe = dbe;
+    if (!v || g_dyn.bias != (float)d->zbias)
+        vkCmdSetDepthBias(cb, -(float)d->zbias, 0.0f, -(float)d->zbias * 0.5f), g_dyn.bias = (float)d->zbias;
+    VkPrimitiveTopology topo = vk_prim(d->prim);
+    if (!v || g_dyn.topo != topo)
+        vkCmdSetPrimitiveTopology(cb, topo), g_dyn.topo = topo;
+    g_dyn.valid = 1;
 
     VkWriteDescriptorSet w[B_COUNT];
     VkDescriptorBufferInfo bi[GFX_NSTREAMS + 2];
@@ -3703,6 +3736,7 @@ static int pass_open2(GfxTex* t, GfxTex* t2, uint32_t layer, uint32_t level, VkA
     VkRect2D sc = { { 0, 0 }, { tw, th } };
     vkCmdSetViewport(g_cb, 0, 1, v ? v : &all);
     vkCmdSetScissor(g_cb, 0, 1, &sc);
+    g_dyn.valid = 0;
     t->used = g_serial, t->rec = g_cb_index;
     return ts;
 }
@@ -4428,7 +4462,7 @@ static uint32_t sun_draw(GfxTex* target, GfxTex* col, const float* invP, const f
     vkCmdEndRendering(cb);
     ts_end(cb, ts);
     g_dirty = 1;
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     target->used = g_serial, target->rec = g_cb_index;
     if (col)
         col->used = g_serial, col->rec = g_cb_index;
@@ -7600,7 +7634,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
         vkCmdDraw(cb, vertex_count(it->prim, it->count), 1, it->first, 0);
         ++drew;
     }
-    g_bound = VK_NULL_HANDLE; /* the game's next draw binds its own */
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0; /* the game's next draw binds its own */
 done:
     if (timed)
         end_pass();
@@ -7677,7 +7711,7 @@ int gfx_chars_draw(const GfxCharFrame* f)
         vkCmdDrawIndexed(cb, vertex_count(it->prim, it->count), 1, it->first, 0, 0);
         ++drew;
     }
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
 done:
     if (timed)
         end_pass();
@@ -8648,7 +8682,7 @@ static int rt_capture(const float* invP, const float* view, const float* cam)
             g_ray.st_cached++;
     }
     vkCmdEndRendering(cb);
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     full_barrier(cb); /* the corners written, before the structures' builds read them */
     if (!vsolid) /* (the bounce light's and occlusion's rays trace the solid ones) */
         return 0;
@@ -8843,7 +8877,7 @@ static void rt_pass(GfxTex* target, int load, VkPipeline p, const float* vp, con
     vkCmdEndRendering(cb);
     ts_end(cb, ts);
     g_dirty = 1;
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     target->used = g_serial, target->rec = g_cb_index;
 }
 
