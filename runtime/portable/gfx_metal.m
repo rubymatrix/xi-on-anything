@@ -3357,6 +3357,11 @@ static struct
     id<MTLTexture> lz, lzv[4];
     id<MTLTexture> aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
     id<MTLTexture> src, ao0, ao1, b1a, b1b, b2a, b2b, ra, rb;
+    /* what scene_fx left for after the temporal upscaler (scene_fx_post): its uniforms as scene_fx made them,
+     * the frame, and the upscaled scene as it was before the bloom and rays (psrc, at the size it is shown) */
+    FxU post_u;
+    uint64_t post_serial;
+    id<MTLTexture> psrc;
     id<MTLTexture> hist[2]; /* the occlusion and shadows after the temporal pass: this frame's and the one before */
     int hist_at;            /* which of hist[] the frame before wrote */
     uint64_t hist_serial;   /* the frame it was written (0: none) */
@@ -6849,9 +6854,9 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
     }
 }
 
-static void scene_aa(GfxTex* color, const GfxScene* s)
+static void scene_aa(GfxTex* color, const GfxScene* s, int force)
 {
-    if (g_fxs.aa < 0.5f || !fx_init())
+    if ((g_fxs.aa < 0.5f && !force) || !fx_init())
         return;
     @autoreleasepool
     {
@@ -7803,6 +7808,10 @@ static void post_lamp_glows(GfxTex* color, const GfxScene* s, id<MTLTexture> dep
     [e endEncoding];
 }
 
+/* the world as it was drawn, while the effects after the temporal upscaler see its upscaled copy as
+ * color->tex (up_post): the glows' draws were recorded at its size, and are drawn again at that */
+static id<MTLTexture> g_world_drawn;
+
 /* the glow's draws again, onto black over the scene's depth; 0 when there were none */
 static int post_glow(GfxTex* color)
 {
@@ -7811,8 +7820,8 @@ static int post_glow(GfxTex* color)
         n += g_glows[i].rt == color && g_glows[i].fmt == color->tex.pixelFormat; /* (not those from before a format change) */
     if (!n)
         return 0;
-    id<MTLTexture> ct = color->tex;
-    if (!post_tex(&g_post.glow, ct.width, ct.height, ct.pixelFormat))
+    id<MTLTexture> ct = color->tex, at = g_world_drawn ? g_world_drawn : ct;
+    if (!post_tex(&g_post.glow, at.width, at.height, ct.pixelFormat))
         return 0;
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = g_post.glow;
@@ -8091,7 +8100,8 @@ static void hdr_forget(GfxTex* t)
         g_hdr.t = NULL;
 }
 
-static void scene_fx(GfxTex* color, const GfxScene* s);
+static void scene_fx(GfxTex* color, const GfxScene* s, int defer);
+static void scene_fx_post(const GfxScene* s, id<MTLTexture> ct, id<MTLTexture> depth);
 
 /* --- the upscaler (g_up) ----------------------------------------------------------------------------------------- */
 /* Its passes, built with FX_MSL ahead of them (FxU, FO, fx_vs, view_z, view_pos) */
@@ -8393,6 +8403,9 @@ static id up_scaler(int temporal, MTLPixelFormat cf, MTLPixelFormat df, uint32_t
         d.depthTextureFormat = df;
         d.motionTextureFormat = MTLPixelFormatRG16Float;
         d.inputWidth = iw, d.inputHeight = ih, d.outputWidth = g_up.out_w, d.outputHeight = g_up.out_h;
+        /* the scene before its tonemap (scene_hdr): light past 1, which the scaler weighs at an exposure it
+         * finds itself, so a bright lamp's pixel does not ring or ghost across the frames it blends */
+        d.autoExposureEnabled = cf == MTLPixelFormatRGBA16Float;
         *sc = [d newTemporalScalerWithDevice:g_dev];
         [d release];
     }
@@ -8541,20 +8554,73 @@ static void up_run(GfxTex* color, const GfxScene* s)
     }
 }
 
+/* the front end's scene with its viewport in the pixels of a texture tw x th standing for color's w x h */
+static GfxScene scene_at(const GfxScene* s, const GfxTex* color, NSUInteger tw, NSUInteger th)
+{
+    GfxScene ps = *s;
+    double sx = (double)tw / color->w, sy = (double)th / color->h;
+    ps.vp[0] = (uint32_t)(s->vp[0] * sx), ps.vp[1] = (uint32_t)(s->vp[1] * sy);
+    ps.vp[2] = (uint32_t)(s->vp[2] * sx + 0.5), ps.vp[3] = (uint32_t)(s->vp[3] * sy + 0.5);
+    return ps;
+}
+
+/* the world this frame goes through the temporal upscaler (up_run's test, ahead of it) */
+static int up_temporal_ahead(const GfxTex* color, const GfxScene* s)
+{
+    if (g_up.mode != 2 || !color->virt || g_up.ok != 1 || s->proj[11] == 0.0f)
+        return 0;
+    id<MTLTexture> depth = color->depth_world ? color->depth_world : color->depth_seen;
+    return depth && depth.width == color->tex.width && depth.height == color->tex.height;
+}
+
+/* the depth surface's upscaled copy this frame (up_depth's), for a depth texture of the world's, or nil */
+static id<MTLTexture> up_depth_tex(id<MTLTexture> depth)
+{
+    for (GfxTex* t = g_targets; t; t = t->next_target)
+        if (t->virt && t->use == GFX_USE_DEPTH && t->tex == depth)
+            return up_fresh(t) ? t->up : nil;
+    return nil;
+}
+
+/* After the temporal upscaler: what is made of the lit scene (scene_fx's bloom, rays and grade, then
+ * post_effects' lamp glows, shafts, depth of field and bloom, then the tonemap) over the upscaled world and its
+ * depth, at the size they are shown. Those effects see the upscaled copy as color->tex for the while. fs: the
+ * front end's scene; ls: at the world's drawn size (all of it there, when the upscaler made nothing). */
+static void up_post(GfxTex* color, const GfxScene* fs, const GfxScene* ls)
+{
+    id<MTLTexture> depth = color->depth_world ? color->depth_world : color->depth_seen;
+    id<MTLTexture> zup = depth ? up_depth_tex(depth) : nil;
+    if (!up_fresh(color) || !zup || zup.width != color->up.width || zup.height != color->up.height)
+    {
+        scene_fx_post(ls, color->tex, depth);
+        post_effects(color, ls);
+        hdr_tone(color, ls);
+        return;
+    }
+    GfxScene us = scene_at(fs, color, color->up.width, color->up.height);
+    id<MTLTexture> drawn = color->tex, dw = color->depth_world, dseen = color->depth_seen;
+    color->tex = color->up, color->depth_world = zup, color->depth_seen = zup;
+    g_world_drawn = drawn;
+    scene_fx_post(&us, color->tex, zup);
+    post_effects(color, &us);
+    hdr_tone(color, &us);
+    g_world_drawn = nil;
+    color->tex = drawn, color->depth_world = dw, color->depth_seen = dseen;
+    color->used = g_serial;
+}
+
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D)
         return;
     color->world_seen = 1;
     g_up.world_w = color->w, g_up.world_h = color->h;
+    const GfxScene* fs = s;
     GfxScene ps;
     if (color->virt)
     {
         /* drawn at fewer pixels (the upscaler): the viewport at the target's own */
-        ps = *s;
-        double sx = (double)color->tex.width / color->w, sy = (double)color->tex.height / color->h;
-        ps.vp[0] = (uint32_t)(s->vp[0] * sx), ps.vp[1] = (uint32_t)(s->vp[1] * sy);
-        ps.vp[2] = (uint32_t)(s->vp[2] * sx + 0.5), ps.vp[3] = (uint32_t)(s->vp[3] * sy + 0.5);
+        ps = scene_at(s, color, color->tex.width, color->tex.height);
         s = &ps;
     }
     @autoreleasepool
@@ -8562,17 +8628,110 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
         hdr_update(color);
     }
     ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
+    /* Temporal upscaling: the light on the world (occlusion, shadows, bounce light, fog) as it was drawn,
+     * then the upscaler, then what is made of the lit scene at the size it is shown (up_post). The upscaler's
+     * history then holds the lit scene only, not glows, a grade and a tonemap carried over frames, and those
+     * are made at the full size, not made up to it. */
+    int ahead = up_temporal_ahead(color, s);
     if (g_fxs.fx != 0.0f)
-        scene_fx(color, s);
+        scene_fx(color, s, ahead);
     scene_fog(color, s);
+    if (ahead)
+    {
+        up_run(color, s);
+        up_post(color, fs, s);
+        return;
+    }
     post_effects(color, s);
     hdr_tone(color, s);
-    if (!(color->virt && g_up.mode == 2)) /* the temporal upscaler anti-aliases */
-        scene_aa(color, s);
+    /* the spatial upscaler (MetalFX's, as FSR 1's; the temporal one's stand-in without a depth) wants its input
+     * anti-aliased: FXAA whatever aa says */
+    scene_aa(color, s, color->virt && g_up.mode != 0);
     up_run(color, s);
 }
 
-static void scene_fx(GfxTex* color, const GfxScene* s)
+/* the bloom's and rays' targets for a scene bw x bh at their size (scene_fx's bdiv) */
+static int fx_bloom_tex(NSUInteger bw, NSUInteger bh)
+{
+    return fx_tex(&g_fx.b1a, MTLPixelFormatRGBA16Float, bw, bh) && fx_tex(&g_fx.b1b, MTLPixelFormatRGBA16Float, bw, bh) &&
+        fx_tex(&g_fx.b2a, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
+        fx_tex(&g_fx.b2b, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
+        fx_tex(&g_fx.ra, MTLPixelFormatRGBA16Float, bw, bh) && fx_tex(&g_fx.rb, MTLPixelFormatRGBA16Float, bw, bh);
+}
+
+/* the bloom (into b1a, b2a) and the god rays (rb) of src, for fx_comp; ao: the occlusion and shadows fx_bright
+ * shades src with, as fx_comp will */
+static void fx_bloom_rays(const FxU* u, id<MTLTexture> src, id<MTLTexture> ao, id<MTLTexture> depth)
+{
+    static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 }, across2[2] = { 2, 0 }, down2[2] = { 0, 2 };
+    MTLViewport qb = fx_full(g_fx.b1a), e = fx_full(g_fx.b2a);
+    if (u->bloom[1] > 0.0f)
+    {
+        id<MTLTexture> b_in[2] = { src, ao };
+        g_pass = GFX_PASS_BLOOM;
+        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.bright_pipe, qb, u, b_in, 2, NULL);
+        fx_pass(g_fx.b1b, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.b1a, 1, across2);
+        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.b1b, 1, down2);
+        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.down_pipe, e, u, &g_fx.b1a, 1, NULL);
+        fx_pass(g_fx.b2b, MTLLoadActionDontCare, g_fx.gauss_pipe, e, u, &g_fx.b2a, 1, across2);
+        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.gauss_pipe, e, u, &g_fx.b2b, 1, down2);
+    }
+    if (u->rays[0] > 0.0f)
+    {
+        id<MTLTexture> mask_in[2] = { src, depth };
+        g_pass = GFX_PASS_RAYS;
+        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.raymask_pipe, qb, u, mask_in, 2, NULL);
+        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.rays_pipe, qb, u, &g_fx.ra, 1, NULL);
+        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.rb, 1, across);
+        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.ra, 1, down);
+    }
+}
+
+/* What scene_fx left for after the temporal upscaler (defer): the bloom, the god rays and the colour grade,
+ * made of the lit scene (ct, in place) at the size it is shown, over its depth there. The light is already in
+ * it, so fx_comp adds only these: no occlusion, shadows, bounce light or fog a second time. */
+static void scene_fx_post(const GfxScene* s, id<MTLTexture> ct, id<MTLTexture> depth)
+{
+    if (g_fx.post_serial != g_serial)
+        return;
+    g_fx.post_serial = 0;
+    FxU u = g_fx.post_u;
+    if (!(u.bloom[1] > 0.0f || u.rays[0] > 0.0f || u.grade[0] > 0.0f) || !depth || depth.width != ct.width ||
+        depth.height != ct.height)
+        return;
+    @autoreleasepool
+    {
+        flush_pass();
+        float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+        if (vw < 16 || vh < 16 || vx + vw > ct.width || vy + vh > ct.height)
+            vx = vy = 0, vw = (float)ct.width, vh = (float)ct.height;
+        uint32_t bdiv = vw > 2048 ? 4 : vw > 1024 ? 2 : 1;
+        NSUInteger bw = (NSUInteger)((vw + bdiv - 1) / bdiv), bh = (NSUInteger)((vh + bdiv - 1) / bdiv);
+        u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+        u.size[0] = (float)ct.width, u.size[1] = (float)ct.height;
+        u.ao[1] = 0.0f, u.shadow[0] = 0.0f, u.smap[0] = 0.0f, u.gi[0] = 0.0f, u.fogc[3] = 0.0f;
+        if (!fx_tex(&g_fx.psrc, ct.pixelFormat, ct.width, ct.height) || !fx_bloom_tex(bw, bh))
+            return;
+        if (!g_fx.comp_pipe || g_fx.comp_fmt != ct.pixelFormat)
+        {
+            [g_fx.comp_pipe release];
+            g_fx.comp_pipe = fx_pipeline(@"fx_comp", ct.pixelFormat);
+            g_fx.comp_fmt = ct.pixelFormat;
+        }
+        if (!g_fx.comp_pipe)
+            return;
+        id<MTLBlitCommandEncoder> b = [cmd() blitCommandEncoder];
+        [b copyFromTexture:ct sourceSlice:0 sourceLevel:0 toTexture:g_fx.psrc destinationSlice:0 destinationLevel:0
+                sliceCount:1 levelCount:1];
+        [b endEncoding];
+        fx_bloom_rays(&u, g_fx.psrc, g_fx.psrc, depth);
+        id<MTLTexture> comp_in[7] = { g_fx.psrc, g_fx.psrc, depth, g_fx.b1a, g_fx.b2a, g_fx.rb, g_fx.rb };
+        g_pass = GFX_PASS_COMP;
+        fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 7, NULL);
+    }
+}
+
+static void scene_fx(GfxTex* color, const GfxScene* s, int defer)
 {
     @autoreleasepool
     {
@@ -8766,6 +8925,14 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             }
             u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.post_bloom > 0.0f ? 0.0f : g_fxs.bloom, u.bloom[2] = 0.25f;
             u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
+            /* the temporal upscaler next (defer): here only the light on the world as it was drawn (the occlusion,
+             * the sun's shadows, the bounce light, the fog); the bloom, the rays and the grade are made of the lit
+             * scene after it, at the size it is shown (scene_fx_post), so its history holds no glow or grade */
+            if (defer)
+            {
+                g_fx.post_u = u, g_fx.post_serial = g_serial;
+                u.bloom[1] = 0.0f, u.rays[0] = 0.0f, u.grade[0] = 0.0f;
+            }
             if (g_fxs.water > 0.0f && have_v)
                 water_scene(s, vinv, &u, ct);
             /* the world for rays, before the passes that trace them */
@@ -8785,11 +8952,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
                 u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
             if (fx_tex(&g_fx.src, ct.pixelFormat, ct.width, ct.height) && fx_tex(&g_fx.ao0, MTLPixelFormatRGBA16Float, aw, ah) &&
-                fx_tex(&g_fx.ao1, MTLPixelFormatRGBA16Float, aw, ah) && fx_tex(&g_fx.b1a, MTLPixelFormatRGBA16Float, bw, bh) &&
-                fx_tex(&g_fx.b1b, MTLPixelFormatRGBA16Float, bw, bh) &&
-                fx_tex(&g_fx.b2a, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
-                fx_tex(&g_fx.b2b, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
-                fx_tex(&g_fx.ra, MTLPixelFormatRGBA16Float, bw, bh) && fx_tex(&g_fx.rb, MTLPixelFormatRGBA16Float, bw, bh))
+                fx_tex(&g_fx.ao1, MTLPixelFormatRGBA16Float, aw, ah) &&
+                (defer || fx_bloom_tex(bw, bh))) /* (deferred: made at the shown size, scene_fx_post) */
             {
                 if (!g_fx.comp_pipe || g_fx.comp_fmt != ct.pixelFormat)
                 {
@@ -8803,8 +8967,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     [b copyFromTexture:ct sourceSlice:0 sourceLevel:0 toTexture:g_fx.src destinationSlice:0 destinationLevel:0
                             sliceCount:1 levelCount:1];
                     [b endEncoding];
-                    static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 }, across2[2] = { 2, 0 }, down2[2] = { 0, 2 };
-                    MTLViewport q = fx_full(g_fx.ao0), qb = fx_full(g_fx.b1a), e = fx_full(g_fx.b2a);
+                    static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 };
+                    MTLViewport q = fx_full(g_fx.ao0);
                     id<MTLTexture> ao_out = g_fx.ao0;
                     if (u.ao[1] > 0.0f || u.shadow[0] > 0.0f || u.smap[0] > 0.0f)
                     {
@@ -8879,27 +9043,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                             g_fx.gih_at = to, g_fx.gih_serial = g_serial;
                         }
                     }
-                    if (u.bloom[1] > 0.0f)
-                    {
-                        id<MTLTexture> b_in[2] = { g_fx.src, ao_out }; /* shaded as fx_comp shades */
-                        g_pass = GFX_PASS_BLOOM;
-                        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.bright_pipe, qb, &u, b_in, 2, NULL);
-                        fx_pass(g_fx.b1b, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1a, 1, across2);
-                        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1b, 1, down2);
-                        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.down_pipe, e, &u, &g_fx.b1a, 1, NULL);
-                        fx_pass(g_fx.b2b, MTLLoadActionDontCare, g_fx.gauss_pipe, e, &u, &g_fx.b2a, 1, across2);
-                        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.gauss_pipe, e, &u, &g_fx.b2b, 1, down2);
-                    }
-                    if (u.rays[0] > 0.0f)
-                    {
-                        id<MTLTexture> mask_in[2] = { g_fx.src, depth };
-                        g_pass = GFX_PASS_RAYS;
-                        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.raymask_pipe, qb, &u, mask_in, 2, NULL);
-                        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.rays_pipe, qb, &u, &g_fx.ra, 1, NULL);
-                        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.rb, 1, across);
-                        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.ra, 1, down);
-                    }
-                    id<MTLTexture> comp_in[7] = { g_fx.src, ao_out, depth, g_fx.b1a, g_fx.b2a, g_fx.rb, gi_out ? gi_out : g_fx.rb };
+                    fx_bloom_rays(&u, g_fx.src, ao_out, depth);
+                    /* (unread when deferred: the source stands in for what is not made yet) */
+                    id<MTLTexture> b1 = defer ? g_fx.src : g_fx.b1a, b2 = defer ? g_fx.src : g_fx.b2a, ry = defer ? g_fx.src : g_fx.rb;
+                    id<MTLTexture> comp_in[7] = { g_fx.src, ao_out, depth, b1, b2, ry, gi_out ? gi_out : ry };
                     g_pass = GFX_PASS_COMP;
                     fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 7, NULL);
                     if (rt && (int)g_fxs.debug == 8)
