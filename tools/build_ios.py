@@ -208,7 +208,7 @@ def host(t):
         sim = ['-Wl,-sectcreate,__TEXT,__entitlements,' + path]
     run(t.cc + ['-o', exe] + objs + archives + hidden + sim + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
                                                                                   '-Wl,-export_dynamic'])
-    return exe, bool(pol_sources)
+    return exe, bool(pol_libs)
 
 
 def info_plist(t):

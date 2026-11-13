@@ -237,7 +237,7 @@ def main():
     pol_sources, pol_flags, pol_libs = build_posix.pol('aarch64-linux-android', str(OUT))
     if pol_sources:
         objs += compile_many(pol_sources, 'pol', pol_flags + build_posix.POL_CFLAGS)
-        # the crate's symbols stay out of libmain.so's exports
+    if pol_libs:  # the client's symbols stay out of libmain.so's exports, built here or prebuilt
         link = pol_libs + ['-Wl,--exclude-libs,' + os.path.basename(a) for a in pol_libs] + link
     objs += compile_many(
         PORTABLE
@@ -274,7 +274,7 @@ def main():
         + objs
         + link
     )
-    if pol_sources:  # the shipped library names none of the PlayOnline client's functions (build_posix.POL_CFLAGS)
+    if pol_libs:  # the shipped library names none of the PlayOnline client's functions (build_posix.POL_CFLAGS)
         shutil.copyfile(library_path, OUT / 'libmain.debug.so')
         run([TC / 'llvm-strip', '--strip-all', library_path])
     metadata = {
