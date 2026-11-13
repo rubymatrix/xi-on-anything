@@ -1033,6 +1033,53 @@ static void state_light(GfxCharLight* o, uint32_t l, float scale)
     }
 }
 
+/* The material a mesh's draws are lit with: the last material record the game walked (its colour and light scale), which
+ * stays set on the device until the next. A mesh whose stream draws before its first record (some shields, the chocobo)
+ * is drawn by the game with the one before it, often the previous mesh's of the same actor; so is it here. */
+static uint32_t g_mat_color = 0x80808080u;
+static float g_mat_f = 1.0f;
+
+/* the per-draw state for the current material: the actor's lights and ambient at the material's scale, the device's
+ * material, the texture factor from the material colour and the actor's tint, the fog */
+static uint32_t char_state(const float* W, const float* WV, const float* P, uint32_t amb, uint32_t mat, uint32_t tint,
+    uint32_t fog_on, uint32_t fog_col, uint32_t fs, uint32_t fe)
+{
+    float f = g_mat_f;
+    if (g_ncstates == g_capcstates)
+    {
+        g_capcstates = g_capcstates ? g_capcstates * 2 : 256;
+        g_cstates = (GfxCharState*)realloc(g_cstates, g_capcstates * sizeof *g_cstates);
+    }
+    GfxCharState* s = &g_cstates[g_ncstates];
+    memset(s, 0, sizeof *s);
+    mat_mul(s->wvp, WV, P);
+    memcpy(s->world, W, sizeof s->world);
+    for (int k = 0; k < 4; ++k)
+        state_light(&s->light[k], FFXI_SCENE_ACTOR_LIGHTS + 0x68u * k, f);
+    for (int c = 0; c < 3; ++c) /* the ambient bytes times the material's scale, truncated, at most 255 */
+    {
+        float v = (float)((amb >> (8 * (2 - c))) & 255) * f;
+        uint32_t b = v > 0.0f ? (uint32_t)v : 0;
+        s->ambient[c] = (float)(b > 255 ? 255 : b) / 255.0f;
+    }
+    float day = scene_day();
+    if (day < 1.0f)
+        night_grade(s->ambient, day);
+    for (int c = 0; c < 4; ++c)
+        s->mat_diffuse[c] = rdf32(mat + 4u * c), s->mat_ambient[c] = rdf32(mat + 16 + 4u * c),
+        s->mat_emissive[c] = rdf32(mat + 48 + 4u * c);
+    uint32_t tf = tfactor(g_mat_color, tint);
+    s->tfactor[0] = (float)((tf >> 16) & 255) / 255.0f, s->tfactor[1] = (float)((tf >> 8) & 255) / 255.0f;
+    s->tfactor[2] = (float)(tf & 255) / 255.0f, s->tfactor[3] = (float)(tf >> 24) / 255.0f;
+    float fsf, fef;
+    memcpy(&fsf, &fs, 4), memcpy(&fef, &fe, 4);
+    s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on && gfx_fx_get("fog_modern") <= 0.0f ? 1.0f : 0.0f;
+    s->fog_col[0] = (float)((fog_col >> 16) & 255) / 255.0f, s->fog_col[1] = (float)((fog_col >> 8) & 255) / 255.0f;
+    s->fog_col[2] = (float)(fog_col & 255) / 255.0f;
+    s->fog_col[3] = f; /* (the material's light scale, for the back end's lamps) */
+    return g_ncstates++;
+}
+
 /* one mesh draw taken (1 and the draw items recorded) or left to the game (0; an environment-mapped one's items recorded
  * to cast only) */
 static int chars_take(Guest* g, uint32_t res, uint32_t model)
@@ -1162,40 +1209,8 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                 if (rd8(vbuf + 0x69) && rd16(rec + 0x1c))
                     cls = 8;
                 hidden = rd8(model + 0xa8 + cls) != 0;
-                float f = rdf32(rec + 0x10);
-                if (g_ncstates == g_capcstates)
-                {
-                    g_capcstates = g_capcstates ? g_capcstates * 2 : 256;
-                    g_cstates = (GfxCharState*)realloc(g_cstates, g_capcstates * sizeof *g_cstates);
-                }
-                GfxCharState* s = &g_cstates[g_ncstates];
-                memset(s, 0, sizeof *s);
-                mat_mul(s->wvp, WV, P);
-                memcpy(s->world, W, sizeof W);
-                for (int k = 0; k < 4; ++k)
-                    state_light(&s->light[k], FFXI_SCENE_ACTOR_LIGHTS + 0x68u * k, f);
-                for (int c = 0; c < 3; ++c) /* the ambient bytes times the material's scale, truncated, at most 255 */
-                {
-                    float v = (float)((amb >> (8 * (2 - c))) & 255) * f;
-                    uint32_t b = v > 0.0f ? (uint32_t)v : 0;
-                    s->ambient[c] = (float)(b > 255 ? 255 : b) / 255.0f;
-                }
-                float day = scene_day();
-                if (day < 1.0f)
-                    night_grade(s->ambient, day);
-                for (int c = 0; c < 4; ++c)
-                    s->mat_diffuse[c] = rdf32(mat + 4u * c), s->mat_ambient[c] = rdf32(mat + 16 + 4u * c),
-                    s->mat_emissive[c] = rdf32(mat + 48 + 4u * c);
-                uint32_t tf = tfactor(rd32(rec), tint);
-                s->tfactor[0] = (float)((tf >> 16) & 255) / 255.0f, s->tfactor[1] = (float)((tf >> 8) & 255) / 255.0f;
-                s->tfactor[2] = (float)(tf & 255) / 255.0f, s->tfactor[3] = (float)(tf >> 24) / 255.0f;
-                float fsf, fef;
-                memcpy(&fsf, &fs, 4), memcpy(&fef, &fe, 4);
-                s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on && gfx_fx_get("fog_modern") <= 0.0f ? 1.0f : 0.0f;
-                s->fog_col[0] = (float)((fog_col >> 16) & 255) / 255.0f, s->fog_col[1] = (float)((fog_col >> 8) & 255) / 255.0f;
-                s->fog_col[2] = (float)(fog_col & 255) / 255.0f;
-                s->fog_col[3] = f; /* (the material's light scale, for the back end's lamps) */
-                cur_state = g_ncstates++;
+                g_mat_color = rd32(rec), g_mat_f = rdf32(rec + 0x10);
+                cur_state = ~0u; /* made at its first draw */
                 p += 0x2e;
             }
             else
@@ -1207,8 +1222,11 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                     wr32(p + 2, o);
                 }
                 uint32_t o = rd32(p + 2);
-                tex_iface = o ? (rd32(o + 0x40) ? rd32(o + 0x40) : rd32(o + 0x44)) : 0;
-                tex = tex_iface ? d3d8_world_texture(tex_iface) : NULL;
+                if (o) /* none found: the game sets none, and draws on with the texture set before it */
+                {
+                    tex_iface = rd32(o + 0x40) ? rd32(o + 0x40) : rd32(o + 0x44);
+                    tex = tex_iface ? d3d8_world_texture(tex_iface) : NULL;
+                }
                 p += 0x12;
             }
             continue;
@@ -1217,7 +1235,9 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         if (op == 0x54 || op == 0x5453)
         {
             uint32_t nidx = op == 0x54 ? n * 3 : n + 2;
-            if (!hidden && tex && cur_state != ~0u && idx + nidx <= ibsize / isize)
+            if (!hidden && tex && idx + nidx <= ibsize / isize && cur_state == ~0u)
+                cur_state = char_state(W, WV, P, amb, mat, tint, fog_on, fog_col, fs, fe);
+            if (!hidden && tex && idx + nidx <= ibsize / isize)
                 for (int m = 0; m <= mirror; ++m)
                 {
                     GfxCharItem** list = envmap ? &g_soitems : &g_citems;
