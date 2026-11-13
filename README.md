@@ -120,6 +120,6 @@ and a LandSandBoat server to sign in to. What every platform has in common is in
 ## License
 
 MIT (`LICENSE`), for this repo's own code. `third_party/` keeps its own licenses (stb: MIT or
-public domain; SDL3: zlib; Mbed TLS: Apache-2.0). The license does not cover FINAL FANTASY XI:
+public domain; SDL3 and nanosvg: zlib; Mbed TLS: Apache-2.0). The license does not cover FINAL FANTASY XI:
 no game files or code derived from them are in this repo, and what the tools produce from your
 install (`generated/`, `build/`) is derived from Square Enix's work, for your own use only.

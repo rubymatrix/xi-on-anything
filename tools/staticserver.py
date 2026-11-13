@@ -20,6 +20,7 @@ In the zone, chat commands (say them, e.g. "!zone 245"):
   !zone <id> [x y z [rot]]   change zone (to a known position for the zone, or the one given)
   !pos <x> <y> <z> [rot]     move within the zone (re-enters the zone at that position)
   !where                     print the zone and position
+  !buffs [id ...]            show these status effects' icons (none: clear them)
 FFXI_STATIC_DEBUG=1 logs every zone packet the client sends.
 Zone lines work when --sql points at a LandSandBoat sql/ folder (zonelines.sql); its
 zone_settings.sql adds each zone's music.
@@ -620,11 +621,14 @@ class ZoneSession:
             elif words and words[0] == 'where':
                 self.say(f'{self.srv.zones.name(self.zone)} ({self.zone}): {self.pos[0]:.2f} {self.pos[1]:.2f} '
                          f'{self.pos[2]:.2f} rot {self.pos[3]}')
+            elif words and words[0] == 'buffs':
+                self.buffs = [int(w, 0) for w in words[1:]][:32]  # status effect ids, shown as icons
+                self.queue.append(self.char_status())
             elif words and words[0] == 'time' and len(words) >= 2:
                 self.srv.clock = vana_offset(float(words[1]))  # the client reads the clock at a zone-in
                 self.change_zone(self.zone, list(self.pos))
             else:
-                self.say('commands: !zone <id> [x y z [rot]], !pos <x> <y> <z> [rot], !where, !time <hour>')
+                self.say('commands: !zone <id> [x y z [rot]], !pos <x> <y> <z> [rot], !where, !time <hour>, !buffs [id ...]')
         except ValueError:
             self.say('numbers, please')
 
@@ -769,7 +773,12 @@ class ZoneSession:
         """0x037: status icons, flags, speed"""
         c = self.srv.char
         b = bytearray(0x5C)
-        b[0:32] = b'\xff' * 32  # no status effects
+        b[0:32] = b'\xff' * 32  # no status effects, unless !buffs gave some
+        bits = 0
+        for i, icon in enumerate(getattr(self, 'buffs', [])[:32]):
+            b[i] = icon & 0xFF
+            bits |= ((icon >> 8) & 3) << (2 * i)
+        struct.pack_into('<Q', b, 0x48, bits)
         flags0 = (self.female() << 8) | ((c['size'] & 3) << 11) | (100 << 16)
         flags1 = (c['speed'] & 0xFFF) | (40 << 17)
         struct.pack_into('<III', b, 0x20, c['char_id'], flags0, flags1)

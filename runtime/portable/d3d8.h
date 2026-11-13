@@ -39,6 +39,13 @@ uint32_t d3d8_capture_result(uint32_t* w, uint32_t* h, uint32_t* format, int* ok
 /* Adds a texture pack: <dir>/<hash>_<w>x<h>.dds replacements for the game's textures (see d3d8.c,
  * tools/make_texpack.py). Before the device is created. */
 void d3d8_texture_pack(const char* dir);
+/* A texture source: replacements drawn at run time. fn sees the first level of each texture of 64x64
+ * or less as the game uploads it (w x h, D3DFORMAT format, rows pitch bytes apart) and returns a
+ * malloc'd A8R8G8B8 image *size x *size (a power of two) to draw with instead, or NULL. It is asked
+ * once per distinct upload. NULL for none. */
+typedef uint8_t* (*D3d8TextureSource)(uint32_t w, uint32_t h, uint32_t format, const uint8_t* level0, uint32_t pitch,
+    uint32_t* size);
+void d3d8_set_texture_source(D3d8TextureSource fn);
 /* The game is loading one of its water models (host64's hook on the model loader): 1 before, 0 after.
  * The vertex buffers made meanwhile are the model's, and draws from them are drawn as water. */
 void d3d8_water_loading(int on);

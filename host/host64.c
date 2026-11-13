@@ -90,6 +90,7 @@
 #include "signin.h"
 #include "appdefaults.h"
 #include "modern.h"
+#include "vicons.h"
 #include "cexi.h"
 #include "discord.h"
 #include "frame.h"
@@ -951,6 +952,21 @@ static void chat_keyboard(void)
 }
 #endif
 
+/* host/vicons.c reads the install through the DAT overlays, as the game would */
+static char g_vicons_game[1024];
+
+static uint8_t* vicons_read(const char* rel, size_t* size)
+{
+    char guest[1200], path[1200];
+    snprintf(guest, sizeof guest, "%s\\%s", g_vicons_game, rel);
+    for (char* c = guest; *c; ++c)
+        if (*c == '/')
+            *c = '\\';
+    if (!vfs_overlay_path(guest, path, sizeof path) && !vfs_host_path(guest, path, sizeof path))
+        return NULL;
+    return plat_read_file(path, size);
+}
+
 static void present_hook(void)
 {
 #if defined(FFXI_ANDROID_VULKAN)
@@ -1613,6 +1629,13 @@ int main(int argc, char** argv)
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
         &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen, &g_fps_limit };
     modern_init(&ms);
+    /* status icons drawn from vectors (host/vicons.c); FFXI_VECTOR_ICONS=0 keeps the game's */
+    if (!getenv("FFXI_VECTOR_ICONS") || strcmp(getenv("FFXI_VECTOR_ICONS"), "0"))
+    {
+        snprintf(g_vicons_game, sizeof g_vicons_game, "%s", game);
+        vicons_init(vicons_read);
+        d3d8_set_texture_source(vicons_texture);
+    }
     setup_nameplates();
     setup_water();
     setup_lod();

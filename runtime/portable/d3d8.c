@@ -182,6 +182,7 @@ typedef struct Obj
     uint32_t repl_pad;   /* ... whose glyph quads are drawn this many texels wider each side */
     uint32_t repl_pad_min; /* ... when they are at least this many texels tall */
     const struct PackEntry* repl_entry; /* ... and its glyph table, if it has one */
+    uint8_t repl_mips;   /* ... sampled through all its mipmaps (a texture source's, not a glyph sheet) */
     uint32_t pw, ph;     /* render-target textures drawn at the screen's resolution (native_size): gpu's
                           * size, where the game sees width x height; 0 when they are the same */
     uint8_t water;       /* vertex buffers: made while the game loaded a water model (d3d8_water_loading) */
@@ -464,15 +465,83 @@ static GfxTex* load_dds(const char* path)
     return t;
 }
 
-/* The replacement for a texture whose first level was just uploaded, or NULL; *pad its entry's. */
-static GfxTex* texture_replacement(const Obj* t, const Obj* level0, uint32_t* pad, uint32_t* pad_min, const PackEntry** entry)
+/* --- texture sources ----------------------------------------------------------------------------------
+ * d3d8_set_texture_source(fn): replacements drawn at run time (host/vicons.c: the status icons from
+ * vectors). fn sees the first level of each small texture the game uploads and may return a square
+ * A8R8G8B8 image to draw with instead; it is made into a texture with its mipmaps once per distinct
+ * upload (by the level's hash), and a texture pack's entry for the same texture wins. */
+#define SOURCE_MAX 64 /* textures larger than this are not shown to the source */
+
+typedef struct SourceEntry
 {
-    *pad = *pad_min = 0, *entry = NULL;
+    uint64_t hash;
+    uint32_t w, h, format;
+    GfxTex* tex; /* NULL: the source has none for it */
+} SourceEntry;
+
+static D3d8TextureSource g_source;
+static SourceEntry* g_srcs;
+static uint32_t g_nsrcs, g_capsrcs;
+
+void d3d8_set_texture_source(D3d8TextureSource fn)
+{
+    g_source = fn;
+}
+
+/* An A8R8G8B8 image n x n (n a power of two) with its mipmaps, each the average of the four texels
+ * above it weighted by their alpha, so transparent texels do not darken the edges. */
+static GfxTex* source_texture(uint8_t* px, uint32_t n)
+{
+    uint32_t levels = 1;
+    while ((n >> levels) >= 1 && levels < 16)
+        levels++;
+    GfxTex* t = gfx_tex_create(GFX_TEX_2D, 21, n, n, levels, GFX_USE_SAMPLE);
+    if (!t)
+        return NULL;
+    uint8_t* cur = px;
+    for (uint32_t l = 0, w = n; l < levels; ++l, w >>= 1)
+    {
+        gfx_tex_upload(t, 0, l, cur, w * 4);
+        if (w == 1)
+            break;
+        uint32_t h = w / 2;
+        uint8_t* next = (uint8_t*)malloc((size_t)h * h * 4);
+        if (!next)
+            break;
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < h; ++x)
+            {
+                uint32_t c[4] = { 0, 0, 0, 0 };
+                for (uint32_t k = 0; k < 4; ++k)
+                {
+                    const uint8_t* q = cur + (((2 * y + (k >> 1)) * w) + 2 * x + (k & 1)) * 4;
+                    c[0] += q[0] * q[3], c[1] += q[1] * q[3], c[2] += q[2] * q[3], c[3] += q[3];
+                }
+                uint8_t* o = next + (y * h + x) * 4;
+                for (int ch = 0; ch < 3; ++ch)
+                    o[ch] = (uint8_t)(c[3] ? (c[ch] + c[3] / 2) / c[3] : 0);
+                o[3] = (uint8_t)((c[3] + 2) / 4);
+            }
+        if (cur != px)
+            free(cur);
+        cur = next;
+    }
+    if (cur != px)
+        free(cur);
+    return t;
+}
+
+/* The replacement for a texture whose first level was just uploaded, or NULL; *pad its entry's. */
+static GfxTex* texture_replacement(const Obj* t, const Obj* level0, uint32_t* pad, uint32_t* pad_min, const PackEntry** entry,
+    uint8_t* mips)
+{
+    *pad = *pad_min = 0, *entry = NULL, *mips = 0;
     if (g_texlog < 0)
         g_texlog = getenv("FFXI_TEXLOG") && getenv("FFXI_TEXLOG")[0] == '1';
-    if (t->kind != O_TEXTURE || (!g_npack && !g_texlog))
+    int sourced = g_source && t->width <= SOURCE_MAX && t->height <= SOURCE_MAX;
+    if (t->kind != O_TEXTURE || (!g_npack && !g_texlog && !sourced))
         return NULL;
-    int sized = g_texlog;
+    int sized = g_texlog || sourced;
     for (uint32_t i = 0; i < g_npack && !sized; ++i)
         sized = g_pack[i].w == t->width && g_pack[i].h == t->height;
     if (!sized)
@@ -497,6 +566,36 @@ static GfxTex* texture_replacement(const Obj* t, const Obj* level0, uint32_t* pa
         }
         *pad = e->pad, *pad_min = e->pad_min, *entry = e;
         return e->tex;
+    }
+    for (uint32_t i = 0; sourced && i < g_nsrcs; ++i)
+    {
+        const SourceEntry* e = &g_srcs[i];
+        if (e->hash == hash && e->w == t->width && e->h == t->height && e->format == level0->format)
+            return (*mips = e->tex != NULL), e->tex;
+    }
+    if (sourced)
+    {
+        uint32_t size = 0;
+        uint8_t* px = g_source(level0->width, level0->height, level0->format, p, pitch, &size);
+        GfxTex* tex = px && size && !(size & (size - 1)) ? source_texture(px, size) : NULL;
+        free(px);
+        if (g_nsrcs == g_capsrcs)
+        {
+            uint32_t cap = g_capsrcs ? g_capsrcs * 2 : 256;
+            SourceEntry* grown = (SourceEntry*)realloc(g_srcs, cap * sizeof *g_srcs);
+            if (grown)
+                g_srcs = grown, g_capsrcs = cap;
+        }
+        if (g_nsrcs < g_capsrcs)
+            g_srcs[g_nsrcs++] = (SourceEntry){ hash, t->width, t->height, level0->format, tex };
+        if (tex)
+        {
+            if (g_texlog)
+                rt_log("[recomp] textures: %ux%u %016llx drawn by the texture source at %ux%u\n", t->width, t->height,
+                    (unsigned long long)hash, size, size);
+            *mips = 1;
+            return tex;
+        }
     }
     if (g_texlog)
         rt_log("[recomp] textures: %ux%u format %08x hash %016llx texture %08x (no replacement)\n", t->width, t->height,
@@ -527,7 +626,7 @@ static GfxTex* texture_for_draw(uint32_t p, int* kind)
             {
                 gfx_tex_upload(t->gpu, s->face, s->level, GUEST_PTR(s->mem), fmt_pitch(s->format, s->width));
                 if (i == 0)
-                    t->repl = texture_replacement(t, s, &t->repl_pad, &t->repl_pad_min, &t->repl_entry);
+                    t->repl = texture_replacement(t, s, &t->repl_pad, &t->repl_pad_min, &t->repl_entry, &t->repl_mips);
             }
             if (s)
                 s->dirty = 0;
@@ -2786,7 +2885,8 @@ static int build_draw(GfxDraw* d)
             if (to->repl && tex == to->repl) /* drawn smaller than it is: linear, between its mipmaps */
             {
                 d->samp[i].mag = d->samp[i].min = d->samp[i].mip = 2, d->samp[i].max_level = 0;
-                d->samp[i].lod_cap = 2; /* its half-size mip at most: smaller ones blend neighbouring glyphs in */
+                d->samp[i].lod_cap = to->repl_mips ? 0 : 2; /* a glyph sheet's half-size mip at most: smaller ones blend
+                                                             * neighbouring glyphs in */
                 if (i == 0)
                     repl0 = 1;
             }
@@ -4559,7 +4659,7 @@ int d3d8_world_sampler(uint32_t iface, GfxSampler* out)
     *out = (GfxSampler){ (uint8_t)t[13], (uint8_t)t[14], (uint8_t)t[25], (uint8_t)t[16], (uint8_t)t[17], (uint8_t)t[18], (uint8_t)t[21],
         (uint8_t)maxlevel, 0, { 0 }, t[15] };
     if (to->repl) /* a texture pack's: as build_draw draws it */
-        out->mag = out->min = out->mip = 2, out->max_level = 0, out->lod_cap = 2;
+        out->mag = out->min = out->mip = 2, out->max_level = 0, out->lod_cap = to->repl_mips ? 0 : 2;
     return 1;
 }
 
