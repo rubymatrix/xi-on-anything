@@ -423,6 +423,8 @@ static float get(const Row* r)
         return g_setup.nameplate_sy ? *g_setup.nameplate_sy : 1.0f;
     if (!strncmp(r->key, "@hide", 5))
         return g_hide >> atoi(r->key + 5) & 1 ? 0.0f : 1.0f;
+    if (!strcmp(r->key, "@cmd_ctrl"))
+        return (float)user32_cmd_as_ctrl();
     if (!strcmp(r->key, "@addon"))
         return g_addons && g_addon_top + (r - ADDON_ROWS) < g_addon_n ? (float)g_addons->get(g_addon_top + (int)(r - ADDON_ROWS))
                                                                       : 0.0f;
@@ -506,6 +508,11 @@ static void set(const Row* r, float v)
         g_hide = v != 0.0f ? g_hide & ~bit : g_hide | bit;
         g_host_touched = 1;
         hide_apply();
+    }
+    else if (!strcmp(r->key, "@cmd_ctrl"))
+    {
+        user32_set_cmd_as_ctrl(v != 0.0f);
+        g_host_touched = 1;
     }
     else if (!strcmp(r->key, "@addon"))
     {
@@ -758,6 +765,12 @@ static const Row INTERFACE_ROWS[] = {
         "Job Points in the main menu's Status." },
     { "Alter Ego Points", "@hide6", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "Alter Ego Points in the main menu's Status." },
+#ifdef __APPLE__
+    HEADER_ROW("Keyboard"),
+    { "Command Key", "@cmd_ctrl", CHOICE, 2, { "Command", "Ctrl" }, { 0, 1 }, 0, 0,
+        "Ctrl makes Command the game's Ctrl key, for keyboards without a right Ctrl. The menu bar's Command "
+        "shortcuts are off meanwhile, all but Quit." },
+#endif
 };
 
 /* ---- remembering ---- */
@@ -898,6 +911,7 @@ static void save(void)
                 g_setup.fps_limit ? *g_setup.fps_limit : 0u, (double)g_ui_aspect, g_hide);
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
+            fprintf(f, "cmd_ctrl=%d\n", user32_cmd_as_ctrl());
             if (g_setup.nameplate_fix && g_setup.nameplate_sx && g_setup.nameplate_sy)
                 fprintf(f, "nameplates=%d\nnameplate_scale=%gx%g\n", *g_setup.nameplate_fix,
                     (double)*g_setup.nameplate_sx, (double)*g_setup.nameplate_sy);
@@ -1353,7 +1367,12 @@ static Page PAGES[] = {
     { "menu    legacyfw", "Legacy", "The older effects on the game's own draws (Renderer: Legacy).", 0x1c0201u,
         LEGACY_ROWS, sizeof LEGACY_ROWS / sizeof LEGACY_ROWS[0] },
 #endif
+#ifdef __APPLE__
+    { "menu    interfaw", "Interface", "Nameplates, items of the game's own menus shown or hidden, and the Command key.",
+        0x1c0201u,
+#else
     { "menu    interfaw", "Interface", "Nameplates, and items of the game's own menus shown or hidden.", 0x1c0201u,
+#endif
         INTERFACE_ROWS, sizeof INTERFACE_ROWS / sizeof INTERFACE_ROWS[0] },
     { "menu    gamepadw", "Gamepad", "Which button does what: the game's gamepad settings.", 0x1c0209u,
         GAMEPAD_ROWS, sizeof GAMEPAD_ROWS / sizeof GAMEPAD_ROWS[0] },
@@ -3066,6 +3085,8 @@ void modern_init(const ModernSetup* setup)
     if (!setup->nameplates_given && setup->nameplate_sx && cfg_value(path, "nameplate_scale", buf, sizeof buf) &&
         sscanf(buf, "%fx%f", &sx, &sy) == 2 && sx >= 0.25f && sx <= 4.0f && sy >= 0.25f && sy <= 4.0f)
         *setup->nameplate_sx = sx, *setup->nameplate_sy = sy;
+    if (cfg_value(path, "cmd_ctrl", buf, sizeof buf))
+        user32_set_cmd_as_ctrl(atoi(buf) != 0);
     if (cfg_value(path, "game_shadows", buf, sizeof buf))
     {
         long v = strtol(buf, NULL, 10);
