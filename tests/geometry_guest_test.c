@@ -2,6 +2,7 @@
 #include "geometry_simd.h"
 #include "geometry_test_memory.h"
 #include "guest.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,16 @@ int gwin_is_committed(uint32_t a)
 {
     ++probe_count;
     return a != blocked_page;
+}
+/* the guard's log: the first rejection for each reason is reported */
+static char logged[4096];
+void rt_log(const char* fmt, ...)
+{
+    size_t used = strlen(logged);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(logged + used, sizeof logged - used, fmt, ap);
+    va_end(ap);
 }
 static void body(Guest* g)
 {
@@ -325,6 +336,10 @@ int main(void)
     need(!geometry_guest_run(NULL, &layout, body), cases++, "null Guest");
     need(!geometry_guest_run(&g, NULL, body), cases++, "null layout");
     need(!geometry_guest_run(&g, &layout, NULL), cases++, "null body");
+    const char* reasons[] = {"(game or host state)", "(no work)", "(layout)",
+                             "(work cap)",           "(unmapped page)", "(alias)"};
+    for (unsigned i = 0; i < sizeof reasons / sizeof *reasons; ++i)
+        need(strstr(logged, reasons[i]) != NULL, cases, reasons[i]);
     printf("{\"alias_guard_cases\":%u,\"unexpected_admissions\":0,\"Guest_or_memory_changes\":0}\n", cases);
     geometry_test_release(rt_guest_base);
     return 0;
