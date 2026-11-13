@@ -1,4 +1,4 @@
-/* The game's size for the screen it is on. See display_fit.h. */
+/* The game's size for the screen it is on (iOS and Android). See display_fit.h. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,11 +48,15 @@ void display_policy(const DisplayIn* in, DisplayOut* out)
 #include "k32.h"
 #include "modern.h"
 #include "user32.h"
+#ifdef __ANDROID__
+void android_overlay_present_rect(int x, int y, int w, int h); /* android_overlay.c */
+#endif
 
 #define SETTINGS_KEY "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI"
 
 static SDL_Window* g_window;
 static DisplayIn g_last;
+static float g_coords = 1.0f; /* the window's coordinates a point: iOS's are points, Android's pixels */
 
 /* What the window is now. FFXI_MAX_PIXELS and FFXI_UI_POINTS override the defaults: a phone (under
  * 600 points high) about 2.4 MP, two thirds of its native pixels, as it runs hot and on battery; an
@@ -60,16 +64,22 @@ static DisplayIn g_last;
 static int read_window(SDL_Window* win, DisplayIn* in)
 {
     memset(in, 0, sizeof *in);
-    int pw = 0, ph = 0;
-    SDL_GetWindowSize(win, &in->win_w, &in->win_h);
+    int cw = 0, ch = 0, pw = 0, ph = 0;
+    SDL_GetWindowSize(win, &cw, &ch);
     SDL_GetWindowSizeInPixels(win, &pw, &ph);
-    if (in->win_w <= 0 || in->win_h <= 0)
+    if (cw <= 0 || ch <= 0)
         return 0;
+#ifdef __ANDROID__
+    float k = SDL_GetDisplayContentScale(SDL_GetDisplayForWindow(win)); /* a point: a dp, the display's density */
+    g_coords = k > 0.0f ? k : 1.0f;
+#endif
+    in->win_w = (int)lroundf((float)cw / g_coords), in->win_h = (int)lroundf((float)ch / g_coords);
     in->density = (float)pw / (float)in->win_w;
     SDL_Rect safe;
     if (SDL_GetWindowSafeArea(win, &safe)) /* across only: the full height, the home indicator over the
                                                 * game's foot as in any full-screen game, bars only beside it */
-        in->safe_x = safe.x, in->safe_y = 0, in->safe_w = safe.w, in->safe_h = in->win_h;
+        in->safe_x = (int)lroundf((float)safe.x / g_coords), in->safe_y = 0,
+        in->safe_w = (int)lroundf((float)safe.w / g_coords), in->safe_h = in->win_h;
     const char* e = getenv("FFXI_UI_POINTS");
     in->ui_points = e ? (float)atof(e) : 1.0f;
     e = getenv("FFXI_MAX_PIXELS");
@@ -97,6 +107,8 @@ void display_fit_start(void* sdl_window)
 void display_fit_frame(void)
 {
     DisplayIn in;
+    if (!g_window) /* signed in from the command line, no sign-in window: the game's own */
+        g_window = (SDL_Window*)user32_sdl_window(d3d8_window());
     if (!g_window || !read_window(g_window, &in) || !memcmp(&in, &g_last, sizeof in))
         return;
     g_last = in;
@@ -104,9 +116,12 @@ void display_fit_frame(void)
     display_policy(&in, &o);
     modern_window_size(o.w, o.h, o.menu_w, o.menu_h);
     gfx_set_present_rect(o.rect_x, o.rect_y, o.rect_w, o.rect_h);
-    /* the pointer, in points, through the same rectangle */
-    user32_set_view((float)o.rect_x / in.density, (float)o.rect_y / in.density, (float)o.rect_w / in.density,
-        (float)o.rect_h / in.density);
+    /* the pointer, in the window's coordinates, through the same rectangle */
+    float c = g_coords / in.density;
+    user32_set_view((float)o.rect_x * c, (float)o.rect_y * c, (float)o.rect_w * c, (float)o.rect_h * c);
+#ifdef __ANDROID__
+    android_overlay_present_rect(o.rect_x, o.rect_y, o.rect_w, o.rect_h); /* the wallpaper beside it */
+#endif
     fprintf(stderr, "[display] presented into %dx%d at %d,%d of the drawable; the game %dx%d, the interface %dx%d\n",
         o.rect_w, o.rect_h, o.rect_x, o.rect_y, o.w, o.h, o.menu_w, o.menu_h);
 }

@@ -25,6 +25,39 @@ void gamecore_set_session(const uint8_t v[16]);
  * and RequestSelectChr), as the launcher that signed in made it. Opaque bytes here; zeros when
  * none is given. */
 void gamecore_set_auth_block(const uint8_t block[0x34]);
+/* PlayOnline's content table for slot 177, as retail's core keeps it (0x10403080): 64 records of
+ * 0x68 bytes by record number (the launcher's pol_content_table). Without it slot 177 builds
+ * records from the game's own character list, as a LandSandBoat sign-in needs. */
+void gamecore_set_contents(const uint8_t table[64 * 0x68]);
+/* PlayOnline's handle table for slot 173 (0x10405800: 64 records of 0x28 bytes, by handle number,
+ * the content slots at +0x20; the launcher's pol_handle_table), and the member's id for slot 283 as
+ * retail's core keeps it (pol_member_id). Without them: one handle 0, and a fixed id. */
+void gamecore_set_handles(const uint8_t table[64 * 0x28]);
+void gamecore_set_member_id(uint64_t id);
+/* The key polcore keeps the member's ids under (its 0x100aa848, launcher pol_member_key): the
+ * message headers the game handles carry ids under it (slots 279, 284-287, 291). */
+void gamecore_set_member_key(uint64_t key);
+/* Where the game's PlayOnline requests go, for a PlayOnline sign-in: begin(verb, data) returns an
+ * id >= 0 or a negative error; poll(id) returns 0 while pending, then the result (> 0 done, < 0
+ * failed) with the reply's payload in out (*got bytes, at most cap). Verbs: "status" (slot 195's
+ * six int32s; payload V and the authCode when the request went out), "msglist" (u16 cap; payload
+ * the 0x48-byte headers of the member's PlayOnline messages, wire form), "msgread" and "msgdelete"
+ * (a header, wire form; payload the message body), "contentlist" (no data; payload the member's
+ * content table, 64 records of 0x68, as slot 177 hands them out). Called on the game thread with
+ * the guest lock held: neither may block. */
+typedef struct GamecoreRequestHost
+{
+    int32_t (*begin)(void* ctx, const char* verb, const uint8_t* data, uint32_t n);
+    int32_t (*poll)(void* ctx, int32_t id, uint8_t* out, uint32_t cap, uint32_t* got);
+    void* ctx;
+} GamecoreRequestHost;
+void gamecore_set_request_host(const GamecoreRequestHost* host);
+/* The path of polcore's GetPath id (slot 126), guest form. */
+void gamecore_path(uint32_t id, char* out, size_t n);
+/* The member's status as PlayOnline's core keeps it after sign-in (the Viewer's status request and
+ * Load MyStatus): handle, character, login mode, OpenStat, contents class, -1 for none. What slots
+ * 189/190/204/206/207 report until the game's own requests change it. */
+void gamecore_set_presence(int32_t handle, int32_t chr, int32_t mode, int32_t openstat, int32_t contents_class);
 /* The lobby's IPv4 address (host byte order), which the lobby's host name resolves to. Default
  * 127.0.0.1; the hosts set it to their account server (host64: --server). */
 void gamecore_set_lobby(uint32_t ipv4_host_order);

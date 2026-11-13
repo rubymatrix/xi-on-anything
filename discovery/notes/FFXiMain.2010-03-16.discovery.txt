@@ -1,0 +1,98 @@
+FFXiMain.dll / FFXi.dll build 2010-03-16: R1 function discovery for static recompilation
+=====================================================================================
+
+Retail files  a 2010 retail install's FINAL FANTASY XI folder (program files from March 2010, its
+              game data from the July 2009 update)
+  FFXiMain.dll  SHA-256 dce0ad59efbb76cfc0c2f225397aeb9cce383b68e27464d35b85ce751b69eb0a
+                PE timestamp 0x4b9fcd53 (2010-03-16)
+  FFXi.dll      SHA-256 2396a307c3e9abe9628ead58877a1fa9f9149915cb1ce725376b5d1a78a6821d
+                PE timestamp 0x4b9fcd7a
+Version       30100317_3, decrypted from patch.ver
+Metadata      FFXiMain.2010-03-16.meta.json, FFXi.2010-03-16.meta.json (ffxi-recomp-meta/1)
+Label         the date of the PE timestamp. Older than every known build by 15 years.
+
+What changed from 2025-11-12
+----------------------------
+Both DLLs' .text differ; the packer is the same (tools/unpack.py unchanged). FFXiMain's .text is
+2,878,510 bytes against 3,298,350, and every count below shrinks with it.
+
+Carrying addresses over
+-----------------------
+From 2025-11-12 (its images unpacked from a HorizonXI install with the same SHA-256s), with
+`newbuild.py carry`. Every result was checked by disassembling both builds.
+
+  chars_ptr      0x10447ca8   votes 561 of 561
+  present_site   0x100031db   after `call [ecx+0x3c]` (Present), the same 0x64-retry loop
+  crt            all 15 by unique byte windows, same order as 2025-11-12. memcpy has a twin
+                 (memmove, 0x1e40 earlier in both builds); the second one, as in 2025-11-12
+  wraps          packet_decrypt 0x100c2360, packet_encrypt 0x100c2230: same prologues
+                 geometry_* (all five) and the four geometry globals: same code; callback
+                 0x103cc420 checked at `mov ecx,[g]; cmp ecx,edi; je` (only 20 of 31 votes)
+
+Found by hand (no unique window):
+  parse_input      0x100780b0  same body: sub esp,0x404, the 0x200-byte copy, the same early
+                               returns; one register fewer saved, so the mode is [esp+0x414]
+                               where 2025-11-12 reads [esp+0x418]
+  nameplate_scale  0x1007c959  the jle just after `fstp [esp+0x50]`; the same [esp+0x4c] and
+                               [esp+0x50] factors. Names are capped at 0x18 bytes (0x24 later)
+
+Left out on purpose:
+  write_line       no counterpart. No function in this build takes (mode, text) and calls the
+                   chat log's add-line; the callers set the mode block themselves.
+  chat_add         0x101063f0 is the same method (ecx = the chat log, 37 of its 42 callers) but it
+                   takes 4 arguments (ret 0x10), not 5 (ret 0x14). host/addons/hooks.c returns
+                   with 0x14 when it blocks a line, so the wrap stays off for this build.
+  modern           17 of host/modern.c's addresses have no counterpart; FFXI_MODERN would be 0
+                   anyway, so the section is left out, as for 2026-08-22.
+  android_wraps    not carried by newbuild.py.
+
+Method
+------
+Ghidra 11.3.2 headless (tools/discover.py), JDK 21. The carried verdicts were each read by
+disassembly first. One was wrong and was replaced: the 21-case table of the signed switch mapped
+to 0x100065d0, which is code (a window made only of relocated table entries); the real table is
+0x10006610. Two 2025-11-12 sites have no counterpart here: the 11-case switch (cmp edx,-5) and the
+`mov [edi+0xccc],esi` false start.
+
+The first run's gate failed with 2 conflicts and 3 suspect functions; one --reuse run passed.
+
+Verdicts, FFXiMain.dll
+  NOT_CODE 0x10006610   21-case table of the switch at 0x10005c39, after a ret
+  NOT_CODE 0x100d7960   4-entry jump table after `ret; nop`
+  NOT_CODE 0x10128aa0   4-entry jump table after a ret
+  NOT_CODE 0x102a7ac0, 0x102a7b30   16-byte records {ptr, int, flags, 0} in .text
+  NOT_CODE 0x102a9a70   inside an 11-byte `mov eax,[0x103c780c]; jmp [eax+off]` stub; REDECODE 0x102a9a68
+  New in this build:
+  NOT_CODE 0x102a6ac0   256 records {0x102d48bc, i, 0x8000i0c, 0} up to 0x102a7ac0 (suspect,
+                        1027 insns, 288 zero adds; it also caused the conflict at 0x102a7ac7)
+  NOT_CODE 0x1016cf4a   inside `mov ecx,[eax+0x18]`; REDECODE 0x1016cf48 (conflict at 0x1016cf45)
+  NOT_CODE 0x10256de0   inside `or ah,1` (80 cc 01), its 0xcc read as padding; REDECODE 0x10256dde
+  NOT_CODE 0x101cc483   inside `mov al,[0x103f0477]` at a function start; REDECODE 0x101cc480
+                        (auto-analysis also logged a conflicting decode at 0x101cc480)
+  SWITCHES 0x10005c39: 21   cmp ecx,-10 / jb ; cmp ecx,10 / ja ; add ecx,10; entries 21-22 padding
+  SWITCHES 0x101c5c7d: 9    ecx = byte [ebx+0x101c5eb0]; 9 entries, then the index bytes
+  SWITCHES 0x1023fe58: 4    ecx = arg [esp+0x38]; entry 4 is 0x90909090 padding
+Verdicts, FFXi.dll
+  NOT_CODE 0x10006680, REDECODE 0x10006678   the stub false start every build has. Its gate
+  passed on the first run.
+
+Results
+-------
+                                  auto-analysis   after discovery   2025-11-12 after discovery
+FFXiMain functions in .text       12,236          19,010            21,685
+instructions                      773,024         868,976           993,608
+instruction bytes                 83.1%           93.2%             93.0%
+instructions outside functions    128,690         0                 0
+scaled-index switches             696             774               942
+tail_jumps                        -               1,876             2,152
+FFXi.dll                          functions 366, switches 42, tail jumps 17 (2025-11-12: 374, 42, 17)
+
+What the runtime will meet in a client this old (not verified by running it)
+--------------------------------------------------------------------------------
+  - The character table is at [chars_ptr]+0x12eb0, not +0x13820 (same 0x8c stride; checked at
+    the getter 0x100d2bb0 and the record reader near 0x100d2719). gamecore_presence.c hard-codes
+    0x13820, so slot 177 would read the wrong records.
+  - FFXiMain calls gamecore slot 441 (+0x6e4, one caller, 0x100d5235), which no later build
+    calls and our gamecore does not implement: it would trap. The other 141 slots the 2025-11-12
+    build calls are all called here too.
+  - No write_line, and chat_add has another arity: addons get no chat text_in.

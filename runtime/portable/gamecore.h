@@ -36,3 +36,7 @@ void gamecore_register(const GamecoreSlot* slots); /* NULL-terminated (fn == NUL
 
 /* The presence values slot 195 sets (-2 = keep), read back by slots 189/190/204/206/207. */
 void presence_update(int32_t chan, int32_t sub, int32_t flag, int32_t mode, int32_t word);
+
+/* The host's PlayOnline request channel (gamecore_set_request_host), NULL without one. */
+struct GamecoreRequestHost;
+const struct GamecoreRequestHost* gamecore_request_host(void);

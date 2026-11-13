@@ -21,6 +21,8 @@ BUILDS = {
     0x694e5955: '2025-12-26',
     0x69144fa8: '2025-11-12',
     0x6ac37846: '2026-10-05',  # FFXiMain.dll
+    0x4b9fcd53: '2010-03-16',  # FFXiMain.dll
+    0x4b9fcd7a: '2010-03-16',  # FFXi.dll
 }
 
 # NOT_CODE: false function starts (data records decoded as code, or aligned starts inside a real
@@ -108,6 +110,48 @@ VERDICTS = {
         'REDECODE': [0x100067c8],
         'SWITCHES': {},
     },
+    # Carried over from 2026-10-05 by tools/newbuild.py carry; re-checked by the discovery pass.
+    # Read by hand (newbuild.py dis, both builds), all in meta/builds.json, none a verdict:
+    # patches ahcolors 0x101f6acd (mov ebp,0x80808080 imm), quicksets 0x101a9132 (jne after call),
+    # statustimers 0x10229a6a (test eax,eax / je), trimspells 0x101afff6 (push 1), cexi_slots 0x101688b7,
+    # 0x1022c8c4 (cmp esi,<recast+0x802>), 0x1022c688 (mov ax,[eax*2+recast]): same instructions, neighbours'
+    # delta (+0x15b6, +0x15d0, +0x1610). frame_net 0x100fa2d0 (+0x150; same body, stores cexi_player),
+    # page_ctor 0x10197f50 (+0x15d0). The menu table grew (menus_end +0x10cc): menus_conf1win is the second
+    # "menu    conf1win" entry 0x10376130, menus_display "tkdebug dbdelsel" 0x10376bd8, menus_addons
+    # "menu    oplev" 0x10375134 (each unique). cexi_fx_spell_edi 0x100a8e9c and cexi_region unchanged.
+    ('ffximain', '2026-11-02'): {
+        'NOT_CODE': [0x1030f580, 0x10310580, 0x103105f0, 0x10312540, 0x103113d0, 0x1015d4b0, 0x101b01d8, 0x100657d0, 0x100f47f0, 0x1015edb0],
+        'REDECODE': [0x1015d4ad, 0x101b01d7, 0x10312538, 0x100657ce],
+        'SWITCHES': {0x10006412: 21, 0x10006ff7: 11, 0x1022382d: 9, 0x102a8908: 4, 0x102bc329: 6},
+    },
+    ('ffxi', '2026-11-02'): {
+        'NOT_CODE': [0x100067d0],
+        'REDECODE': [0x100067c8],
+        'SWITCHES': {},
+    },
+    # 2010-03-16: a 2010 retail install (patch.ver 30100317_3), carried from 2025-11-12 and each site
+    # checked by disassembly. Two 2025-11-12 sites have no counterpart in this build: the 11-case switch
+    # (cmp edx,-5 / jb ; cmp edx,5 / ja) and the `mov [edi+0xccc],esi` false start.
+    ('ffximain', '2010-03-16'): {
+        'NOT_CODE': [0x10006610,                          # 21-case table of the switch at 0x10005c39, after a ret
+                     0x100d7960,                          # 4-entry jump table after `ret; nop` (0x100d7887, ...)
+                     0x10128aa0,                          # 4-entry jump table after a ret (0x10128a28, ...)
+                     0x102a7ac0, 0x102a7b30,              # 16-byte records {ptr, int, flags, 0} in .text
+                     0x102a9a70,                          # inside an 11-byte `mov eax,[0x103c780c]; jmp [eax+off]` stub
+                     # New in this build (its own gate):
+                     0x102a6ac0,                          # 256 16-byte records {0x102d48bc, i, 0x8000i0c, 0} up to 0x102a7ac0
+                     0x1016cf4a,                          # inside `mov ecx,[eax+0x18]` at 0x1016cf48
+                     0x10256de0,                          # inside `or ah,1` (80 cc 01) at 0x10256dde, its 0xcc read as padding
+                     0x101cc483],                         # inside `mov al,[0x103f0477]` at 0x101cc480, a function start
+        'REDECODE': [0x102a9a68, 0x1016cf48, 0x10256dde, 0x101cc480],
+        'SWITCHES': {
+            0x10005c39: 21,  # cmp ecx,-10 / jb ; cmp ecx,10 / ja ; add ecx,10; entries 21-22 are padding
+            0x101c5c7d: 9,   # ecx = byte [ebx+0x101c5eb0]; 9 entries, then the index bytes
+            0x1023fe58: 4,   # ecx = arg [esp+0x38]; entry 4 is 0x90909090 padding
+        },
+    },
+    ('ffxi', '2010-03-16'): {'NOT_CODE': [0x10006680],  # inside the 11-byte stub at 0x10006678 (jmp [eax+0xe90])
+                             'REDECODE': [0x10006678], 'SWITCHES': {}},
 }
 
 

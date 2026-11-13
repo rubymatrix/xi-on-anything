@@ -56,7 +56,11 @@ gives the delta's users the real one instead, and needs:
                       time) and gets it as it is.
 
 A caller is told apart from the x87 stack after the call, followed until the delta (or a value
-made from it) is stored as a float, compared, or truncated by the CRT's _ftol.
+made from it) is stored as a float, compared, or truncated by the CRT's _ftol. A delta stored whole
+into a local (fstp [esp+x]) is followed to where the function loads it back: an int site when every
+load is truncated. XiControlActor::CheckContactActor does that (its 30-frame hold before the player
+walks through a mob: counter -= (int)dt), and so does XiControlActor::OnMove (an actor's 1800-frame
+"moved lately" countdown); given a fraction they never count down past 60 fps (issue #98).
 """
 import argparse
 import json
@@ -130,8 +134,74 @@ def die(msg):
     raise SystemExit('frame_sites: ' + msg)
 
 
-def classify(md, read, ret, ftol, getters):
-    """'int' when the caller truncates the delta into an integer, 'float' otherwise, and why."""
+ESP_REF = re.compile(r'\[esp(?: \+ (0x[0-9a-f]+|\d+))?\]')
+
+
+def esp_slot(op):
+    """The offset of a dword local ([esp + x]), else None."""
+    m = ESP_REF.fullmatch(op[len('dword ptr '):]) if op.startswith('dword ptr ') else None
+    return int(m.group(1) or '0', 0) if m else None
+
+
+_pops = {}
+
+
+def callee_pops(md, read, va):
+    """The bytes of arguments a callee pops (its ret n), 0 when it leaves them to the caller."""
+    if va not in _pops:
+        insn = next((i for i in md.disasm(read(va, 0x4000), va) if i.mnemonic == 'ret'), None)
+        _pops[va] = int(insn.op_str, 16) if insn and insn.op_str else 0
+    return _pops[va]
+
+
+def reloads(md, read, spill, at, slot, ftol, getters):
+    """The delta stored whole into a local ([esp + slot], fstp at spill): 'int' when every load of it back
+    later in the function is truncated into integer state, 'float' otherwise. CheckContactActor keeps the
+    delta so, and only later takes whole frames off its contact counter: n -= (int)dt.
+
+    A linear walk from the store to the function's end, keeping how far esp has moved since (push, pop,
+    sub/add esp, a callee's ret n) and carrying it over a forward branch to its target; after a ret or jmp
+    it is unknown until such a target. Any other use of the slot (read whole, its address taken) is a float."""
+    depth, known, at_target, found = 0, True, {}, []
+    end = at + 0x1000
+    while at < end:
+        insn = next(md.disasm(read(at, 16), at), None)
+        if insn is None:
+            break
+        m, ops, nxt = insn.mnemonic, insn.op_str, at + insn.size
+        if at in at_target:
+            depth, known = at_target[at], True
+        if known:
+            if any(int(r or '0', 0) == slot + depth for r in ESP_REF.findall(ops)):
+                if m != 'fld':
+                    return 'float', 'the stored delta used at %#x' % at
+                found.append((at,) + classify(md, read, nxt, ftol, getters, spills=False))
+            if m == 'push':
+                depth += 4
+            elif m == 'pop':
+                depth -= 4
+            elif m in ('sub', 'add') and ops.startswith('esp, '):
+                depth += int(ops[5:], 0) * (1 if m == 'sub' else -1)
+            elif m == 'call' and ops.startswith('0x'):
+                depth -= callee_pops(md, read, int(ops, 16))
+            elif m.startswith('j') and ops.startswith('0x') and int(ops, 16) > at:
+                at_target.setdefault(int(ops, 16), depth)
+        if m == 'ret' or m == 'jmp':
+            known = False
+            if read(nxt, 1) in (b'\x90', b'\xcc') and not any(t > at for t in at_target):
+                break  # the function's end: padding after it, no branch past it
+        at = nxt
+    if not found:
+        return 'float', 'stored at %#x, not loaded back' % spill
+    floats = [f for f in found if f[1] != 'int']
+    if floats:
+        return 'float', 'stored at %#x, loaded back as a float at %#x' % (spill, floats[0][0])
+    return 'int', 'stored at %#x, truncated at %s' % (spill, ', '.join('%#x' % f[0] for f in found))
+
+
+def classify(md, read, ret, ftol, getters, spills=True):
+    """'int' when the caller truncates the delta into an integer, 'float' otherwise, and why. With spills,
+    the delta stored whole into a local is followed to where it is loaded back (reloads)."""
     stack = ['dt']  # x87 stack, top first: 'dt' for the delta or a value made from it
     at, steps = ret, 0
     while steps < 40:
@@ -172,6 +242,9 @@ def classify(md, read, ret, ftol, getters):
                     stack.pop(0)
             else:
                 if stack and stack[0] == 'dt':
+                    x = esp_slot(two[0]) if m == 'fstp' and spills else None
+                    if x is not None and stack.count('dt') == 1:
+                        return reloads(md, read, at, nxt, x, ftol, getters)
                     return 'float', '%s at %#x' % (m, at)
                 if m in ('fstp', 'fistp'):
                     stack.pop(0)

@@ -1,8 +1,8 @@
 # Options catalog
 
 Every setting the client has, grouped by what it changes rather than where it lives. In game, the
-player-facing ones are under **Config › Advanced** (`host/modern.c`), in nine pages: Display,
-Graphics, Shadows, Lighting, Atmosphere, Water, Legacy, Interface and Addons. The tree is at the end.
+player-facing ones are under **Config › Advanced** (`host/modern.c`), in ten pages: Display,
+Graphics, Shadows, Lighting, Atmosphere, Water, Legacy, Interface, Gamepad and Addons. The tree is at the end.
 
 Sources, as the tables abbreviate them:
 
@@ -88,17 +88,17 @@ the Lighting and Atmosphere pages.
 | Ray decay / length | | `rays_decay`, `rays_length` | 0.965 / 0.85 |
 | Bloom | Legacy › [Glow] Bloom | `bloom` | 0.3 (0–2) |
 | Bloom threshold | Legacy › [Glow] Bloom Threshold | `threshold` | 0.75 (0.3–1) |
-| Post bloom (lamps, spells, sun; with or without `FFXI_FX`, Metal) | Atmosphere › [Bloom] Strength | `post_bloom` | 0 off (1 tuned) |
+| Post bloom (lamps, spells, sun; with or without `FFXI_FX`, Metal and Vulkan) | Atmosphere › [Bloom] Strength | `post_bloom` | 0 off (1 tuned) |
 | Post bloom sky threshold / knee / spread | | `bloom_threshold`, `bloom_knee`, `bloom_radius` | 0.95 / 0.05 / 1 |
 | Post bloom emissive weight: effects and lamp glows / sun, moon, sky | | `bloom_emissive_fx`, `bloom_emissive_lights` | 1.2 / 1.5 |
-| Depth of field (Metal) | Atmosphere › [Depth of Field] Strength | `post_dof` | 0 off (1 tuned) |
+| Depth of field (Metal and Vulkan) | Atmosphere › [Depth of Field] Strength | `post_dof` | 0 off (1 tuned) |
 | DOF focus (0 follows the player) / sharp range / ramp / near blur | | `dof_focus`, `dof_range`, `dof_ramp`, `dof_near` | 0 / 50 / 150 / 0 (0–1) |
-| Sun shafts (scene renderer with `scene_shadows`, Metal) | Atmosphere › [Sun Shafts] Strength | `post_shafts` | 0 off (1 tuned) |
+| Sun shafts (scene renderer with `scene_shadows`, Metal and Vulkan) | Atmosphere › [Sun Shafts] Strength | `post_shafts` | 0 off (1 tuned) |
 | Shafts haze density / quality (2 a third of the scene, 16 steps; 1 a fifth, 10) / forward lobe / reach / over frames | | `shafts_density`, `shafts_q`, `shafts_g`, `shafts_dist`, `shafts_temporal` | 1 / 2 / 0.6 / 120 / 0.9 |
-| Specular highlights (scene 2 with `scene_shadows`, Metal): strength / lamps' share / wetness / anti-aliasing width | | `scene_spec`, `scene_spec_lamps`, `scene_spec_wet`, `scene_spec_aa` | 0 off (1 tuned) / 1 / 0 (0–1) / 1 |
-| HDR scene target (Metal): on / tonemap (0 neutral, 1 highlight shoulder, 2 ACES) / exposure / white point / knee | | `scene_hdr`, `tonemap`, `exposure`, `tone_white`, `tone_knee` | 0 / 0 / 1 / 4 / 0.8 |
+| Specular highlights (scene 2 with `scene_shadows`, Metal and Vulkan): strength / lamps' share / wetness / anti-aliasing width | | `scene_spec`, `scene_spec_lamps`, `scene_spec_wet`, `scene_spec_aa` | 0 off (1 tuned) / 1 / 0 (0–1) / 1 |
+| HDR scene target (Metal and Vulkan): on / tonemap (0 neutral, 1 highlight shoulder, 2 ACES) / exposure / white point / knee | | `scene_hdr`, `tonemap`, `exposure`, `tone_white`, `tone_knee` | 0 / 0 / 1 / 4 / 0.8 |
 | Upscaling: off / spatial / temporal; render scale; sharpening | | `upscale`, `upscale_scale`, `upscale_sharpen` | 0 / 0.67 / 0.25. Metal: MetalFX; temporal (2) is the sharp one (jittered, mip-biased, anti-aliased), spatial (1) is grainy without anti-aliased input. Windows (Direct3D 12) and Linux (Vulkan): the world drawn at `upscale_scale` of the screen in place of the Background Resolution (`upscale_scale` read at start); 1 FSR 1 (EASU, then RCAS at `upscale_sharpen`); 2 on Windows AMD's FSR SDK (FSR 4 on a Radeon RX 6000 or later, FSR 3.1 on other GPUs; its DLLs beside `host64.exe`, which `tools/build.py` fetches; FSR 1 without them), on Linux FSR 1. Android and Web: none yet |
-| Lamps (scene 2, Metal): every lit lamp per pixel, faded at its range / reach / glow sprite and size | | `scene_lamps`, `scene_lamp_far`, `scene_lamp_glow`, `scene_lamp_glow_size` | 0 off (1: the game's strength) / 120 / 0 / 0.6 |
+| Lamps (scene 2, Metal and Vulkan): every lit lamp per pixel, faded at its range / reach / glow sprite and size | | `scene_lamps`, `scene_lamp_far`, `scene_lamp_glow`, `scene_lamp_glow_size` | 0 off (1: the game's strength) / 120 / 0 / 0.6 |
 | Lamps: on/off fade (seconds) / fire flicker / character shadows from the nearest lamps (0-4) and cube size / shadow debug | | `scene_lamp_fade`, `scene_lamp_flicker`, `scene_lamp_shadows`, `scene_lamp_shadow_size`, `scene_lamp_debug` | 1.5 / 0.06 / 4 / 256 / 0 |
 | Lamps: the zone casts in those lamps' cubes too (what the game drew that frame; drawn again when the lamps change or every 600 frames) | Shadows › [Lamps] Walls Cast | `scene_lamp_zone` | 1 on (0: characters only) |
 | Night (scene renderer, eased through dusk and dawn by the sun's height): the moon's shadows' strength as a share of the sun's / their penumbra's width / the sun, moon and ambient light at midnight / a cool grey shift on them; lamps untouched | | `moon_shadow`, `moon_soft`, `night_exposure`, `night_tint` | 0.7 / 1.5 / 0.6 / 0.35 |
@@ -144,6 +144,24 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+| Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
+
+### Gamepad
+
+The game's own button map, registry `padsin000`, which on Windows only `FFXiPadConfig.exe` sets. The
+Gamepad buttons in the title screen's Config window and in Config (item 13) open **Config › Gamepad**
+in its place; it is also in the Advanced list. Each row is a function, set to a button (None, A, B, X,
+Y, LB, RB, LT, RT, L Stick, R Stick, Start, Back, the D-pad). A button given to one function is taken
+from the function that had it, which gets the old one's. A change is written at once and the game
+reads the map again (window message `0x800b`), so it applies without a restart. Button names are an
+Xbox pad's; SDL lays every pad out as one (A is the bottom face button).
+
+| Rows | Default |
+|---|---|
+| [Buttons] Select / Confirm, Cancel, Active Window, Main Menu, Autorun, Macro Palette (Ctrl), Macro Palette (Alt), Heal / Lock Target, Change View, Target Nearby NPC, Map, Hide Menus, Logout, Soft Keyboard (not on iOS) | A, B, Y, X, LB, LT, RT, L Stick, R Stick, none, none, Back, Start, RB |
+| [Menu Directions] Up, Down, Left, Right | the D-pad |
+
+The sticks (movement and camera) and the button combinations (`padexsin000`) are not on the page.
 
 ## 9. Textures & game data
 
@@ -167,7 +185,7 @@ the Lighting and Atmosphere pages.
 | Setting | CLI | App / Env |
 |---|---|---|
 | Server / lobby host | `--server` (`--lobby` old name) | `FFXIServer` |
-| Launcher session | `--session`, `--auth` | |
+| Launcher session | `--session`, `--auth`; `--pol-status stdio` | |
 | LandSandBoat sign-in | `--user`, `--pass`, `--otp`, `--login-token` | `FFXI_PASSWORD`, `FFXI_LSB_SESSION` |
 | Ports | `--authport` 54231, `--dataport` 54230, `--viewport` 54001 | |
 | Trust server cert | `--trust on\|off` | |
@@ -253,7 +271,13 @@ Config
     ├── Interface
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
-    │   └── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   ├── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   └── [Keyboard] ...... Command Key (macOS, iOS)
+    ├── Gamepad (also the game's Gamepad buttons)
+    │   ├── [Buttons] ....... Select / Confirm, Cancel, Active Window, Main Menu, Autorun,
+    │   │                     Macro Palette (Ctrl), Macro Palette (Alt), Heal / Lock Target,
+    │   │                     Change View, Target Nearby NPC, Map, Hide Menus, Logout, Soft Keyboard
+    │   └── [Menu Directions] Up, Down, Left, Right
     └── Addons .............. one row an installed addon (xi, Ashita, Windower)
 ```
 

@@ -26,10 +26,17 @@ void user32_desktop_mode(uint32_t* w, uint32_t* h, uint32_t* hz);
  * in a wider window (full height) or a taller one (full width), and the mouse is mapped to match. 0
  * (the default) is off. */
 void user32_set_ui_aspect(float aspect);
+/* PostMessage from the host: msg to hwnd's window procedure, on its thread, from its queue. */
+void user32_post(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lparam);
 /* The game's window in one of its modes (registry 0034: 0 full screen, 1 a window, 2 borderless, 3
  * borderless over the desktop) at w x h, while it runs */
 void user32_set_window(uint32_t hwnd, int mode, int w, int h);
 float user32_ui_aspect(void);
+/* Command as Ctrl (Apple keyboards): the GUI keys reach the game as the Ctrl keys on their side, in
+ * DirectInput and in the window's messages; on macOS the menu bar's Command shortcuts other than
+ * Quit are off meanwhile. The overlay still sees Command. 0 (the default) is off. */
+void user32_set_cmd_as_ctrl(int on);
+int user32_cmd_as_ctrl(void);
 /* The fraction of hwnd's width the interface keeps: 1 when off, or the window is not wider. */
 float user32_ui_squeeze(uint32_t hwnd);
 /* The fraction of hwnd's height the interface keeps: 1 when off, or the window is not taller. */

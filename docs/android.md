@@ -5,16 +5,16 @@ a C++ Vulkan back end. It uses no Wine, GameNative, FEX or DXVK. It shares the
 geometry adapter with the desktop hosts; the desktop Metal, D3D12 and C Vulkan
 back ends keep their own build paths.
 
-The APK is a debug client. It signs in to a LandSandBoat server with the
-account given in `run.args` as `--user` and `--pass`; the sign-in screen and
-saved sessions are not offered. It contains no password, game files, captures or
-generated game code: bring your own compatible client installation and local
-test server. The C++ back end does not implement the Modern FX extensions; the
-game's own D3D8 lighting, fog, textures and shadows work. Config > Advanced
-shows only the pages that apply here: Display (Frame Rate, Interface Shape and
-the window and resolution settings), Interface and Addons. A controller or keyboard
-is recommended. On-screen buttons are enabled by the activity's `touch_controls`
-boolean extra.
+The APK is a debug client. It opens on the sign-in screen, as the desktop and
+iPhone builds do, or signs in to a LandSandBoat server with the account given in
+`run.args` as `--user` and `--pass`. Passwords are not saved on Android (there is
+no keychain here), and `--session`/`--auth` on the command line are refused. It
+contains no password, game files, captures or generated game code: bring your
+own compatible client installation and server. The C++ back end does not
+implement the Modern FX extensions; the game's own D3D8 lighting, fog, textures
+and shadows work. Config > Advanced shows only the pages that apply here: Display
+(Frame Rate, Interface Shape and the window and resolution settings), Interface
+and Addons. It plays with the touch controls below, a controller, or a keyboard.
 
 ## Build on macOS or Linux
 
@@ -47,13 +47,45 @@ checks the library's hash against its build metadata and sets the matching
 minimum API. The signing key is created in the dependency directory. Neither the
 build nor packaging installs an APK or changes device settings.
 
-The APK is `build/android/xi-native-test.apk`, package `com.rubymatrix.xionanything`.
+The APK is `build/android/xi-native-test.apk`, package `com.rubymatrix.xionanything`,
+named XI on Anything on the home screen, with the iPhone app's icon.
 Before replacing an existing installation, keep a copy of its APK, data and
 configuration. The app reads `run.args` from its external files directory, one
 literal argument per line (no shell expansion). Give `--game`, `--data-dir`, the
-registry paths, `--server`, `--user` and `--pass` there. Without both,
-the app exits instead of showing the sign-in screen. Never commit that file. Without `run.args`, the built-in command line uses the server 127.0.0.1
+registry paths and `--server` there, and `--user` and `--pass` to skip the
+sign-in screen. Never commit that file. Without `run.args`, the built-in command line uses the server 127.0.0.1
 (loopback), not a public game service.
+
+## Screen, touch controls and keyboard
+
+These are the iPhone build's (docs/ios.md), shared through `FFXI_MOBILE`:
+
+- **Screen:** `host/display_fit.c` sizes the game for the screen it is on: the
+  back buffer at the safe area's pixels (beside a camera cutout) within a pixel
+  budget (about 2.4 MP on a phone, 4 MP on a tablet or a Fold's inner screen;
+  `FFXI_MAX_PIXELS` overrides it), the interface at about a dp a pixel. It
+  follows when the window changes, a Fold opened or closed. The frame is
+  presented into the safe area and the pointer is mapped to match.
+- **Touch controls:** `host/touch.c`, from the sign-in screen on: SDL's virtual
+  gamepad, so the game sees an Xbox pad. A floating left stick, a drag elsewhere
+  for the camera, PlayStation-shaped face buttons, the D-pad, L1/R1, L2/R2,
+  SELECT/START and Target (F8); a quick tap off the controls is a click. The
+  gamepad toggle hides them; the lock beside it (or a long press on the toggle)
+  unlocks the layout, to drag each group where it suits, kept per window shape
+  in `touch-layout.txt` beside `run.args`. A real controller in use hides them,
+  and a touch brings them back. On a tall screen they gather at its foot.
+- **Drawing:** the controls are drawn by a view over the game's surface
+  (`MainActivity.Overlay`, fed by `host/android_overlay.c`), not by the Vulkan
+  back end: they keep the display's rate when the game runs slower, and their
+  labels are the system font. Touches pass through it to SDL.
+- **Back:** Android's Back, the gesture or the button, is Escape; it never
+  closes the app, and Escape on the sign-in screen does not quit it.
+- **Keyboard:** the on-screen keyboard shows on the sign-in screen's fields, and
+  in game only while the chat line is typed in; a tap outside the text puts it
+  away and the next brings it back. The view pans to keep the field or the chat
+  line above it. The game's own soft keyboard (the PS2 client's) is off.
+- **Wallpaper:** `wallpaper.png` or `.jpg` beside `run.args` fills the bars
+  beside the game, cropped to fill and dimmed. None is in the APK.
 
 ## Controls and defaults
 
@@ -120,8 +152,9 @@ The policy test covers pass dependencies, fixed controls, resource versions,
 worker snapshots and queues, completion, failure and shutdown, and the frame
 collector. The build test covers object-cache invalidation, agreement between
 the API level, TLS mode and library metadata, a fresh Java staging directory, and
-cleanup after a packaging failure. The entry test covers the account
-restriction, option mapping, build-feature checks and offscreen-test dispatch,
+cleanup after a packaging failure. The entry test covers the sign-in paths (the
+screen, an account, a refused session), the touch controls' start, option
+mapping, build-feature checks and offscreen-test dispatch,
 using stub host and SDL functions. None of them measures FPS. The shared
 geometry CI runs on macOS, Linux (GCC and Clang) and Windows (MSVC); the macOS
 and Linux jobs also run the policy, build and entry tests.
