@@ -63,6 +63,8 @@ int keychain_set(const char* key, const char* password)
     CFRelease(change);
     CFRelease(q);
     CFRelease(data);
+    if (st != errSecSuccess) /* -34018 errSecMissingEntitlement: the app has no application-identifier */
+        fprintf(stderr, "[keychain] not saved: OSStatus %d\n", (int)st);
     return st == errSecSuccess;
 }
 

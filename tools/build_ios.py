@@ -184,16 +184,31 @@ def host(t):
             '-I', 'runtime/portable', '-I', 'generated', '-I', 'third_party/stb']
     objs = t.compile(build_posix.generated('all'), 'all', base + build_posix.GEN_WARNINGS + ['-I', 'generated/all'], True)
     objs += t.compile(build_posix.generated('ffxi'), 'ffxi', base + build_posix.GEN_WARNINGS + ['-I', 'generated/ffxi'], True)
-    ours = base + inc + ['-I', 'host/addons', '-DIMGUI_USER_CONFIG="imconfig_xi.h"']
+    # the PlayOnline client, when XI_POL names it (build_posix.pol)
+    pol_sources, pol_flags, pol_libs = build_posix.pol(
+        'aarch64-apple-ios' + ('-sim' if t.sdk == 'iphonesimulator' else ''), t.out, {'IPHONEOS_DEPLOYMENT_TARGET': MIN_IOS})
+    if pol_sources:
+        objs += t.compile(pol_sources, 'pol', base + pol_flags + build_posix.POL_CFLAGS)
+    ours = base + inc + pol_flags + ['-I', 'host/addons', '-DIMGUI_USER_CONFIG="imconfig_xi.h"']
     sources = build_posix.PORTABLE + build_posix.HOST_SOURCES + build_posix.ADDON_SOURCES
     objs += t.compile([s for s in sources if s != 'host/host64.c'], 'host', ours)
     objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
     objs += t.compile(['host/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
     exe = os.path.join(t.out, 'host64')
     fw = sum((['-framework', f] for f in FRAMEWORKS), [])
-    run(t.cc + ['-o', exe] + objs + archives + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
-                                                                              '-Wl,-export_dynamic'])
-    return exe
+    hidden = ['-Wl,-load_hidden,' + a for a in pol_libs]  # the crate's symbols, not exported
+    sim = []
+    if t.sdk == 'iphonesimulator':
+        # The simulator reads an app's entitlements from this section, as Xcode links them; an ad-hoc
+        # signature can't carry them. Without an application-identifier the keychain refuses every item
+        # (errSecMissingEntitlement), so Remember Password saved nothing.
+        path = os.path.join(t.out, 'simulator-entitlements.plist')
+        with open(path, 'wb') as f:
+            plistlib.dump({'application-identifier': 'SIMULATOR.' + t.bundle_id}, f)
+        sim = ['-Wl,-sectcreate,__TEXT,__entitlements,' + path]
+    run(t.cc + ['-o', exe] + objs + archives + hidden + sim + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
+                                                                                  '-Wl,-export_dynamic'])
+    return exe, bool(pol_sources)
 
 
 def info_plist(t):
@@ -205,7 +220,9 @@ def info_plist(t):
         'CFBundlePackageType': 'APPL',
         'CFBundleInfoDictionaryVersion': '6.0',
         'CFBundleShortVersionString': buildinfo.runtime()['version'],
-        'CFBundleVersion': '1',
+        # the game build it is made for, as digits (2026-11-02: 20261102): the launcher reads it off a
+        # device to say whether the app there is current
+        'CFBundleVersion': (buildinfo.runtime()['build'] or '').replace('-', '') or '1',
         'CFBundleSupportedPlatforms': ['iPhoneSimulator' if t.sdk == 'iphonesimulator' else 'iPhoneOS'],
         'MinimumOSVersion': MIN_IOS,
         'UIDeviceFamily': [1, 2],
@@ -249,11 +266,13 @@ def app_icon(t, bundle):
 
 
 def app(t, a):
-    exe = host(t)
+    exe, pol = host(t)
     bundle = os.path.join(t.out, APP_NAME + '.app')
     shutil.rmtree(bundle, ignore_errors=True)
     os.makedirs(bundle)
     shutil.copy(exe, os.path.join(bundle, APP_NAME))
+    if pol:  # the shipped copy names none of the PlayOnline client's functions (build_posix.POL_CFLAGS)
+        run(['xcrun', 'strip', '-S', '-x', os.path.join(bundle, APP_NAME)])
     shutil.copy(os.path.join(ROOT, 'ffxi.reg'), bundle)
     shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(bundle, 'textures'))
     if a.wallpaper:  # behind the black bars (host/ios_main.c): PNG or JPEG, anything else as a PNG
@@ -330,7 +349,8 @@ def iphone(name):
         devices = json.load(f)['result']['devices']
     for d in devices:
         props = d.get('deviceProperties', {})
-        if d.get('hardwareProperties', {}).get('reality') != 'physical':
+        # a simulator says 'simulated'; a real device 'physical', or (iOS 26) nothing at all
+        if d.get('hardwareProperties', {}).get('reality') == 'simulated' or d.get('visibilityClass') == 'simulators':
             continue
         if not name or name in (props.get('name'), d.get('identifier'), d.get('hardwareProperties', {}).get('udid')):
             return d['identifier']
