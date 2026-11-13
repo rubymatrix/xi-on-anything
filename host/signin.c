@@ -47,6 +47,8 @@ typedef struct Config
     uint16_t auth_port, data_port, view_port;
     char loader_version[24]; /* "": LSB_LOADER_VERSION */
     char background[1024]; /* a picture behind the screen; "": background.png/.jpg beside signin.cfg */
+    int auto_signin;  /* an account sent by the launcher (import.json): sign in as it once its passwords are read */
+    int otp_required; /* ...unless it needs a one-time password, which can't be remembered */
 } Config;
 
 static void config_path(const char* dir, const char* name, char* out, size_t n)
@@ -208,6 +210,10 @@ static void config_load(const char* path, Config* c)
             c->view_port = (uint16_t)atoi(v);
         else if (!strcmp(line, "loader_version"))
             SDL_strlcpy(c->loader_version, v, sizeof c->loader_version);
+        else if (!strcmp(line, "auto_signin"))
+            c->auto_signin = atoi(v) != 0;
+        else if (!strcmp(line, "otp_required"))
+            c->otp_required = atoi(v) != 0;
     }
     fclose(f);
 }
@@ -231,6 +237,8 @@ static void config_save(const char* path, const Config* c)
         fprintf(f, "auth_port=%u\ndata_port=%u\nview_port=%u\n", c->auth_port, c->data_port, c->view_port);
     if (c->loader_version[0])
         fprintf(f, "loader_version=%s\n", c->loader_version);
+    if (c->auto_signin)
+        fprintf(f, "auto_signin=1\notp_required=%d\n", c->otp_required);
     fclose(f);
 }
 
@@ -249,6 +257,130 @@ static void keychain_key_sqex(const Config* c, char* out, size_t n)
         snprintf(out, n, "sqex:%s", c->sqex_id);
     else
         out[0] = 0;
+}
+
+/* ---- an account handed over by the launcher on a computer ----
+ * The launcher's iPhone and iPad page puts import.json beside signin.cfg (devicectl, into the app's
+ * own container, which the Files app doesn't show): the sign-in method and IDs, which become the
+ * screen's, and the passwords, which go straight to the keychain. The file is overwritten and
+ * removed at once. One string member's value, JSON-unescaped (\uXXXX as UTF-8); 1 if it is there. */
+static int json_string(const char* text, const char* key, char* out, size_t n)
+{
+    char pat[80];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char* p = strstr(text, pat);
+    if (!p || !n)
+        return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ':')
+        ++p;
+    if (*p++ != '"')
+        return 0;
+    size_t o = 0;
+    for (; *p && *p != '"'; ++p)
+    {
+        unsigned c = (unsigned char)*p;
+        if (c == '\\')
+        {
+            c = (unsigned char)*++p;
+            switch (c)
+            {
+            case 'n': c = '\n'; break;
+            case 't': c = '\t'; break;
+            case 'r': c = '\r'; break;
+            case 'b': c = '\b'; break;
+            case 'f': c = '\f'; break;
+            case 'u':
+            {
+                unsigned v = 0;
+                for (int i = 0; i < 4; ++i)
+                {
+                    char h = p[1 + i];
+                    v = v * 16 + (unsigned)(h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : 0);
+                }
+                p += 4;
+                char u[3];
+                int k = v < 0x80 ? (u[0] = (char)v, 1)
+                        : v < 0x800 ? (u[0] = (char)(0xc0 | v >> 6), u[1] = (char)(0x80 | (v & 0x3f)), 2)
+                                    : (u[0] = (char)(0xe0 | v >> 12), u[1] = (char)(0x80 | (v >> 6 & 0x3f)), u[2] = (char)(0x80 | (v & 0x3f)), 3);
+                for (int i = 0; i < k && o + 1 < n; ++i)
+                    out[o++] = u[i];
+                continue;
+            }
+            default: break; /* \" \\ \/ */
+            }
+            if (!c)
+                break;
+        }
+        if (o + 1 < n)
+            out[o++] = (char)c;
+    }
+    out[o] = 0;
+    return 1;
+}
+
+static void import_account(const char* dir, const char* cfg_path, Config* c)
+{
+    char path[1100];
+    config_path(dir, "import.json", path, sizeof path);
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        return;
+    char text[4096];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+    /* gone before anything else: whatever happens below, the passwords don't stay in a file */
+    f = fopen(path, "r+b");
+    if (f)
+    {
+        char zero[256] = { 0 };
+        for (size_t left = n; left; left -= left < sizeof zero ? left : sizeof zero)
+            fwrite(zero, 1, left < sizeof zero ? left : sizeof zero, f);
+        fclose(f);
+    }
+    remove(path);
+
+    char method[8] = "", user[64] = "", sqex_id[64] = "", server[128] = "", password[128] = "", sqex_password[128] = "";
+    json_string(text, "method", method, sizeof method);
+    json_string(text, "user", user, sizeof user);
+    json_string(text, "sqex_id", sqex_id, sizeof sqex_id);
+    json_string(text, "server", server, sizeof server);
+    json_string(text, "password", password, sizeof password);
+    json_string(text, "sqex_password", sqex_password, sizeof sqex_password);
+    char text_flags[64] = "";
+    const char* flag = strstr(text, "\"otp_required\"");
+    if (flag)
+        SDL_strlcpy(text_flags, flag, sizeof text_flags);
+    SDL_memset(text, 0, sizeof text);
+    if (!user[0])
+    {
+        fprintf(stderr, "[signin] import.json names no account\n");
+        return;
+    }
+#ifdef FFXI_POL
+    c->method = !strcmp(method, "pol") ? SIGNIN_POL : SIGNIN_LSB;
+#endif
+    SDL_strlcpy(c->user, user, sizeof c->user);
+    SDL_strlcpy(c->sqex_id, c->method == SIGNIN_POL ? sqex_id : "", sizeof c->sqex_id);
+    if (c->method == SIGNIN_LSB && server[0])
+        SDL_strlcpy(c->server, server, sizeof c->server);
+    c->remember = 1;
+    c->auto_signin = 1;
+    c->otp_required = strstr(text_flags, "\"otp_required\":true") != NULL || strstr(text_flags, "\"otp_required\": true") != NULL;
+    config_save(cfg_path, c);
+    char key[256];
+    int saved = 0;
+    keychain_key(c, key, sizeof key);
+    if (password[0])
+        saved = keychain_set(key, password);
+    keychain_key_sqex(c, key, sizeof key);
+    if (key[0] && sqex_password[0])
+        saved &= keychain_set(key, sqex_password);
+    SDL_memset(password, 0, sizeof password);
+    SDL_memset(sqex_password, 0, sizeof sqex_password);
+    fprintf(stderr, "[signin] signed-in account from the launcher: %s%s\n",
+        c->method == SIGNIN_POL ? "PlayOnline" : c->server, saved ? ", its passwords in the keychain" : "");
 }
 
 /* The game's display settings when nothing else gives them: a window of 1920x1080, as the
@@ -576,6 +708,8 @@ typedef struct Ui
     int theme_loaded;
     Uint64 focus_time;
     Uint64 opened;              /* when the screen came up: a keychain wait says so after a moment */
+    Uint64 auto_at;             /* an automatic sign-in (cfg.auto_signin) starts then; 0 for none */
+    int auto_done;              /* tried, stopped or failed: not again this run */
     Uint64 anim_at;             /* when the window began opening, or closing */
     int closing, close_result;  /* closing: then signin_run returns close_result */
     Uint64 press_at;            /* the last button pressed: when, which control, which option */
@@ -1913,6 +2047,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     c->space = setup->default_space >= 0 ? setup->default_space != 0 : 1;
     SDL_strlcpy(c->server, setup->default_server ? setup->default_server : "127.0.0.1", sizeof c->server);
     config_load(cfg_path, c);
+    import_account(dir, cfg_path, c);
 #ifndef FFXI_POL
     c->method = SIGNIN_LSB; /* saved by a build with the PlayOnline client */
 #endif
@@ -2071,6 +2206,14 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         SDL_Event e;
         while (SDL_PollEvent(&e))
         {
+            /* the player's own input stops an automatic sign-in that hasn't started */
+            if (u->auto_at && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                                  e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN))
+            {
+                u->auto_at = 0, u->auto_done = 1;
+                set_status(u, "", 0);
+                continue;
+            }
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                 done = 1;
             else if (e.type == SDL_EVENT_GAMEPAD_ADDED)
@@ -2125,6 +2268,33 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             SDL_SetAtomicInt(&g_keyread.state, 0);
             if (!u->status_error)
                 set_status(u, "", 0);
+            /* an account the launcher sent: sign in as it, a moment later (any input stops it), or ask
+             * only for the one-time password */
+            int pol = u->cfg.method == SIGNIN_POL;
+            int have = u->cfg.user[0] && u->password[0] && (!pol || (u->cfg.sqex_id[0] && u->sqex_password[0]));
+            if (u->cfg.auto_signin && u->cfg.remember && have && !u->auto_done && u->screen == SCREEN_SIGNIN)
+            {
+                if (u->cfg.otp_required)
+                {
+                    u->auto_done = 1;
+                    u->focus = index_of(u, ID_OTP);
+                    set_status(u, "Enter your one-time password to sign in.", 0);
+                }
+                else
+                {
+                    u->auto_at = SDL_GetTicks() + 1500;
+                    char msg[160];
+                    snprintf(msg, sizeof msg, "Signing in as %s... tap to stop", u->cfg.user);
+                    set_status(u, msg, 0);
+                }
+            }
+        }
+        if (u->auto_at && SDL_GetTicks() >= u->auto_at)
+        {
+            u->auto_at = 0;
+            u->auto_done = 1;
+            if (u->screen == SCREEN_SIGNIN && !busy())
+                start_signin(u);
         }
         int state = SDL_GetAtomicInt(&g_job.state);
         if (state == JOB_FAILED)
@@ -2132,6 +2302,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             SDL_SetAtomicInt(&g_job.state, JOB_IDLE);
             set_status(u, g_job.error[0] ? g_job.error : "The sign-in failed.", 1);
             u->otp[0] = 0; /* one-time codes are single use */
+            u->auto_done = 1, u->auto_at = 0; /* no automatic retry */
         }
         else if (state == JOB_DONE)
         {

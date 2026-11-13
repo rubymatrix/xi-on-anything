@@ -220,7 +220,9 @@ def info_plist(t):
         'CFBundlePackageType': 'APPL',
         'CFBundleInfoDictionaryVersion': '6.0',
         'CFBundleShortVersionString': buildinfo.runtime()['version'],
-        'CFBundleVersion': '1',
+        # the game build it is made for, as digits (2026-11-02: 20261102): the launcher reads it off a
+        # device to say whether the app there is current
+        'CFBundleVersion': (buildinfo.runtime()['build'] or '').replace('-', '') or '1',
         'CFBundleSupportedPlatforms': ['iPhoneSimulator' if t.sdk == 'iphonesimulator' else 'iPhoneOS'],
         'MinimumOSVersion': MIN_IOS,
         'UIDeviceFamily': [1, 2],
@@ -347,7 +349,8 @@ def iphone(name):
         devices = json.load(f)['result']['devices']
     for d in devices:
         props = d.get('deviceProperties', {})
-        if d.get('hardwareProperties', {}).get('reality') != 'physical':
+        # a simulator says 'simulated'; a real device 'physical', or (iOS 26) nothing at all
+        if d.get('hardwareProperties', {}).get('reality') == 'simulated' or d.get('visibilityClass') == 'simulators':
             continue
         if not name or name in (props.get('name'), d.get('identifier'), d.get('hardwareProperties', {}).get('udid')):
             return d['identifier']
