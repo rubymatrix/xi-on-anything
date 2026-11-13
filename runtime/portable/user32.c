@@ -24,6 +24,14 @@
 #include "thunk.h"
 #include "user32.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
+#endif
+
 #define WM_CREATE 0x0001
 #define WM_DESTROY 0x0002
 #define WM_MOVE 0x0003
@@ -78,6 +86,7 @@ static Wnd g_wnds[MAX_WINDOWS];
 static uint32_t g_focus;
 static int g_sdl_up;
 static float g_ui_aspect; /* --ui-aspect: width / height of the interface's box, 0 off */
+static int g_cmd_ctrl;    /* Command (the GUI keys) is Ctrl to the game (Apple keyboards have no right Ctrl) */
 
 static Wnd* wnd(uint32_t hwnd)
 {
@@ -578,6 +587,94 @@ static uint32_t mouse_keys(SDL_MouseButtonFlags b)
         (g_keys[0x10] ? 4u : 0) | (g_keys[0x11] ? 8u : 0);
 }
 
+/* Command as Ctrl: a GUI key pressed while it is on is the Ctrl key on its side until it is released
+ * (so turning it off with Command held still releases Ctrl). Only the game sees the change: the
+ * overlay is handed the event first and keeps the Mac's Command. */
+static uint8_t g_gui_is_ctrl[2];
+
+static void cmd_as_ctrl(SDL_Event* e)
+{
+    if (e->type != SDL_EVENT_KEY_DOWN && e->type != SDL_EVENT_KEY_UP)
+        return;
+    SDL_Scancode sc = e->key.scancode;
+    if (sc == SDL_SCANCODE_LGUI || sc == SDL_SCANCODE_RGUI)
+    {
+        int right = sc == SDL_SCANCODE_RGUI;
+        if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat)
+            g_gui_is_ctrl[right] = (uint8_t)g_cmd_ctrl;
+        if (g_gui_is_ctrl[right])
+        {
+            e->key.scancode = right ? SDL_SCANCODE_RCTRL : SDL_SCANCODE_LCTRL;
+            e->key.key = right ? SDLK_RCTRL : SDLK_LCTRL;
+        }
+        if (e->type == SDL_EVENT_KEY_UP)
+            g_gui_is_ctrl[right] = 0;
+    }
+    if (g_gui_is_ctrl[0] && (e->key.mod & SDL_KMOD_LGUI))
+        e->key.mod = (SDL_Keymod)((e->key.mod & ~SDL_KMOD_LGUI) | SDL_KMOD_LCTRL);
+    if (g_gui_is_ctrl[1] && (e->key.mod & SDL_KMOD_RGUI))
+        e->key.mod = (SDL_Keymod)((e->key.mod & ~SDL_KMOD_RGUI) | SDL_KMOD_RCTRL);
+}
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+/* While Command is Ctrl, the menu bar's Command shortcuts (SDL's: Hide, Hide Others, Close,
+ * Minimize; Preferences) would take Ctrl+H, Ctrl+W and Ctrl+M from the game, so they are cleared, and
+ * put back when it is off. Quit (Command-Q) stays. AppKit's menus are the main thread's: done from
+ * pump. */
+#define NS_COMMAND (1ul << 20)
+#define NS_CONTROL (1ul << 18)
+static struct
+{
+    id item, key;
+} g_menu_keys[16];
+static int g_menu_nkeys, g_menu_cleared;
+
+static id objc_call(id o, const char* sel) { return ((id(*)(id, SEL))objc_msgSend)(o, sel_registerName(sel)); }
+
+static void menu_keys(int clear)
+{
+    if (clear == g_menu_cleared)
+        return;
+    id app = objc_call((id)objc_getClass("NSApplication"), "sharedApplication");
+    id bar = app ? objc_call(app, "mainMenu") : NULL;
+    if (!bar)
+        return; /* none yet (SDL makes it with the first window): tried again next pump */
+    g_menu_cleared = clear;
+    SEL set_key = sel_registerName("setKeyEquivalent:");
+    if (!clear)
+    {
+        for (int i = 0; i < g_menu_nkeys; ++i)
+        {
+            ((void (*)(id, SEL, id))objc_msgSend)(g_menu_keys[i].item, set_key, g_menu_keys[i].key);
+            objc_call(g_menu_keys[i].key, "release");
+            objc_call(g_menu_keys[i].item, "release");
+        }
+        g_menu_nkeys = 0;
+        return;
+    }
+    id none = objc_call((id)objc_getClass("NSString"), "string");
+    SEL at = sel_registerName("itemAtIndex:");
+    long n = ((long (*)(id, SEL))objc_msgSend)(bar, sel_registerName("numberOfItems"));
+    for (long i = 0; i < n; ++i)
+    {
+        id menu = objc_call(((id(*)(id, SEL, long))objc_msgSend)(bar, at, i), "submenu");
+        long m = menu ? ((long (*)(id, SEL))objc_msgSend)(menu, sel_registerName("numberOfItems")) : 0;
+        for (long j = 0; j < m && g_menu_nkeys < (int)(sizeof g_menu_keys / sizeof g_menu_keys[0]); ++j)
+        {
+            id item = ((id(*)(id, SEL, long))objc_msgSend)(menu, at, j);
+            id key = objc_call(item, "keyEquivalent");
+            const char* k = key ? ((const char* (*)(id, SEL))objc_msgSend)(key, sel_registerName("UTF8String")) : NULL;
+            unsigned long mods = ((unsigned long (*)(id, SEL))objc_msgSend)(item, sel_registerName("keyEquivalentModifierMask"));
+            if (!k || !*k || !strcmp(k, "q") || !(mods & NS_COMMAND) || (mods & NS_CONTROL))
+                continue;
+            g_menu_keys[g_menu_nkeys].item = objc_call(item, "retain");
+            g_menu_keys[g_menu_nkeys++].key = objc_call(key, "retain");
+            ((void (*)(id, SEL, id))objc_msgSend)(item, set_key, none);
+        }
+    }
+}
+#endif
+
 /* The mouse buttons (SDL_BUTTON_MASK bits) the overlay took the press of: their release is the
  * overlay's too, and the game's window is not told they are down while they are. */
 static SDL_MouseButtonFlags g_overlay_buttons;
@@ -587,6 +684,9 @@ static void pump(void)
 {
     if (!g_sdl_up)
         return;
+#if defined(__APPLE__) && TARGET_OS_OSX
+    menu_keys(g_cmd_ctrl);
+#endif
     SDL_Event e;
     while (SDL_PollEvent(&e))
     {
@@ -626,6 +726,7 @@ static void pump(void)
             g_mouse_held = SDL_GetMouseState(NULL, NULL) != 0;
             continue;
         }
+        cmd_as_ctrl(&e);
         input_sdl_event(&e); /* DirectInput's view of the same events */
         Wnd* w = NULL;
         switch (e.type)
@@ -2080,6 +2181,10 @@ void user32_post(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lparam)
 }
 
 float user32_ui_aspect(void) { return g_ui_aspect; }
+
+void user32_set_cmd_as_ctrl(int on) { g_cmd_ctrl = on != 0; }
+
+int user32_cmd_as_ctrl(void) { return g_cmd_ctrl; }
 
 float user32_ui_squeeze(uint32_t hwnd)
 {

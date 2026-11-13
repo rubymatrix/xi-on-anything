@@ -217,7 +217,7 @@ static uint8_t mods_now(void)
     if (m & SDL_KMOD_ALT)
         r |= MOD_ALT;
     if (m & SDL_KMOD_GUI)
-        r |= MOD_WIN;
+        r |= user32_cmd_as_ctrl() ? MOD_CTRL : MOD_WIN; /* Command as Ctrl: a Ctrl bind is Command's too */
     if (m & SDL_KMOD_SHIFT)
         r |= MOD_SHIFT;
     return r;

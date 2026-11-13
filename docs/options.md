@@ -143,6 +143,7 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+| Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
 
 ### Gamepad
 
@@ -269,7 +270,8 @@ Config
     ├── Interface
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
-    │   └── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   ├── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   └── [Keyboard] ...... Command Key (macOS, iOS)
     ├── Gamepad (also the game's Gamepad buttons)
     │   ├── [Buttons] ....... Select / Confirm, Cancel, Active Window, Main Menu, Autorun,
     │   │                     Macro Palette (Ctrl), Macro Palette (Alt), Heal / Lock Target,
