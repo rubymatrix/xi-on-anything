@@ -760,13 +760,16 @@ class ZoneSession:
     def char_stats(self):
         """0x061: HP, MP, jobs, base stats, home point"""
         c = self.srv.char
-        b = bytearray(0x6C)
+        b = bytearray(0x70)
         struct.pack_into('<iiBBBBhh', b, 0, c['hp'], c['mp'], c['main_job'], c['main_level'], c['sub_job'],
                          c['sub_level'], 0, 1000)
         struct.pack_into('<7H', b, 0x10, *([50] * 7))
         struct.pack_into('<hh', b, 0x2C, 100, 100)
         struct.pack_into('<HHHH', b, 0x40, 0, 1, 0, self.zone)
         b[0x4C] = c['nation']
+        # exemplar points to the next master level (packet +0x6C): 2500 at master level 0, as a server
+        # sends it; pointwatch reads the master level back from this number
+        struct.pack_into('<I', b, 0x68, 2500)
         return sub(0x061, b)
 
     def char_status(self):

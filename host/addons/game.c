@@ -702,10 +702,25 @@ uint32_t xi_game_target_window(void)
     return p && xi_mapped(p, XI_SIZE_targetwindow_t) ? p : 0;
 }
 
+static int imm_after(uint32_t fn, uint32_t at, const uint8_t* op, uint32_t oplen, uint32_t* imm);
+
+/* target_t* lives in its own global. It sat 0x2F4 after the target window's on earlier builds, but
+ * 2026-11-02 moved it (0x2F0 there; 0x2F4 now holds a code pointer), so it is read from the SetTarget
+ * call site, which loads it into ecx (mov ecx, [g]) as the call's this. */
+static uint32_t target_global(void)
+{
+    static const uint8_t op_ecx[] = {0x8B, 0x0D};
+    uint32_t g;
+    if (imm_after(xi_game_ptr_value(XI_P_SET_TARGET), 2, op_ecx, 2, &g))
+        return g;
+    g = xi_game_ptr_value(XI_P_TARGET);
+    return g ? g + 0x2F4 : 0;
+}
+
 uint32_t xi_game_target(void)
 {
-    uint32_t g = xi_game_ptr_value(XI_P_TARGET);
-    uint32_t p = g ? xi_game_rd32(g + 0x2F4) : 0;
+    uint32_t g = target_global();
+    uint32_t p = g ? xi_game_rd32(g) : 0;
     return p && xi_mapped(p, XI_SIZE_target_t) ? p : 0;
 }
 

@@ -322,7 +322,9 @@ end
 local function set_vital(key, event, v)
     local old = S.vitals[key]
     S.vitals[key] = v
-    if old ~= nil and old ~= v then emit(event, v, old) end
+    -- the first value too, from 0: Windower sees memory go from 0 to it (xivbar reads the vitals at
+    -- login, before the first 0x0DF, and then waits for these)
+    if (old or 0) ~= v then emit(event, v, old or 0) end
 end
 
 local function vitals(hp, mp, tp, hpp, mpp)
