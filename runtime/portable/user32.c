@@ -836,6 +836,9 @@ static void apply_frame(Wnd* w)
     uint32_t dw, dh, hz;
     user32_desktop_mode(&dw, &dh, &hz);
     int cover = popup && (uint32_t)w->w >= dw && (uint32_t)w->h >= dh, full = cover || w->fullscreen;
+#ifdef __ANDROID__
+    full = 1; /* the screen whatever the mode: SDL hides the system bars only for a full-screen window */
+#endif
     /* a macOS Space is only for a window with a frame: full screen hides it anyway */
     int spaces = SDL_GetHintBoolean(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, false);
     SDL_SetWindowBordered(w->sdl, !popup || (full && spaces));
@@ -870,9 +873,11 @@ void user32_set_window(uint32_t hwnd, int mode, int width, int height)
     w->w = mode == 3 && dw ? (int)dw : width, w->h = mode == 3 && dh ? (int)dh : height;
     if (w->sdl)
     {
-        /* out of full screen first: a full-screen window keeps its size */
+        /* out of full screen first: a full-screen window keeps its size (Android: always full screen) */
+#ifndef __ANDROID__
         SDL_SetWindowFullscreen(w->sdl, false);
         SDL_SyncWindow(w->sdl);
+#endif
         size_window(w);
         apply_frame(w);
         if (mode == 1 || mode == 2)
@@ -1025,17 +1030,18 @@ static int show_window(Wnd* w, int show)
         {
             SDL_ShowWindow(w->sdl);
             SDL_RaiseWindow(w->sdl);
+#ifdef FFXI_MOBILE
+            /* a phone's keyboard shows whenever text input is on (iOS's whatever the hint; Android's
+             * kept, for the chat line): off (the sign-in's, on this same window, with it), and on only
+             * while the chat line is open (host64.c) */
+            SDL_StopTextInput(w->sdl);
+#else
             /* text input for the game's chat (WM_CHAR), but no on-screen keyboard over the game: with no
              * physical keyboard SDL shows one (a Steam Deck, Steam's under X11) the moment it starts.
              * The game has its own; SDL_ENABLE_SCREEN_KEYBOARD in the environment still wins. The
              * sign-in screen (host/signin.c) keeps it, for the password. */
             SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
             SDL_SetHint(SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD, "0");
-#ifdef FFXI_IOS
-            /* iOS shows its keyboard whenever text input is on, whatever the hint: off (the sign-in's,
-             * on this same window, with it), and on only while the chat line is open (host64.c) */
-            SDL_StopTextInput(w->sdl);
-#else
             SDL_StartTextInput(w->sdl);
 #endif
         }
