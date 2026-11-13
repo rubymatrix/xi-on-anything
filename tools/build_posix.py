@@ -93,6 +93,41 @@ HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime
 ADDON_SOURCES = sorted('host/addons/' + f for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'host', 'addons'))
                        if f.endswith('.c') or f.endswith('.cpp')) + ['generated/addons_lua.c']
 ADDON_LIBS = ('luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
+# The PlayOnline sign-in, which is not in this repository: XI_POL names a folder whose
+# xi-build.json lists the C sources to compile (one of them implements host/signin_pol.h) and the
+# Rust crate to link, and the sign-in screen gets PlayOnline as a method.
+def pol(rust_target=None, out=None, env=None):
+    """The PlayOnline sign-in's sources, the flags for them and for ours, and the archives to link
+    (its crate built for rust_target into out), or ([], [], []) without XI_POL."""
+    folder = os.environ.get('XI_POL')
+    if not folder:
+        return [], [], []
+    folder = os.path.abspath(os.path.expanduser(folder))
+    try:
+        with open(os.path.join(folder, 'xi-build.json')) as f:
+            m = json.load(f)
+    except OSError as e:
+        raise SystemExit('XI_POL=%s: %s' % (folder, e))
+    sources = [os.path.join(folder, s) for s in m['sources']]
+    manifest = os.path.join(folder, m['crate'], 'Cargo.toml')
+    missing = [s for s in sources + [manifest] if not os.path.isfile(s)]
+    if missing:
+        raise SystemExit('XI_POL=%s has no %s' % (folder, ', '.join(missing)))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    target_dir = os.path.join(out or os.path.join(root, 'build'), 'pol')
+    cmd = ['cargo', 'build', '--release', '--manifest-path', manifest, '--target-dir', target_dir] + (
+        ['--target', rust_target] if rust_target else [])
+    print('>', ' '.join(cmd), flush=True)
+    subprocess.check_call(cmd, env=dict(os.environ, **(env or {})))
+    archive = os.path.join(target_dir, *([rust_target] if rust_target else []), 'release', m['lib'])
+    return sources, ['-DFFXI_POL', '-I', folder, '-I', os.path.join(root, 'host')], [archive]
+
+
+# The PlayOnline client stays out of what a build exports: hosts export their own symbols for the
+# addons' FFI (-export_dynamic), so its sources compile with hidden visibility, its crate links
+# hidden (load_hidden / exclude-libs), and the app that ships is stripped of local symbols and debug
+# information, which name its functions. The unstripped build stays beside it for debugging.
+POL_CFLAGS = ['-fvisibility=hidden', '-g0']
 
 
 def posix(p):

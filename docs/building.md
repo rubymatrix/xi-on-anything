@@ -114,3 +114,31 @@ python tools\build.py host64     # x64: the game host (SDL3 at C:\Dev\SDL3)
 ## Android (experimental)
 
 See [android.md](android.md).
+
+## PlayOnline sign-in on iPhone, iPad and Android
+
+Where there is no launcher to sign in first, the game's own sign-in screen can sign in to
+PlayOnline. Before it does, it brings the install up to date, as the launcher and the PlayOnline
+Viewer do, because PlayOnline's lobby takes only the newest client. That sign-in and update are not
+in this repository. A build includes them when `XI_POL` names the folder that holds them: its
+`xi-build.json` lists the C sources to compile, one of which implements
+[`host/signin_pol.h`](../host/signin_pol.h), and a Rust crate to link.
+
+```sh
+XI_POL=/path/to/pol python3 tools/build_ios.py app
+XI_POL=/path/to/pol python3 tools/build_android.py host --native-tls
+```
+
+The crate is built with `cargo` for the build's target, so add the target once
+(`rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android`). Without
+`XI_POL` the screen signs in to LandSandBoat servers only.
+
+Settings then has a **Sign-in Method** row, and PlayOnline has no server to pick. The sign-in page
+asks for the **Square Enix ID** and its password, the **PlayOnline ID** and its password, and the
+one-time password when the Square Enix account has one. Remember Password keeps both
+passwords in the keychain (Android has no password store yet, so there it keeps neither).
+
+A phone can't rebuild the client. The app is recompiled from one `FFXiMain.dll` (`FFXI_SHA256` in
+`generated/build.h`). The updater still updates the files, but if the update brings a different
+`FFXiMain.dll`, the sign-in stops and asks for a new build of the app. Patch the Mac's install
+(the launcher does), run `prepare` for the new build, and build the app again.

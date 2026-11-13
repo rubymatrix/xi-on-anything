@@ -233,6 +233,12 @@ def main():
         if not sources:
             raise RuntimeError('missing translation: generated/' + part)
         objs += compile_many(sources, part, ['-I' + str(ROOT / 'generated' / part)])
+    # the PlayOnline client, when XI_POL names it (build_posix.pol); the sign-in screen offers it
+    pol_sources, pol_flags, pol_libs = build_posix.pol('aarch64-linux-android', str(OUT))
+    if pol_sources:
+        objs += compile_many(pol_sources, 'pol', pol_flags + build_posix.POL_CFLAGS)
+        # the crate's symbols stay out of libmain.so's exports
+        link = pol_libs + ['-Wl,--exclude-libs,' + os.path.basename(a) for a in pol_libs] + link
     objs += compile_many(
         PORTABLE
         + HOST
@@ -240,7 +246,7 @@ def main():
         + gfx
         + ['host/android_main.c', 'host/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c'],
         'host',
-        extra + ['-Dmain=xi_host_main'],
+        extra + pol_flags + ['-Dmain=xi_host_main'],
     )
     for source, entry in [
         ('gfx_test.c', 'xi_gfx_test_main'),
@@ -268,6 +274,9 @@ def main():
         + objs
         + link
     )
+    if pol_sources:  # the shipped library names none of the PlayOnline client's functions (build_posix.POL_CFLAGS)
+        shutil.copyfile(library_path, OUT / 'libmain.debug.so')
+        run([TC / 'llvm-strip', '--strip-all', library_path])
     metadata = {
         'schema': 1,
         'minimum_api': MIN_API,

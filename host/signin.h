@@ -1,5 +1,6 @@
 /* The sign-in screen host64 shows before the game (signin.c): the game's own UI art, a Settings
- * screen to pick the LandSandBoat server, whether to remember the password, and the window theme. It signs in on a worker thread; what it opened (the window,
+ * screen to pick the sign-in method (a LandSandBoat server, or PlayOnline in a build that has its
+ * client: signin_pol.h), the server, whether to remember the password, and the window theme. It signs in on a worker thread; what it opened (the window,
  * the graphics back end on it, the sign-in's connections) carries on into the game. */
 #pragma once
 
@@ -9,6 +10,12 @@
  * SIGNIN_KEYBOARD_TEXT, data1 the whole of the field's text (malloc'd; the screen frees it). The
  * screen sets the field the keyboard was opened over to it. The UWP build's sdl_uwp.c sends it. */
 #define SIGNIN_KEYBOARD_TEXT 0x5849 /* "XI" */
+
+enum
+{
+    SIGNIN_LSB = 1, /* a LandSandBoat server: lsb_login */
+    SIGNIN_POL = 2, /* PlayOnline's own servers: the session value V (signin_pol.h) */
+};
 
 typedef struct SigninSetup
 {
@@ -36,7 +43,10 @@ typedef struct SigninSetup
 typedef struct SigninResult
 {
     void* window;             /* the SDL window, for the game to take over (user32_adopt_window) */
-    uint32_t server;          /* the lobby's IPv4, host byte order */
+    int method;               /* how it signed in: SIGNIN_LSB or SIGNIN_POL */
+    uint32_t server;          /* the lobby's IPv4, host byte order (LandSandBoat) */
+    uint8_t session[16];      /* PlayOnline: the session value V, as --session gives it */
+    uint8_t auth[0x34];       /* PlayOnline: the authCode block, as --auth gives it */
     char settings_reg[1024];  /* the display settings host64 loads when given none (--reg-final) */
     char data_dir[1024];      /* the folder those live in: host64's --data-dir when given none */
 } SigninResult;

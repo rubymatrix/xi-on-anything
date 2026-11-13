@@ -88,6 +88,9 @@
 #include "gamecore_config.h"
 #include "lsb_login.h"
 #include "signin.h"
+#ifdef FFXI_POL
+#include "signin_pol.h"
+#endif
 #include "appdefaults.h"
 #include "modern.h"
 #include "cexi.h"
@@ -480,6 +483,20 @@ static void pol_req_stdio_reader(void* arg)
     }
 }
 
+#ifdef FFXI_POL
+/* the sign-in screen's own PlayOnline session (signin_pol.h), in this process */
+static int32_t pol_req_own_begin(void* ctx, const char* verb, const uint8_t* data, uint32_t n)
+{
+    (void)ctx;
+    return signin_pol_request_begin(verb, data, n);
+}
+
+static int32_t pol_req_own_poll(void* ctx, int32_t id, uint8_t* out, uint32_t cap, uint32_t* got)
+{
+    (void)ctx;
+    return signin_pol_request_poll(id, out, cap, got);
+}
+#endif
 
 /* w:h (16:9), wxh, w/h, or a ratio (1.778); 0 if it is none of those */
 static double parse_shape(const char* s)
@@ -1392,7 +1409,32 @@ int main(int argc, char** argv)
             return 0;
         if (r > 0)
         {
-            game_server = sr.server;
+            if (sr.method == SIGNIN_POL)
+            {
+                /* as a launcher's --session and --auth: the game's hosts through DNS, below */
+                gamecore_set_session(sr.session);
+                gamecore_set_auth_block(sr.auth);
+                memset(sr.session, 0, sizeof sr.session);
+                have_session = 1;
+#ifdef FFXI_POL
+                /* the game's own status requests on the session the screen signed in */
+                GamecoreRequestHost h = { pol_req_own_begin, pol_req_own_poll, NULL };
+                gamecore_set_request_host(&h);
+                static uint8_t table[64 * 0x68], htable[64 * 0x28];
+                int32_t st[5];
+                uint64_t id, key;
+                if (signin_pol_state(table, htable, st, &id, &key))
+                {
+                    gamecore_set_contents(table);
+                    gamecore_set_handles(htable);
+                    gamecore_set_presence(st[0], st[1], st[2], st[3], st[4]);
+                    gamecore_set_member_id(id);
+                    gamecore_set_member_key(key);
+                }
+#endif
+            }
+            else
+                game_server = sr.server;
             user32_adopt_window(sr.window);
 #ifdef FFXI_MOBILE
             g_signin_window = sr.window;
