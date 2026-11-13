@@ -10693,6 +10693,7 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
 #define ACQUIRE_TIMEOUT_NS 100000000ull
 static uint32_t g_timeouts; /* acquires timed out since the window last gave images steadily (60 in a row) */
 static uint32_t g_steady;   /* images in a row since one timed out */
+static VkResult g_acquire_failed = VK_SUCCESS; /* the last acquire error logged, until an image comes again */
 
 /* the back buffer onto the window's next image; 0 when there is none to draw to now */
 static int present_to_window(GfxTex* bb)
@@ -10720,7 +10721,23 @@ static int present_to_window(GfxTex* bb)
         return 0;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
+    {
+        /* a lost surface or device, out of memory, ...: the frame goes unshown, and likely every one after it.
+         * Say so once per kind, so a window that stops updating shows up in the log (#107) */
+        if (r != g_acquire_failed)
+        {
+            fprintf(stderr, "[recomp] gfx: vkAcquireNextImageKHR failed (VkResult %d): frames go unshown\n", (int)r);
+            g_acquire_failed = r;
+        }
+        g_steady = 0;
         return 0;
+    }
+    if (g_acquire_failed != VK_SUCCESS)
+    {
+        fprintf(stderr, "[recomp] gfx: images from the window again, after vkAcquireNextImageKHR failed (VkResult %d)\n",
+            (int)g_acquire_failed);
+        g_acquire_failed = VK_SUCCESS;
+    }
     if (g_timeouts && ++g_steady == 60) /* (one that gives an image now and then logs once, not with each) */
         fprintf(stderr, "[recomp] gfx: images from the window again, after %u acquires timed out\n", g_timeouts), g_timeouts = 0;
     gpu_sync();
