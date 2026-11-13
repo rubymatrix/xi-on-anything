@@ -379,8 +379,8 @@ static int parse_hex(const char* s, uint8_t* out, size_t n)
 
 /* --pol-status stdio: the game's PlayOnline requests go to the launcher that holds the PlayOnline
  * session, which sends them on it as retail's core does on its own: the status requests (slots
- * 195/196, the request: at the lobby, at character select, on leaving the world), the content ID
- * list (slots 175/176, the request: loaded again in the game) and the in-game message client's
+ * 195/196: at the lobby, at character select, on leaving the world), the content ID list (slots
+ * 175/176: loaded again in the game) and the in-game message client's
  * (slots 278/275/280: list, read and delete the member's messages). One line out
  * on stdout per request,
  *     [pol-req] begin <id> <verb> <data: hex>
@@ -391,7 +391,7 @@ static int parse_hex(const char* s, uint8_t* out, size_t n)
  * request timeout. */
 #define POL_REQ_SLOTS 8
 #define POL_REQ_TIMEOUT_MS 100000
-#define POL_REQ_MAX 0x4000 /* the largest payload: a message body (polcore reads at most 0x2000) */
+#define POL_REQ_MAX 0x4000 /* the largest payload: a message body (retail reads at most 0x2000) */
 typedef struct PolReqSlot
 {
     volatile uint32_t state; /* 0 free, 1 waiting for the launcher, 2 answered */
