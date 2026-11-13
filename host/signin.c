@@ -260,9 +260,10 @@ static void keychain_key_sqex(const Config* c, char* out, size_t n)
 }
 
 /* ---- an account handed over by the launcher on a computer ----
- * The launcher's iPhone and iPad page puts import.json beside signin.cfg (devicectl, into the app's
- * own container, which the Files app doesn't show): the sign-in method and IDs, which become the
- * screen's, and the passwords, which go straight to the keychain. The file is overwritten and
+ * The launcher's phone page puts import.json beside signin.cfg (devicectl, into the iPhone app's
+ * own container, which the Files app doesn't show; on Android into the app's private files): the
+ * sign-in method and IDs, which become the screen's, and the passwords, which go straight to the
+ * keychain. The file is overwritten and
  * removed at once. One string member's value, JSON-unescaped (\uXXXX as UTF-8); 1 if it is there. */
 static int json_string(const char* text, const char* key, char* out, size_t n)
 {
@@ -323,6 +324,19 @@ static void import_account(const char* dir, const char* cfg_path, Config* c)
 {
     char path[1100];
     config_path(dir, "import.json", path, sizeof path);
+#ifdef __ANDROID__
+    /* Android: the launcher puts it in the app's private files (adb run-as), out of shared storage */
+    const char* own = SDL_GetAndroidInternalStoragePath();
+    char private_path[1100];
+    FILE* there = own && snprintf(private_path, sizeof private_path, "%s/import.json", own) < (int)sizeof private_path
+                      ? fopen(private_path, "rb")
+                      : NULL;
+    if (there)
+    {
+        fclose(there);
+        SDL_strlcpy(path, private_path, sizeof path);
+    }
+#endif
     FILE* f = fopen(path, "rb");
     if (!f)
         return;
