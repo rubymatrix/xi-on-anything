@@ -103,6 +103,7 @@ the log reports each one: `[recomp] dats: era-dats, 163 files`.
 | `FFXI_PROBE=gpu` | Read the game's 16×16 occlusion probe from the GPU. By default it answers "visible" at once, which saves 7–8 ms a frame. |
 | `FFXI_PROBE_DRAW=1` | Draw the characters' occlusion probes even though nothing reads them (with the default answer above). By default they are skipped on the 2025-11-12 build: up to 3 ms of GPU time a frame in crowds. |
 | `FFXI_DRAWLOG=<file>` | While `<file>.go` exists, write the next frame's draws to `<file>` (return addresses on the guest stack, texture, vertex box), then remove `.go`. For finding which game code draws what. |
+| `FFXI_GPU_TIMES=<file>` | Vulkan: GPU timestamps around each run of draws from one call site of the game and around the effects, sun maps and present. Each second, `<file>` gets the GPU time and draws per site (`t <epoch> frames <n> gpu_ms <ms>`, then `<site> <ns> <draws> <runs>`; a site is the draw's return address, with the next return address up the stack above it). |
 | `FFXI_ASYNC_READBACK=1` | Small read-only surface locks take the newest finished copy instead of waiting for the GPU. |
 | `FFXI_VSYNC=0` | Never wait for the display, for measuring frame rates past its refresh rate. |
 | `FFXI_NATIVE_GEOMETRY=1` | Skin characters with SSE-order kernels (`runtime/portable/geometry_simd.c`) (NEON or SSE2) instead of the translated x87 code, on builds with a verified layout (2025-11-12). The same output as the original's SSE path; no measured FPS gain on desktop. |

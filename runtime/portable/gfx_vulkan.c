@@ -608,6 +608,76 @@ static void ts_end(VkCommandBuffer cb, int i)
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ts_pool[g_frame], 2 * (uint32_t)i + 1);
 }
 
+/* FFXI_GPU_TIMES=<path>: GPU time per group of draws. A timestamp is written whenever the game's call site of
+ * the draws changes (GfxDraw.site) and around the back end's own passes; each second, <path> gets the time and
+ * draws per site since the last. A probe for the census of the game's draws; off, it costs a test per draw. */
+#define GT_MAX 4096
+enum { GT_FRAME = 1, GT_FX, GT_SUN, GT_MIPS, GT_PRESENT, GT_END };
+typedef struct { VkQueryPool pool; uint32_t n; uint64_t tag[GT_MAX]; uint32_t draws[GT_MAX]; } GtFrame;
+typedef struct { uint64_t tag, ns; uint32_t draws, segs, used; } GtSum;
+static int g_gt_on = -1;
+static FILE* g_gt_out;
+static GtFrame g_gt[FRAMES];
+static uint64_t g_gt_last, g_gt_frames, g_gt_frame_ns;
+static GtSum g_gt_sum[16384];
+static double g_gt_next;
+
+static int gt_enabled(void)
+{
+    if (g_gt_on < 0)
+    {
+        const char* p = getenv("FFXI_GPU_TIMES");
+        g_gt_on = p && *p && (g_gt_out = fopen(p, "w")) != NULL;
+    }
+    return g_gt_on;
+}
+
+static double gt_epoch(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return t.tv_sec + t.tv_nsec * 1e-9;
+}
+
+static void gt_add(uint64_t tag, uint64_t ns, uint32_t draws)
+{
+    uint32_t h = (uint32_t)((tag * 0x9E3779B97F4A7C15ull) >> 50) & 16383u;
+    while (g_gt_sum[h].used && g_gt_sum[h].tag != tag)
+        h = (h + 1) & 16383u;
+    GtSum* e = &g_gt_sum[h];
+    e->used = 1, e->tag = tag, e->ns += ns, e->draws += draws, e->segs++;
+}
+
+/* the slot's timestamps from its last frame, which the GPU has finished */
+static void gt_collect(void)
+{
+    GtFrame* t = &g_gt[g_frame];
+    static uint64_t v[GT_MAX];
+    if (t->n >= 2 && vkGetQueryPoolResults(g_dev, t->pool, 0, t->n, t->n * sizeof v[0], v, sizeof v[0], VK_QUERY_RESULT_64_BIT) ==
+        VK_SUCCESS)
+    {
+        double per = g_props.limits.timestampPeriod;
+        for (uint32_t i = 0; i + 1 < t->n; ++i)
+            gt_add(t->tag[i], v[i + 1] > v[i] ? (uint64_t)((v[i + 1] - v[i]) * per) : 0, t->draws[i]);
+        g_gt_frame_ns += v[t->n - 1] > v[0] ? (uint64_t)((v[t->n - 1] - v[0]) * per) : 0, g_gt_frames++;
+    }
+    if (t->n)
+        vkResetQueryPool(g_dev, t->pool, 0, t->n);
+    t->n = 0;
+    double now = gt_epoch();
+    if (now < g_gt_next)
+        return;
+    g_gt_next = now + 1.0;
+    fprintf(g_gt_out, "t %.3f frames %llu gpu_ms %.3f\n", now, (unsigned long long)g_gt_frames, g_gt_frame_ns / 1e6);
+    for (uint32_t i = 0; i < 16384; ++i)
+        if (g_gt_sum[i].used)
+            fprintf(g_gt_out, "%016llx %llu %u %u\n", (unsigned long long)g_gt_sum[i].tag, (unsigned long long)g_gt_sum[i].ns,
+                g_gt_sum[i].draws, g_gt_sum[i].segs);
+    fflush(g_gt_out);
+    memset(g_gt_sum, 0, sizeof g_gt_sum);
+    g_gt_frames = g_gt_frame_ns = 0;
+}
+
 static void frame_begin(void)
 {
     if (g_frame_open)
@@ -618,6 +688,8 @@ static void frame_begin(void)
     if (gfx_profiling)
         g_prof.sem_ns += gfx_now_ns() - t0;
     ts_read(g_frame);
+    if (g_gt_on > 0)
+        gt_collect();
     completed();
     empty_trash(f);
     if (f->cbs_used)
@@ -660,6 +732,8 @@ static VkCommandBuffer new_cb(void)
     return cb;
 }
 
+static void gt_mark(uint64_t tag);
+
 /* the frame's command buffer, begun */
 static VkCommandBuffer cmd(void)
 {
@@ -669,8 +743,32 @@ static VkCommandBuffer cmd(void)
         g_dirty = 1; /* the work submitted before it may still be writing */
         g_bound = VK_NULL_HANDLE;
         ts_frame_start(g_cb);
+        if (g_gt_on > 0 && !g_gt[g_frame].n)
+            gt_mark(GT_FRAME);
     }
     return g_cb;
+}
+
+/* a timestamp in the frame's command buffer: what follows, up to the next, is the tag's */
+static void gt_mark(uint64_t tag)
+{
+    VkCommandBuffer cb = cmd();
+    GtFrame* t = &g_gt[g_frame];
+    if (!t->pool)
+    {
+        VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = GT_MAX;
+        VK_CHECK(vkCreateQueryPool(g_dev, &qi, NULL, &t->pool));
+        vkResetQueryPool(g_dev, t->pool, 0, GT_MAX);
+    }
+    if (t->n >= GT_MAX - 1 && tag != GT_END)
+        return; /* the rest of the frame goes to the last one */
+    if (t->n == GT_MAX)
+        return;
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, t->pool, t->n);
+    t->tag[t->n] = tag, t->draws[t->n] = 0, t->n++;
+    g_gt_last = tag;
 }
 
 /* the uploads' command buffer: submitted just before the frame's, so it may only touch what the
@@ -2224,6 +2322,8 @@ static void scene_mips(const GfxDraw* d)
             continue;
         if (t->w <= tw && t->h <= th)
             continue; /* not made smaller */
+        if (g_gt_on > 0 && g_gt_last != GT_MIPS)
+            gt_mark(GT_MIPS);
         flush_pass();
         gpu_sync();
         for (uint32_t l = 1; l < t->mips; ++l)
@@ -2691,7 +2791,11 @@ void gfx_draw(const GfxDraw* d)
         return;
     uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
     scene_mips(d);
+    if (g_gt_on > 0 && d->site != g_gt_last)
+        gt_mark(d->site);
     draw_encode(d);
+    if (g_gt_on > 0 && g_gt[g_frame].n)
+        g_gt[g_frame].draws[g_gt[g_frame].n - 1]++;
     if (gfx_profiling)
         g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws++;
 }
@@ -10010,6 +10114,16 @@ static void hdr_forget(const GfxTex* t)
 
 static void scene_fx(GfxTex* color, const GfxScene* s);
 
+static int sun_map_timed(const GfxScene* s, const float* L, FxU* u)
+{
+    if (g_gt_on > 0)
+        gt_mark(GT_SUN);
+    int r = sun_map(s, L, u);
+    if (g_gt_on > 0)
+        gt_mark(GT_FX);
+    return r;
+}
+
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
@@ -10029,6 +10143,8 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
 static void scene_fx(GfxTex* color, const GfxScene* s)
 {
     flush_pass();
+    if (g_gt_on > 0)
+        gt_mark(GT_FX);
     GfxTex *ct = color, *depth = color->depth_world ? color->depth_world : color->depth_seen;
     g_fx.tr_depth = color->depth_world && color->depth_world != color->depth_seen ? 2 : depth ? 1 : 0;
     uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
@@ -10156,7 +10272,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             day *= g_moghouse ? room : 1.0f - fminf(fmaxf(s->indoors, 0.0f), 1.0f) * (1.0f - room);
             u.shadow[0] = g_fxs.shadow * day;
             u.shadow[1] = g_fxs.shadow_length, u.shadow[2] = 0.3f, u.shadow[3] = 40.0f;
-            if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
+            if (g_fxs.sun > 0.0f && day > 0.0f && sun_map_timed(s, g_fx.sunw, &u))
             {
                 u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
                 u.gi[0] *= g_fxs.gi * day;
@@ -10749,6 +10865,8 @@ static int present_to_window(GfxTex* bb)
     image_barrier(cb, g_swap_images[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
     bb->used = g_serial, bb->rec = g_cb_index;
+    if (g_gt_on > 0)
+        gt_mark(GT_END);
     submit_ex(0, f->acquired, g_swap_done[idx]);
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
@@ -10766,6 +10884,8 @@ static void frame_end(void)
 {
     casters_clear();
     glows_clear();
+    if (g_gt_on > 0 && g_cb && g_gt[g_frame].n)
+        gt_mark(GT_END);
     submit(0);
     Frame* f = &g_frames[g_frame];
     if (!f->value)
@@ -10782,7 +10902,11 @@ void gfx_present(GfxTex* bb)
     uint64_t present_start = gfx_profiling ? gfx_now_ns() : 0;
     g_present_thread = pthread_self();
     flush_pass();
+    if (g_gt_on > 0)
+        gt_mark(GT_SUN);
     shadow_frame_end(); /* the scene renderer's characters' shadows, for the next frame: timed with the frame's passes */
+    if (g_gt_on > 0)
+        gt_mark(GT_PRESENT);
     if (g_surface && bb && bb->use != GFX_USE_DEPTH)
     {
         int pw = 0, ph = 0;
@@ -10993,6 +11117,8 @@ int gfx_init(void* window, int vsync)
     VkPhysicalDeviceVulkan12Features en12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     en12.pNext = &en13;
     en12.timelineSemaphore = VK_TRUE;
+    if (gt_enabled() && !(en12.hostQueryReset = have12.hostQueryReset))
+        g_gt_on = 0;
     en12.samplerMirrorClampToEdge = have12.samplerMirrorClampToEdge;
     if (g_has_rt)
         en12.bufferDeviceAddress = en12.shaderSampledImageArrayNonUniformIndexing = en12.descriptorBindingPartiallyBound = VK_TRUE;

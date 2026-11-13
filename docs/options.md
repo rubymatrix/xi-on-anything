@@ -222,7 +222,7 @@ Not for players.
 | World | `FFXI_LODLOG`, `FFXI_WATERLOG`, `FFXI_PRIMELOG` |
 | Files / net | `FFXI_DATS_TRACE`, `FFXI_NET_TRACE` |
 | Recompiler | `FFXI_RECOMP_TRACE`, `FFXI_RECOMP_MISSING` |
-| Profiling | `FFXI_PROFILE`, `FFXI_SAMPLE` |
+| Profiling | `FFXI_PROFILE`, `FFXI_SAMPLE`, `FFXI_GPU_TIMES` |
 
 ---
 

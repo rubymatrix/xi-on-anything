@@ -3927,6 +3927,25 @@ static int game_shadow_hidden(const GfxDraw* d)
     return 0;
 }
 
+/* FFXI_GPU_TIMES: the draw's return address, and the next value up the guest stack that follows a call (as
+ * FFXI_DRAWLOG's stack does), for the back end's GPU time per call site. The game draws through wrappers, so the
+ * first is one of a few; the second is mostly the wrapper's caller, sometimes a stale local of the wrapper's. */
+static uint64_t draw_site(void)
+{
+    uint32_t ra = rd32(g_cap_esp), up = 0;
+    for (uint32_t a = g_cap_esp + 4; a < g_cap_esp + 0x400; a += 4)
+    {
+        uint32_t v = rd32(a);
+        if (v >= rt_image_lo + 6 && v < rt_image_hi &&
+            (rd8(v - 5) == 0xE8 || rd8(v - 6) == 0xFF || rd8(v - 3) == 0xFF || rd8(v - 2) == 0xFF))
+        {
+            up = v;
+            break;
+        }
+    }
+    return (uint64_t)up << 32 | ra;
+}
+
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
     uint32_t up_data, uint32_t up_stride, uint32_t n)
 {
@@ -3943,9 +3962,14 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
         if (g_gpu_skip)
             return;
     }
+    static int sites = -1;
+    if (sites < 0)
+        sites = getenv("FFXI_GPU_TIMES") && *getenv("FFXI_GPU_TIMES");
     GfxDraw* d = &g_draw;
     if (!build_draw(d))
         return;
+    if (sites)
+        d->site = draw_site();
     if (game_shadow_hidden(d))
     {
         g_scene.st_game_shadows++;
