@@ -98,7 +98,9 @@ ADDON_LIBS = ('luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
 # Rust crate to link, and the sign-in screen gets PlayOnline as a method.
 def pol(rust_target=None, out=None, env=None):
     """The PlayOnline sign-in's sources, the flags for them and for ours, and the archives to link
-    (its crate built for rust_target into out), or ([], [], []) without XI_POL."""
+    (its crate built for rust_target into out), or ([], [], []) without XI_POL. XI_POL's xi-build.json
+    names the C sources and the crate, or, for a prebuilt client, "prebuilt": {rust_target: [the
+    static libraries]}, and then there are no sources."""
     folder = os.environ.get('XI_POL')
     if not folder:
         return [], [], []
@@ -108,12 +110,22 @@ def pol(rust_target=None, out=None, env=None):
             m = json.load(f)
     except OSError as e:
         raise SystemExit('XI_POL=%s: %s' % (folder, e))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # a prebuilt client (what the launcher ships): its static libraries for this target, no sources
+    if 'prebuilt' in m:
+        libs = m['prebuilt'].get(rust_target or '')
+        if not libs:
+            raise SystemExit('XI_POL=%s has no PlayOnline client for %s' % (folder, rust_target))
+        libs = [os.path.join(folder, a) for a in libs]
+        missing = [a for a in libs if not os.path.isfile(a)]
+        if missing:
+            raise SystemExit('XI_POL=%s has no %s' % (folder, ', '.join(missing)))
+        return [], ['-DFFXI_POL', '-I', os.path.join(root, 'host')], libs
     sources = [os.path.join(folder, s) for s in m['sources']]
     manifest = os.path.join(folder, m['crate'], 'Cargo.toml')
     missing = [s for s in sources + [manifest] if not os.path.isfile(s)]
     if missing:
         raise SystemExit('XI_POL=%s has no %s' % (folder, ', '.join(missing)))
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target_dir = os.path.join(out or os.path.join(root, 'build'), 'pol')
     cmd = ['cargo', 'build', '--release', '--manifest-path', manifest, '--target-dir', target_dir] + (
         ['--target', rust_target] if rust_target else [])
