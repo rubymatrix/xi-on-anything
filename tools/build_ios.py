@@ -197,8 +197,17 @@ def host(t):
     exe = os.path.join(t.out, 'host64')
     fw = sum((['-framework', f] for f in FRAMEWORKS), [])
     hidden = ['-Wl,-load_hidden,' + a for a in pol_libs]  # the crate's symbols, not exported
-    run(t.cc + ['-o', exe] + objs + archives + hidden + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
-                                                                            '-Wl,-export_dynamic'])
+    sim = []
+    if t.sdk == 'iphonesimulator':
+        # The simulator reads an app's entitlements from this section, as Xcode links them; an ad-hoc
+        # signature can't carry them. Without an application-identifier the keychain refuses every item
+        # (errSecMissingEntitlement), so Remember Password saved nothing.
+        path = os.path.join(t.out, 'simulator-entitlements.plist')
+        with open(path, 'wb') as f:
+            plistlib.dump({'application-identifier': 'SIMULATOR.' + t.bundle_id}, f)
+        sim = ['-Wl,-sectcreate,__TEXT,__entitlements,' + path]
+    run(t.cc + ['-o', exe] + objs + archives + hidden + sim + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
+                                                                                  '-Wl,-export_dynamic'])
     return exe, bool(pol_sources)
 
 
