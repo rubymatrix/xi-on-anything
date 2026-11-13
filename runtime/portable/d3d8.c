@@ -3251,7 +3251,7 @@ static struct
     int world_done; /* the effects ran on it this frame: once a frame */
     struct { GfxTex* t; uint32_t n; } tally[4]; /* this frame's 3D draws per target */
     uint32_t draws; /* 3D draws to it since the effects last ran */
-    int done, cam;  /* the effects ran this frame; s holds a camera */
+    int done;       /* the effects ran this frame */
     /* where this frame's camera and sun came from: the draw's number, and for the camera 2 when that
      * draw was fogged (the world), 1 when not; 0 before one is found */
     uint32_t cam_draw, sun_draw, cam_rank;
@@ -3417,16 +3417,18 @@ static void scene_finish(const char* why)
         const float* f = g_scene.s.fogcolor;
         fprintf(g_cap, "scene done (%s) after %u 3D draws, camera %d from draw %u (fogged %d), sun %d from draw %u, "
             "projection %g %g %g %g / %g %g, viewport %u %u %u %u z %g..%g, fog %.2f %.2f %.2f\n",
-            why, g_scene.draws, g_scene.cam, g_scene.cam_draw, g_scene.cam_rank == 2, g_scene.s.sun_dir[3] != 0.0f,
+            why, g_scene.draws, g_scene.cam_rank != 0, g_scene.cam_draw, g_scene.cam_rank == 2, g_scene.s.sun_dir[3] != 0.0f,
             g_scene.sun_draw, p[0], p[5], p[10], p[11], p[14], p[15], vp[0], vp[1], vp[2], vp[3], u2f(vp[4]), u2f(vp[5]),
             f[0], f[1], f[2]);
     }
     if (g_scene.draws && !g_scene.done)
     {
         g_scene.st_why[!strcmp(why, "sampled") || why[0] == 'e' ? 0 : why[0] == 'i' ? 1 : why[0] == 'p' ? 2 : 3]++;
-        g_scene.st_cam[g_scene.cam ? g_scene.cam_rank : 0]++;
+        g_scene.st_cam[g_scene.cam_rank]++;
     }
-    if (g_scene.draws && !g_scene.done && g_scene.cam && (!g_scene.world || g_scene.rt == g_scene.world) &&
+    /* a camera from this scene's own draws (cam_rank), not one kept from an earlier scene: first person by day
+     * finds none, and the effects ran on the last third-person view for as long as it lasted (#106) */
+    if (g_scene.draws && !g_scene.done && g_scene.cam_rank && (!g_scene.world || g_scene.rt == g_scene.world) &&
         !g_scene.world_done)
     {
         /* the sun the votes chose, into this scene's camera space; w = 1 when lit draws voted in this
@@ -3534,7 +3536,11 @@ static void scene_note(GfxDraw* d)
      * (the world) over any other: the sun, its flare and the sky come later with their own views
      * and no fog, and taking theirs made the effects' fog come and go with the camera's angle */
     uint32_t rank = d->fs.fog ? 2u : 1u;
-    if (!d->vs.prog && s->xf[3][11] != 0.0f && d->depth.zwrite && rank > g_scene.cam_rank)
+    /* a view with no translation (a sky drawn around the eye, as first person at night draws first) is no
+     * camera: taking it put the effects' camera at the zone's origin, its sun read back upside down (#106) */
+    const float* vt = s->xf[2] + 12;
+    if (!d->vs.prog && s->xf[3][11] != 0.0f && d->depth.zwrite && rank > g_scene.cam_rank &&
+        (vt[0] != 0.0f || vt[1] != 0.0f || vt[2] != 0.0f))
     {
         g_scene.cam_rank = rank, g_scene.cam_draw = g_scene.draws;
         memcpy(sc->proj, s->xf[3], 64);
@@ -3543,7 +3549,6 @@ static void scene_note(GfxDraw* d)
         memcpy(sc->ambient, d->u.ambient, 16);
         memcpy(sc->fogcolor, d->u.fogcolor, 16);
         sc->fog[0] = d->u.params[2], sc->fog[1] = d->u.params[3], sc->fog[2] = d->fs.fog ? 1.0f : 0.0f;
-        g_scene.cam = 1;
     }
     if (d->vs.nlights && d->depth.zwrite)
     {
