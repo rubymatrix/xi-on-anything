@@ -147,10 +147,11 @@ return function(windower, h)
             model_scale = num(ent(i, 'ModelHitboxSize')),
             movement_speed = num(ent(i, 'MovementSpeed')),
             linkshell_color = { red = bit.band(lc, 0xFF), green = bit.band(bit.rshift(lc, 8), 0xFF), blue = bit.band(bit.rshift(lc, 16), 0xFF) },
+            -- Windower's order, 1-based: face, then head .. ranged (DressUp reads all nine)
             models = {
+                num(ent(i, 'Look.Hair')),
                 num(ent(i, 'Look.Head')), num(ent(i, 'Look.Body')), num(ent(i, 'Look.Hands')), num(ent(i, 'Look.Legs')),
                 num(ent(i, 'Look.Feet')), num(ent(i, 'Look.Main')), num(ent(i, 'Look.Sub')), num(ent(i, 'Look.Ranged')),
-                [0] = num(ent(i, 'Look.Hair')),
             },
         }
         return m
@@ -168,9 +169,11 @@ return function(windower, h)
     end
 
     local function target_index(sub)
-        local s = num(game.target(P('target_t', 'IsSubTargetActive')))
-        local slot = sub and 1 or s
-        if sub and s == 0 then return nil end
+        -- a flag byte, not a slot: the game leaves values other than 1 in it
+        local active = num(game.target(P('target_t', 'IsSubTargetActive'))) ~= 0
+        if sub and not active then return nil end
+        local slot = active and 1 or 0
+        if num(game.target(P('target_t', ('Targets[%d].IsActive'):format(slot)))) == 0 then return nil end
         local i = game.target(P('target_t', ('Targets[%d].Index'):format(slot)))
         if not i or i == 0 then return nil end
         return i
@@ -271,12 +274,17 @@ return function(windower, h)
             p.main_job_id = p.main_job_id or 0
             p.main_job, p.main_job_full = job(p.main_job_id)
             p.main_job_level = p.main_job_level or 0
-            if p.sub_job_id then p.sub_job, p.sub_job_full = job(p.sub_job_id) end
+            p.sub_job_id, p.sub_job_level = p.sub_job_id or 0, p.sub_job_level or 0
+            if p.sub_job_id > 0 then p.sub_job, p.sub_job_full = job(p.sub_job_id) end
             p.status = p.status or 0
             p.in_combat = p.status == 1
             p.buffs, p.skills, p.jobs = p.buffs or {}, p.skills or {}, p.jobs or {}
             p.merits, p.job_points = p.merits or {}, p.job_points or {}
-            p.vitals = p.vitals or { hp = 0, mp = 0, tp = 0, hpp = 0, mpp = 0, max_hp = 0, max_mp = 0 }
+            -- the packets give max HP/MP (0x00A, 0x061) before HP/MP/TP (0x0DF): never a missing field
+            local v = {}
+            for k, x in pairs(type(p.vitals) == 'table' and p.vitals or {}) do v[k] = x end
+            for _, k in ipairs({ 'hp', 'mp', 'tp', 'hpp', 'mpp', 'max_hp', 'max_mp' }) do v[k] = v[k] or 0 end
+            p.vitals = v
             return p
         end
         local pi = player_index()
@@ -305,8 +313,10 @@ return function(windower, h)
             linkshell_slot = 0,
         }
         p.in_combat = p.status == 1
+        -- no sub job is id 0 (res.jobs[0] is "None"), as the 0x061 byte it mirrors: Rhombus looks it
+        -- up, GearSwap compares it with that byte
+        p.sub_job_id, p.sub_job_level = sub, 0
         if sub > 0 then
-            p.sub_job_id = sub
             p.sub_job, p.sub_job_full = job(sub)
             p.sub_job_level = num(player('SubJobLevel'))
         end

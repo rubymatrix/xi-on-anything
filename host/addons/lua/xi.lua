@@ -446,7 +446,7 @@ events.raise = raise
 -- there returns at once (LuAshitacast sleeps in its unload) and the rest of the handler runs.
 local unloading = false
 
-function coroutine.sleep(s)
+local function sleep(s)
     local co, main = co_running()
     if co == nil or main then
         if unloading then return end
@@ -455,7 +455,7 @@ function coroutine.sleep(s)
     co_yield(SLEEP, tonumber(s) or 0)
 end
 
-function coroutine.sleepf(n)
+local function sleepf(n)
     local co, main = co_running()
     if co == nil or main then
         if unloading then return end
@@ -463,6 +463,10 @@ function coroutine.sleepf(n)
     end
     co_yield(SLEEPF, tonumber(n) or 1)
 end
+
+-- Addons may replace coroutine.sleep / yield with their own (GearSwap's call coroutine.yield, which it
+-- has replaced too, so they recurse); the scheduler below calls these locals, never the table's.
+coroutine.sleep, coroutine.sleepf = sleep, sleepf
 
 local task_api = {}
 xi.tasks = task_api
@@ -477,7 +481,7 @@ end
 function task_api.once(delay, fn, ...)
     local args = { n = select('#', ...), ... }
     return task_api.spawn(function()
-        coroutine.sleep(delay or 0)
+        sleep(delay or 0)
         return fn(unpack(args, 1, args.n))
     end)
 end
@@ -485,7 +489,7 @@ end
 function task_api.oncef(frames, fn, ...)
     local args = { n = select('#', ...), ... }
     return task_api.spawn(function()
-        coroutine.sleepf(frames or 1)
+        sleepf(frames or 1)
         return fn(unpack(args, 1, args.n))
     end)
 end
@@ -495,12 +499,12 @@ function task_api.repeating(delay, reps, interval, fn, ...)
     local args = { n = select('#', ...), ... }
     local t
     t = task_api.spawn(function()
-        coroutine.sleep(delay or 0)
+        sleep(delay or 0)
         local n = 0
         while not t.cancelled and (not reps or reps <= 0 or n < reps) do
             fn(unpack(args, 1, args.n))
             n = n + 1
-            coroutine.sleep(interval or 0)
+            sleep(interval or 0)
         end
     end)
     return t
@@ -510,12 +514,12 @@ function task_api.repeatingf(delay, reps, interval, fn, ...)
     local args = { n = select('#', ...), ... }
     local t
     t = task_api.spawn(function()
-        coroutine.sleepf(delay or 1)
+        sleepf(delay or 1)
         local n = 0
         while not t.cancelled and (not reps or reps <= 0 or n < reps) do
             fn(unpack(args, 1, args.n))
             n = n + 1
-            coroutine.sleepf(interval or 1)
+            sleepf(interval or 1)
         end
     end)
     return t
