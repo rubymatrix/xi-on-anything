@@ -7,6 +7,11 @@
   python3 tools/build_android.py gfxtest --test <name> [--native-tls]   one offscreen GPU fixture
         (tests/<name>_test.c), without the game
   python3 tools/build_android.py tls-test [--native-tls]   the ELF TLS check (tests/android_tls_test.c)
+  python3 tools/build_android.py install --device SERIAL [--keystore file.p12 --key-alias xi]
+        everything the app needs, from the dependencies (android_deps.py, once) to the API 29 host and
+        its APK (build_android_apk.py, signed with --keystore, its password in
+        XI_ANDROID_KEYSTORE_PASS), installed over adb on the device SERIAL (`adb devices`) as an
+        update that keeps the app's files. The launcher's phone page runs this.
 
 FFXiMain.dll is translated into generated/android-all (tools/android_translation.py); FFXi.dll and
 the addons are rebuilt from the same prepared files. Desktop outputs are not touched. Run
@@ -23,17 +28,28 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import android_translation
-from android_toolchain import CACHE, ROOT, SDL, TC
+from android_toolchain import CACHE, MAKE, ROOT, SDK, SDL, TC
 import build
 import build_posix
 
 MIN_API = 28
-CC = str(TC / f'aarch64-linux-android{MIN_API}-clang')
-CXX = CC + '++'
-AR = str(TC / 'llvm-ar')
+WINDOWS = sys.platform == 'win32'
+
+
+def clang(api):
+    """The NDK's compiler driver for API `api` (a .cmd wrapper on Windows)."""
+    return str(TC / f'aarch64-linux-android{api}-clang') + ('.cmd' if WINDOWS else '')
+
+
+CC = clang(MIN_API)
+CXX = CC.replace('-clang.cmd', '-clang++.cmd') if WINDOWS else CC + '++'
+AR = str(TC / 'llvm-ar') + ('.exe' if WINDOWS else '')
+STRIP = str(TC / 'llvm-strip') + ('.exe' if WINDOWS else '')
+ADB = SDK / 'platform-tools' / ('adb.exe' if WINDOWS else 'adb')
 OUT = Path(os.environ.get('XI_ANDROID_BUILD_DIR', str(ROOT / 'build/android'))).resolve()
 FLAGS = [
     '-O2',
@@ -59,6 +75,7 @@ WARN = build_posix.GEN_WARNINGS
 
 
 def run(args, **kw):
+    print('> ' + ' '.join(map(str, args))[:200], flush=True)
     subprocess.run(list(map(str, args)), cwd=ROOT, check=True, **kw)
 
 
@@ -97,6 +114,7 @@ def compile_one(job):
 
 def compile_many(srcs, group, extra=()):
     jobs = [(s, OUT / 'obj' / group / (str(s).replace('/', '_').replace('\\', '_') + '.o'), extra) for s in srcs]
+    print(f'{group}: compiling {len(jobs)} files (the ones changed since the last build)', flush=True)
     errors = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
         for name, err in ex.map(compile_one, jobs):
@@ -107,6 +125,30 @@ def compile_many(srcs, group, extra=()):
             print(name + '\n' + err[-6500:], file=sys.stderr)
         raise SystemExit(1)
     return [j[1] for j in jobs]
+
+
+def luajit_make(work, tc, cc):
+    """LuaJIT's own makefile, cross-compiling with the NDK's compilers in tc (cc: the API's clang)."""
+    run(
+        [
+            MAKE if MAKE.exists() else 'make',
+            '-C',
+            work / 'src',
+            '-j6',
+            'BUILDMODE=static',
+            'TARGET_SYS=Linux',
+            'HOST_CC=' + os.environ.get('XI_HOST_CC', 'clang'),
+            'CROSS=' + str(tc) + '/',
+            'CC=' + cc,
+            'STATIC_CC=' + cc,
+            'DYNAMIC_CC=' + cc + ' -fPIC',
+            'TARGET_LD=' + cc,
+            'TARGET_AR=' + str(tc / Path(AR).name) + ' rcus',
+            'TARGET_STRIP=' + str(tc / Path(STRIP).name),
+            'XCFLAGS=-DLUAJIT_ENABLE_LUA52COMPAT -fPIC',
+            'libluajit.a',
+        ]
+    )
 
 
 def library(name):
@@ -120,26 +162,19 @@ def library(name):
         work = OUT / ('luajit-src' if MIN_API == 28 else f'luajit-src-api{MIN_API}')
         if not work.exists():
             shutil.copytree(lib, work)
-        run(
-            [
-                'make',
-                '-C',
-                work / 'src',
-                '-j6',
-                'BUILDMODE=static',
-                'TARGET_SYS=Linux',
-                'HOST_CC=clang',
-                'CROSS=' + str(TC) + '/',
-                'CC=' + CC,
-                'STATIC_CC=' + CC,
-                'DYNAMIC_CC=' + CC + ' -fPIC',
-                'TARGET_LD=' + CC,
-                'TARGET_AR=' + AR + ' rcus',
-                'TARGET_STRIP=' + str(TC / 'llvm-strip'),
-                'XCFLAGS=-DLUAJIT_ENABLE_LUA52COMPAT -fPIC',
-                'libluajit.a',
-            ]
-        )
+        # make splits its variables at spaces: an NDK under one (the launcher's, in macOS's
+        # "Application Support") is reached through a link without any, for this build
+        tc, link = TC, None
+        if ' ' in str(TC) and not WINDOWS:
+            link = Path(tempfile.mkdtemp(prefix='xi-ndk-'))
+            (link / 'bin').symlink_to(TC, target_is_directory=True)
+            tc = link / 'bin'
+        cc = str(tc / Path(CC).name)
+        try:
+            luajit_make(work, tc, cc)
+        finally:
+            if link:
+                shutil.rmtree(link)
         shutil.copyfile(work / 'src/libluajit.a', archive)
     else:
         objs = []
@@ -157,7 +192,7 @@ def library(name):
 def main():
     global CC, CXX, MIN_API
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('target', choices=['deps', 'gfxtest', 'host', 'tls-test'])
+    ap.add_argument('target', choices=['deps', 'gfxtest', 'host', 'tls-test', 'install'])
     ap.add_argument(
         '--test',
         choices=[
@@ -173,11 +208,21 @@ def main():
         help='Offscreen GPU fixture for gfxtest target',
     )
     ap.add_argument('--native-tls', action='store_true', help='API 29 ELF TLS (default: API 28, emulated TLS)')
+    ap.add_argument('--device', help='install: the adb serial of the device')
+    ap.add_argument('--keystore', help='install: the key to sign with (build_android_apk.py --keystore)')
+    ap.add_argument('--key-alias', default='xi', help="install: the key's alias")
     a = ap.parse_args()
+    if a.target == 'install':
+        if not a.device:
+            ap.error('install needs --device (a serial from adb devices)')
+        a.native_tls = True  # API 29 (Android 10) and its ELF TLS, as the docs build
+        # the dependencies once (SDL3, glslang): android_deps.py's outputs are what the host links
+        if not (CACHE / 'sdl-build/libSDL3.so').exists() or not (CACHE / 'spirv-build.json').exists():
+            run([sys.executable, ROOT / 'tools/android_deps.py'])
     if a.native_tls:
         MIN_API = 29
-        CC = str(TC / f'aarch64-linux-android{MIN_API}-clang')
-        CXX = CC + '++'
+        CC = clang(MIN_API)
+        CXX = CC.replace('-clang.cmd', '-clang++.cmd') if WINDOWS else CC + '++'
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / 'generated').mkdir(exist_ok=True)
     if a.target == 'tls-test':
@@ -189,7 +234,7 @@ def main():
         return
     libs = []
     extra = ['-I' + str(ROOT / 'host/addons'), '-DIMGUI_USER_CONFIG="imconfig_xi.h"']
-    if a.target in ('deps', 'host'):
+    if a.target in ('deps', 'host', 'install'):
         for n in ['mbedtls', 'luajit', 'imgui', 'luasocket', 'lfs', 'sqlite']:
             lib, inc = library(n)
             libs.append(lib)
@@ -276,7 +321,7 @@ def main():
     )
     if pol_sources:  # the shipped library names none of the PlayOnline client's functions (build_posix.POL_CFLAGS)
         shutil.copyfile(library_path, OUT / 'libmain.debug.so')
-        run([TC / 'llvm-strip', '--strip-all', library_path])
+        run([STRIP, '--strip-all', library_path])
     metadata = {
         'schema': 1,
         'minimum_api': MIN_API,
@@ -287,7 +332,19 @@ def main():
     }
     (OUT / 'build-config.json').write_text(json.dumps(metadata, indent=2) + '\n')
     print('built', library_path)
+    if a.target == 'install':
+        package = [sys.executable, ROOT / 'tools/build_android_apk.py', '--build-dir', OUT]
+        if a.keystore:
+            package += ['--keystore', a.keystore, '--key-alias', a.key_alias]
+        run(package)
+        # -r: an update, the app's files kept; -d: an older game build too (the app is debuggable)
+        run([ADB, '-s', a.device, 'install', '-r', '-d', OUT / 'xi-native-test.apk'])
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except subprocess.CalledProcessError as e:
+        # the step's own error is just above; a traceback here would push it out of the launcher's view
+        print('failed: ' + ' '.join(map(str, e.cmd))[:300], file=sys.stderr)
+        raise SystemExit(1)

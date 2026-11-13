@@ -11,6 +11,8 @@ The sources are pinned by SHA-256. Downloads and builds stay in the dependency c
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import tarfile
 import urllib.request
@@ -49,6 +51,28 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def extract(archive, into):
+    """A tarball into `into`, every member inside it: tarfile's 'data' filter where Python has it
+    (3.12, and later 3.8-3.11 releases), else the same refusal of absolute paths, '..', devices and
+    links that leave the tree (Xcode's Python 3.9, which the launcher's builds run)."""
+    with tarfile.open(archive) as data:
+        if hasattr(tarfile, 'data_filter'):
+            data.extractall(into, filter='data')
+            return
+        root = os.path.realpath(into)
+        for member in data.getmembers():
+            target = os.path.realpath(os.path.join(into, member.name))
+            link = member.issym() and os.path.realpath(os.path.join(os.path.dirname(target), member.linkname))
+            if (
+                os.path.commonpath([root, target]) != root
+                or (link and os.path.commonpath([root, link]) != root)
+                or member.islnk()
+                or member.isdev()
+            ):
+                raise RuntimeError('unsafe member in ' + archive.name + ': ' + member.name)
+        data.extractall(into)
+
+
 def download(url, archive, expected):
     """archive, downloaded from url once and checked against its pinned hash every time."""
     if not archive.exists():
@@ -72,9 +96,9 @@ def fetch():
         target = source / relative if relative else source
         if not target.exists():
             temp = CACHE / (name + '-extraction')
-            temp.mkdir(exist_ok=False)
-            with tarfile.open(archive) as data:
-                data.extractall(temp, filter='data')
+            shutil.rmtree(temp, ignore_errors=True)  # left by an earlier run cut short
+            temp.mkdir()
+            extract(archive, temp)
             entries = list(temp.iterdir())
             assert len(entries) == 1
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -88,8 +112,7 @@ def build_sdl(toolchain, jobs):
     archive = CACHE / (SDL.name + '.tar.gz')
     download('https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/' + archive.name, archive, SDL_SHA256)
     if not SDL.exists():
-        with tarfile.open(archive) as data:
-            data.extractall(CACHE, filter='data')
+        extract(archive, CACHE)
     output = CACHE / 'sdl-build'
     subprocess.run(
         [
