@@ -3,29 +3,11 @@
 # sanitizers on macOS and Linux.
 name: Shared geometry
 
+# Only a published release runs it (the launcher's release workflow publishes them here): no pull
+# requests, no pushes to main, no runs by hand.
 on:
-  pull_request:
-    paths:
-      - 'runtime/portable/geometry_*'
-      - 'tests/geometry_*'
-      - 'host/host64.c'
-      - 'meta/builds.json'
-      - 'tools/build.py'
-      - 'tools/build_posix.py'
-      - 'tools/buildinfo.py'
-      - '.github/workflows/geometry-simd.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'runtime/portable/geometry_*'
-      - 'tests/geometry_*'
-      - 'host/host64.c'
-      - 'meta/builds.json'
-      - 'tools/build.py'
-      - 'tools/build_posix.py'
-      - 'tools/buildinfo.py'
-      - '.github/workflows/geometry-simd.yml'
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read

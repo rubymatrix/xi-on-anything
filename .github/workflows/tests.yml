@@ -1,11 +1,12 @@
 # The tests that need no game files: the replay tools and their recordings (tests/replay_test.py),
 # and the game's paths on a case-sensitive host (tests/vfs_test.c).
 name: tests
+# Only a published release runs it (the launcher's release workflow publishes them here): no pull
+# requests, no pushes to main, no runs by hand.
 on:
-  pull_request:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  release:
+    types: [published]
+
 permissions:
   contents: read
 jobs:
