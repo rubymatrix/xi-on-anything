@@ -2101,7 +2101,7 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
 
 /* --- the PC port's own drawing mistakes, drawn as the PS2 draws them ----------------------------------------------
  * After portfix (github.com/voetre/portfix, MIT License, Copyright (c) 2026 voetre), which found and measured both.
- * Each has a setting, on unless set to 0: fix_water_layers, fix_button_rims, fix_summon_halos. They are read once a frame (fixes_frame),
+ * Each has a setting, on unless set to 0: fix_water_layers, fix_button_rims, fix_summon_halos, fix_shine. They are read once a frame (fixes_frame),
  * not at every draw.
  *
  * Water layers. Port Bastok's sea is three flat layers drawn in order: an opaque black one, the scrolling ripples added
@@ -2118,13 +2118,15 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
  * as a light, see-through rim. The PS2's buttons have none, nor does a disabled button (alpha blended). A body drawn
  * added over its own shadow (same texture, size and uv, the shadow just down and right of it) is drawn alpha blended:
  * where the shadow lies under it the result is the same. */
-static int g_fix_water = 1, g_fix_buttons = 1, g_fix_halos = 1;
+static int g_fix_water = 1, g_fix_buttons = 1, g_fix_halos = 1, g_fix_shine = 1;
+static Obj* sub(uint32_t tex, uint32_t face, uint32_t level);
 
 static void fixes_frame(void)
 {
     g_fix_water = gfx_fx_get("fix_water_layers") != 0.0f;
     g_fix_buttons = gfx_fx_get("fix_button_rims") != 0.0f;
     g_fix_halos = gfx_fx_get("fix_summon_halos") != 0.0f;
+    g_fix_shine = gfx_fx_get("fix_shine") != 0.0f;
 }
 
 /* the held ripple draw: DrawPrimitive's arguments, the scene renderer's site for it, the device state it had */
@@ -2160,6 +2162,9 @@ static void water_flush(void)
     keep = g_dev.cur;
     g_dev.cur = g_water.s;
     g_dev.cur.rs[14] = 0; /* ZWRITEENABLE */
+    static int said;
+    if (!said++)
+        rt_log("[recomp] d3d8: water layers: a ripple layer drawn after its tint, as on the PS2 (fix_water_layers)\n");
     uint32_t zone = g_draw_zone;
     g_draw_zone = g_water.zone;
     draw(g_water.prim, g_water.count, g_water.start, 0, 0, 0, 0);
@@ -2198,6 +2203,9 @@ static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t
     static uint32_t buf;
     if (!buf)
         buf = gheap_alloc(4 * 28, 1);
+    static int said;
+    if (!said++)
+        rt_log("[recomp] d3d8: summon halos: drawn from the %ux%u silhouette (fix_summon_halos)\n", src->width, src->height);
     memcpy(GUEST_PTR(buf), GUEST_PTR(data), 4 * 28);
     float k = (float)rt->width / 640.0f, x0 = u2f(rd32(data)), y0 = u2f(rd32(data + 4));
     for (uint32_t i = 0; i < 4; ++i)
@@ -2207,6 +2215,154 @@ static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t
         wr32(v + 4, f2u(u2f(rd32(v + 4)) + y0 * (k - 1.0f)));
     }
     return buf;
+}
+
+/* Shine (fix_shine). Two kinds, one draw each on the PC, both added by stage 1 as MODULATEALPHA_ADDCOLOR (CURRENT,
+ * TEXTURE): current + current alpha x texture, where stage 0's alpha is the texture's alpha x strength / 2 (TFACTOR's
+ * alpha) x 2, the PS2's alpha read on the 0xFF = 1.0 scale instead of its 0x80 = 1.0: half the PS2's shine.
+ * - Sphere map (gold plates and the like: texture coordinates CAMERASPACENORMAL | 1): the identity texture matrix
+ *   reads (nx, ny), a quarter of the map, its dark corner on a face turned to the camera. Drawn with the PS2's
+ *   mapping, u = 0.5 + 0.5 nx, v = 0.5 - 0.5 ny, and twice the strength: stage 1 = texture x 2 x current's alpha into
+ *   TEMP, stage 2 = current + TEMP.
+ * - The light's highlight on weapons and armour (CAMERASPACEREFLECTIONVECTOR | 1, a cube): the texture matrix turns the
+ *   reflection over (diag(1, -1, -1)), so the spot is found looking away from the light; the PS2's sphere-mapped spot
+ *   texture pasted on the cube's -Z face has half its spread; and it is white, at half strength. Drawn with the flip
+ *   taken out, a cube rebuilt from the game's -Z face with the PS2's spread (radius 0.6 x sin(angle / 2), 0.5 the
+ *   texture's edge), and stage 1 = cube x TFACTOR x 4 into TEMP with TFACTOR's colour half light 0's diffuse, stage 2
+ *   = current + current alpha x TEMP. TFACTOR's alpha (the strength) and the stages' alpha results are the game's. */
+static uint32_t g_spot_cube, g_spot_from; /* the highlight cube built from the game's (g_spot_from) */
+
+/* 1 sphere-map shine, 2 the light's highlight, 0 neither */
+static int shine_kind(const State* s)
+{
+    const uint32_t* t = s->tss[1];
+    if (t[1] != 18 || t[2] != 1 || t[3] != 2) /* MODULATEALPHA_ADDCOLOR (CURRENT, TEXTURE) */
+        return 0;
+    return t[11] == (0x10000u | 1) ? 1 : t[11] == (0x30000u | 1) ? 2 : 0;
+}
+
+/* a direction's texel of the game's spot face, bilinear, the spot's corner colour outside */
+static uint32_t spot_sample(const uint32_t* spot, uint32_t n, float u, float v)
+{
+    float x = u * (float)n - 0.5f, y = v * (float)n - 0.5f, acc[4] = { 0, 0, 0, 0 };
+    int x0 = (int)floorf(x), y0 = (int)floorf(y);
+    float fx = x - (float)x0, fy = y - (float)y0;
+    for (int k = 0; k < 4; ++k)
+    {
+        int xi = x0 + (k & 1), yi = y0 + (k >> 1);
+        float w = ((k & 1) ? fx : 1.0f - fx) * ((k >> 1) ? fy : 1.0f - fy);
+        uint32_t c = xi >= 0 && yi >= 0 && xi < (int)n && yi < (int)n ? spot[yi * (int)n + xi] : (spot[0] & 0xFF000000u);
+        for (int b = 0; b < 4; ++b)
+            acc[b] += w * (float)(c >> (8 * b) & 0xFF);
+    }
+    uint32_t out = 0;
+    for (int b = 0; b < 4; ++b)
+        out |= ((uint32_t)lroundf(acc[b]) & 0xFF) << (8 * b);
+    return out;
+}
+
+/* the highlight cube for the game's (built once a cube), or 0 when it can't be made from it */
+static uint32_t spot_cube(uint32_t game)
+{
+    if (game == g_spot_from && g_spot_cube)
+        return g_spot_cube;
+    Obj* g = obj(game);
+    Obj* face = sub(game, 5, 0); /* D3DCUBEMAP_FACE_NEGATIVE_Z */
+    if (!g || g->kind != O_CUBE || !face || !face->mem || (face->format != 21 && face->format != 22) || face->width < 8 ||
+        face->width != face->height)
+        return 0;
+    uint32_t n = face->width, pitch = fmt_pitch(face->format, n);
+    uint32_t* spot = (uint32_t*)malloc(4u * n * n);
+    if (!spot)
+        return 0;
+    for (uint32_t y = 0; y < n; ++y)
+        memcpy(spot + y * n, (const uint8_t*)GUEST_PTR(face->mem) + y * pitch, 4u * n);
+    const uint32_t N = 128;
+    if (g_spot_cube)
+        obj_release(g_spot_cube), g_spot_cube = 0;
+    uint32_t cube = new_texture(O_CUBE, N, N, 1, 0, 21 /* A8R8G8B8 */, 1 /* MANAGED */);
+    for (uint32_t f = 0; f < 6; ++f)
+    {
+        Obj* s = sub(cube, f, 0);
+        uint8_t* px = (uint8_t*)GUEST_PTR(obj_mem(s));
+        uint32_t sp = fmt_pitch(21, N);
+        for (uint32_t y = 0; y < N; ++y)
+            for (uint32_t x = 0; x < N; ++x)
+            {
+                /* this texel's direction, in Direct3D's cube face layout */
+                float a = 2.0f * ((float)x + 0.5f) / (float)N - 1.0f, b = 2.0f * ((float)y + 0.5f) / (float)N - 1.0f, d[3];
+                switch (f)
+                {
+                case 0: d[0] = 1, d[1] = -b, d[2] = -a; break;
+                case 1: d[0] = -1, d[1] = -b, d[2] = a; break;
+                case 2: d[0] = a, d[1] = 1, d[2] = b; break;
+                case 3: d[0] = a, d[1] = -1, d[2] = -b; break;
+                case 4: d[0] = a, d[1] = -b, d[2] = 1; break;
+                default: d[0] = -a, d[1] = -b, d[2] = -1; break;
+                }
+                float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), c = -d[2] / len; /* cos from the axis (-Z) */
+                float r = 0.6f * sqrtf(fmaxf(0.0f, (1.0f - c) * 0.5f)), side = sqrtf(d[0] * d[0] + d[1] * d[1]);
+                /* the same way round as the game's face near the axis: face -Z texel (u, v) is direction (-u, -v) */
+                float u = side > 1e-6f ? 0.5f - r * d[0] / side : 0.5f, v = side > 1e-6f ? 0.5f - r * d[1] / side : 0.5f;
+                uint32_t t = spot_sample(spot, n, u, v);
+                memcpy(px + y * sp + x * 4u, &t, 4);
+            }
+        mark_dirty(s);
+    }
+    free(spot);
+    g_spot_cube = cube, g_spot_from = game;
+    return cube;
+}
+
+/* 1 when a shine draw was drawn here, as the PS2 draws it */
+static int shine_draw(uint32_t prim, uint32_t count, uint32_t indices, uint32_t isize)
+{
+    State* s = &g_dev.cur;
+    int kind = shine_kind(s);
+    uint32_t cube = 0;
+    if (!kind || (kind == 2 && !(cube = spot_cube(s->tex[1]))))
+        return 0;
+    uint32_t keep[3][32], tf = s->rs[60], tex1 = s->tex[1];
+    float keep_m[16];
+    memcpy(keep, s->tss[1], sizeof keep);
+    memcpy(keep_m, s->xf[17], sizeof keep_m); /* D3DTS_TEXTURE1 */
+    uint32_t* t1 = s->tss[1];
+    uint32_t* t2 = s->tss[2];
+    if (kind == 1)
+    {
+        static const float ps2[16] = { 0.5f, 0, 0, 0, 0, -0.5f, 0, 0, 0, 0, 0, 0, 0.5f, 0.5f, 0, 1 };
+        memcpy(s->xf[17], ps2, sizeof ps2);
+        t1[1] = 5, t1[2] = 2, t1[3] = 1 | 0x20; /* MODULATE2X (TEXTURE, CURRENT | ALPHAREPLICATE) */
+        t2[1] = 7, t2[2] = 1, t2[3] = 5;        /* ADD (CURRENT, TEMP) */
+    }
+    else
+    {
+        for (int c = 0; c < 4; ++c) /* diag(1, -1, -1) x the matrix: its second and third rows negated */
+            s->xf[17][4 + c] = -keep_m[4 + c], s->xf[17][8 + c] = -keep_m[8 + c];
+        const Light* l0 = &s->light[0];
+        float rgb[3] = { 1, 1, 1 };
+        if (l0->enabled)
+            for (int i = 0; i < 3; ++i)
+                rgb[i] = u2f(l0->v[1 + i]); /* D3DLIGHT8 Diffuse */
+        s->rs[60] = tf & 0xFF000000u;
+        for (int i = 0; i < 3; ++i)
+            s->rs[60] |= (uint32_t)lroundf(fminf(1.0f, fmaxf(0.0f, rgb[i] * 0.5f)) * 255.0f) << (16 - 8 * i);
+        s->tex[1] = cube;
+        t1[1] = 6, t1[2] = 2, t1[3] = 3; /* MODULATE4X (TEXTURE, TFACTOR) */
+        t2[1] = 18, t2[2] = 1, t2[3] = 5; /* MODULATEALPHA_ADDCOLOR (CURRENT, TEMP) */
+    }
+    t1[28] = 5;          /* RESULTARG TEMP */
+    t2[4] = 2, t2[5] = 5; /* ALPHAOP SELECTARG1 (TEMP) */
+    s->tss[3][1] = 1, s->tss[3][4] = 1; /* stage 3 off */
+    static int said[2];
+    if (!said[kind - 1]++)
+        rt_log(kind == 1 ? "[recomp] d3d8: shine: sphere-mapped shine drawn as on the PS2 (fix_shine)\n"
+                         : "[recomp] d3d8: shine: the light's highlight drawn as on the PS2 (fix_shine)\n");
+    draw(prim, count, 0, indices, isize, 0, 0);
+    memcpy(s->tss[1], keep, sizeof keep);
+    memcpy(s->xf[17], keep_m, sizeof keep_m);
+    s->rs[60] = tf, s->tex[1] = tex1;
+    return 1;
 }
 
 /* this frame's button shadows: black quads, alpha blended, for button_body to find a body's own */
@@ -2254,7 +2410,12 @@ static int button_body(uint32_t prim, uint32_t count, uint32_t data, uint32_t st
         if (sh->tex == q.tex && fabsf(sh->x1 - sh->x0 - w) <= crop && fabsf(sh->y1 - sh->y0 - h) <= crop && dx > 0.0f &&
             dy > 0.0f && dx <= h * 0.25f && dy <= h * 0.25f && fabsf(sh->u0 - q.u0) <= 1e-3f && fabsf(sh->v0 - q.v0) <= 1e-3f &&
             fabsf(sh->u1 - q.u1) <= 0.05f && fabsf(sh->v1 - q.v1) <= 0.05f)
+        {
+            static int said;
+            if (!said++)
+                rt_log("[recomp] d3d8: button rims: a button body drawn over its shadow alpha blended (fix_button_rims)\n");
             return 1;
+        }
     }
     return 0;
 }
@@ -2283,7 +2444,8 @@ static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
     if (ib && ib->mem)
     {
         uint32_t isize = ib->format == FMT_INDEX32 ? 4 : 2;
-        draw(ARG(1), ARG(5), 0, ib->mem + ARG(4) * isize, isize, 0, 0);
+        if (!g_fix_shine || !shine_draw(ARG(1), ARG(5), ib->mem + ARG(4) * isize, isize))
+            draw(ARG(1), ARG(5), 0, ib->mem + ARG(4) * isize, isize, 0, 0);
     }
     else
         gfx_prof_skip(GFX_SKIP_NO_INDICES);

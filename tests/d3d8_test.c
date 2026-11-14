@@ -566,6 +566,136 @@ static void test_summon_halos(void)
     call(low, D_Release, 0);
 }
 
+/* a quad facing the camera (normal 0,0,-1), XYZ|NORMAL|DIFFUSE through identity transforms, drawn indexed, its diffuse
+ * black with alpha 0x80: the shine draws' first stage gives that colour and alpha, stage 1 adds the shine */
+static void shine_quad(void)
+{
+    typedef struct { float x, y, z, nx, ny, nz; uint32_t c; } NV; /* FVF 0x52 */
+    NV q[4] = { { -1, 1, 0.5f, 0, 0, -1, 0x80000000u }, { 1, 1, 0.5f, 0, 0, -1, 0x80000000u },
+                { -1, -1, 0.5f, 0, 0, -1, 0x80000000u }, { 1, -1, 0.5f, 0, 0, -1, 0x80000000u } };
+    uint32_t pp = galloc(4);
+    call(g_dev, D_CreateVertexBuffer, 5, (uint32_t)sizeof q, 0x8, 0x52, 1, g_out);
+    uint32_t vb = rd32(g_out);
+    call(vb, B_Lock, 4, 0, 0, pp, 0);
+    memcpy(GUEST_PTR(rd32(pp)), q, sizeof q);
+    call(vb, B_Unlock, 0);
+    call(g_dev, D_CreateIndexBuffer, 5, 6 * 2, 0x8, 101, 1, g_out);
+    uint32_t ib = rd32(g_out);
+    call(ib, B_Lock, 4, 0, 0, pp, 0);
+    uint16_t idx[6] = { 0, 1, 2, 2, 1, 3 };
+    memcpy(GUEST_PTR(rd32(pp)), idx, sizeof idx);
+    call(ib, B_Unlock, 0);
+    call(g_dev, D_SetVertexShader, 1, 0x52);
+    call(g_dev, D_SetStreamSource, 3, 0, vb, (uint32_t)sizeof q[0]);
+    call(g_dev, D_SetIndices, 2, ib, 0);
+    call(g_dev, D_BeginScene, 0);
+    call(g_dev, D_DrawIndexedPrimitive, 5, 4 /* LIST */, 0, 4, 0, 2);
+    call(g_dev, D_EndScene, 0);
+    call(g_dev, D_SetIndices, 2, 0, 0);
+    call(g_dev, D_SetStreamSource, 3, 0, 0, 0);
+    call(ib, D_Release, 0);
+    call(vb, D_Release, 0);
+}
+
+/* the shine draws' stages: 0 the diffuse (black, alpha 0x80), 1 MODULATEALPHA_ADDCOLOR (CURRENT, TEXTURE) with
+ * generated texture coordinates (tci) through D3DTS_TEXTURE1 (m), 2 off */
+static void shine_stages(uint32_t tci, const float m[16], uint32_t tex)
+{
+    call(g_dev, D_SetRenderState, 2, 7, 0);   /* ZENABLE off */
+    call(g_dev, D_SetRenderState, 2, 137, 0); /* LIGHTING off */
+    call(g_dev, D_SetRenderState, 2, 22, 1);  /* CULL none */
+    call(g_dev, D_SetRenderState, 2, 27, 0);  /* no blending */
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(g_dev, D_SetTextureStageState, 3, 0, 1, 2 /* SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 4, 2 /* SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTexture, 2, 1, tex);
+    call(g_dev, D_SetTextureStageState, 3, 1, 1, 18 /* MODULATEALPHA_ADDCOLOR */);
+    call(g_dev, D_SetTextureStageState, 3, 1, 2, 1 /* CURRENT */);
+    call(g_dev, D_SetTextureStageState, 3, 1, 3, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 1, 4, 2 /* ALPHAOP SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 1, 5, 1 /* CURRENT */);
+    call(g_dev, D_SetTextureStageState, 3, 1, 11, tci);
+    call(g_dev, D_SetTextureStageState, 3, 1, 24, tci >> 16 == 3 ? 3 : 2); /* COUNT3 for the cube, COUNT2 */
+    call(g_dev, D_SetTextureStageState, 3, 1, 16, 1); /* point */
+    call(g_dev, D_SetTextureStageState, 3, 1, 17, 1);
+    call(g_dev, D_SetTextureStageState, 3, 2, 1, 1 /* stage 2 off */);
+    call(g_dev, D_SetTextureStageState, 3, 2, 4, 1);
+    uint32_t mm = galloc(64);
+    memcpy(GUEST_PTR(mm), m, 64);
+    call(g_dev, D_SetTransform, 2, 17 /* D3DTS_TEXTURE1 */, mm);
+}
+
+static void shine_reset(void)
+{
+    static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    uint32_t mm = galloc(64);
+    memcpy(GUEST_PTR(mm), id, 64);
+    call(g_dev, D_SetTransform, 2, 17, mm);
+    call(g_dev, D_SetTexture, 2, 1, 0);
+    call(g_dev, D_SetTextureStageState, 3, 1, 1, 1 /* DISABLE */);
+    call(g_dev, D_SetTextureStageState, 3, 1, 4, 1);
+    call(g_dev, D_SetTextureStageState, 3, 1, 11, 1);
+    call(g_dev, D_SetTextureStageState, 3, 1, 24, 0);
+}
+
+/* Sphere-map shine (d3d8.c shine_draw, after portfix): a face turned to the camera. The PC's identity matrix reads the
+ * map at (nx, ny) = (0, 0), its top-left texel (red), at half strength: 0x80 red. Fixed, the PS2's mapping reads its
+ * centre, the bottom-right texel at point sampling (green), at the PS2's strength: full green. */
+static void test_shine_sphere(void)
+{
+    clear(0xFF000000u);
+    call(g_dev, D_CreateTexture, 7, 2, 2, 1, 0, 21, 1, g_out);
+    uint32_t tex = rd32(g_out), lr = galloc(8);
+    call(tex, T_LockRect, 4, 0, lr, 0, 0);
+    uint32_t bits = rd32(lr + 4), pitch = rd32(lr);
+    wr32(bits, 0xFFFF0000u), wr32(bits + 4, 0xFF000000u), wr32(bits + pitch, 0xFF000000u), wr32(bits + pitch + 4, 0xFF00FF00u);
+    call(tex, T_UnlockRect, 1, 0);
+    static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    shine_stages(0x10000u | 1 /* CAMERASPACENORMAL */, id, tex);
+    shine_quad();
+    uint32_t p = pixel(16, 16);
+    CHECK(p == 0x00FF00, "sphere-map shine: %06x (want 00ff00; about 800000 as the PC draws it)", p);
+    shine_reset();
+    call(tex, D_Release, 0);
+}
+
+/* The light's highlight (d3d8.c shine_draw, spot_cube): a cube white on -Z, black elsewhere, through the game's
+ * diag(1, -1, -1); the face reflects the eye straight back (0, 0, -1). The PC's flip sends that to +Z, black. Fixed,
+ * to -Z, the spot, times light 0's colour (white) x 2 x the stage-0 alpha (0x80): grey 0x80. */
+static void test_shine_spot(void)
+{
+    clear(0xFF000000u);
+    call(g_dev, 22 /* CreateCubeTexture */, 6, 16, 1, 0, 21, 1, g_out);
+    uint32_t cube = rd32(g_out), lr = galloc(8);
+    for (uint32_t f = 0; f < 6; ++f)
+    {
+        call(cube, 16 /* LockRect */, 5, f, 0, lr, 0, 0);
+        uint32_t bits = rd32(lr + 4), pitch = rd32(lr);
+        for (uint32_t y = 0; y < 16; ++y)
+            for (uint32_t x = 0; x < 16; ++x)
+                wr32(bits + y * pitch + 4 * x, f == 5 ? 0xFFFFFFFFu : 0xFF000000u);
+        call(cube, 17 /* UnlockRect */, 2, f, 0);
+    }
+    uint32_t light = galloc(104);
+    memset(GUEST_PTR(light), 0, 104);
+    wr32(light, 3 /* DIRECTIONAL */);
+    wr32(light + 4, fbits(1.0f)), wr32(light + 8, fbits(1.0f)), wr32(light + 12, fbits(1.0f)), wr32(light + 16, fbits(1.0f));
+    wr32(light + 72, fbits(1.0f)); /* Direction z (D3DLIGHT8 +64 Direction) */
+    call(g_dev, 44 /* SetLight */, 2, 0, light);
+    call(g_dev, 46 /* LightEnable */, 2, 0, 1);
+    call(g_dev, D_SetRenderState, 2, 60, 0x40000000u); /* TEXTUREFACTOR: the strength in its alpha */
+    static const float flip[16] = { 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1 };
+    shine_stages(0x30000u | 1 /* CAMERASPACEREFLECTIONVECTOR */, flip, cube);
+    shine_quad();
+    uint32_t p = pixel(16, 16);
+    CHECK(p == 0x808080 || p == 0x7F7F7F || p == 0x818181, "light's highlight: %06x (want 808080; 000000 as the PC draws it)", p);
+    shine_reset();
+    call(g_dev, 46, 2, 0, 0);
+    call(cube, D_Release, 0);
+}
+
 int main(void)
 {
     if (!gwin_init())
@@ -608,6 +738,8 @@ int main(void)
     test_water_layers();
     test_button_rims();
     test_summon_halos();
+    test_shine_sphere();
+    test_shine_spot();
     call(g_dev, D_Present, 4, 0, 0, 0, 0);
     printf(g_fails ? "d3d8_test: %d failed\n" : "d3d8_test: ok\n", g_fails);
     return g_fails != 0;
