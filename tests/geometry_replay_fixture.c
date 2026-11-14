@@ -57,6 +57,15 @@ int test_init(void)
     geometry_hooks_init();
     return 1;
 }
+/* guest.h hides these two from an ELF shared library (RT_HOT_GLOBAL), so the test reaches them here */
+unsigned char* test_guest_base(void)
+{
+    return rt_guest_base;
+}
+void test_reloc_delta(uint32_t delta)
+{
+    rt_reloc_delta = delta;
+}
 void test_reset_pages(void)
 {
     memset(mapped, 0, sizeof mapped);

@@ -793,7 +793,8 @@
         "frame_yield": "0x1023c2f0",
         "frame_net": "0x100f9d70",
         "frame_net_wait": "0x100eda90",
-        "mesh_draw": "0x10029e10"
+        "mesh_draw": "0x10029e10",
+        "probe_test": "0x1006c110"
       },
       "geometry": {
         "layout": 1,

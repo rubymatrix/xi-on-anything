@@ -186,6 +186,9 @@ typedef struct Obj
     uint32_t pw, ph;     /* render-target textures drawn at the screen's resolution (native_size): gpu's
                           * size, where the game sees width x height; 0 when they are the same */
     uint8_t water;       /* vertex buffers: made while the game loaded a water model (d3d8_water_loading) */
+    uint8_t unread;      /* render-target textures: drawn into since last cleared or sampled (d3d8_probe_test) */
+    uint8_t wr_track, wr_known; /* render-target textures composited as a whole: what was drawn is followed (wr) */
+    int32_t wr[4];       /* ... its pixels x0, y0, x1, y1 since a clear to alpha 0, when wr_known (fade_scissor) */
 } Obj;
 
 static Obj* g_objs;
@@ -727,6 +730,11 @@ static void raise_top(int* top, uint32_t n)
 /* A 16x16 occlusion probe tests a quad at the sky's depth (z 0x3f7ffffe, 1 - 2^-23: the game's
  * probe for the sun and its lens flare) since the last probe was read; see lock_rect. */
 static int g_probe_sky;
+static int g_gpu_skip; /* inside a call whose draws, clears and copies nobody sees (d3d8_probe_test) */
+static int g_gpu_skip_seen; /* the call's first draw has been looked at */
+static int g_probe_wrapped; /* d3d8_probe_test installed: render targets' unread is kept */
+static int g_fade_scissor; /* fade_scissor on (d3d8_setup; FFXI_FADE_SCISSOR=0: off) */
+static Obj* wr_target(void);
 static int g_occlusion; /* d3d8_set_occlusion */
 static uint32_t g_d3d;
 
@@ -1195,6 +1203,47 @@ static void IDirect3DDevice8_Reset(Guest* g)
     RET(D3D_OK, 2);
 }
 
+static int async_readback(void)
+{
+    static int async = -1;
+    if (async < 0)
+        async = getenv("FFXI_ASYNC_READBACK") && getenv("FFXI_ASYNC_READBACK")[0] == '1';
+    return async;
+}
+
+/* the occlusion mode FFXI_PROBE forces on the probes' reads (lock_rect), 0 for none */
+static int probe_forced(void)
+{
+    static int forced = -1;
+    if (forced < 0)
+    {
+        int gpu = getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu");
+#if defined(FFXI_ANDROID_VULKAN)
+        forced = async_readback() ? 1 : gpu ? 2 : 0;
+#else
+        forced = gpu ? (async_readback() ? 1 : 2) : 0;
+#endif
+    }
+    return forced;
+}
+
+/* The game's occlusion test of a character's screen rectangle (host64.c wraps it where the build is known): it
+ * draws the rectangle black and then white where the scene's depth is behind the character, into a 4096x4096
+ * scratch target, samples that into 16x16 and reads the copy back to decide whether the name is drawn. Occlusion
+ * 0 answers that read fully visible without the GPU (lock_rect), so while it runs its draws, clears and copies
+ * are dropped: up to 12 a frame, each two quads of as much as 3,000x3,000 pixels. The game's code still runs,
+ * its state and answer as before. Not the sun flare's probe (character 0), whose answer is read. */
+void d3d8_probe_test(Guest* g, GuestFn orig, int character)
+{
+    g_probe_wrapped = 1;
+    g_gpu_skip = character && g_occlusion == 0 && !probe_forced();
+    g_gpu_skip_seen = 0;
+    orig(g);
+    g_gpu_skip = 0;
+}
+
+void d3d8_probe_wrapped(void) { g_probe_wrapped = 1; }
+
 /* Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion): the frame is done */
 static void (*g_present_hook)(void);
 
@@ -1642,6 +1691,11 @@ static void IDirect3DDevice8_CopyRects(Guest* g)
     Obj* d = obj(ARG(4));
     if (!s || !d || s->format != d->format)
         RET(D3DERR_INVALIDCALL, 6);
+    if (g_gpu_skip)
+        RET(D3D_OK, 6);
+    Obj* dc = d->container ? obj(d->container) : NULL;
+    if (dc)
+        dc->wr_known = 0; /* copied into: what it holds isn't followed (fade_scissor) */
     if (surface_scaled(s) || surface_scaled(d))
     {
         static int said;
@@ -1737,6 +1791,21 @@ static void apply_targets(void);
 static void IDirect3DDevice8_Clear(Guest* g)
 {
     WORLD_FLUSH();
+    if (g_gpu_skip)
+        RET(D3D_OK, 7);
+    Obj* wt = g_fade_scissor && (ARG(3) & 1u) ? wr_target() : NULL;
+    if (wt) /* all of it to alpha 0: nothing drawn yet; else what it holds isn't known */
+    {
+        int all = !ARG(1) && !g_dev.cur.vp[0] && !g_dev.cur.vp[1] && g_dev.cur.vp[2] >= wt->width && g_dev.cur.vp[3] >= wt->height;
+        wt->wr_known = all && !(ARG(4) >> 24), wt->wr[0] = wt->wr[1] = wt->wr[2] = wt->wr[3] = 0;
+    }
+    if (g_probe_wrapped && (ARG(3) & 1u) && !ARG(1)) /* D3DCLEAR_TARGET, all of it */
+    {
+        Obj* rt = obj(g_dev.rt);
+        Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+        if (t)
+            t->unread = 0;
+    }
     apply_targets();
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
@@ -3871,12 +3940,143 @@ static int game_shadow_hidden(const GfxDraw* d)
     return 0;
 }
 
+/* FFXI_GPU_TIMES: the draw's return address, and the next value up the guest stack that follows a call (as
+ * FFXI_DRAWLOG's stack does), for the back end's GPU time per call site. The game draws through wrappers, so the
+ * first is one of a few; the second is mostly the wrapper's caller, sometimes a stale local of the wrapper's. */
+static uint64_t draw_site(void)
+{
+    uint32_t ra = rd32(g_cap_esp), up = 0;
+    for (uint32_t a = g_cap_esp + 4; a < g_cap_esp + 0x400; a += 4)
+    {
+        uint32_t v = rd32(a);
+        if (v >= rt_image_lo + 6 && v < rt_image_hi &&
+            (rd8(v - 5) == 0xE8 || rd8(v - 6) == 0xFF || rd8(v - 3) == 0xFF || rd8(v - 2) == 0xFF))
+        {
+            up = v;
+            break;
+        }
+    }
+    return (uint64_t)up << 32 | ra;
+}
+
+/* The pixels a 3D draw of fixed-function vertices first .. first + n can touch in its target, as x0, y0, x1, y1,
+ * a pixel round its projected vertices; 0 when that isn't known (a vertex shader, transformed or merged vertices, a
+ * vertex at or behind the camera). The vertices are the bound stream's, or a DrawPrimitiveUP's own (up_data). */
+static int draw_rect(const GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data, uint32_t up_stride, int32_t r[4])
+{
+    if (d->vs.prog || d->vs.rhw || g_merge.on || !d->vs.el[GFX_R_POSITION].used)
+        return 0;
+    uint32_t base, stride, off = (uint32_t)d->u.offset[GFX_R_POSITION];
+    uint64_t size;
+    if (up_data)
+        base = up_data, stride = up_stride, size = 0x100000000ull - up_data;
+    else
+    {
+        uint32_t st = d->vs.el[GFX_R_POSITION].stream;
+        Obj* b = obj(g_dev.cur.stream[st]);
+        if (!b || !b->mem)
+            return 0;
+        base = b->mem, stride = g_dev.cur.stride[st], size = b->size;
+    }
+    if (!stride || (uint64_t)(first + n) * stride > size)
+        return 0;
+    const float* m = d->u.wvp;
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        uint32_t at = base + (first + i) * stride + off;
+        float x = u2f(rd32(at)), y = u2f(rd32(at + 4)), z = u2f(rd32(at + 8));
+        float cw = x * m[3] + y * m[7] + z * m[11] + m[15];
+        if (!(cw > 1e-4f))
+            return 0;
+        float cx = (x * m[0] + y * m[4] + z * m[8] + m[12]) / cw, cy = (x * m[1] + y * m[5] + z * m[9] + m[13]) / cw;
+        x0 = cx < x0 ? cx : x0, x1 = cx > x1 ? cx : x1, y0 = cy < y0 ? cy : y0, y1 = cy > y1 ? cy : y1;
+    }
+    if (!(x1 >= x0) || !(y1 >= y0) || x0 < -1e6f || x1 > 1e6f || y0 < -1e6f || y1 > 1e6f)
+        return 0;
+    float vx = (float)d->vp[0], vy = (float)d->vp[1], vw = (float)d->vp[2], vh = (float)d->vp[3];
+    r[0] = (int32_t)floorf(vx + (x0 * 0.5f + 0.5f) * vw) - 2, r[2] = (int32_t)ceilf(vx + (x1 * 0.5f + 0.5f) * vw) + 2;
+    r[1] = (int32_t)floorf(vy + (0.5f - y1 * 0.5f) * vh) - 2, r[3] = (int32_t)ceilf(vy + (0.5f - y0 * 0.5f) * vh) + 2;
+    return 1;
+}
+
+/* A screen-space quad that composites a render-target texture T over the whole target, pixel for pixel (point
+ * filtered, its UVs 0..1 on a target T's size) and keeps only what has alpha above 0 from T's alpha: FFXI draws a
+ * fading character into a cleared scratch target, then lays the scratch over the scene this way. Where nothing
+ * was drawn into T since it was cleared to alpha 0, the test discards every pixel: the quad is scissored to what
+ * was (T's wr), or skipped. Returns 0 to skip the draw. */
+static int fade_scissor(GfxDraw* d, uint32_t prim, uint32_t count, uint32_t up_data, uint32_t up_stride)
+{
+    const uint32_t* rs = g_dev.cur.rs;
+    const uint32_t* t0 = g_dev.cur.tss[0];
+    Obj* tex = obj(g_dev.cur.tex[0]);
+    Obj* rt = obj(g_dev.rt);
+    if (!up_data || up_stride != 28 || g_dev.cur.vs != 0x144 || prim != 5 || count != 2 || !tex || !rt ||
+        tex->kind != O_TEXTURE || !(tex->usage & USAGE_RENDERTARGET) || tex->pw || rt->pw || d->fs.prog ||
+        (g_scene.rt && tex->gpu == g_scene.rt)) /* not the scene's own target: the effects write it too */
+        return 1;
+    /* alpha test GREATER ref (or GREATEREQUAL ref > 0), the alpha a product with T's (MODULATE, 2X, 4X) or T's own */
+    uint32_t aop = t0[4], a1 = t0[5], a2 = t0[6];
+    int from_t = ((aop == 4 || aop == 5 || aop == 6) && (a1 == 2 || a2 == 2)) || (aop == 2 && a1 == 2) || (aop == 3 && a2 == 2);
+    if (!rs[15] || !((rs[25] == 5 && (int32_t)rs[24] >= 0) || (rs[25] == 7 && (int32_t)rs[24] > 0)) || !from_t ||
+        g_dev.cur.tss[1][4] != 1 || t0[16] != 1 || t0[17] != 1 || tex->width != rt->width || tex->height != rt->height)
+        return 1;
+    static const float corner[4][4] = { { 0, 0, 0, 0 }, { 1, 0, 1, 0 }, { 0, 1, 0, 1 }, { 1, 1, 1, 1 } };
+    for (int i = 0; i < 4; ++i)
+    {
+        uint32_t v = up_data + 28u * i;
+        if (u2f(rd32(v)) != corner[i][0] * rt->width || u2f(rd32(v + 4)) != corner[i][1] * rt->height ||
+            u2f(rd32(v + 20)) != corner[i][2] || u2f(rd32(v + 24)) != corner[i][3])
+            return 1;
+    }
+    if (!tex->wr_track)
+    {
+        tex->wr_track = 1, tex->wr_known = 0; /* followed from its next clear */
+        return 1;
+    }
+    if (!tex->wr_known)
+        return 1;
+    int32_t x0 = tex->wr[0] < 0 ? 0 : tex->wr[0], y0 = tex->wr[1] < 0 ? 0 : tex->wr[1];
+    int32_t x1 = tex->wr[2] > (int32_t)rt->width ? (int32_t)rt->width : tex->wr[2];
+    int32_t y1 = tex->wr[3] > (int32_t)rt->height ? (int32_t)rt->height : tex->wr[3];
+    if (x1 <= x0 || y1 <= y0)
+        return 0;
+    d->scissor[0] = x0, d->scissor[1] = y0, d->scissor[2] = x1 - x0, d->scissor[3] = y1 - y0;
+    return 1;
+}
+
+/* the current target's texture, when its drawn pixels are followed (fade_scissor) */
+static Obj* wr_target(void)
+{
+    Obj* rt = obj(g_dev.rt);
+    Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+    return t && t->wr_track ? t : NULL;
+}
+
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
     uint32_t up_data, uint32_t up_stride, uint32_t n)
 {
+    if (g_gpu_skip)
+    {
+        /* what the call draws over must not be waiting to be used: the scratch target is also where a fading
+         * character is drawn before it is composited (cleared at the start, not after), so a probe between the
+         * two would have been composited with it - drawn then as the game draws it */
+        Obj* rt = obj(g_dev.rt);
+        Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+        if (!g_gpu_skip_seen && t && t->unread)
+            g_gpu_skip = 0;
+        g_gpu_skip_seen = 1;
+        if (g_gpu_skip)
+            return;
+    }
+    static int sites = -1;
+    if (sites < 0)
+        sites = getenv("FFXI_GPU_TIMES") && *getenv("FFXI_GPU_TIMES");
     GfxDraw* d = &g_draw;
     if (!build_draw(d))
         return;
+    if (sites)
+        d->site = draw_site();
     if (game_shadow_hidden(d))
     {
         g_scene.st_game_shadows++;
@@ -3920,8 +4120,38 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
                 d->vp[0], d->vp[1], d->vp[2], d->vp[3]);
     }
     d->prim = prim, d->count = count;
+    if (g_fade_scissor && d->vs.rhw && !fade_scissor(d, prim, count, up_data, up_stride))
+        return;
+    Obj* wt = g_fade_scissor ? wr_target() : NULL;
+    if (wt && wt->wr_known)
+    {
+        int32_t r[4];
+        if (draw_rect(d, first, nverts, up_data, up_stride, r))
+        {
+            if (wt->wr[2] <= wt->wr[0] || wt->wr[3] <= wt->wr[1])
+                memcpy(wt->wr, r, sizeof r);
+            else
+                wt->wr[0] = r[0] < wt->wr[0] ? r[0] : wt->wr[0], wt->wr[1] = r[1] < wt->wr[1] ? r[1] : wt->wr[1],
+                wt->wr[2] = r[2] > wt->wr[2] ? r[2] : wt->wr[2], wt->wr[3] = r[3] > wt->wr[3] ? r[3] : wt->wr[3];
+        }
+        else
+            wt->wr_known = 0;
+    }
     apply_targets();
     gfx_draw(d);
+    if (g_probe_wrapped)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            Obj* t = (d->fs.prog || i < d->fs.nstages) && d->fs.st[i].tex ? obj(g_dev.cur.tex[i]) : NULL;
+            if (t && (t->usage & USAGE_RENDERTARGET))
+                t->unread = 0;
+        }
+        Obj* rt = obj(g_dev.rt);
+        Obj* t = rt && rt->container ? obj(rt->container) : NULL;
+        if (t)
+            t->unread = 1;
+    }
     if (g_cap)
         cap_dump_target(g_cap_n - 1);
 }
@@ -4196,18 +4426,7 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
              * - 2, exactly: the CPU waits for the scene so far (7-8 ms a frame at a 4096x4096 background).
              * FFXI_PROBE=gpu reads exactly; FFXI_ASYNC_READBACK=1 makes that late (Android: always late),
              * and on desktop also reads other small read-only locks late. */
-            static int async = -1, forced = -1;
-            if (async < 0)
-                async = getenv("FFXI_ASYNC_READBACK") && getenv("FFXI_ASYNC_READBACK")[0] == '1';
-            if (forced < 0)
-            {
-                int gpu = getenv("FFXI_PROBE") && !strcmp(getenv("FFXI_PROBE"), "gpu");
-#if defined(FFXI_ANDROID_VULKAN)
-                forced = async ? 1 : gpu ? 2 : 0;
-#else
-                forced = gpu ? (async ? 1 : 2) : 0;
-#endif
-            }
+            int async = async_readback(), forced = probe_forced();
             int probe = (flags & LOCK_READONLY) && s->width == 16 && s->height == 16, sky = probe && g_probe_sky;
             int mode = forced ? forced : g_occlusion;
             if (probe)
@@ -4233,6 +4452,9 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
         }
         if (!(flags & LOCK_READONLY) && !(s->usage & USAGE_DEPTHSTENCIL))
             s->gpu_locked = 1;
+        Obj* sc = !(flags & LOCK_READONLY) && s->container ? obj(s->container) : NULL;
+        if (sc)
+            sc->wr_known = 0; /* written by the CPU: what it holds isn't followed (fade_scissor) */
     }
     else if (!(flags & LOCK_READONLY))
         mark_dirty(s);
@@ -4631,6 +4853,7 @@ void d3d8_setup(void)
     /* after the images are mapped, before either DLL's DllMain */
     android_probe_hooks_init();
 #endif
+    g_fade_scissor = !(getenv("FFXI_FADE_SCISSOR") && getenv("FFXI_FADE_SCISSOR")[0] == '0');
     g_vtbl[O_D3D] = make_vtbl("IDirect3D8", kD3D8);
     g_vtbl[O_DEVICE] = make_vtbl("IDirect3DDevice8", kDevice);
     g_vtbl[O_TEXTURE] = make_vtbl("IDirect3DTexture8", kTexture);
@@ -4699,6 +4922,9 @@ int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
 {
     if (!g_dev.rt)
         return 0;
+    Obj* wt = g_fade_scissor ? wr_target() : NULL;
+    if (wt)
+        wt->wr_known = 0; /* the scene renderer's draws into it aren't followed: its composite covers everything (fade_scissor) */
     apply_targets();
     memcpy(game_vp, g_dev.cur.vp, 6 * sizeof *game_vp);
     memcpy(vp, g_dev.cur.vp, 6 * sizeof *vp);

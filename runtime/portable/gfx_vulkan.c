@@ -1,8 +1,8 @@
 /* The graphics back end on Vulkan 1.3 (Linux): what gfx.h asks for, on one VkDevice. The same model
  * as the Metal one (gfx_metal.m), mapped onto Vulkan:
  *
- *   - Frames: one command buffer at a time, submitted at Present (or when the CPU needs a result, or
- *     in chunks of draws); up to three frames in flight, each with its own upload ring - vertex,
+ *   - Frames: one command buffer at a time, submitted at Present (or when the CPU needs a result);
+ *     up to three frames in flight, each with its own upload ring - vertex,
  *     index and uniform bytes are copied into the ring per draw, so the game may rewrite a buffer the
  *     moment a draw returns, as D3D lets it. One timeline semaphore counts the submissions; a frame is
  *     done when it reaches the value of the frame's last one.
@@ -62,6 +62,7 @@
 #include "cachedir.h"
 #include "gfx.h"
 #include "gfx_fx.h"
+#include "gfx_key.h"
 #include "gfx_msl.h"
 #include "gfx_scene.h"
 
@@ -245,7 +246,6 @@ static VkCommandBuffer g_upcb; /* uploads to submit ahead of g_cb */
 static uint64_t g_cb_index = 1;
 static int g_in_pass, g_dirty;
 static int g_up_dirty; /* the uploads' command buffer cleared a new texture since its last barrier */
-static uint32_t g_cmd_draws;
 
 static VkDescriptorSetLayout g_dsl, g_util_dsl;
 static VkPipelineLayout g_layout, g_util_layout;
@@ -263,6 +263,22 @@ static uint32_t g_pending_clear; /* D3DCLEAR flags for the next pass's load ops 
 static float g_clear_color[4], g_clear_z;
 static uint32_t g_clear_stencil;
 static VkPipeline g_bound;
+/* The dynamic state draw_encode last set in the frame's command buffer: what is the same is not set again
+ * (valid 0 once anything else binds a pipeline, which sets them its own way, or a new buffer begins).
+ * Setting each at every draw cost RADV GPU time as well: 10-15% of the frame in crowds on a Radeon 8060S. */
+static struct
+{
+    int valid;
+    VkBool32 zt, zw, st, dbe;
+    VkCompareOp zop, sop;
+    VkStencilOp sf, sp, sz;
+    uint32_t sread, swrite, sref;
+    VkCullModeFlags cull;
+    VkPrimitiveTopology topo;
+    float bias;
+    VkViewport vp;
+    VkRect2D sc;
+} g_dyn;
 
 /* the window */
 static SDL_Window* g_window;
@@ -298,38 +314,17 @@ typedef struct Map
     uint32_t cap, n;
 } Map;
 
-/* Eight bytes a step: a pipeline's key is a few hundred bytes, looked up one to three times per draw,
- * and FNV's byte at a time was a measurable share of the frame. Only these maps use it (never saved). */
-static uint64_t key_hash(const void* p, size_t n)
-{
-    const uint8_t* b = (const uint8_t*)p;
-    uint64_t h = 0x9E3779B97F4A7C15ull ^ n, w;
-    for (; n >= 8; b += 8, n -= 8)
-    {
-        memcpy(&w, b, 8);
-        h = (h ^ w) * 0xFF51AFD7ED558CCDull;
-        h ^= h >> 32;
-    }
-    w = 0;
-    memcpy(&w, b, n);
-    h = (h ^ w) * 0xC4CEB9FE1A85EC53ull;
-    h ^= h >> 29;
-    h *= 0x94D049BB133111EBull;
-    h ^= h >> 32;
-    return h ? h : 1;
-}
-
 static void* map_get(Map* m, const void* key, size_t klen)
 {
     if (!m->cap)
         return NULL;
-    uint64_t h = key_hash(key, klen);
+    uint64_t h = gfx_key_hash(key, klen);
     for (uint32_t i = (uint32_t)h & (m->cap - 1);; i = (i + 1) & (m->cap - 1))
     {
         MapEnt* e = &m->e[i];
         if (!e->hash)
             return NULL;
-        if (e->hash == h && e->klen == klen && !memcmp(e->key, key, klen))
+        if (e->hash == h && e->klen == klen && gfx_key_eq(e->key, key, klen))
             return e->obj;
     }
 }
@@ -353,7 +348,7 @@ static void map_put(Map* m, const void* key, size_t klen, void* obj)
             }
         free(old.e);
     }
-    uint64_t h = key_hash(key, klen);
+    uint64_t h = gfx_key_hash(key, klen);
     uint32_t j = (uint32_t)h & (m->cap - 1);
     while (m->e[j].hash)
         j = (j + 1) & (m->cap - 1);
@@ -629,6 +624,79 @@ static void ts_end(VkCommandBuffer cb, int i)
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_ts_pool[g_frame], 2 * (uint32_t)i + 1);
 }
 
+/* FFXI_GPU_TIMES=<path>: GPU time per group of draws. A timestamp is written whenever the game's call site of
+ * the draws changes (GfxDraw.site) and around the back end's own passes; each second, <path> gets the time and
+ * draws per site since the last. A probe for the census of the game's draws; off, it costs a test per draw. */
+#define GT_MAX 4096
+enum { GT_FRAME = 1, GT_FX, GT_SUN, GT_MIPS, GT_PRESENT, GT_END, GT_COPY, GT_WATER, GT_FXP = 16 };
+typedef struct { VkQueryPool pool; uint32_t n; uint64_t tag[GT_MAX]; uint32_t draws[GT_MAX]; } GtFrame;
+typedef struct { uint64_t tag, ns; uint32_t draws, segs, used; } GtSum;
+static int g_gt_on = -1;
+static FILE* g_gt_out;
+static GtFrame g_gt[FRAMES];
+static uint64_t g_gt_last, g_gt_frames, g_gt_frame_ns;
+static GtSum g_gt_sum[16384];
+static double g_gt_next;
+
+static int gt_enabled(void)
+{
+    if (g_gt_on < 0)
+    {
+        const char* p = getenv("FFXI_GPU_TIMES");
+        g_gt_on = p && *p && (g_gt_out = fopen(p, "w")) != NULL;
+    }
+    return g_gt_on;
+}
+
+static double gt_epoch(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return t.tv_sec + t.tv_nsec * 1e-9;
+}
+
+static void gt_add(uint64_t tag, uint64_t ns, uint32_t draws)
+{
+    uint32_t h = (uint32_t)((tag * 0x9E3779B97F4A7C15ull) >> 50) & 16383u;
+    for (uint32_t k = 0; g_gt_sum[h].used && g_gt_sum[h].tag != tag; ++k, h = (h + 1) & 16383u)
+        if (k == 16383u)
+            return; /* every slot this second taken by another site: the sample is dropped */
+    GtSum* e = &g_gt_sum[h];
+    e->used = 1, e->tag = tag, e->ns += ns, e->draws += draws, e->segs++;
+}
+
+/* the slot's timestamps from its last frame, which the GPU has finished */
+static void gt_collect(void)
+{
+    GtFrame* t = &g_gt[g_frame];
+    static uint64_t v[GT_MAX];
+    if (t->n >= 2 && vkGetQueryPoolResults(g_dev, t->pool, 0, t->n, t->n * sizeof v[0], v, sizeof v[0], VK_QUERY_RESULT_64_BIT) ==
+        VK_SUCCESS)
+    {
+        double per = g_props.limits.timestampPeriod;
+        for (uint32_t i = 0; i < t->n; ++i)
+            v[i] &= g_ts_mask; /* the queue's valid bits only */
+        for (uint32_t i = 0; i + 1 < t->n; ++i)
+            gt_add(t->tag[i], v[i + 1] > v[i] ? (uint64_t)((v[i + 1] - v[i]) * per) : 0, t->draws[i]);
+        g_gt_frame_ns += v[t->n - 1] > v[0] ? (uint64_t)((v[t->n - 1] - v[0]) * per) : 0, g_gt_frames++;
+    }
+    if (t->n)
+        vkResetQueryPool(g_dev, t->pool, 0, t->n);
+    t->n = 0;
+    double now = gt_epoch();
+    if (now < g_gt_next)
+        return;
+    g_gt_next = now + 1.0;
+    fprintf(g_gt_out, "t %.3f frames %llu gpu_ms %.3f\n", now, (unsigned long long)g_gt_frames, g_gt_frame_ns / 1e6);
+    for (uint32_t i = 0; i < 16384; ++i)
+        if (g_gt_sum[i].used)
+            fprintf(g_gt_out, "%016llx %llu %u %u\n", (unsigned long long)g_gt_sum[i].tag, (unsigned long long)g_gt_sum[i].ns,
+                g_gt_sum[i].draws, g_gt_sum[i].segs);
+    fflush(g_gt_out);
+    memset(g_gt_sum, 0, sizeof g_gt_sum);
+    g_gt_frames = g_gt_frame_ns = 0;
+}
+
 static void frame_begin(void)
 {
     if (g_frame_open)
@@ -639,6 +707,8 @@ static void frame_begin(void)
     if (gfx_profiling)
         g_prof.sem_ns += gfx_now_ns() - t0;
     ts_read(g_frame);
+    if (g_gt_on > 0)
+        gt_collect();
     completed();
     empty_trash(f);
     if (f->cbs_used)
@@ -681,6 +751,8 @@ static VkCommandBuffer new_cb(void)
     return cb;
 }
 
+static void gt_mark(uint64_t tag);
+
 /* the frame's command buffer, begun */
 static VkCommandBuffer cmd(void)
 {
@@ -688,10 +760,40 @@ static VkCommandBuffer cmd(void)
     {
         g_cb = new_cb();
         g_dirty = 1; /* the work submitted before it may still be writing */
-        g_bound = VK_NULL_HANDLE;
+        g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
         ts_frame_start(g_cb);
+        if (g_gt_on > 0 && !g_gt[g_frame].n)
+            gt_mark(GT_FRAME);
     }
     return g_cb;
+}
+
+/* a timestamp in the frame's command buffer: what follows, up to the next, is the tag's */
+static void gt_mark(uint64_t tag)
+{
+    if (!g_ts_mask) /* the queue has no timestamps (none valid when the device was set up) */
+    {
+        g_gt_on = 0;
+        fprintf(stderr, "[recomp] gfx: no GPU timestamps on this queue: FFXI_GPU_TIMES off\n");
+        return;
+    }
+    VkCommandBuffer cb = cmd();
+    GtFrame* t = &g_gt[g_frame];
+    if (!t->pool)
+    {
+        VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = GT_MAX;
+        VK_CHECK(vkCreateQueryPool(g_dev, &qi, NULL, &t->pool));
+        vkResetQueryPool(g_dev, t->pool, 0, GT_MAX);
+    }
+    if (t->n >= GT_MAX - 1 && tag != GT_END)
+        return; /* the rest of the frame goes to the last one */
+    if (t->n == GT_MAX)
+        return;
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, t->pool, t->n);
+    t->tag[t->n] = tag, t->draws[t->n] = 0, t->n++;
+    g_gt_last = tag;
 }
 
 /* the uploads' command buffer: submitted just before the frame's, so it may only touch what the
@@ -845,7 +947,6 @@ static void submit_ex(int wait, VkSemaphore wait_sem, VkSemaphore signal_sem)
     g_frames[g_frame].value = value;
     g_cb = g_upcb = VK_NULL_HANDLE;
     g_cb_index++;
-    g_cmd_draws = 0;
     if (wait)
         wait_value(value);
 }
@@ -1426,11 +1527,10 @@ void gfx_copy(GfxTex* src, uint32_t sface, uint32_t slevel, uint32_t sx, uint32_
 }
 
 /* --- render passes --------------------------------------------------------------------------------------------- */
-/* Draws recorded since the last submission. A frame goes to the GPU in chunks - submitted when a pass
- * ends with this many behind it - so the GPU works while the game builds the rest, and a mid-frame
- * readback (the game's per-frame probe) waits only for the tail. */
-#define CHUNK_DRAWS 96
-#define SPLIT_DRAWS 320
+/* A frame goes to the GPU in one submission, at Present (or earlier where a readback must wait for it). It used
+ * to go in chunks of ~100 draws so the GPU could start early, but the GPU works on the previous frame meanwhile,
+ * and the extra submissions cost: with effects off, one per frame was 2-7% faster in every replay scene, and
+ * the GPU's clock could rise where it had thermal headroom. */
 
 static void color_size(uint32_t* w, uint32_t* h) { level_size(g_rt, g_rt_level, w, h); }
 
@@ -1506,7 +1606,7 @@ static int begin_pass(void)
         g_pass_ts = ts_begin(g_cb, g_pass_next), g_pass_next = -1;
     vkCmdBeginRendering(g_cb, &ri);
     g_in_pass = 1;
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     g_rt->used = g_serial, g_rt->rec = g_cb_index;
     if (!g_rt_face && !g_rt_level)
         g_rt->scene = 0; /* drawn to: its mips are behind */
@@ -1522,8 +1622,6 @@ void gfx_set_targets(GfxTex* color, uint32_t face, uint32_t level, GfxTex* depth
     g_rt = color, g_rt_face = face, g_rt_level = level, g_ds = depth;
     if (g_in_pass)
         end_pass();
-    if (g_cmd_draws >= CHUNK_DRAWS && g_cb)
-        submit(0);
 }
 
 /* --- shaders and pipelines, built off the game's thread ---------------------------------------------------
@@ -2173,7 +2271,8 @@ static int set_viewport(const uint32_t vp[6])
     if (vw <= 0 || vh <= 0)
         return 0;
     VkViewport v = { (float)x, (float)(y + vh), (float)vw, (float)-vh, zmin, zmax };
-    vkCmdSetViewport(g_cb, 0, 1, &v);
+    if (!g_dyn.valid || memcmp(&g_dyn.vp, &v, sizeof v))
+        vkCmdSetViewport(g_cb, 0, 1, &v), g_dyn.vp = v;
     g_set_vp = v;
     return 1;
 }
@@ -2200,7 +2299,8 @@ static void set_scissor(const int32_t sc[4])
             y0 = y1;
     }
     VkRect2D r = { { (int32_t)x0, (int32_t)y0 }, { (uint32_t)(x1 - x0), (uint32_t)(y1 - y0) } };
-    vkCmdSetScissor(g_cb, 0, 1, &r);
+    if (!g_dyn.valid || memcmp(&g_dyn.sc, &r, sizeof r))
+        vkCmdSetScissor(g_cb, 0, 1, &r), g_dyn.sc = r;
     g_set_sc = r;
 }
 
@@ -2249,6 +2349,8 @@ static void scene_mips(const GfxDraw* d)
             continue;
         if (t->w <= tw && t->h <= th)
             continue; /* not made smaller */
+        if (g_gt_on > 0 && g_gt_last != GT_MIPS)
+            gt_mark(GT_MIPS);
         flush_pass();
         gpu_sync();
         for (uint32_t l = 1; l < t->mips; ++l)
@@ -2496,33 +2598,48 @@ static void draw_encode(const GfxDraw* d)
     GfxDepthKey dk = d->depth;
     if (!depth)
         memset(&dk, 0, sizeof dk);
-    vkCmdSetDepthTestEnable(cb, dk.zenable ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthWriteEnable(cb, dk.zenable && dk.zwrite ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthCompareOp(cb, dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS);
-    int stencil = dk.stencil && depth && depth->has_stencil;
-    vkCmdSetStencilTestEnable(cb, stencil ? VK_TRUE : VK_FALSE);
-    if (stencil)
+    int stencil = dk.stencil && depth && depth->has_stencil, v = g_dyn.valid;
+    VkBool32 zt = dk.zenable ? VK_TRUE : VK_FALSE, zw = dk.zenable && dk.zwrite ? VK_TRUE : VK_FALSE;
+    VkCompareOp zop = dk.zenable ? compare(dk.zfunc) : VK_COMPARE_OP_ALWAYS;
+    if (!v || g_dyn.zt != zt)
+        vkCmdSetDepthTestEnable(cb, zt), g_dyn.zt = zt;
+    if (!v || g_dyn.zw != zw)
+        vkCmdSetDepthWriteEnable(cb, zw), g_dyn.zw = zw;
+    if (!v || g_dyn.zop != zop)
+        vkCmdSetDepthCompareOp(cb, zop), g_dyn.zop = zop;
+    VkBool32 st = stencil ? VK_TRUE : VK_FALSE;
+    if (!v || g_dyn.st != st)
+        vkCmdSetStencilTestEnable(cb, st), g_dyn.st = st;
+    VkStencilOp sf = stencil ? stencil_op(dk.sfail) : VK_STENCIL_OP_KEEP;
+    VkStencilOp sp = stencil ? stencil_op(dk.spass) : VK_STENCIL_OP_KEEP, sz = stencil ? stencil_op(dk.szfail) : VK_STENCIL_OP_KEEP;
+    VkCompareOp sop = stencil ? compare(dk.sfunc) : VK_COMPARE_OP_ALWAYS;
+    uint32_t sread = stencil ? dk.sread : 0xFF, swrite = stencil ? dk.swrite : 0, sref = stencil ? d->stencil_ref : 0;
+    if (!v || g_dyn.sf != sf || g_dyn.sp != sp || g_dyn.sz != sz || g_dyn.sop != sop)
     {
-        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, stencil_op(dk.sfail), stencil_op(dk.spass), stencil_op(dk.szfail),
-            compare(dk.sfunc));
-        vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, dk.sread);
-        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, dk.swrite);
-        vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, d->stencil_ref);
+        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, sf, sp, sz, sop);
+        g_dyn.sf = sf, g_dyn.sp = sp, g_dyn.sz = sz, g_dyn.sop = sop;
     }
-    else
-    {
-        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP,
-            VK_COMPARE_OP_ALWAYS);
-        vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
-        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
-        vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
-    }
+    if (!v || g_dyn.sread != sread)
+        vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, sread), g_dyn.sread = sread;
+    if (!v || g_dyn.swrite != swrite)
+        vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, swrite), g_dyn.swrite = swrite;
+    if (!v || g_dyn.sref != sref)
+        vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, sref), g_dyn.sref = sref;
     /* D3D's front faces are clockwise on screen; CULL_CCW (the default) culls the back ones */
-    vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
-    vkCmdSetCullMode(cb, d->cull == 3 ? VK_CULL_MODE_BACK_BIT : d->cull == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE);
-    vkCmdSetDepthBiasEnable(cb, d->zbias ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthBias(cb, -(float)d->zbias, 0.0f, -(float)d->zbias * 0.5f);
-    vkCmdSetPrimitiveTopology(cb, vk_prim(d->prim));
+    if (!v)
+        vkCmdSetFrontFace(cb, VK_FRONT_FACE_CLOCKWISE);
+    VkCullModeFlags cull = d->cull == 3 ? VK_CULL_MODE_BACK_BIT : d->cull == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+    if (!v || g_dyn.cull != cull)
+        vkCmdSetCullMode(cb, cull), g_dyn.cull = cull;
+    VkBool32 dbe = d->zbias ? VK_TRUE : VK_FALSE;
+    if (!v || g_dyn.dbe != dbe)
+        vkCmdSetDepthBiasEnable(cb, dbe), g_dyn.dbe = dbe;
+    if (!v || g_dyn.bias != (float)d->zbias)
+        vkCmdSetDepthBias(cb, -(float)d->zbias, 0.0f, -(float)d->zbias * 0.5f), g_dyn.bias = (float)d->zbias;
+    VkPrimitiveTopology topo = vk_prim(d->prim);
+    if (!v || g_dyn.topo != topo)
+        vkCmdSetPrimitiveTopology(cb, topo), g_dyn.topo = topo;
+    g_dyn.valid = 1;
 
     VkWriteDescriptorSet w[B_COUNT];
     VkDescriptorBufferInfo bi[GFX_NSTREAMS + 2];
@@ -2716,15 +2833,11 @@ void gfx_draw(const GfxDraw* d)
         return;
     uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
     scene_mips(d);
+    if (g_gt_on > 0 && d->site != g_gt_last)
+        gt_mark(d->site);
     draw_encode(d);
-    g_cmd_draws++;
-    /* a long pass (the 3D scene) goes to the GPU in pieces too: end it here, submit, and the next draw
-     * resumes it with its contents loaded */
-    if (g_cmd_draws >= SPLIT_DRAWS && g_in_pass)
-    {
-        end_pass();
-        submit(0);
-    }
+    if (g_gt_on > 0 && g_gt[g_frame].n)
+        g_gt[g_frame].draws[g_gt[g_frame].n - 1]++;
     if (gfx_profiling)
         g_prof.draw_ns += gfx_now_ns() - t0, g_prof.draws++;
 }
@@ -2901,11 +3014,28 @@ static const char FX_GLSL[] =
     "#endif\n"
     "\n"
     "#ifdef FX_AO\n"
-    "vec3 pos_lz(vec2 q, float r) {\n"
+    "vec3 pos_ic(vec2 c) {\n" /* pos_at(t0, c + 0.5) for c whole: vp is whole pixels */
+    "  c = clamp(c, u.vp.xy, u.vp.xy + u.vp.zw - 1.0);\n"
+    "  return view_pos(c + 0.5, view_z(texelFetch(t0, ivec2(c), 0).r));\n"
+    "}\n"
+    "vec3 pos_lz(vec2 q, float r) {\n" /* q within the viewport (main's outside): t >= 0 */
     "  vec2 t = (q - u.vp.xy) * u.size.zw / u.vp.zw;\n"
-    "  int lv = clamp(int(floor(log2(max(r * u.size.z / u.vp.z, 1.0)))) - 3, 0, 3);\n"
-    "  ivec2 p = min(ivec2(max(t, 0.0)) >> lv, textureSize(t3, lv) - 1);\n"
+    "  int lv = clamp(int(log2(max(r * u.size.z / u.vp.z, 1.0))) - 3, 0, 3);\n"
+    "  ivec2 p = min(ivec2(t) >> lv, (ivec2(u.size.zw) >> lv) - 1);\n" /* t3: fx_lz, size.zw, 8 or more, 4 levels */
     "  return view_pos(q, texelFetch(t3, p, lv).r);\n"
+    "}\n"
+    "vec2 c_at(vec3 R, float rd) {\n" /* a contact step: where it shows, the depth there (view_z's), its test */
+    "  vec2 ndc = vec2(R.x * u.proj.x + R.z * u.proj.z, R.y * u.proj.y + R.z * u.proj.w) / rd;\n"
+    "  return u.vp.xy + vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
+    "}\n"
+    "bool c_out(vec2 q) { return any(lessThan(q, u.vp.xy)) || any(greaterThanEqual(q + 0.5, u.vp.xy + u.vp.zw)); }\n"
+    "float c_depth(vec2 q) {\n" /* read at q + 0.5, where the fixup drew it; clamped for a step read ahead */
+    "  return (depth_at(t0, clamp(q + 0.5, u.vp.xy, u.vp.xy + u.vp.zw - 1.0)) - u.zp.z) / max(u.zp.w - u.zp.z, 1e-6);\n"
+    "}\n"
+    "bool c_hit(float dd, float rd) {\n"
+    "  float sd = u.zp.y / (dd * u.hand.x - u.zp.x) * u.hand.x;\n"
+    "  float in_front = rd - sd;\n"
+    "  return !(dd >= 0.999999) && sd > 0.0 && in_front > 0.005 * rd + 0.02 && in_front < u.shadow.z + 0.01 * rd;\n"
     "}\n"
     "float sun_shadow(vec3 P, vec3 N, float dist, float k) {\n"
     "  float nl = dot(N, u.sun.xyz);\n"
@@ -2913,17 +3043,20 @@ static const char FX_GLSL[] =
     "  if (fade <= 0.0) return 1.0;\n"
     "  int NS = max(int(u.aop.y), 1);\n" /* contact_steps, jittered by k and gathered over frames */
     "  vec3 O = P + N * (0.01 * dist);\n"
-    "  for (int i = 0; i < NS; ++i) {\n"
-    "    float a = (float(i) + k) / float(NS);\n"
-    "    vec3 R = O + u.sun.xyz * (u.shadow.y * a * a);\n"
-    "    float rd = R.z * u.hand.x;\n"
-    "    if (rd <= 0.05) break;\n"
-    "    vec2 ndc = vec2(R.x * u.proj.x + R.z * u.proj.z, R.y * u.proj.y + R.z * u.proj.w) / rd;\n"
-    "    vec2 q = u.vp.xy + vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * u.vp.zw;\n"
-    "    if (outside(q) || outside(q + 0.5)) break;\n" /* the pixel read within the viewport, not just q */
-    "    float sd = view_z(depth_at(t0, q + 0.5)) * u.hand.x;\n" /* where the fixup drew it */
-    "    float in_front = rd - sd;\n"
-    "    if (sd > 0.0 && in_front > 0.005 * rd + 0.02 && in_front < u.shadow.z + 0.01 * rd) return 1.0 - fade * (1.0 - a * a);\n"
+    "  float rns = 1.0 / float(NS);\n"
+    "  for (int i = 0; i < NS; i += 3) {\n" /* 3 steps a turn: their reads issued, then each step as before */
+    "    float a0 = (float(i) + k) * rns, a1 = (float(i + 1) + k) * rns, a2 = (float(i + 2) + k) * rns;\n"
+    "    vec3 R0 = O + u.sun.xyz * (u.shadow.y * a0 * a0), R1 = O + u.sun.xyz * (u.shadow.y * a1 * a1);\n"
+    "    vec3 R2 = O + u.sun.xyz * (u.shadow.y * a2 * a2);\n"
+    "    float rd0 = R0.z * u.hand.x, rd1 = R1.z * u.hand.x, rd2 = R2.z * u.hand.x;\n"
+    "    vec2 q0 = c_at(R0, rd0), q1 = c_at(R1, rd1), q2 = c_at(R2, rd2);\n"
+    "    float d0 = c_depth(q0), d1 = c_depth(q1), d2 = c_depth(q2);\n"
+    "    if (rd0 <= 0.05 || c_out(q0)) break;\n"
+    "    if (c_hit(d0, rd0)) return 1.0 - fade * (1.0 - a0 * a0);\n"
+    "    if (i + 1 == NS || rd1 <= 0.05 || c_out(q1)) break;\n"
+    "    if (c_hit(d1, rd1)) return 1.0 - fade * (1.0 - a1 * a1);\n"
+    "    if (i + 2 == NS || rd2 <= 0.05 || c_out(q2)) break;\n"
+    "    if (c_hit(d2, rd2)) return 1.0 - fade * (1.0 - a2 * a2);\n"
     "  }\n"
     "  return 1.0;\n"
     "}\n"
@@ -2941,16 +3074,21 @@ static const char FX_GLSL[] =
     "  if (edge <= 0.0) return 1.0;\n"
     "  float z = lc.z - p.y, sz = float(textureSize(sm, 0).x), tx = 1.0 / sz;\n"
     "  float a = k * 6.2831853, ca = cos(a), sa = sin(a);\n"
+    "  vec2 us = uv * sz;\n" /* (uv + D * 32 tx) sz to the bit: sz a power of two (the maps, the stand-in) */
     "  mat2 rot = mat2(vec2(ca, sa), vec2(-sa, ca));\n"
-    "  float bs = 0.0, bn = 0.0;\n"
+    "  float bs = 0.0;\n"
+    "  int n = 0;\n"
     "  for (int i = 0; i < 16; ++i) {\n"
-    "    vec2 q = clamp((uv + DISK[i] * (32.0 * tx)) * sz, 0.0, sz - 1.0);\n"
+    "    vec2 q = clamp(us + DISK[i] * 32.0, 0.0, sz - 1.0);\n"
     "    float d = texelFetch(sm, ivec2(q), 0).r;\n"
-    "    if (d < z) bs += d, bn += 1.0;\n"
+    "    if (d < z) bs += d;\n"
+    "    n += int(d < z);\n"
     "  }\n"
-    "  if (bn == 0.0) return 1.0;\n"
+    "  if (n == 0) return 1.0;\n"
+    "  float bn = float(n);\n"
     "  float pen = clamp((z - bs / bn) * p.z, hard ? 0.5 * tx : max(1.5 * tx, 0.02 / (p.x * sz)), 32.0 * tx);\n"
     "  float near = minw > 0.0 ? smoothstep(0.5 * minw, 1.5 * minw, (z - bs / bn) * du) : 1.0;\n"
+    "  if (near == 0.0) return 1.0;\n" /* mix(1.0, s / 16.0, 0.0): 1.0 whatever s is */
     "  float zc = z - pen * p.w, s = 0.0;\n"
     "  for (int i = 0; i < 16; ++i) s += texture(cmp, vec3(uv + rot * DISK[i] * pen, zc));\n"
     "  return mix(1.0, s / 16.0, near);\n"
@@ -2970,12 +3108,12 @@ static const char FX_GLSL[] =
     "  return min(mix(1.0, s, max(en, ef)), face);\n" /* the face's shade with a map or without */
     "}\n"
     "void main() {\n"
-    "  vec2 px = floor(u.vp.xy + vuv * u.vp.zw) + 0.5;\n"
-    "  vec3 P = pos_at(t0, px);\n"
+    "  vec2 kc = floor(u.vp.xy + vuv * u.vp.zw), px = kc + 0.5;\n"
+    "  vec3 P = pos_ic(kc);\n"
     "  float dist = P.z * u.hand.x;\n"
     "  if (dist <= 0.0) { oc = vec4(1.0, 0.0, 1.0, 1.0); return; }\n"
-    "  vec3 r = pos_at(t0, px + vec2(1, 0)) - P, l = P - pos_at(t0, px - vec2(1, 0));\n"
-    "  vec3 d = pos_at(t0, px + vec2(0, 1)) - P, t = P - pos_at(t0, px - vec2(0, 1));\n"
+    "  vec3 r = pos_ic(kc + vec2(1, 0)) - P, l = P - pos_ic(kc - vec2(1, 0));\n"
+    "  vec3 d = pos_ic(kc + vec2(0, 1)) - P, t = P - pos_ic(kc - vec2(0, 1));\n"
     /* at the viewport's edge one side is the pixel itself (pos_at clamps to it): zero, its cross a NaN */
     "  vec3 dx = (abs(r.z) < abs(l.z) && dot(r, r) > 0.0) || dot(l, l) == 0.0 ? r : l;\n"
     "  vec3 dy = (abs(d.z) < abs(t.z) && dot(d, d) > 0.0) || dot(t, t) == 0.0 ? d : t;\n"
@@ -2990,9 +3128,9 @@ static const char FX_GLSL[] =
     "  float rad = u.ao.x, rpx = min(rad * u.proj.y * 0.5 * u.vp.w / dist, u.ao.w);\n"
     "  if (u.ao.y <= 0.0 || rpx < 2.0) { oc = vec4(1.0, dist, mp, sh); return; }\n"
     "  int NS = max(int(u.aop.x), 1);\n"
-    "  float sum = 0.0;\n"
+    "  float sum = 0.0, rns = 1.0 / float(NS), rr = 1.0 / (rad * rad);\n"
     "  for (int i = 0; i < NS; ++i) {\n"
-    "    float a = (float(i) + k) / float(NS);\n"
+    "    float a = (float(i) + k) * rns;\n"
     "    float ang = float(i) * 2.3999632 + k * 6.2831853;\n"
     "    vec2 q = px + vec2(cos(ang), sin(ang)) * (a * rpx);\n"
     "    if (outside(q)) continue;\n"
@@ -3000,7 +3138,7 @@ static const char FX_GLSL[] =
     "    if (Q.z == 0.0 || dist - Q.z * u.hand.x > 0.5 * rad) continue;\n"
     "    vec3 v = Q - P;\n"
     "    float vv = dot(v, v), vn = dot(v, N);\n"
-    "    float q2 = vv / (rad * rad), fall = clamp(1.0 - q2 * q2, 0.0, 1.0);\n"
+    "    float q2 = vv * rr, fall = clamp(1.0 - q2 * q2, 0.0, 1.0);\n"
     "    sum += fall * max(vn * inversesqrt(vv + 1e-6) - u.ao.z, 0.0);\n"
     "  }\n"
     "  float facing = smoothstep(0.1, 0.4, dot(N, -P) / dist);\n"
@@ -3137,7 +3275,7 @@ static const char FX_GLSL[] =
     "  vec2 uv = (u.vp.xy + vuv * u.vp.zw) / u.size.xy, t = 1.0 / u.size.xy;\n"
     "  vec3 c = 0.25 * (texture(t0, uv + t * vec2(-1, -1)).rgb + texture(t0, uv + t * vec2(1, -1)).rgb +\n"
     "                   texture(t0, uv + t * vec2(-1, 1)).rgb + texture(t0, uv + t * vec2(1, 1)).rgb);\n"
-    /* as the composite will shade it: the scene is copied before the occlusion and the sun's shadows,
+    /* as the composite will shade it: the scene is read as it was before the occlusion and the sun's shadows,
      * and a character in a cliff's shadow, drawn dark, still glowed as bright as in the open */
     "  if (u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0) {\n"
     "    vec4 os = textureLod(t1, vuv, 0.0);\n"
@@ -3271,14 +3409,15 @@ static const char FX_GLSL[] =
     "  vec2 px = gl_FragCoord.xy;\n"
     "  vec4 c = texelFetch(t0, ivec2(px), 0);\n"
     "  int dbg = int(u.grade.w);\n"
-    "  vec3 os = u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0 ? ao_at(vuv, view_z(depth_at(t2, px)) * u.hand.x) : vec3(1.0);\n"
+    "  float vz = view_z(depth_at(t2, px));\n" /* once: the grade wants it always */
+    "  vec3 os = u.ao.y > 0.0 || u.shadow.x > 0.0 || u.smap.x > 0.0 ? ao_at(vuv, vz * u.hand.x) : vec3(1.0);\n"
     /* what glows (a lamp's glass, a lit doorway: near white in a colour) is light, not a surface: the occlusion
      * leaves it, as it greyed the lamps it stood next to */
     "  float o = mix(os.x, 1.0, smoothstep(0.6, 0.95, max(c.r, max(c.g, c.b)))), sun = mix(1.0, os.y, u.smap.x) * mix(1.0, os.z, u.shadow.x);\n"
     "  if (dbg == 1) { oc = vec4(o, o, o, c.a); return; }\n"
     "  if (dbg == 5) { oc = vec4(vec3(sun), c.a); return; }\n"
     /* the bounce light (t6) on the surface's own colour, mostly where the sun does not reach (gfx_hlsl.c) */
-    "  vec3 gl = u.gi.x > 0.0 ? gi_at(vuv, view_z(depth_at(t2, px)) * u.hand.x) : vec3(0.0);\n"
+    "  vec3 gl = u.gi.x > 0.0 ? gi_at(vuv, vz * u.hand.x) : vec3(0.0);\n"
     "  if (dbg == 6) { oc = vec4(gl * 3.0, c.a); return; }\n"
     "  if (dbg == 7 && px.x < u.vp.x + u.vp.z * 0.5) gl = vec3(0.0);\n"
     "  vec3 base = c.rgb;\n"
@@ -3286,7 +3425,7 @@ static const char FX_GLSL[] =
     "  c.rgb += base * gl * mix(1.0, o, u.ao.y) * (1.0 - 0.75 * mix(1.0, os.y, u.smap.x));\n"
     "  float f = 0.0;\n"
     "  if (u.fogc.a > 0.0) {\n"
-    "    float z = view_z(depth_at(t2, px));\n"
+    "    float z = vz;\n"
     "    if (z != 0.0) {\n"
     "      vec3 P = view_pos(px, z);\n"
     "      float d = length(P), bd = u.fogp.x * dot(P, u.up.xyz);\n"
@@ -3314,7 +3453,7 @@ static const char FX_GLSL[] =
     "  x = clamp(x, 0.0, 1.0);\n"
     /* the contrast curve leaves what nothing was drawn on (no depth). (The game's sky dome has depth: it
      * stands round the camera, no farther than the walls, so the curve still darkens it.) */
-    "  x = mix(x, x * x * (3.0 - 2.0 * x), u.grade.z * (view_z(depth_at(t2, px)) != 0.0 ? 1.0 : 0.0));\n"
+    "  x = mix(x, x * x * (3.0 - 2.0 * x), u.grade.z * (vz != 0.0 ? 1.0 : 0.0));\n"
     "  c.rgb = mix(c.rgb, x, u.grade.x);\n"
     "  oc = c;\n"
     "}\n"
@@ -3332,7 +3471,7 @@ static struct
         linz_pipe, zmip_pipe, gi_pipe, gitemp_pipe, mip_pipe;
     GfxTex* lz;     /* the occlusion's depth: view z at its size and three levels below (FX_LINZ, FX_ZMIP) */
     GfxTex* aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
-    GfxTex *src, *ao0, *ao1, *b1a, *b1b, *b2a, *b2b, *ra, *rb;
+    GfxTex *src, *ao0, *ao1, *b1a, *b1b, *b2a, *b2b, *ra, *rb; /* src: the composite's spare (or the scene copied) */
     GfxTex* hist[2];      /* the occlusion and shadows after the temporal pass: this frame's and the one before */
     int hist_at;          /* which of hist[] the frame before wrote */
     uint64_t hist_serial; /* the frame it was written (0: none) */
@@ -3574,6 +3713,32 @@ static GfxTex* fx_tex(GfxTex** t, VkFormat fmt, uint32_t w, uint32_t h, int use,
     return *t;
 }
 
+/* *t made like `like`, mip chain and all, for the two to trade images (swap_images); NULL if it can't be */
+static GfxTex* fx_tex_like(GfxTex** t, const GfxTex* like)
+{
+    if (!*t || (*t)->w != like->w || (*t)->h != like->h || (*t)->vf != like->vf || (*t)->mips != like->mips ||
+        (*t)->fmt != like->fmt)
+    {
+        gfx_tex_destroy(*t);
+        *t = tex_create(GFX_TEX_2D, like->fmt, like->w, like->h, like->levels, GFX_USE_RT, like->vf, 0);
+    }
+    return *t && (*t)->mips == like->mips && (*t)->vf == like->vf ? *t : NULL;
+}
+
+/* a and b (made alike: fx_tex_like) trade their images and the views of them; each keeps what it is to the
+ * rest - the game's render target, its depths, its readbacks */
+static void swap_images(GfxTex* a, GfxTex* b)
+{
+    VkImage img = a->img;
+    VmaAllocation mem = a->mem;
+    VkImageView view = a->view, mipview = a->mipview, *rtv = a->rtv, *levelv = a->levelv;
+    a->img = b->img, a->mem = b->mem, a->view = b->view, a->mipview = b->mipview, a->rtv = b->rtv, a->levelv = b->levelv;
+    b->img = img, b->mem = mem, b->view = view, b->mipview = mipview, b->rtv = rtv, b->levelv = levelv;
+    uint64_t used = a->used > b->used ? a->used : b->used, rec = a->rec > b->rec ? a->rec : b->rec;
+    a->used = b->used = used, a->rec = b->rec = rec; /* either image may be in this frame's commands */
+    a->scene = b->scene = 0;
+}
+
 /* a view of one level of t, to read it while another level is drawn */
 static VkImageView level_view(GfxTex* t, uint32_t level)
 {
@@ -3632,6 +3797,7 @@ static int pass_open2(GfxTex* t, GfxTex* t2, uint32_t layer, uint32_t level, VkA
     VkRect2D sc = { { 0, 0 }, { tw, th } };
     vkCmdSetViewport(g_cb, 0, 1, v ? v : &all);
     vkCmdSetScissor(g_cb, 0, 1, &sc);
+    g_dyn.valid = 0;
     t->used = g_serial, t->rec = g_cb_index;
     return ts;
 }
@@ -3654,6 +3820,17 @@ static void pass_close(int ts)
 static void fx_pass(GfxTex* target, uint32_t level, int load, VkPipeline p, const float* vp, const VkImageView* in, int n,
     const VkImageView* sh, const int32_t* dir)
 {
+    if (g_gt_on > 0)
+    {
+        /* each kind of pass its own tag: GT_FXP + its index here */
+        const VkPipeline k[] = { g_fx.linz_pipe, g_fx.zmip_pipe, g_fx.ao_pipe, g_fx.blur_pipe, g_fx.temporal_pipe, g_fx.gi_pipe,
+            g_fx.gitemp_pipe, g_fx.bright_pipe, g_fx.gauss_pipe, g_fx.down_pipe, g_fx.raymask_pipe, g_fx.rays_pipe,
+            g_fx.comp_pipe, g_fx.aa_pipe, g_fx.mip_pipe };
+        uint32_t i = 0;
+        while (i < sizeof k / sizeof k[0] && k[i] != p)
+            ++i;
+        gt_mark(GT_FXP + i);
+    }
     VkViewport v = vp ? (VkViewport){ vp[0], vp[1], vp[2], vp[3], 0, 1 } : (VkViewport){ 0 };
     int ts = pass_open(target, 0, level, load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE, vp ? &v : NULL, g_pass);
     VkCommandBuffer cb = g_cb;
@@ -4357,7 +4534,7 @@ static uint32_t sun_draw(GfxTex* target, GfxTex* col, const float* invP, const f
     vkCmdEndRendering(cb);
     ts_end(cb, ts);
     g_dirty = 1;
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     target->used = g_serial, target->rec = g_cb_index;
     if (col)
         col->used = g_serial, col->rec = g_cb_index;
@@ -6213,7 +6390,6 @@ static uint32_t shadow_zone(const GfxShadowFrame* f)
         }
     }
     pass_close(ts);
-    g_cmd_draws += c.drawn;
     return c.drawn;
 }
 
@@ -6257,7 +6433,6 @@ static void shadow_chars_pass(const GfxCharFrame* cf, VkDescriptorBufferInfo pal
         }
         pass_close(ts);
         g_shd_drawn[!reach] += c.drawn;
-        g_cmd_draws += c.drawn;
     }
 }
 
@@ -7276,7 +7451,6 @@ static void lamp_shadows_draw(const GfxCharFrame* cf, VkDescriptorBufferInfo pal
         pass_close(ts);
         drawn += c.drawn;
     }
-    g_cmd_draws += drawn;
     g_lamps.nsh = ns, g_lamps.sh_serial = g_serial;
 }
 
@@ -7320,7 +7494,6 @@ static void lamp_zone_cubes(void)
         pass_close(ts);
         drawn += c.drawn;
     }
-    g_cmd_draws += drawn;
     memcpy(g_lamps.zpos, g_lamps.shpos, sizeof g_lamps.zpos);
     g_lamps.zn = g_lamps.nsh, g_lamps.z_serial = g_serial;
 }
@@ -7533,8 +7706,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
         vkCmdDraw(cb, vertex_count(it->prim, it->count), 1, it->first, 0);
         ++drew;
     }
-    g_bound = VK_NULL_HANDLE; /* the game's next draw binds its own */
-    g_cmd_draws += drew;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0; /* the game's next draw binds its own */
 done:
     if (timed)
         end_pass();
@@ -7611,8 +7783,7 @@ int gfx_chars_draw(const GfxCharFrame* f)
         vkCmdDrawIndexed(cb, vertex_count(it->prim, it->count), 1, it->first, 0, 0);
         ++drew;
     }
-    g_bound = VK_NULL_HANDLE;
-    g_cmd_draws += drew;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
 done:
     if (timed)
         end_pass();
@@ -8583,7 +8754,7 @@ static int rt_capture(const float* invP, const float* view, const float* cam)
             g_ray.st_cached++;
     }
     vkCmdEndRendering(cb);
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     full_barrier(cb); /* the corners written, before the structures' builds read them */
     if (!vsolid) /* (the bounce light's and occlusion's rays trace the solid ones) */
         return 0;
@@ -8778,7 +8949,7 @@ static void rt_pass(GfxTex* target, int load, VkPipeline p, const float* vp, con
     vkCmdEndRendering(cb);
     ts_end(cb, ts);
     g_dirty = 1;
-    g_bound = VK_NULL_HANDLE;
+    g_bound = VK_NULL_HANDLE, g_dyn.valid = 0;
     target->used = g_serial, target->rec = g_cb_index;
 }
 
@@ -10049,6 +10220,16 @@ static void hdr_forget(const GfxTex* t)
 
 static void scene_fx(GfxTex* color, const GfxScene* s);
 
+static int sun_map_timed(const GfxScene* s, const float* L, FxU* u)
+{
+    if (g_gt_on > 0)
+        gt_mark(GT_SUN);
+    int r = sun_map(s, L, u);
+    if (g_gt_on > 0)
+        gt_mark(GT_FX);
+    return r;
+}
+
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D || color->use != GFX_USE_RT)
@@ -10068,6 +10249,8 @@ void gfx_scene_done(GfxTex* color, const GfxScene* s)
 static void scene_fx(GfxTex* color, const GfxScene* s)
 {
     flush_pass();
+    if (g_gt_on > 0)
+        gt_mark(GT_FX);
     GfxTex *ct = color, *depth = color->depth_world ? color->depth_world : color->depth_seen;
     g_fx.tr_depth = color->depth_world && color->depth_world != color->depth_seen ? 2 : depth ? 1 : 0;
     uint64_t t0 = gfx_profiling ? gfx_now_ns() : 0;
@@ -10195,7 +10378,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             day *= g_moghouse ? room : 1.0f - fminf(fmaxf(s->indoors, 0.0f), 1.0f) * (1.0f - room);
             u.shadow[0] = g_fxs.shadow * day;
             u.shadow[1] = g_fxs.shadow_length, u.shadow[2] = 0.3f, u.shadow[3] = 40.0f;
-            if (g_fxs.sun > 0.0f && day > 0.0f && sun_map(s, g_fx.sunw, &u))
+            if (g_fxs.sun > 0.0f && day > 0.0f && sun_map_timed(s, g_fx.sunw, &u))
             {
                 u.smap[0] = g_fxs.sun * day, g_fx.st_drawn_this = 1;
                 u.gi[0] *= g_fxs.gi * day;
@@ -10249,7 +10432,13 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.bloom, u.bloom[2] = 0.25f;
         u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
         if (g_fxs.water > 0.0f && have_v)
+        {
+            if (g_gt_on > 0)
+                gt_mark(GT_WATER);
             water_scene(s, vinv, &u, ct);
+            if (g_gt_on > 0)
+                gt_mark(GT_FX);
+        }
         const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT;
         /* the world for rays, before the passes that trace them */
         int rt = 0;
@@ -10266,7 +10455,12 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
         u.gip[1] = fminf(fmaxf(g_fxs.temporal, 0.0f), 0.95f), u.gip[2] = 12.0f; /* the history's share; the gather's samples */
         if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
             u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
-        if (fx_tex(&g_fx.src, ct->vf, ct->w, ct->h, GFX_USE_RT, 1) && fx_tex(&g_fx.ao0, F16, aw, ah, GFX_USE_RT, 1) &&
+        /* where the composite covers the whole target it is drawn into a spare image made alike, which then takes
+         * the target's place (swap_images): the passes read the scene as it is, with no copy (0.7 ms a frame of
+         * a 4096x4096 background on a Radeon 8060S). Elsewhere the scene is copied and composited over itself. */
+        int whole = s->vp[0] == 0 && s->vp[1] == 0 && s->vp[2] == ct->w && s->vp[3] == ct->h && !ct->conv && !ct->x8 &&
+            !(rt && (int)g_fxs.debug == 8) && fx_tex_like(&g_fx.src, ct);
+        if ((whole || fx_tex(&g_fx.src, ct->vf, ct->w, ct->h, GFX_USE_RT, 1)) && fx_tex(&g_fx.ao0, F16, aw, ah, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.ao1, F16, aw, ah, GFX_USE_RT, 1) && fx_tex(&g_fx.b1a, F16, bw, bh, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.b1b, F16, bw, bh, GFX_USE_RT, 1) && fx_tex(&g_fx.b2a, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) &&
             fx_tex(&g_fx.b2b, F16, (bw + 1) / 2, (bh + 1) / 2, GFX_USE_RT, 1) && fx_tex(&g_fx.ra, F16, bw, bh, GFX_USE_RT, 1) &&
@@ -10275,9 +10469,16 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             g_fx.comp_pipe = fmt_pipe(ct->vf, FP_FX_COMP);
             if (g_fx.comp_pipe)
             {
-                gpu_sync();
-                image_copy(ct, g_fx.src, VK_IMAGE_ASPECT_COLOR_BIT);
-                g_dirty = 1;
+                GfxTex* scene = whole ? ct : g_fx.src; /* what the passes read */
+                g_dirty = 1; /* the scene's draws done before they read it */
+                if (!whole)
+                {
+                    if (g_gt_on > 0)
+                        gt_mark(GT_COPY);
+                    gpu_sync();
+                    image_copy(ct, g_fx.src, VK_IMAGE_ASPECT_COLOR_BIT);
+                    g_dirty = 1;
+                }
                 static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 }, across2[2] = { 2, 0 }, down2[2] = { 0, 2 };
                 GfxTex* ao_out = g_fx.ao0;
                 if (u.ao[1] > 0.0f || u.shadow[0] > 0.0f || u.smap[0] > 0.0f)
@@ -10338,7 +10539,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                         /* traced (rt): rays from each texel into the world, the light they meet as the frame or the
                          * sun saw it; smoothed four times (one texel apart, two, four, one) before the temporal pass */
                         static const int32_t s1[2] = { 1, 1 }, s2[2] = { 2, 2 }, s4[2] = { 4, 4 };
-                        VkImageView r_in[5] = { depth->view, g_fx.src->view, ao_out->view, g_fx.gimap->view, g_fx.gicol->view };
+                        VkImageView r_in[5] = { depth->view, scene->view, ao_out->view, g_fx.gimap->view, g_fx.gicol->view };
                         rt_pass(g_fx.gi0, 0, g_ray.gi, NULL, r_in, 5, NULL);
                         rt_pass(g_fx.gi1, 0, g_ray.giblur, NULL, &g_fx.gi0->view, 1, s1);
                         rt_pass(g_fx.gi0, 0, g_ray.giblur, NULL, &g_fx.gi1->view, 1, s2);
@@ -10364,7 +10565,7 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 }
                 if (u.bloom[1] > 0.0f)
                 {
-                    VkImageView b_in[2] = { g_fx.src->view, ao_out->view }; /* shaded as the composite shades */
+                    VkImageView b_in[2] = { scene->view, ao_out->view }; /* shaded as the composite shades */
                     g_pass = GFX_PASS_BLOOM;
                     fx_pass(g_fx.b1a, 0, 0, g_fx.bright_pipe, NULL, b_in, 2, NULL, NULL);
                     fx_pass(g_fx.b1b, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.b1a->view, 1, NULL, across2);
@@ -10375,18 +10576,20 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 }
                 if (u.rays[0] > 0.0f)
                 {
-                    VkImageView mask_in[2] = { g_fx.src->view, depth->view };
+                    VkImageView mask_in[2] = { scene->view, depth->view };
                     g_pass = GFX_PASS_RAYS;
                     fx_pass(g_fx.ra, 0, 0, g_fx.raymask_pipe, NULL, mask_in, 2, NULL, NULL);
                     fx_pass(g_fx.rb, 0, 0, g_fx.rays_pipe, NULL, &g_fx.ra->view, 1, NULL, NULL);
                     fx_pass(g_fx.ra, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.rb->view, 1, NULL, across);
                     fx_pass(g_fx.rb, 0, 0, g_fx.gauss_pipe, NULL, &g_fx.ra->view, 1, NULL, down);
                 }
-                VkImageView comp_in[7] = { g_fx.src->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view,
+                VkImageView comp_in[7] = { scene->view, ao_out->view, depth->view, g_fx.b1a->view, g_fx.b2a->view, g_fx.rb->view,
                     gi_out ? gi_out->view : VK_NULL_HANDLE };
                 float vp[4] = { vx, vy, vw, vh };
                 g_pass = GFX_PASS_COMP;
-                fx_pass(ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 7, NULL, NULL);
+                fx_pass(whole ? g_fx.src : ct, 0, 1, g_fx.comp_pipe, vp, comp_in, 7, NULL, NULL);
+                if (whole)
+                    swap_images(ct, g_fx.src);
                 if (rt && (int)g_fxs.debug == 8)
                 {
                     if (!g_ray.clay || g_ray.clay_fmt != ct->vf)
@@ -10788,6 +10991,8 @@ static int present_to_window(GfxTex* bb)
     image_barrier(cb, g_swap_images[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
     bb->used = g_serial, bb->rec = g_cb_index;
+    if (g_gt_on > 0)
+        gt_mark(GT_END);
     submit_ex(0, f->acquired, g_swap_done[idx]);
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
@@ -10805,6 +11010,8 @@ static void frame_end(void)
 {
     casters_clear();
     glows_clear();
+    if (g_gt_on > 0 && g_cb && g_gt[g_frame].n)
+        gt_mark(GT_END);
     submit(0);
     Frame* f = &g_frames[g_frame];
     if (!f->value)
@@ -10821,7 +11028,11 @@ void gfx_present(GfxTex* bb)
     uint64_t present_start = gfx_profiling ? gfx_now_ns() : 0;
     g_present_thread = pthread_self();
     flush_pass();
+    if (g_gt_on > 0)
+        gt_mark(GT_SUN);
     shadow_frame_end(); /* the scene renderer's characters' shadows, for the next frame: timed with the frame's passes */
+    if (g_gt_on > 0)
+        gt_mark(GT_PRESENT);
     if (g_surface && bb && bb->use != GFX_USE_DEPTH)
     {
         int pw = 0, ph = 0;
@@ -11032,6 +11243,8 @@ int gfx_init(void* window, int vsync)
     VkPhysicalDeviceVulkan12Features en12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     en12.pNext = &en13;
     en12.timelineSemaphore = VK_TRUE;
+    if (gt_enabled() && !(en12.hostQueryReset = have12.hostQueryReset))
+        g_gt_on = 0;
     en12.samplerMirrorClampToEdge = have12.samplerMirrorClampToEdge;
     if (g_has_rt)
         en12.bufferDeviceAddress = en12.shaderSampledImageArrayNonUniformIndexing = en12.descriptorBindingPartiallyBound = VK_TRUE;

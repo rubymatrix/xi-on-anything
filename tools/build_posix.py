@@ -9,6 +9,8 @@
         offscreen, without the game (tests/gfx_test.c, tests/d3d8_test.c)
   python3 tools/build_posix.py vfstest                   the game's paths to host paths (runtime/portable/vfs.c),
         without the game (tests/vfs_test.c)
+  python3 tools/build_posix.py keytest                   the graphics back ends' map hash and compare
+        (runtime/portable/gfx_key.h), without a GPU (tests/gfx_key_test.c)
   python3 tools/build_posix.py datuitest --game <folder>  the game's UI art read from its DATs (host/datui.c):
         parse checks, and renders in build/datui/ (tests/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
@@ -380,7 +382,9 @@ def host64_kit(game, kitdir):
     # the headers: SDL3's public ones are the same on every platform (third_party/sdl3/include)
     addon_cflags, _ = addons(make=False)
     inc = ['-I', 'third_party/sdl3/include'] + thirdparty.flags('mbedtls') + addon_cflags
-    objs += compile_stale(k['device_sources'], 'build/obj/host64-kit', inc)
+    # and host/kit_mem.c: compiler_rt's memcpy, memcmp and the rest local to host64, so its libraries use
+    # glibc's. In the same call: the folder's .flags records one set, and another would rebuild them all
+    objs += compile_stale(k['device_sources'] + ['host/kit_mem.c'], 'build/obj/host64-kit', inc)
     libs = [os.path.join(kitdir, 'lib', l) for l in k['libs'] if l != 'libxi.a']
     # libxi.a whole, as the other builds link every object: addons find win32_ffi.c's and gdifont_ffi.c's
     # functions by name (ffi.C), so nothing references them and an archive would leave them out
@@ -428,6 +432,13 @@ def vfstest():
     run(CC + CFLAGS + ['-o', 'build/vfs_test', 'tests/vfs_test.c', 'runtime/portable/vfs.c', 'runtime/portable/plat_posix.c',
                        '-lpthread'])
     run(['build/vfs_test'])
+
+
+def keytest():
+    """runtime/portable/gfx_key.h on this host: tests/gfx_key_test.c."""
+    os.makedirs(os.path.join(ROOT, 'build'), exist_ok=True)
+    run(CC + CFLAGS + ['-o', 'build/gfx_key_test', 'tests/gfx_key_test.c'])
+    run(['build/gfx_key_test'])
 
 
 DESKTOP_ID = 'xi-on-anything'  # host64's app id on Linux (host64.c XI_APP_ID)
@@ -619,7 +630,7 @@ APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'datuitest', 'app', 'kit', 'desktop'])
+    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'keytest', 'datuitest', 'app', 'kit', 'desktop'])
     ap.add_argument('--out', default='build/kit')  # kit: where it goes
     ap.add_argument('--kit')  # host64: build from this kit
     ap.add_argument('--game', default=os.path.expanduser('~/SquareEnix/FINAL FANTASY XI'))
@@ -643,6 +654,8 @@ def main():
         return gfxtest()
     if args.target == 'vfstest':
         return vfstest()
+    if args.target == 'keytest':
+        return keytest()
     if args.target == 'kit':
         return kit(args.out)
     game = os.path.abspath(args.game)

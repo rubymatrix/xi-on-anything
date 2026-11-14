@@ -39,6 +39,7 @@
 #include "cachedir.h"
 #include "gfx.h"
 #include "gfx_hlsl.h"
+#include "gfx_key.h"
 #include "gfx_rt_dxil.h"
 
 #define FRAMES 3
@@ -295,15 +296,6 @@ typedef struct Map
     uint32_t cap, n;
 } Map;
 
-static uint64_t fnv(const void* p, size_t n)
-{
-    const uint8_t* b = (const uint8_t*)p;
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; ++i)
-        h = (h ^ b[i]) * 1099511628211ull;
-    return h ? h : 1;
-}
-
 static MapEnt* map_find(Map* m, const void* key, size_t klen, uint64_t h)
 {
     if (!m->cap)
@@ -313,14 +305,14 @@ static MapEnt* map_find(Map* m, const void* key, size_t klen, uint64_t h)
         MapEnt* e = &m->e[i];
         if (!e->hash)
             return NULL;
-        if (e->hash == h && e->klen == klen && !memcmp(e->key, key, klen))
+        if (e->hash == h && e->klen == klen && gfx_key_eq(e->key, key, klen))
             return e;
     }
 }
 
 static void* map_get(Map* m, const void* key, size_t klen)
 {
-    MapEnt* e = map_find(m, key, klen, fnv(key, klen));
+    MapEnt* e = map_find(m, key, klen, gfx_key_hash(key, klen));
     return e ? e->obj : NULL;
 }
 
@@ -343,7 +335,7 @@ static void map_put(Map* m, const void* key, size_t klen, void* obj)
             }
         free(old.e);
     }
-    uint64_t h = fnv(key, klen);
+    uint64_t h = gfx_key_hash(key, klen);
     uint32_t j = (uint32_t)h & (m->cap - 1);
     while (m->e[j].hash)
         j = (j + 1) & (m->cap - 1);

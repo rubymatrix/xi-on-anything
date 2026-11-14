@@ -214,6 +214,7 @@ typedef struct GfxDraw
     GfxBuf* ibuf;      /* the indices are also in this static buffer, at ibuf_off (4-byte aligned) */
     uint32_t ibuf_off;
     uint32_t vertex_start;
+    uint64_t site; /* the game's return addresses, the innermost two (FFXI_GPU_TIMES only; 0 otherwise) */
 } GfxDraw;
 
 /* The SDL_WindowFlags a window the back end draws into must be created with (SDL_WINDOW_VULKAN for

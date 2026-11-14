@@ -75,13 +75,14 @@ void gt_restore(const GtSaved* s)
         gt_lock();
 }
 
-/* Called at every loop's back edge. The clock is read only every 32nd call while another thread
- * waits: reading it at each was 8% of the game thread's time where the clock is slow (a virtual
- * machine's QueryPerformanceCounter), and 32 back edges are far shorter than the quantum. */
+/* Called from loops' back edges while another thread waits, one in RT_SAFEPOINT_EVERY of a function's.
+ * The clock is read only every 4th call: reading it at each was 8% of the game thread's time where the
+ * clock is slow (a virtual machine's QueryPerformanceCounter), and 256 back edges are far shorter than
+ * the quantum. */
 static void yield_if_due(void)
 {
     static RT_TLS unsigned t_skip;
-    if (!t_held || t_noyield || !rt_lock_contended || (++t_skip & 31u) ||
+    if (!t_held || t_noyield || !rt_lock_contended || (++t_skip & 3u) ||
         rt_monotonic_ns() - g_acquired_at < (t_quantum_ns ? t_quantum_ns : QUANTUM_NS))
         return;
     gt_unlock();
