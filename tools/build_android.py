@@ -76,7 +76,15 @@ WARN = build_posix.GEN_WARNINGS
 
 def run(args, **kw):
     print('> ' + ' '.join(map(str, args))[:200], flush=True)
-    subprocess.run(list(map(str, args)), cwd=ROOT, check=True, **kw)
+    args = list(map(str, args))
+    # the NDK's drivers are .cmd wrappers on Windows, and cmd.exe takes at most 8191 characters: a
+    # long command (libmain.so's link) passes its arguments to clang in a response file instead
+    if WINDOWS and args[0].endswith('.cmd') and len(subprocess.list2cmdline(args)) > 7000:
+        rsp = OUT / (Path(args[0]).stem + '.rsp')
+        rsp.parent.mkdir(parents=True, exist_ok=True)
+        rsp.write_text('\n'.join('"' + x.replace('\\', '/') + '"' for x in args[1:]) + '\n')
+        args = [args[0], '@' + str(rsp)]
+    subprocess.run(args, cwd=ROOT, check=True, **kw)
 
 
 def compile_one(job):
