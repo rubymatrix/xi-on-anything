@@ -3961,20 +3961,30 @@ static uint64_t draw_site(void)
 
 /* The pixels a 3D draw of fixed-function vertices first .. first + n can touch in its target, as x0, y0, x1, y1,
  * a pixel round its projected vertices; 0 when that isn't known (a vertex shader, transformed or merged vertices, a
- * vertex at or behind the camera). */
-static int draw_rect(const GfxDraw* d, uint32_t first, uint32_t n, int32_t r[4])
+ * vertex at or behind the camera). The vertices are the bound stream's, or a DrawPrimitiveUP's own (up_data). */
+static int draw_rect(const GfxDraw* d, uint32_t first, uint32_t n, uint32_t up_data, uint32_t up_stride, int32_t r[4])
 {
     if (d->vs.prog || d->vs.rhw || g_merge.on || !d->vs.el[GFX_R_POSITION].used)
         return 0;
-    Obj* b = obj(g_dev.cur.stream[d->vs.el[GFX_R_POSITION].stream]);
-    uint32_t stride = g_dev.cur.stride[d->vs.el[GFX_R_POSITION].stream], off = (uint32_t)d->u.offset[GFX_R_POSITION];
-    if (!b || !b->mem || !stride || (uint64_t)(first + n) * stride > b->size)
+    uint32_t base, stride, off = (uint32_t)d->u.offset[GFX_R_POSITION];
+    uint64_t size;
+    if (up_data)
+        base = up_data, stride = up_stride, size = 0x100000000ull - up_data;
+    else
+    {
+        uint32_t st = d->vs.el[GFX_R_POSITION].stream;
+        Obj* b = obj(g_dev.cur.stream[st]);
+        if (!b || !b->mem)
+            return 0;
+        base = b->mem, stride = g_dev.cur.stride[st], size = b->size;
+    }
+    if (!stride || (uint64_t)(first + n) * stride > size)
         return 0;
     const float* m = d->u.wvp;
     float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
     for (uint32_t i = 0; i < n; ++i)
     {
-        uint32_t at = b->mem + (first + i) * stride + off;
+        uint32_t at = base + (first + i) * stride + off;
         float x = u2f(rd32(at)), y = u2f(rd32(at + 4)), z = u2f(rd32(at + 8));
         float cw = x * m[3] + y * m[7] + z * m[11] + m[15];
         if (!(cw > 1e-4f))
@@ -4116,7 +4126,7 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
     if (wt && wt->wr_known)
     {
         int32_t r[4];
-        if (draw_rect(d, first, nverts, r))
+        if (draw_rect(d, first, nverts, up_data, up_stride, r))
         {
             if (wt->wr[2] <= wt->wr[0] || wt->wr[3] <= wt->wr[1])
                 memcpy(wt->wr, r, sizeof r);
@@ -4912,6 +4922,9 @@ int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
 {
     if (!g_dev.rt)
         return 0;
+    Obj* wt = g_fade_scissor ? wr_target() : NULL;
+    if (wt)
+        wt->wr_known = 0; /* the scene renderer's draws into it aren't followed: its composite covers everything (fade_scissor) */
     apply_targets();
     memcpy(game_vp, g_dev.cur.vp, 6 * sizeof *game_vp);
     memcpy(vp, g_dev.cur.vp, 6 * sizeof *vp);

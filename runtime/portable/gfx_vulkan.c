@@ -658,8 +658,9 @@ static double gt_epoch(void)
 static void gt_add(uint64_t tag, uint64_t ns, uint32_t draws)
 {
     uint32_t h = (uint32_t)((tag * 0x9E3779B97F4A7C15ull) >> 50) & 16383u;
-    while (g_gt_sum[h].used && g_gt_sum[h].tag != tag)
-        h = (h + 1) & 16383u;
+    for (uint32_t k = 0; g_gt_sum[h].used && g_gt_sum[h].tag != tag; ++k, h = (h + 1) & 16383u)
+        if (k == 16383u)
+            return; /* every slot this second taken by another site: the sample is dropped */
     GtSum* e = &g_gt_sum[h];
     e->used = 1, e->tag = tag, e->ns += ns, e->draws += draws, e->segs++;
 }
@@ -673,6 +674,8 @@ static void gt_collect(void)
         VK_SUCCESS)
     {
         double per = g_props.limits.timestampPeriod;
+        for (uint32_t i = 0; i < t->n; ++i)
+            v[i] &= g_ts_mask; /* the queue's valid bits only */
         for (uint32_t i = 0; i + 1 < t->n; ++i)
             gt_add(t->tag[i], v[i + 1] > v[i] ? (uint64_t)((v[i + 1] - v[i]) * per) : 0, t->draws[i]);
         g_gt_frame_ns += v[t->n - 1] > v[0] ? (uint64_t)((v[t->n - 1] - v[0]) * per) : 0, g_gt_frames++;
@@ -768,6 +771,12 @@ static VkCommandBuffer cmd(void)
 /* a timestamp in the frame's command buffer: what follows, up to the next, is the tag's */
 static void gt_mark(uint64_t tag)
 {
+    if (!g_ts_mask) /* the queue has no timestamps (none valid when the device was set up) */
+    {
+        g_gt_on = 0;
+        fprintf(stderr, "[recomp] gfx: no GPU timestamps on this queue: FFXI_GPU_TIMES off\n");
+        return;
+    }
     VkCommandBuffer cb = cmd();
     GtFrame* t = &g_gt[g_frame];
     if (!t->pool)
