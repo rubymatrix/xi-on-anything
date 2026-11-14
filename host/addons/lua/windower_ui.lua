@@ -37,6 +37,8 @@ return function(windower, h)
         local id = ui.text_new()
         texts[name] = id
         ui.text_set(id, 'font', 'Arial')
+        -- sizes are Windows' (points to an em of pt * 4/3 px), not ImGui's ascent-to-descent
+        ui.text_set(id, 'em', 1)
         ui.text_set(id, 'size', 12 * 4 / 3)
         ui.text_set(id, 'color', argb(255, 255, 255, 255))
         ui.text_set(id, 'bg_visible', 0)
@@ -85,7 +87,10 @@ return function(windower, h)
     ------------------------------------------------------------------------------ prim
 
     -- Windower primitives: a coloured rectangle, optionally textured. fit_to_texture makes the
-    -- primitive the texture's size; repeat(x, y) tiles the texture x by y times over it.
+    -- primitive the texture's size and maps the texture one texel to a pixel, so a later set_size
+    -- crops it (xivbar fills its bars this way: the full bar, sized down to the part to show);
+    -- without it the texture stretches over the primitive. repeat(x, y) tiles the texture x by y
+    -- times over it.
     local prims = {} -- name -> { id, w, h, fit, tex, tw, th, rx, ry }
 
     local function pr(name)
@@ -95,7 +100,6 @@ return function(windower, h)
     -- the xi primitive's size and texture mapping from the Windower state
     local function apply(p)
         local w, hgt = p.w, p.h
-        if p.fit and p.tex then w, hgt = p.tw, p.th end
         local id = p.id
         if p.tex and (p.rx ~= 1 or p.ry ~= 1) and p.tw > 0 and p.th > 0 then
             -- uv 0..rx: the texture's pixels times the factor, scaled down to the size shown
@@ -105,6 +109,13 @@ return function(windower, h)
             ui.prim_set(id, 'height', vh)
             ui.prim_set(id, 'scale_x', vw ~= 0 and w / vw or 1)
             ui.prim_set(id, 'scale_y', vh ~= 0 and hgt / vh or 1)
+        elseif p.fit and p.tex then
+            -- xi fit 0: uv 0..w/tw, one texel a pixel, so a size under the texture's crops it
+            ui.prim_set(id, 'fit', 0)
+            ui.prim_set(id, 'width', w)
+            ui.prim_set(id, 'height', hgt)
+            ui.prim_set(id, 'scale_x', 1)
+            ui.prim_set(id, 'scale_y', 1)
         else
             ui.prim_set(id, 'fit', 1)
             ui.prim_set(id, 'width', w)
@@ -147,6 +158,7 @@ return function(windower, h)
     function prim.set_fit_to_texture(name, fit)
         local p = pr(name)
         p.fit = fit and true or false
+        if p.fit and p.tex then p.w, p.h = p.tw, p.th end
         apply(p)
     end
     function prim.set_repeat(name, x, y)
@@ -164,6 +176,7 @@ return function(windower, h)
             local id, w, hgt = ui.texture_file(xi.fs.path(tostring(path)))
             if id then
                 p.tex, p.tw, p.th = id, w, hgt
+                if p.fit then p.w, p.h = w, hgt end
             else
                 xi.log(('windower.prim.set_texture: cannot load %s'):format(tostring(path)))
             end
