@@ -195,7 +195,7 @@ def host(t):
     objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
     objs += t.compile(['host/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
     exe = os.path.join(t.out, 'host64')
-    fw = sum((['-framework', f] for f in FRAMEWORKS), [])
+    fw = sum((['-framework', f] for f in FRAMEWORKS), []) + ['-weak_framework', 'MetalFX']  # the upscaler (iOS 16 on)
     hidden = ['-Wl,-load_hidden,' + a for a in pol_libs]  # the crate's symbols, not exported
     sim = []
     if t.sdk == 'iphonesimulator':

@@ -1,8 +1,8 @@
 # Options catalog
 
 Every setting the client has, grouped by what it changes rather than where it lives. In game, the
-player-facing ones are under **Config › Advanced** (`host/modern.c`), in ten pages: Display,
-Graphics, Shadows, Lighting, Atmosphere, Water, Legacy, Interface, Gamepad and Addons. The tree is at the end.
+player-facing ones are under **Config › Advanced** (`host/modern.c`), in nine pages: Display,
+Graphics, Shadows, Lighting, Atmosphere, Water, Interface, Gamepad and Addons. The tree is at the end.
 
 Sources, as the tables abbreviate them:
 
@@ -38,28 +38,28 @@ the Lighting and Atmosphere pages.
 |---|---|---|---|
 | Anti-aliasing | Graphics › [Quality] Anti-Aliasing | `aa` | 0 off, 1 FXAA |
 | Texture filtering | Graphics › [Quality] Texture Filtering | `aniso` | 16 (1/4/8/16) |
-| Overall quality | Graphics › [Quality] Overall Quality | | Low / Medium / Max set the scene renderer and post effects (`scene`, `scene_hdr`, `tonemap`, `scene_shadows`, `shadow_softness`, `shadow_soft_q`, `scene_shadow_size`, `scene_lamps`, `scene_lamp_shadows`, `scene_gi`, `scene_gi_q`, `scene_ao`, `scene_ao_q`, `scene_spec`, `post_shafts`, `post_bloom`, `post_dof`) and turn the older effects' lighting off (`light`, `sun`, `ao`, `gi`, `shadow`, `rays`, `bloom`). Low: lit per vertex, nothing else; Medium: per pixel, HDR, soft shadows (Low taps), lamps (2 shadowed), occlusion low, highlights, shafts, bloom; Max: as tools/replay/showcase-fx.txt. Custom when they are none of these |
-| Renderer | Graphics › [Quality] Renderer | `scene` | Per Pixel 2, Per Vertex 1, Legacy 0 (the game's draws with the older effects); the modern ones turn the older lighting keys off, Legacy puts them back to their defaults |
+| Overall quality | Graphics › [Quality] Overall Quality | | Low / Medium / Max set the scene renderer and post effects (`scene`, `scene_hdr`, `tonemap`, `scene_shadows`, `shadow_softness`, `shadow_soft_q`, `scene_shadow_size`, `scene_lamps`, `scene_lamp_shadows`, `scene_gi`, `scene_gi_q`, `scene_ao`, `scene_ao_q`, `scene_spec`, `post_shafts`, `post_bloom`, `post_dof`). Low: lit per vertex, nothing else; Medium: per pixel, HDR, soft shadows (Low taps), lamps (2 shadowed), occlusion low, highlights, shafts, bloom; Max: as tools/replay/showcase-fx.txt. Custom when they are none of these |
+| Renderer | Graphics › [Quality] Renderer | `scene` | Original 0 (the game's own draws), Deferred 2 (the scene renderer, lit per pixel); 1, per vertex, is still read from the file and shows as Deferred |
 | Anti-shimmer (temporal) | | `filter` | 1 on; fixed (fx.txt's line ignored) |
 | Temporal blend | | `temporal` | 0.85 |
 | Sharpening | Graphics › [Quality] Sharpening | `sharpen` | 0.3 (0–1) |
 | Color grading | Graphics › [Color] Color Grading | `grade` | 1.0 (0–1) |
-| Saturation | Graphics › [Color] Saturation | `sat` | 1.12 (0.5–1.5) |
-| Contrast | Graphics › [Color] Contrast | `contrast` | 0.2 (0–0.5) |
+| Saturation | Graphics › [Color] Saturation | `sat` | 1.25 (0.5–1.5) |
+| Contrast | Graphics › [Color] Contrast | `contrast` | 0.4 (0–0.5) |
 
 ## 3. Lighting and shadows
 
 | Setting | Menu | fx | Default / range |
 |---|---|---|---|
 | Modern effects (master) | | `fx` | 1 on; fixed (fx.txt's line ignored; `FFXI_FX=0` still turns them off) |
-| Per-pixel lighting | Legacy › [Lighting] Modern Lighting | `light` | 2 all lights (0 off, 1 sun) |
-| Bounce light | Legacy › [Lighting] Bounce Light | `gi` | 0 off (0–3) |
+| Per-pixel lighting | | `light` | 0; off and fixed: the older effects are gone (fx.txt's line ignored; `FFXI_FX_<KEY>` still sets it) |
+| Bounce light | | `gi` | 0; off and fixed: the older effects are gone (fx.txt's line ignored; `FFXI_FX_<KEY>` still sets it) |
 | Ray tracing | | `rt` | 0 off; fixed (fx.txt's line ignored; `FFXI_FX_RT=1` turns it on) |
-| Sun shadow darkness | Legacy › [Shadows] Sun Shadows | `sun` | 0.45 (0–1) |
-| Shadow casters | Legacy › [Shadows] Shadow Casters | `sun_casters` | 0 all, 1 characters, 2 world |
-| Shadow edges | Legacy › [Shadows] Shadow Edges | `sun_soft` | 0 hard, 0.03 soft |
-| Shadow detail (near map) | Legacy › [Shadows] Shadow Detail | `sun_detail` | 4096 (2048/4096/8192; 512–8192 in the file) |
-| Indoor shadows | Legacy › [Shadows] Indoor Shadows | `moghouse` | 0 (0–1) |
+| Sun shadow darkness | | `sun` | 0; off and fixed: the older effects are gone (fx.txt's line ignored; `FFXI_FX_<KEY>` still sets it) |
+| Shadow casters | | `sun_casters` | 0 all, 1 characters, 2 world |
+| Shadow edges | | `sun_soft` | 0 hard, 0.03 soft |
+| Shadow detail (near map) | | `sun_detail` | 4096 (2048/4096/8192; 512–8192 in the file) |
+| Indoor shadows | | `moghouse` | 0 (0–1) |
 | The game's own character shadows | | `gameshadows` | 0 auto; fixed (fx.txt's line ignored) |
 | Dawn/dusk long shadows | | `sun_dusk` | 1 |
 | Sun shadow reach | | `sun_distance` | 100 |
@@ -67,27 +67,27 @@ the Lighting and Atmosphere pages.
 | Off-screen caster prime | | `sun_prime` | 300 (0 never) |
 | Sun direct strength | | `sun_direct` | 0.5 |
 | Sun face / min | | `sun_face`, `sun_min` | 0 / 0 |
-| Contact shadow | | `shadow`, `shadow_length`, `contact_steps` | 0.3 / 0.6 / 0 (the steps a frame, 1–16; 0 follows `ao_quality`: 8, 12, 16) |
+| Contact shadow | | `shadow`, `shadow_length`, `contact_steps` | 0 (fixed, as `light`) / 0.6 / 0 (the steps a frame, 1–16; 0 follows `ao_quality`: 8, 12, 16) |
 
 ## 4. Ambient occlusion
 
 | Setting | Menu | fx | Default / range |
 |---|---|---|---|
-| Strength | Legacy › [Ambient Occlusion] Strength | `ao` | 0.8 (0–1.5) |
-| Quality | Legacy › [Ambient Occlusion] Quality | `ao_quality` | 1 medium (10 taps); 0 low (6), 2 high (16); the contact shadows' steps follow it (12; 8, 16) |
-| Radius | Legacy › [Ambient Occlusion] Radius | `radius` | 1.0 (0.25–3) |
+| Strength | | `ao` | 0; off and fixed: the older effects are gone (fx.txt's line ignored; `FFXI_FX_<KEY>` still sets it) |
+| Quality | | `ao_quality` | 1 medium (10 taps); 0 low (6), 2 high (16); the contact shadows' steps follow it (12; 8, 16) |
+| Radius | | `radius` | 1.0 (0.25–3) |
 
 ## 5. Atmosphere
 
 | Setting | Menu | fx | Default / range |
 |---|---|---|---|
-| Fog density | Legacy › [Glow] Haze | `fog` | 0.004 (0–0.02) |
+| Fog density | | `fog` | 0; off and fixed: the older effects are gone (fx.txt's line ignored; `FFXI_FX_<KEY>` still sets it) |
 | Fog falloff / height / max | | `fog_falloff`, `fog_height`, `fog_max` | 0.08 / 2.0 / 0.5 |
 | Fog sun glow / phase | | `fog_sun`, `fog_g` | 0.5 / 0.6 |
-| God rays | Legacy › [Glow] God Rays | `rays` | 0.6 (0–1.5) |
+| God rays | | `rays` | 0; off and fixed: the older effects are gone (fx.txt's line ignored; `FFXI_FX_<KEY>` still sets it) |
 | Ray decay / length | | `rays_decay`, `rays_length` | 0.965 / 0.85 |
-| Bloom | Legacy › [Glow] Bloom | `bloom` | 0.3 (0–2) |
-| Bloom threshold | Legacy › [Glow] Bloom Threshold | `threshold` | 0.75 (0.3–1) |
+| Bloom | | `bloom` | 0; off and fixed: the older effects are gone (fx.txt's line ignored; `FFXI_FX_<KEY>` still sets it) |
+| Bloom threshold | | `threshold` | 0.75 (0.3–1) |
 | Post bloom (lamps, spells, sun; with or without `FFXI_FX`, Metal and Vulkan) | Atmosphere › [Bloom] Strength | `post_bloom` | 0 off (1 tuned) |
 | Post bloom sky threshold / knee / spread | | `bloom_threshold`, `bloom_knee`, `bloom_radius` | 0.95 / 0.05 / 1 |
 | Post bloom emissive weight: effects and lamp glows / sun, moon, sky | | `bloom_emissive_fx`, `bloom_emissive_lights` | 1.2 / 1.5 |
@@ -97,6 +97,7 @@ the Lighting and Atmosphere pages.
 | Shafts haze density / quality (2 a third of the scene, 16 steps; 1 a fifth, 10) / forward lobe / reach / over frames | | `shafts_density`, `shafts_q`, `shafts_g`, `shafts_dist`, `shafts_temporal` | 1 / 2 / 0.6 / 120 / 0.9 |
 | Specular highlights (scene 2 with `scene_shadows`, Metal and Vulkan): strength / lamps' share / wetness / anti-aliasing width | | `scene_spec`, `scene_spec_lamps`, `scene_spec_wet`, `scene_spec_aa` | 0 off (1 tuned) / 1 / 0 (0–1) / 1 |
 | HDR scene target (Metal and Vulkan): on / tonemap (0 neutral, 1 highlight shoulder, 2 ACES) / exposure / white point / knee | | `scene_hdr`, `tonemap`, `exposure`, `tone_white`, `tone_knee` | 0 / 0 / 1 / 4 / 0.8 |
+| Upscaling: off / spatial / temporal; render scale; sharpening | Graphics › [Upscaling] Upscaling, Render Scale (Quality 0.77, Balanced 0.67, Performance 0.5), Upscale Sharpening | `upscale`, `upscale_scale`, `upscale_sharpen` | 0 / 0.67 / 0.25. Metal: MetalFX; temporal (2) is the sharp one (jittered, mip-biased, anti-aliased), spatial (1) is grainy without anti-aliased input. Windows (Direct3D 12) and Linux (Vulkan): the world drawn at `upscale_scale` of the screen in place of the Background Resolution (`upscale_scale` read at start); 1 FSR 1 (EASU, then RCAS at `upscale_sharpen`); 2 on Windows AMD's FSR SDK (FSR 4 on a Radeon RX 6000 or later, FSR 3.1 on other GPUs; its DLLs beside `host64.exe`, which `tools/build.py` fetches; FSR 1 without them), on Linux FSR 1. Android and Web: none yet |
 | Lamps (scene 2, Metal and Vulkan): every lit lamp per pixel, faded at its range / reach / glow sprite and size | | `scene_lamps`, `scene_lamp_far`, `scene_lamp_glow`, `scene_lamp_glow_size` | 0 off (1: the game's strength) / 120 / 0 / 0.6 |
 | Lamps: on/off fade (seconds) / fire flicker / character shadows from the nearest lamps (0-4) and cube size / shadow debug | | `scene_lamp_fade`, `scene_lamp_flicker`, `scene_lamp_shadows`, `scene_lamp_shadow_size`, `scene_lamp_debug` | 1.5 / 0.06 / 4 / 256 / 0 |
 | Lamps: the zone casts in those lamps' cubes too (what the game drew that frame; drawn again when the lamps change or every 600 frames) | Shadows › [Lamps] Walls Cast | `scene_lamp_zone` | 1 on (0: characters only) |
@@ -244,6 +245,7 @@ Config
     │   └── [Performance] ... Frame Rate, FPS Counter
     ├── Graphics
     │   ├── [Quality] ....... Overall Quality, Renderer, Anti-Aliasing, Texture Filtering, Sharpening
+    │   ├── [Upscaling] ..... Upscaling, Render Scale, Upscale Sharpening
     │   ├── [Color] ......... High Dynamic Range, Tone Mapping, Exposure, Color Grading, Saturation,
     │   │                     Contrast
     │   └── [World Detail] .. Draw Distance, Character Distance
@@ -264,11 +266,6 @@ Config
     │   └── [Depth of Field]  Strength, Sharp Distance
     ├── Water
     │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift
-    ├── Legacy (the older effects, Renderer: Legacy)
-    │   ├── [Lighting] ...... Modern Lighting, Bounce Light
-    │   ├── [Shadows] ....... Sun Shadows, Shadow Casters, Shadow Edges, Shadow Detail, Indoor Shadows
-    │   ├── [Ambient Occlusion] Strength, Quality, Radius
-    │   └── [Glow] .......... God Rays, Bloom, Bloom Threshold, Haze
     ├── Interface
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy

@@ -906,6 +906,61 @@ static void shadow_focus(void)
     }
 }
 
+#if !defined(__APPLE__) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
+#include "cachedir.h"
+/* An fx setting before the back end reads them (gfx_fx.c's order): fx.txt's line, else FFXI_FX_<KEY>, else def */
+static float fx_peek(const char* key, float def)
+{
+    char name[64], *c;
+    snprintf(name, sizeof name, "FFXI_FX_%s", key);
+    for (c = name; *c; ++c)
+        if (*c >= 'a' && *c <= 'z')
+            *c -= 32;
+    const char* e = getenv(name);
+    float v = e && *e ? (float)atof(e) : def;
+    const char* file = getenv("FFXI_FX_FILE");
+    char path[1024], dir[900];
+    if (file && *file)
+        snprintf(path, sizeof path, "%s", file);
+    else if (cache_dir(dir, sizeof dir))
+        snprintf(path, sizeof path, "%s/fx.txt", dir);
+    else
+        return v;
+    FILE* f = fopen(path, "r");
+    if (!f)
+        return v;
+    char line[256], k[64];
+    float fv;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, " %63[a-z_] = %f", k, &fv) == 2 && !strcmp(k, key))
+            v = fv;
+    fclose(f);
+    return v;
+}
+
+/* FSR 1 (upscale, on Direct3D 12 and Linux's Vulkan; Metal's MetalFX draws the world smaller itself, and
+ * Android's Vulkan and WebGPU have no upscaler yet, so their background is left as it is): the
+ * game draws its world into a background of the back buffer's size times upscale_scale, in place of the
+ * Background Resolution it has (2048 to 8192 across, drawn larger than the screen and made smaller), and
+ * the back end makes it up to the screen through EASU and RCAS where the game puts it there. Read by the
+ * game, never saved: with upscale off the next run has the player's own again. */
+static void upscale_background(void)
+{
+    if (fx_peek("upscale", 0.0f) < 0.5f)
+        return;
+    static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";
+    uint32_t w = 0, h = 0;
+    if (!reg_get_dword(KEY, "0001", &w) || !reg_get_dword(KEY, "0002", &h) || w < 320 || h < 240)
+        return;
+    float scale = fx_peek("upscale_scale", 0.67f);
+    scale = scale < 0.5f ? 0.5f : scale > 1.0f ? 1.0f : scale;
+    uint32_t bw = (uint32_t)(w * scale + 0.5f) & ~1u, bh = (uint32_t)(h * scale + 0.5f) & ~1u;
+    reg_override_dword(KEY, "0003", bw);
+    reg_override_dword(KEY, "0004", bh);
+    fprintf(stderr, "[recomp] upscaling: the world drawn at %ux%u and made up to %ux%u (FSR 1)\n", bw, bh, w, h);
+}
+#endif
+
 #ifdef FFXI_MOBILE
 static void* g_signin_window; /* the window the game takes over: display_fit_start */
 
@@ -1585,6 +1640,9 @@ int main(int argc, char** argv)
     reg_init(regs, nregs, overlay);
     for (unsigned i = 0; i < nfinals; ++i)
         reg_load_final(finals[i]);
+#if !defined(__APPLE__) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
+    upscale_background();
+#endif
 #ifdef FFXI_MOBILE
     display_fit_start(g_signin_window); /* the game's size from the screen, whatever the file says */
     soft_keyboard_off();

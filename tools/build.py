@@ -352,6 +352,47 @@ def host_resources(env, objdir):
     return res
 
 
+# AMD's FSR SDK DLLs for upscale 2 (gfx_d3d12.c fsr_sdk_load): FSR 4 on a Radeon RX 6000 or later, FSR 3.1
+# elsewhere. Too large for the repository (the upscaler is 57 MB), so taken from the SDK's tag, checked
+# against the tag's git blob hashes, and kept in generated/fsr_sdk/. MIT license (third_party/fsr_sdk).
+FSR_SDK_TAG = 'v2.4.0'
+FSR_SDK_DLLS = {
+    'amd_fidelityfx_loader_dx12.dll': 'f1afee09dd3bcded005c722b1e94befb3ee3f9e6',
+    'amd_fidelityfx_upscaler_dx12.dll': '6d01d9f52c412fc336350f04e948eb1bee196a38',
+}
+
+
+def fsr_dlls(out):
+    """The FSR SDK's DLLs beside host64.exe in out; without them (offline, say) the game upscales with FSR 1."""
+    import hashlib
+    import urllib.request
+    cache = os.path.join(ROOT, 'generated', 'fsr_sdk')
+    os.makedirs(cache, exist_ok=True)
+    for name, blob in FSR_SDK_DLLS.items():
+        path = os.path.join(cache, name)
+
+        def good():
+            if not os.path.isfile(path):
+                return False
+            with open(path, 'rb') as f:
+                data = f.read()
+            return hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest() == blob
+
+        if not good():
+            url = ('https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/%s/Kits/FidelityFX/signedbin/%s'
+                   % (FSR_SDK_TAG, name))
+            try:
+                urllib.request.urlretrieve(url, path)
+            except OSError as e:
+                print('warning: %s not fetched (%s): upscale 2 will be FSR 1' % (name, e))
+                return
+            if not good():
+                os.remove(path)
+                print('warning: %s is not the FSR SDK %s one: upscale 2 will be FSR 1' % (name, FSR_SDK_TAG))
+                return
+        shutil.copy(path, os.path.join(ROOT, out))
+
+
 def host64(env):
     """The 64-bit game host: FFXiMain and FFXi.dll translated, the portable runtime, SDL3."""
     objs = game_objects(env)
@@ -368,6 +409,7 @@ def host64(env):
     # /MAP: tools/sample_report.py reads FFXI_SAMPLE's samples against it
     run(['link', '/nologo', '/OUT:build\\host64.exe', '/MAP:build\\host64.map', '/MACHINE:X64', sdl_lib] + HOST_LIBS + objs, env)
     shutil.copy(os.path.join(SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, 'build'))
+    fsr_dlls('build')
     buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
     print('built build\\host64.exe; run: build\\host64.exe --game "%s" ...' % BUILD['game'])
 

@@ -28,29 +28,29 @@ static const struct
     float def;
 } FX_SETTINGS[] = {
     { "fx", offsetof(GfxFxSettings, fx), 1.0f },
-    { "ao", offsetof(GfxFxSettings, ao), 0.8f },
+    { "ao", offsetof(GfxFxSettings, ao), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "radius", offsetof(GfxFxSettings, radius), 1.0f },
     { "grade", offsetof(GfxFxSettings, grade), 1.0f },
-    { "sat", offsetof(GfxFxSettings, sat), 1.12f },
-    { "contrast", offsetof(GfxFxSettings, contrast), 0.2f },
+    { "sat", offsetof(GfxFxSettings, sat), 1.25f },
+    { "contrast", offsetof(GfxFxSettings, contrast), 0.4f },
     { "sharpen", offsetof(GfxFxSettings, sharpen), 0.3f },
     { "filter", offsetof(GfxFxSettings, filter), 1.0f },
     { "aniso", offsetof(GfxFxSettings, aniso), 16.0f },
-    { "fog", offsetof(GfxFxSettings, fog), 0.004f },
+    { "fog", offsetof(GfxFxSettings, fog), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "fog_falloff", offsetof(GfxFxSettings, fog_falloff), 0.08f },
     { "fog_height", offsetof(GfxFxSettings, fog_height), 2.0f },
     { "fog_max", offsetof(GfxFxSettings, fog_max), 0.5f },
     { "fog_sun", offsetof(GfxFxSettings, fog_sun), 0.5f },
     { "fog_g", offsetof(GfxFxSettings, fog_g), 0.6f },
-    { "bloom", offsetof(GfxFxSettings, bloom), 0.3f },
+    { "bloom", offsetof(GfxFxSettings, bloom), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "threshold", offsetof(GfxFxSettings, threshold), 0.75f },
-    { "rays", offsetof(GfxFxSettings, rays), 0.6f },
+    { "rays", offsetof(GfxFxSettings, rays), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "rays_decay", offsetof(GfxFxSettings, rays_decay), 0.965f },
     { "rays_length", offsetof(GfxFxSettings, rays_length), 0.85f },
-    { "light", offsetof(GfxFxSettings, light), 2.0f },
-    { "shadow", offsetof(GfxFxSettings, shadow), 0.3f },
+    { "light", offsetof(GfxFxSettings, light), 0.0f }, /* (the older effects: off, FX_FIXED) */
+    { "shadow", offsetof(GfxFxSettings, shadow), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "shadow_length", offsetof(GfxFxSettings, shadow_length), 0.6f },
-    { "sun", offsetof(GfxFxSettings, sun), 0.45f },
+    { "sun", offsetof(GfxFxSettings, sun), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "sun_distance", offsetof(GfxFxSettings, sun_distance), 100.0f },
     { "sun_soft", offsetof(GfxFxSettings, sun_soft), 0.0f },
     { "sun_face", offsetof(GfxFxSettings, sun_face), 0.0f },
@@ -277,11 +277,31 @@ static const struct
     { "scene_ao_chars", offsetof(GfxFxSettings, scene_ao_chars), 1.0f },
     /* 1: the zone and characters show the occlusion alone */
     { "scene_ao_debug", offsetof(GfxFxSettings, scene_ao_debug), 0.0f },
+    /* not an effect: the world drawn at fewer pixels and made up to the back buffer's, 0 off
+     * (the game's background resolution, as it was), 1 spatial (MetalFX's spatial scaler: one frame at a time),
+     * 2 temporal (MetalFX's temporal scaler: the frames before too, through jittered pixels, the depth and the
+     * camera's motion; anti-aliased as well). upscale_scale: the world's pixels across against the back
+     * buffer's, 0.5 to 1 (1: anti-aliasing alone, temporal); 0.67 is MetalFX's quality ratio, under it the
+     * picture softens, the spatial scaler's most of all. Temporal: the world's textures are sampled at the
+     * mips of the back buffer's size, not the smaller one's (a negative mip bias), and upscale_sharpen is a
+     * contrast-adaptive sharpening of what comes out (0 none; the spatial scaler sharpens on its own).
+     * Metal: MetalFX (gfx_metal.m up_*). Direct3D 12 and Linux's Vulkan: the host draws the world smaller
+     * (host64.c upscale_background; upscale_scale read at start there) and the back end makes it up where
+     * the game puts it on the screen: 1 FSR 1 (EASU, then RCAS at upscale_sharpen: fsr_view / fsr_srv);
+     * 2 on Direct3D 12 AMD's FSR SDK (FSR 4 on a Radeon RX 6000 or later, FSR 3.1 on any other GPU:
+     * gfx_d3d12.c fsr_sdk_upscale), FSR 1 without its DLLs, and on Vulkan. Android's Vulkan and WebGPU:
+     * none yet. */
+    { "upscale", offsetof(GfxFxSettings, upscale), 0.0f },
+    { "upscale_scale", offsetof(GfxFxSettings, upscale_scale), 0.67f },
+    { "upscale_sharpen", offsetof(GfxFxSettings, upscale_sharpen), 0.25f },
 };
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
  * the old menus wrote would hold them where nothing can change them back) */
-static const char* const FX_FIXED[] = { "fx", "gameshadows", "filter", "lod", "rt" };
+/* The older effects on the game's own draws (their lighting, sun shadows, occlusion, haze, god rays and bloom) are
+ * gone from the menus: off whatever a file from before says, which the environment can still turn on to compare. */
+static const char* const FX_FIXED[] = { "fx", "gameshadows", "filter", "lod", "rt",
+    "light", "sun", "ao", "gi", "shadow", "rays", "bloom", "fog" };
 
 static int fx_fixed(const char* key)
 {
@@ -392,7 +412,7 @@ void fx_config(void)
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
     "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof",
-    "scene ao", "scene ao trace", "post shafts", "hdr", "lamps" };
+    "scene ao", "scene ao trace", "post shafts", "hdr", "lamps", "upscale" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */

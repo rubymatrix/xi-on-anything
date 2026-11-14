@@ -16,6 +16,7 @@
  * Built without ARC: every object here is retained and released by hand, and each entry point runs
  * in its own autorelease pool (the callers are guest threads with none). */
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <SDL3/SDL.h>
 #include <TargetConditionals.h>
@@ -100,6 +101,15 @@ struct GfxTex
     uint32_t rb_face[GFX_READBACKS], rb_level[GFX_READBACKS], rb_index[GFX_READBACKS];
     uint64_t rb_frame; /* the frame the reads below were counted in */
     uint32_t rb_count; /* reads of this surface so far in that frame */
+    /* the upscaler (upscale_*): a target of the world's size is drawn at fewer pixels than it says (virt:
+     * tex is smaller than w x h; the front end's viewports, scissors and clears are scaled onto it), and
+     * from the scaler's pass on in a frame (up_serial) drawn into and sampled at the back buffer's, in up */
+    int virt;
+    int world_seen; /* the world was drawn into it (gfx_scene_done), or it was drawn from that, or it was
+                     * the depth for that: what the upscaler may make smaller */
+    id<MTLTexture> up;
+    uint64_t up_serial;
+    GfxTex* next_target; /* every render target and depth surface (g_targets) */
 };
 
 typedef struct Chunk
@@ -187,6 +197,40 @@ static double g_ts_scale;              /* ns per GPU timestamp tick */
 static GfxTex* g_rt;
 static uint32_t g_rt_face, g_rt_level;
 static GfxTex* g_ds;
+static GfxTex* g_targets; /* the render targets and depth surfaces, through next_target (the upscaler's) */
+/* The upscaler (upscale_*, MetalFX): the world's target and every target and depth surface of its size
+ * (FFXI's background, its depth, the copy some frames show) are made at the back buffer's size times
+ * upscale_scale (GfxTex.virt; up_sync, at each Present) - not the background's own size, which is
+ * already larger than the screen (FFXI draws the world at 2048 to 8192 across and makes it smaller).
+ * At the scene's end (gfx_scene_done, after the effects) MetalFX makes the world up to the back
+ * buffer's size, into the target's up texture, and its depth is made up with it; what the game draws
+ * on it after that (nameplates, spell effects) goes to them, and what samples it (the quad that puts
+ * it on the back buffer) reads up. The world's textures are sampled with a negative mip bias (bias),
+ * so they keep the detail of the size they end up at. Temporal: each frame's world is drawn a
+ * fraction of a pixel aside (the viewport's origin: the jitter), and the scaler is given the camera's
+ * motion per pixel, from the depth (up_motion). */
+static struct
+{
+    int mode;                  /* this frame: 0 off, 1 spatial, 2 temporal */
+    int ok;                    /* MetalFX: -1 not looked at, 0 not here (macOS 12, the GPU), 1 there */
+    uint32_t world_w, world_h; /* the world's target as the front end has it (gfx_scene_done's) */
+    uint32_t out_w, out_h;     /* the back buffer: what the world is made up to */
+    uint32_t in_w, in_h;       /* what it is drawn at */
+    float jit[2];              /* this frame's offset, in the world's pixels (temporal) */
+    float bias;                /* the mip bias of the world's textures: log2 of in over out (temporal), half that (spatial) */
+    uint32_t phase;
+    id tscaler, sscaler;       /* id<MTLFXTemporalScaler>, id<MTLFXSpatialScaler> */
+    uint32_t tkey[5], skey[5]; /* what each was made for: in, out sizes, format */
+    id<MTLTexture> motion;     /* the camera's motion per pixel, in pixels (RG16F, the world's size) */
+    id<MTLTexture> zcopy;      /* the world's depth as Depth32Float, when it has a stencil (MetalFX takes none) */
+    id<MTLRenderPipelineState> motion_pipe, copy_pipe, depth_pipe, zcopy_pipe;
+    MTLPixelFormat copy_fmt, depth_fmt;
+    id<MTLDepthStencilState> depth_always;
+    float prev_view[16], prev_proj[16];
+    uint64_t prev_serial; /* the frame prev_* were kept (0: none) */
+    float jsign[2];       /* the jitter's signs as MetalFX takes them (FFXI_UPSCALE_SIGNS "x y", for checking by eye) */
+    uint32_t st_frames;
+} g_up = { .ok = -1, .jsign = { 1.0f, 1.0f } };
 static uint32_t g_pending_clear; /* D3DCLEAR flags for the next pass's load actions */
 static float g_clear_color[4], g_clear_z;
 static uint32_t g_clear_stencil;
@@ -641,6 +685,59 @@ void gfx_buf_upload(GfxBuf* b, const void* data, uint32_t size)
 }
 
 /* --- textures ------------------------------------------------------------------------------------------------ */
+/* t's own textures (tex, view, mipview) at pw x ph pixels: w x h, or fewer for a target the upscaler
+ * draws at fewer (virt). 0 when Metal made none. */
+static int tex_storage(GfxTex* t, uint32_t pw, uint32_t ph)
+{
+    MTLTextureSwizzleChannels sw;
+    int swizzled, conv;
+    uint32_t block, texel;
+    MTLPixelFormat pf = pixel_format(t->fmt, t->use, &conv, &block, &texel, &sw, &swizzled);
+    if (t->bc)
+        pf = MTLPixelFormatBGRA8Unorm;
+    MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
+    d.textureType = t->type == GFX_TEX_CUBE ? MTLTextureTypeCube : MTLTextureType2D;
+    d.pixelFormat = pf;
+    d.width = pw;
+    d.height = t->type == GFX_TEX_CUBE ? pw : ph;
+    t->mips = t->levels;
+    /* a large color target (FFXI's background) gets a whole mip chain: the finished scene is made
+     * smaller through it rather than one bilinear sample per screen pixel (gfx_scene_done). Not one the
+     * upscaler draws smaller: that is made larger. */
+    if (t->use == GFX_USE_RT && t->type == GFX_TEX_2D && t->levels == 1 && t->w >= 1024 && t->h >= 1024 && !t->virt)
+        while ((t->w >> t->mips) || (t->h >> t->mips))
+            t->mips++;
+    d.mipmapLevelCount = t->mips;
+    if (t->use == GFX_USE_SAMPLE)
+    {
+        d.storageMode = MTLStorageModeShared;
+        d.usage = MTLTextureUsageShaderRead | (swizzled ? MTLTextureUsagePixelFormatView : 0);
+    }
+    else
+    {
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | (swizzled ? MTLTextureUsagePixelFormatView : 0);
+    }
+    t->tex = [g_dev newTextureWithDescriptor:d];
+    [d release];
+    if (!t->tex)
+        return 0;
+    if (swizzled && t->use != GFX_USE_DEPTH)
+        t->view = [t->tex newTextureViewWithPixelFormat:pf textureType:t->tex.textureType levels:NSMakeRange(0, t->levels)
+                                                 slices:NSMakeRange(0, t->type == GFX_TEX_CUBE ? 6 : 1) swizzle:sw];
+    else if (t->mips > t->levels)
+    {
+        /* the game's draws see the one level it made: the rest hold nothing until the scene
+         * filter builds them, and a sampler with a mip filter would read them */
+        t->view = [t->tex newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(0, 1)
+                                                 slices:NSMakeRange(0, 1)];
+        t->mipview = [t->tex retain];
+    }
+    else
+        t->view = [t->tex retain];
+    return 1;
+}
+
 GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t levels, int use)
 {
     if (!g_dev)
@@ -656,49 +753,14 @@ GfxTex* gfx_tex_create(int type, uint32_t fmt, uint32_t w, uint32_t h, uint32_t 
             t->bc = fmt, t->block = 0, t->texel = 4, pf = MTLPixelFormatBGRA8Unorm;
         t->has_stencil = pf == MTLPixelFormatDepth32Float_Stencil8;
         t->x8 = fmt == F_X8R8G8B8;
-        MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
-        d.textureType = type == GFX_TEX_CUBE ? MTLTextureTypeCube : MTLTextureType2D;
-        d.pixelFormat = pf;
-        d.width = t->w;
-        d.height = type == GFX_TEX_CUBE ? t->w : t->h;
-        t->mips = t->levels;
-        /* a large color target (FFXI's background) gets a whole mip chain: the finished scene is made
-         * smaller through it rather than one bilinear sample per screen pixel (gfx_scene_done) */
-        if (use == GFX_USE_RT && type == GFX_TEX_2D && t->levels == 1 && t->w >= 1024 && t->h >= 1024)
-            while ((t->w >> t->mips) || (t->h >> t->mips))
-                t->mips++;
-        d.mipmapLevelCount = t->mips;
-        if (use == GFX_USE_SAMPLE)
-        {
-            d.storageMode = MTLStorageModeShared;
-            d.usage = MTLTextureUsageShaderRead | (swizzled ? MTLTextureUsagePixelFormatView : 0);
-        }
-        else
-        {
-            d.storageMode = MTLStorageModePrivate;
-            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | (swizzled ? MTLTextureUsagePixelFormatView : 0);
-        }
-        t->tex = [g_dev newTextureWithDescriptor:d];
-        [d release];
-        if (!t->tex)
+        if (!tex_storage(t, t->w, t->h))
         {
             fprintf(stderr, "[recomp] gfx: texture %ux%u format %u failed\n", w, h, fmt);
             free(t);
             return NULL;
         }
-        if (swizzled && use != GFX_USE_DEPTH)
-            t->view = [t->tex newTextureViewWithPixelFormat:pf textureType:t->tex.textureType levels:NSMakeRange(0, t->levels)
-                                                     slices:NSMakeRange(0, type == GFX_TEX_CUBE ? 6 : 1) swizzle:sw];
-        else if (t->mips > t->levels)
-        {
-            /* the game's draws see the one level it made: the rest hold nothing until the scene
-             * filter builds them, and a sampler with a mip filter would read them */
-            t->view = [t->tex newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(0, 1)
-                                                     slices:NSMakeRange(0, 1)];
-            t->mipview = [t->tex retain];
-        }
-        else
-            t->view = [t->tex retain];
+        if (use != GFX_USE_SAMPLE)
+            t->next_target = g_targets, g_targets = t;
         return t;
     }
 }
@@ -713,6 +775,13 @@ void gfx_tex_destroy(GfxTex* t)
         end_pass(), g_rt = NULL;
     if (g_ds == t)
         end_pass(), g_ds = NULL;
+    for (GfxTex** p = &g_targets; *p; p = &(*p)->next_target)
+        if (*p == t)
+        {
+            *p = t->next_target;
+            break;
+        }
+    [t->up release];
     [t->view release];
     [t->mipview release];
     [t->depth_seen release];
@@ -859,6 +928,17 @@ void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t 
 {
     if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block || t->bc)
         return;
+    if (t->virt)
+    {
+        /* drawn at fewer pixels than it says (the upscaler): nothing at its own size to read. FFXI reads
+         * only its 16x16 probes, which never are */
+        static int said;
+        if (!said)
+            said = 1, fprintf(stderr, "[recomp] gfx: a read of an upscaled target gives black\n");
+        for (uint32_t y = 0; y < t->h; ++y)
+            memset((uint8_t*)dst + (size_t)y * pitch, 0, (size_t)t->w * t->texel);
+        return;
+    }
     @autoreleasepool
     {
         uint32_t w, h;
@@ -883,6 +963,11 @@ void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uin
 {
     if (!t || level >= t->levels || t->use == GFX_USE_DEPTH || t->block || t->bc)
         return;
+    if (t->virt)
+    {
+        gfx_tex_read(t, face, level, dst, pitch);
+        return;
+    }
     @autoreleasepool
     {
         uint32_t w, h;
@@ -931,9 +1016,33 @@ void gfx_copy(GfxTex* src, uint32_t sface, uint32_t slevel, uint32_t sx, uint32_
     @autoreleasepool
     {
         flush_pass();
+        /* an upscaled target's (virt) rectangle at its own pixels: the copy no larger than the smaller of
+         * the two scaled, and within both */
+        id<MTLTexture> st = src->tex, dt = dst->tex;
+        if (src->virt || dst->virt)
+        {
+            if (!slevel && src->up && src->up_serial == g_serial)
+                st = src->up;
+            if (!dlevel && dst->up && dst->up_serial == g_serial)
+                dt = dst->up;
+            if (st.pixelFormat != dt.pixelFormat)
+                return;
+            double ssx = slevel ? 1.0 : (double)st.width / src->w, ssy = slevel ? 1.0 : (double)st.height / src->h;
+            double dsx = dlevel ? 1.0 : (double)dt.width / dst->w, dsy = dlevel ? 1.0 : (double)dt.height / dst->h;
+            sx = (uint32_t)(sx * ssx), sy = (uint32_t)(sy * ssy), dx = (uint32_t)(dx * dsx), dy = (uint32_t)(dy * dsy);
+            uint32_t cw = (uint32_t)(w * (ssx < dsx ? ssx : dsx)), ch = (uint32_t)(h * (ssy < dsy ? ssy : dsy));
+            uint32_t sw = (uint32_t)(st.width >> slevel), sh = (uint32_t)(st.height >> slevel);
+            uint32_t dw = (uint32_t)(dt.width >> dlevel), dh = (uint32_t)(dt.height >> dlevel);
+            if (sx >= sw || sy >= sh || dx >= dw || dy >= dh)
+                return;
+            w = cw < sw - sx ? cw : sw - sx, h = ch < sh - sy ? ch : sh - sy;
+            w = w < dw - dx ? w : dw - dx, h = h < dh - dy ? h : dh - dy;
+            if (!w || !h)
+                return;
+        }
         id<MTLBlitCommandEncoder> blit = [cmd() blitCommandEncoder];
-        [blit copyFromTexture:src->tex sourceSlice:sface sourceLevel:slevel sourceOrigin:MTLOriginMake(sx, sy, 0)
-                   sourceSize:MTLSizeMake(w, h, 1) toTexture:dst->tex destinationSlice:dface destinationLevel:dlevel
+        [blit copyFromTexture:st sourceSlice:sface sourceLevel:slevel sourceOrigin:MTLOriginMake(sx, sy, 0)
+                   sourceSize:MTLSizeMake(w, h, 1) toTexture:dt destinationSlice:dface destinationLevel:dlevel
             destinationOrigin:MTLOriginMake(dx, dy, 0)];
         [blit endEncoding];
         src->used = dst->used = g_serial;
@@ -967,6 +1076,52 @@ static void color_size(uint32_t* w, uint32_t* h)
     level_size(g_rt, g_rt_level, w, h);
 }
 
+/* What g_rt's draws go to: its upscaled copy from the upscaler's pass on in the frame (up), else its own */
+static id<MTLTexture> rt_target(void)
+{
+    return g_rt->virt && !g_rt_level && g_rt->up && g_rt->up_serial == g_serial ? g_rt->up : g_rt->tex;
+}
+
+/* the attachment's own size, and its pixels per pixel of the size the front end gives (color_size) */
+static void attach_size(uint32_t* w, uint32_t* h, double* sx, double* sy)
+{
+    uint32_t lw, lh;
+    color_size(&lw, &lh);
+    if (!g_rt->virt || g_rt_level)
+    {
+        *w = lw, *h = lh;
+        if (sx)
+            *sx = *sy = 1.0;
+        return;
+    }
+    id<MTLTexture> t = rt_target();
+    *w = (uint32_t)t.width, *h = (uint32_t)t.height;
+    if (sx)
+        *sx = (double)*w / lw, *sy = (double)*h / lh;
+}
+
+/* a viewport the front end gives (its pixels) in the attachment's (the upscaler's smaller target) */
+static void attach_vp(const uint32_t vp[6], uint32_t out[6])
+{
+    memcpy(out, vp, 6 * sizeof *out);
+    double sx, sy;
+    uint32_t aw, ah;
+    attach_size(&aw, &ah, &sx, &sy);
+    if (sx == 1.0 && sy == 1.0)
+        return;
+    out[0] = (uint32_t)(vp[0] * sx), out[1] = (uint32_t)(vp[1] * sy);
+    out[2] = (uint32_t)(vp[2] * sx + 0.5), out[3] = (uint32_t)(vp[3] * sy + 0.5);
+}
+
+/* the world drawn smaller and not yet made up (the upscaler): its draws into its target before the
+ * scaler's pass, which are jittered (temporal) and sample their textures with the mip bias */
+static int rt_upscaled(void)
+{
+    return g_up.mode && g_rt && g_rt->virt && !g_rt_level && rt_target() == g_rt->tex;
+}
+
+static int rt_jittered(void) { return g_up.mode == 2 && rt_upscaled(); }
+
 /* the depth attachment for the current color target: the bound one, or a scratch one of the color
  * target's size when they differ (D3D lets depth be larger; Metal wants them equal) */
 static id<MTLTexture> depth_attachment(void)
@@ -974,9 +1129,13 @@ static id<MTLTexture> depth_attachment(void)
     if (!g_ds || !g_rt)
         return nil;
     uint32_t w, h;
-    color_size(&w, &h);
-    if (g_ds->w == w && g_ds->h == h)
-        return g_ds->tex;
+    attach_size(&w, &h, NULL, NULL);
+    /* drawing at the back buffer's size after the upscaler's pass (rt_target): the depth made up with it */
+    id<MTLTexture> dt = g_ds->tex;
+    if (g_rt->virt && rt_target() == g_rt->up)
+        dt = g_ds->virt && g_ds->up && g_ds->up_serial == g_serial ? g_ds->up : nil;
+    if (dt && dt.width == w && dt.height == h)
+        return dt;
     if (!g_scratch_depth || g_scratch_depth.width != w || g_scratch_depth.height != h ||
         g_scratch_depth.pixelFormat != g_ds->tex.pixelFormat)
     {
@@ -1002,7 +1161,7 @@ static int begin_pass(void)
     MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
     if (g_pass_next >= 0)
         ts_mark(p, g_pass_next), g_pass_next = -1;
-    p.colorAttachments[0].texture = g_rt->tex;
+    p.colorAttachments[0].texture = rt_target();
     p.colorAttachments[0].slice = g_rt_face;
     p.colorAttachments[0].level = g_rt_level;
     p.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -1027,13 +1186,15 @@ static int begin_pass(void)
             p.stencilAttachment.loadAction = (g_pending_clear & 4) ? MTLLoadActionClear : MTLLoadActionLoad;
             p.stencilAttachment.clearStencil = g_clear_stencil;
         }
-        if (!g_rt_face && !g_rt_level && g_rt->depth_seen != depth)
+        if (!g_rt_face && !g_rt_level && g_rt->depth_seen != depth && rt_target() == g_rt->tex)
         {
             [g_rt->depth_seen release];
             g_rt->depth_seen = [depth retain];
         }
     }
     g_pending_clear = 0;
+    if (g_rt->world_seen && g_ds && !g_ds->world_seen && g_ds->w == g_rt->w && g_ds->h == g_rt->h)
+        g_ds->world_seen = 1;
     g_enc = [[cmd() renderCommandEncoderWithDescriptor:p] retain];
     bound_forget();
     /* D3D's front faces are clockwise on screen; CULL_CCW (the default) culls the back ones */
@@ -1623,6 +1784,49 @@ static id<MTLSamplerState> sampler(const GfxSampler* k)
     return s;
 }
 
+/* the same, its mips picked bias levels finer (the upscaler's world: negative); bias 0, or a Metal
+ * without a sampler's bias (before macOS 26), is sampler() */
+static Map g_bsamplers;
+static id<MTLSamplerState> sampler_bias(const GfxSampler* k, float bias)
+{
+    if (bias == 0.0f || k->mip == 0)
+        return sampler(k);
+    if (@available(macOS 26.0, iOS 26.0, *))
+    {
+        struct
+        {
+            GfxSampler k;
+            float bias;
+        } key;
+        memset(&key, 0, sizeof key);
+        key.k = *k, key.bias = bias;
+        id s = map_get(&g_bsamplers, &key, sizeof key);
+        if (s)
+            return s;
+        MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
+        d.sAddressMode = address(k->addr_u);
+        d.tAddressMode = address(k->addr_v);
+        d.rAddressMode = address(k->addr_w);
+        d.magFilter = k->mag >= 2 ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+        d.minFilter = k->min >= 2 ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+        d.mipFilter = k->mip == 1 ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
+        if ((k->min == 3 || k->mag == 3) && k->max_aniso > 1)
+            d.maxAnisotropy = k->max_aniso > 16 ? 16 : k->max_aniso;
+        d.lodMinClamp = k->max_level;
+        if (k->lod_cap)
+            d.lodMaxClamp = (float)(k->lod_cap - 1);
+        d.lodBias = bias;
+        uint32_t a = k->border >> 24, rgb = k->border & 0xFFFFFF;
+        d.borderColor = a < 128 ? MTLSamplerBorderColorTransparentBlack
+            : rgb >= 0x808080 ? MTLSamplerBorderColorOpaqueWhite : MTLSamplerBorderColorOpaqueBlack;
+        s = [g_dev newSamplerStateWithDescriptor:d];
+        [d release];
+        map_put(&g_bsamplers, &key, sizeof key, s);
+        return s;
+    }
+    return sampler(k);
+}
+
 /* --- drawing --------------------------------------------------------------------------------------------------- */
 static void set_viewport(const uint32_t vp[6])
 {
@@ -1640,6 +1844,16 @@ static void set_viewport(const uint32_t vp[6])
         vw = w - x;
     if (y + vh > h)
         vh = h - y;
+    if (g_rt->virt)
+    {
+        /* the front end's pixels onto the attachment's (the upscaler), and the world's offset */
+        uint32_t aw, ah;
+        double sx, sy;
+        attach_size(&aw, &ah, &sx, &sy);
+        x *= sx, y *= sy, vw *= sx, vh *= sy;
+        if (rt_jittered())
+            x += g_up.jit[0], y += g_up.jit[1];
+    }
     MTLViewport v = { x, y, vw, vh, zmin, zmax };
     if (g_bound.valid && !memcmp(&v, &g_bound.vp, sizeof v))
         return;
@@ -1651,14 +1865,15 @@ static void set_viewport(const uint32_t vp[6])
 static void set_scissor(const int32_t sc[4])
 {
     uint32_t w, h;
-    color_size(&w, &h);
+    double sx = 1.0, sy = 1.0;
+    attach_size(&w, &h, &sx, &sy);
     int64_t x0 = 0, y0 = 0, x1 = w, y1 = h;
     if (sc[2] > 0)
     {
-        x0 = sc[0] < 0 ? 0 : sc[0];
-        y0 = sc[1] < 0 ? 0 : sc[1];
-        x1 = (int64_t)sc[0] + sc[2];
-        y1 = (int64_t)sc[1] + sc[3];
+        x0 = sc[0] < 0 ? 0 : (int64_t)floor(sc[0] * sx);
+        y0 = sc[1] < 0 ? 0 : (int64_t)floor(sc[1] * sy);
+        x1 = (int64_t)ceil(((int64_t)sc[0] + sc[2]) * sx);
+        y1 = (int64_t)ceil(((int64_t)sc[1] + sc[3]) * sy);
         if (x1 > w)
             x1 = w;
         if (y1 > h)
@@ -1735,7 +1950,7 @@ static void scene_mips(const GfxDraw* d)
     {
         GfxTex* t = d->tex[i];
         int wanted = d->fs.prog || i < d->fs.nstages ? d->fs.st[i].tex : 0;
-        if (!wanted || !t || t == g_rt || !t->mipview || t->mips < 2 || t->scene)
+        if (!wanted || !t || t == g_rt || !t->mipview || t->mips < 2 || t->scene || t->virt)
             continue;
         if (t->tex.width <= tw && t->tex.height <= th)
             continue; /* not made smaller */
@@ -1766,11 +1981,34 @@ void gfx_draw(const GfxDraw* d)
 static int water_mode(const GfxDraw* d);
 static int water_capture(void);
 static void water_bind(void);
+static void up_promote(GfxTex* t);
+
+/* a texture as it is now: its upscaled copy once the upscaler made it this frame */
+static int up_fresh(const GfxTex* t) { return t->virt && t->up && t->up_serial == g_serial; }
 
 static void draw_encode(const GfxDraw* d)
 {
     @autoreleasepool
     {
+        /* the upscaled world drawn into another target of its size, which is drawn at fewer pixels (the
+         * copy FFXI shows some frames): that one goes up to the back buffer's size too, first */
+        if (g_rt && !g_rt_level && !g_rt->world_seen && g_rt->w == g_up.world_w && g_rt->h == g_up.world_h)
+            for (int i = 0; i < 8; ++i)
+            {
+                int wanted = d->fs.prog || i < d->fs.nstages ? d->fs.st[i].tex : 0;
+                if (wanted && d->tex[i] && d->tex[i] != g_rt && d->tex[i]->world_seen)
+                    g_rt->world_seen = 1;
+            }
+        if (g_rt && g_rt->virt && !g_rt_level && !up_fresh(g_rt))
+            for (int i = 0; i < 8; ++i)
+            {
+                int wanted = d->fs.prog || i < d->fs.nstages ? d->fs.st[i].tex : 0;
+                if (wanted && d->tex[i] && d->tex[i] != g_rt && up_fresh(d->tex[i]))
+                {
+                    up_promote(g_rt);
+                    break;
+                }
+            }
         int water = g_rt ? water_mode(d) : 0;
         if (water && !water_capture())
             water = 0;
@@ -1875,7 +2113,7 @@ static void draw_encode(const GfxDraw* d)
             int wanted = d->fs.prog || i < d->fs.nstages ? d->fs.st[i].tex : 0;
             if (!wanted || !t)
                 continue;
-            id<MTLTexture> view = t->view;
+            id<MTLTexture> view = up_fresh(t) && t != g_rt ? t->up : t->view;
             GfxSampler sk = d->samp[i];
             if (g_fxs.fx != 0.0f)
             {
@@ -1894,7 +2132,8 @@ static void draw_encode(const GfxDraw* d)
             }
             if (g_bound.tex[i] != view)
                 [g_enc setFragmentTexture:view atIndex:(NSUInteger)i], g_bound.tex[i] = view;
-            id<MTLSamplerState> ss = sampler(&sk);
+            /* the world drawn smaller (the upscaler): its textures at the mips of the size it is made up to */
+            id<MTLSamplerState> ss = !d->vs.rhw && t->levels > 1 && !t->virt && rt_upscaled() ? sampler_bias(&sk, g_up.bias) : sampler(&sk);
             if (g_bound.samp[i] != ss)
                 [g_enc setFragmentSamplerState:ss atIndex:(NSUInteger)i], g_bound.samp[i] = ss;
             t->used = g_serial;
@@ -2176,7 +2415,9 @@ void gfx_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t c
         [g_enc setCullMode:MTLCullModeNone];
         [g_enc setTriangleFillMode:MTLTriangleFillModeFill];
         [g_enc setDepthBias:0 slopeScale:0 clamp:0];
-        [g_enc setViewport:(MTLViewport){ 0, 0, w, h, 0, 1 }];
+        uint32_t aw, ah;
+        attach_size(&aw, &ah, NULL, NULL);
+        [g_enc setViewport:(MTLViewport){ 0, 0, aw, ah, 0, 1 }];
         for (uint32_t i = 0; i < nrects; ++i)
         {
             int32_t x0 = rects[4 * i] > vx0 ? rects[4 * i] : vx0, y0 = rects[4 * i + 1] > vy0 ? rects[4 * i + 1] : vy0;
@@ -3108,6 +3349,11 @@ static struct
     id<MTLTexture> lz, lzv[4];
     id<MTLTexture> aa_src; /* the scene as it was, for the anti-aliasing pass to read (scene_aa) */
     id<MTLTexture> src, ao0, ao1, b1a, b1b, b2a, b2b, ra, rb;
+    /* what scene_fx left for after the temporal upscaler (scene_fx_post): its uniforms as scene_fx made them,
+     * the frame, and the upscaled scene as it was before the bloom and rays (psrc, at the size it is shown) */
+    FxU post_u;
+    uint64_t post_serial;
+    id<MTLTexture> psrc;
     id<MTLTexture> hist[2]; /* the occlusion and shadows after the temporal pass: this frame's and the one before */
     int hist_at;            /* which of hist[] the frame before wrote */
     uint64_t hist_serial;   /* the frame it was written (0: none) */
@@ -4584,7 +4830,9 @@ static void water_scene(const GfxScene* s, const float* vinv, const FxU* u, id<M
  * it blends by its alpha, else only its edge softened */
 static int water_mode(const GfxDraw* d)
 {
-    if (!d->water || g_fxs.fx == 0.0f || g_fxs.water <= 0.0f || g_fx.wu_serial != g_serial || d->vs.rhw || d->vs.prog ||
+    /* the water's uniforms from this frame's scene, or the last frame's: the game draws its water before the world's
+     * end (gfx_scene_done, where water_scene makes them), so a frame's water takes the frame before's */
+    if (!d->water || g_fxs.fx == 0.0f || g_fxs.water <= 0.0f || !g_fx.wu_serial || g_fx.wu_serial + 1 < g_serial || d->vs.rhw || d->vs.prog ||
         d->fs.prog || !d->pipe.blend || g_rt_face || g_rt_level)
         return 0;
     if (d->pipe.src == 5 && d->pipe.dst == 6 && d->pipe.op == 1) /* SRCALPHA, INVSRCALPHA, ADD */
@@ -4595,7 +4843,7 @@ static int water_mode(const GfxDraw* d)
 /* the target and its depth as they are, before the frame's first water draw into it: 0 if they cannot be */
 static int water_capture(void)
 {
-    id<MTLTexture> ct = g_rt->tex, depth = depth_attachment();
+    id<MTLTexture> ct = rt_target(), depth = depth_attachment();
     if (!depth || depth.width != ct.width || depth.height != ct.height || ct.sampleCount != 1 ||
         ct.width != (NSUInteger)g_fx.wu.size[0] || ct.height != (NSUInteger)g_fx.wu.size[1])
         return 0;
@@ -5657,10 +5905,14 @@ int gfx_world_draw(const GfxWorldFrame* f)
         if (shadow)
             shadow_bind(g_enc);
         int gi = gi_bind(g_enc);
-        ao_note(f, depth);
+        /* the occlusion and the lamps' tiles in the attachment's pixels (the upscaler's smaller world) */
+        GfxWorldFrame fa = *f;
+        attach_vp(f->vp, fa.vp);
+        ao_note(&fa, depth);
         int ao = ao_bind(g_enc);
         int spec = spec_bind(g_enc, shadow && pixel);
-        int lamps = pixel && lamps_bind(g_enc, f->view, f->proj, f->vp);
+        int lamps = pixel && lamps_bind(g_enc, f->view, f->proj, fa.vp);
+        float lod_bias = rt_upscaled() ? g_up.bias : 0.0f;
         if (lamps)
             lamp_zone_collect(f);
         id<MTLRenderPipelineState> cur = nil;
@@ -5700,7 +5952,7 @@ int gfx_world_draw(const GfxWorldFrame* f)
                 it->tex->filled == (1u << it->tex->levels) - 1)
                 sk.min = 3, sk.mip = 2, sk.max_aniso = (uint8_t)(g_fxs.aniso > 16.0f ? 16.0f : g_fxs.aniso);
             [g_enc setFragmentTexture:it->tex->view atIndex:0];
-            [g_enc setFragmentSamplerState:sampler(&sk) atIndex:0];
+            [g_enc setFragmentSamplerState:it->tex->levels > 1 ? sampler_bias(&sk, lod_bias) : sampler(&sk) atIndex:0];
             it->tex->used = g_serial;
             uint32_t n = vertex_count(it->prim, it->count);
             [g_enc drawPrimitives:it->prim == GFX_TRIANGLESTRIP ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle
@@ -6042,7 +6294,9 @@ int gfx_chars_draw(const GfxCharFrame* f)
                 [g_enc setFragmentBytes:lg length:sizeof lg atIndex:7];
             }
             [g_enc setFragmentTexture:it->tex->view atIndex:0];
-            [g_enc setFragmentSamplerState:sampler(&it->samp) atIndex:0];
+            [g_enc setFragmentSamplerState:it->tex->levels > 1 && rt_upscaled() ? sampler_bias(&it->samp, g_up.bias)
+                                                                                 : sampler(&it->samp)
+                                   atIndex:0];
             it->tex->used = g_serial;
             uint32_t n = vertex_count(it->prim, it->count);
             [g_enc drawIndexedPrimitives:it->prim == GFX_TRIANGLESTRIP ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle
@@ -6594,9 +6848,9 @@ void gfx_shadow_begin(const GfxShadowFrame* f)
     }
 }
 
-static void scene_aa(GfxTex* color, const GfxScene* s)
+static void scene_aa(GfxTex* color, const GfxScene* s, int force)
 {
-    if (g_fxs.aa < 0.5f || !fx_init())
+    if ((g_fxs.aa < 0.5f && !force) || !fx_init())
         return;
     @autoreleasepool
     {
@@ -6821,7 +7075,7 @@ static const char POST_MSL[] =
     "  float3 dir = v / max(l, 1e-4);\n"
     "  float T = exp(-fog_tau(u, dir, d));\n"
     "  float g = u.sun.w, mu = dot(dir, u.sun.xyz);\n"
-    "  float mie = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float mie = min(0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5), 1.0); /* (held to 1, as the shafts) */\n"
     "  float ray = 0.75 * (1.0 + mu * mu);\n" /* (Rayleigh: a little more toward and away from the sun than across) */
     "  float3 I = (u.airc.rgb * ray + u.sunc.rgb * mie) * (1.0 - T);\n"
     "  if (u.lt.z > 0.0 && u.p.z > 0.0) {\n" /* the lamps in this tile: their light scattered in the mist round them */
@@ -6920,7 +7174,8 @@ static const char POST_MSL[] =
     "  float j = fract(fract(52.9829189 * fract(dot(lp, float2(0.06711056, 0.00583715)))) + u.p.w);\n"
     "  int n = int(u.p.z);\n"
     "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
-    "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  // the forward lobe held to 1 (at g 0.6 it is 2.5 looking into the sun: the low sun washed the whole view out)\n"
+    "  float ph = min(0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5), 1.0);\n"
     "  float ray = 0.75 * (1.0 + mu * mu);\n"
     "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0, llast = 1.0; float3 A = 0.0;\n"
     "  for (int i = 0; i < n; ++i) {\n"
@@ -7041,27 +7296,34 @@ static const char POST_MSL[] =
     "}\n"
     "// the tonemap, in place (the pixel as it is, read back): 0 neutral (clamped, today's image), 1 filmic (ACES fit\n"
     "// on the linear light, exposure, normalised to the white point), back to the display's encoding\n"
-    "struct TU { float4 k; }; // mode, exposure, white point, unused\n"
+    "// then the colour grade (fx_comp's without HDR), on the picture as it will be shown\n"
+    "struct TU { float4 k; float4 g; }; // mode, exposure, white point, knee; the grade: strength, saturation, contrast\n"
     "static float3 aces(float3 x) { return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14); }\n"
-    "fragment float4 hdr_tone(PV in [[stage_in]], constant TU& u [[buffer(0)]], float4 c [[color(0)]]) {\n"
-    "  float3 v = max(c.rgb, 0.0);\n"
-    "  if (u.k.x < 0.5) return float4(min(v, 1.0), c.a);\n"
-    "  if (u.k.x < 1.5) {\n"
+    "static float3 tone_grade(float3 v, float4 g) {\n"
+    "  float3 x = saturate(mix(float3(dot(v, float3(0.2126, 0.7152, 0.0722))), v, g.y));\n"
+    "  x = mix(x, x * x * (3.0 - 2.0 * x), g.z);\n"
+    "  return mix(v, x, g.x);\n"
+    "}\n"
+    "static float3 tone_map(float3 v, float4 k) {\n"
+    "  if (k.x < 0.5) return min(v, 1.0);\n"
+    "  if (k.x < 1.5) {\n"
     "    // 1: a shoulder - the image as it was below the knee (k.w), what is past it (highlights, glows, glints) rolled\n"
     "    // off toward white by its brightest channel, the hue kept; the exposure first\n"
-    "    v *= u.k.y;\n"
-    "    float m = max(v.r, max(v.g, v.b)), kn = u.k.w;\n"
+    "    v *= k.y;\n"
+    "    float m = max(v.r, max(v.g, v.b)), kn = k.w;\n"
     "    if (m > kn) {\n"
     "      float r = kn + (1.0 - kn) * (1.0 - exp(-(m - kn) / (1.0 - kn)));\n"
     "      float3 h = v * (r / m);\n"
-    "      v = mix(h, float3(r), saturate((m - 1.0) / (u.k.z - 1.0)) * 0.5); // the brightest toward white\n"
+    "      v = mix(h, float3(r), saturate((m - 1.0) / (k.z - 1.0)) * 0.5); // the brightest toward white\n"
     "    }\n"
-    "    return float4(saturate(v), c.a);\n"
+    "    return saturate(v);\n"
     "  }\n"
     "  // 2: ACES fit on the linear light, normalised to the white point\n"
-    "  float3 l = pow(v, 2.2) * u.k.y;\n"
-    "  float3 t = aces(l) / aces(float3(u.k.z));\n"
-    "  return float4(pow(saturate(t), 1.0 / 2.2), c.a);\n"
+    "  float3 t = aces(pow(v, 2.2) * k.y) / aces(float3(k.z));\n"
+    "  return pow(saturate(t), 1.0 / 2.2);\n"
+    "}\n"
+    "fragment float4 hdr_tone(PV in [[stage_in]], constant TU& u [[buffer(0)]], float4 c [[color(0)]]) {\n"
+    "  return float4(tone_grade(tone_map(max(c.rgb, 0.0), u.k), u.g), c.a);\n"
     "}\n"
     "// --- the lamps' glows (scene_lamp_glow): a soft sprite at each lamp, its own colour, hidden by what stands in front of\n"
     "// it (the scene's depth, softly), faded with distance; added to the scene before the bloom takes it\n"
@@ -7308,7 +7570,7 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     /* strongest with the light low (long paths through the haze, the look of dawn and dusk), about a quarter of that
      * overhead: clear midday air shows little */
     float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
-    float k = g_fxs.post_shafts * g_shd.u.info[2] * 1.5f * (0.25f + 0.75f * low * low);
+    float k = g_fxs.post_shafts * g_shd.u.info[2] * (0.35f + 0.65f * low * low); /* (up to 1: 1.5 was too much at dawn and dusk) */
     for (int c = 0; c < 3; ++c)
         u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
     u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
@@ -7548,6 +7810,10 @@ static void post_lamp_glows(GfxTex* color, const GfxScene* s, id<MTLTexture> dep
     [e endEncoding];
 }
 
+/* the world as it was drawn, while the effects after the temporal upscaler see its upscaled copy as
+ * color->tex (up_post): the glows' draws were recorded at its size, and are drawn again at that */
+static id<MTLTexture> g_world_drawn;
+
 /* the glow's draws again, onto black over the scene's depth; 0 when there were none */
 static int post_glow(GfxTex* color)
 {
@@ -7556,8 +7822,8 @@ static int post_glow(GfxTex* color)
         n += g_glows[i].rt == color && g_glows[i].fmt == color->tex.pixelFormat; /* (not those from before a format change) */
     if (!n)
         return 0;
-    id<MTLTexture> ct = color->tex;
-    if (!post_tex(&g_post.glow, ct.width, ct.height, ct.pixelFormat))
+    id<MTLTexture> ct = color->tex, at = g_world_drawn ? g_world_drawn : ct;
+    if (!post_tex(&g_post.glow, at.width, at.height, ct.pixelFormat))
         return 0;
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = g_post.glow;
@@ -7789,7 +8055,7 @@ static void hdr_swap(GfxTex* t, MTLPixelFormat pf)
 /* the scene's target float while scene_hdr is on (and back once it is off) */
 static void hdr_update(GfxTex* color)
 {
-    int want = g_fxs.scene_hdr > 0.0f && color->use == GFX_USE_RT && color->tex.mipmapLevelCount > 1 && !color->block;
+    int want = g_fxs.scene_hdr > 0.0f && color->use == GFX_USE_RT && (color->tex.mipmapLevelCount > 1 || color->virt) && !color->block;
     if (g_hdr.t && g_hdr.t != color && g_hdr.t->tex.pixelFormat == MTLPixelFormatRGBA16Float)
         hdr_swap(g_hdr.t, MTLPixelFormatBGRA8Unorm), g_hdr.t = NULL; /* (another target is the world now) */
     if (want && color->tex.pixelFormat == MTLPixelFormatBGRA8Unorm)
@@ -7814,7 +8080,10 @@ static void hdr_tone(GfxTex* color, const GfxScene* s)
         float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
         if (vw < 16 || vh < 16 || vx + vw > ct.width || vy + vh > ct.height)
             vx = vy = 0, vw = (float)ct.width, vh = (float)ct.height;
-        float k[4] = { g_fxs.tonemap, fmaxf(g_fxs.exposure, 0.01f), fmaxf(g_fxs.tone_white, 1.01f), fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f) };
+        /* the grade with it, on the picture as shown (fx_comp leaves it to this with HDR: scene_fx) */
+        float g = g_fxs.fx != 0.0f ? g_fxs.grade : 0.0f;
+        float k[8] = { g_fxs.tonemap, fmaxf(g_fxs.exposure, 0.01f), fmaxf(g_fxs.tone_white, 1.01f),
+            fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f), g, g_fxs.sat, g_fxs.contrast, 0 };
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = ct;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -7823,7 +8092,7 @@ static void hdr_tone(GfxTex* color, const GfxScene* s)
         id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
         [e setRenderPipelineState:g_hdr.tone];
         [e setViewport:(MTLViewport){ vx, vy, vw, vh, 0, 1 }];
-        [e setFragmentBytes:k length:sizeof k atIndex:0];
+        [e setFragmentBytes:k length:sizeof k atIndex:0]; /* (TU: k, g) */
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
         color->scene = 0, color->used = g_serial;
@@ -7836,26 +8105,670 @@ static void hdr_forget(GfxTex* t)
         g_hdr.t = NULL;
 }
 
-static void scene_fx(GfxTex* color, const GfxScene* s);
+static void scene_fx(GfxTex* color, const GfxScene* s, int defer);
+static void scene_fx_post(const GfxScene* s, id<MTLTexture> ct, id<MTLTexture> depth);
+
+/* --- the upscaler (g_up) ----------------------------------------------------------------------------------------- */
+/* Its passes, built with FX_MSL ahead of them (FxU, FO, fx_vs, view_z, view_pos) */
+static const char UP_MSL[] =
+    /* the camera's motion at each pixel of the world (the temporal scaler's): the point the depth puts
+     * there - drawn hist.xy pixels aside (the jitter) - where the frame before's camera saw it (reproj),
+     * less where this frame's does (lmat: this frame's projection), in the viewport's uv, y down; the
+     * sky as far off. MetalFX takes it as the way back to the frame before (motionVectorScale: pixels). */
+    "fragment float4 up_motion(FO in [[stage_in]], constant FxU& u [[buffer(0)]], depth2d<float> dt [[texture(0)]]) {\n"
+    "  float2 px = floor(in.pos.xy) + 0.5;\n"
+    "  float z = view_z(u, dt.read(uint2(px)));\n"
+    "  if (z == 0.0) z = 4000.0 * u.hand.x;\n"
+    "  float3 P = view_pos(u, px - u.hist.xy, z);\n"
+    "  float4 c = u.lmat * float4(P, 1.0), p = u.reproj * float4(P, 1.0);\n"
+    "  if (c.w <= 1e-4 || p.w <= 1e-4) return float4(0.0);\n"
+    "  return float4((p.xy / p.w - c.xy / c.w) * float2(0.5, -0.5), 0.0, 0.0);\n"
+    "}\n"
+    /* a target drawn at fewer pixels, made up to the back buffer's (bilinear): one the upscaled world is
+     * drawn into (up_promote) */
+    "fragment float4 up_copy(FO in [[stage_in]], texture2d<float> src [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  return src.sample(s, in.uv);\n"
+    "}\n"
+    /* the world's depth at another size (the nearest of its pixels): at the back buffer's for what is
+     * drawn over it after (up_depth), or at its own as Depth32Float for MetalFX (up_zcopy) */
+    "struct UpD { float d [[depth(any)]]; };\n"
+    "fragment UpD up_depth(FO in [[stage_in]], depth2d<float> dt [[texture(0)]]) {\n"
+    "  uint2 n = uint2(dt.get_width(), dt.get_height());\n"
+    "  UpD o; o.d = dt.read(min(uint2(in.uv * float2(n)), n - 1)); return o;\n"
+    "}\n";
+
+static id<MTLLibrary> g_up_lib;
+static id<MTLSamplerState> g_up_samp;
+
+static id<MTLRenderPipelineState> up_pipeline(NSString* frag, MTLPixelFormat color, MTLPixelFormat depth)
+{
+    MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+    id<MTLFunction> vf = [g_up_lib newFunctionWithName:@"fx_vs"], ff = [g_up_lib newFunctionWithName:frag];
+    pd.vertexFunction = vf;
+    pd.fragmentFunction = ff;
+    pd.colorAttachments[0].pixelFormat = color;
+    pd.depthAttachmentPixelFormat = depth;
+    if (depth == MTLPixelFormatDepth32Float_Stencil8)
+        pd.stencilAttachmentPixelFormat = depth;
+    NSError* err = nil;
+    id<MTLRenderPipelineState> p = vf && ff ? [g_dev newRenderPipelineStateWithDescriptor:pd error:&err] : nil;
+    if (!p)
+        fprintf(stderr, "[recomp] gfx: upscaler: %s failed: %s\n", [frag UTF8String], err ? [[err localizedDescription] UTF8String] : "no function");
+    [vf release];
+    [ff release];
+    [pd release];
+    return p;
+}
+
+/* MetalFX's scalers on this GPU (macOS 13, iOS 16 on), and the passes around them */
+static int up_available(void)
+{
+    if (g_up.ok >= 0)
+        return g_up.ok;
+    g_up.ok = 0;
+    if (@available(macOS 13.0, iOS 16.0, *))
+        g_up.ok = [MTLFXTemporalScalerDescriptor supportsDevice:g_dev] && [MTLFXSpatialScalerDescriptor supportsDevice:g_dev];
+    if (!g_up.ok)
+    {
+        fprintf(stderr, "[recomp] gfx: upscaling: MetalFX is not on this system (macOS 13 or iOS 16, and an Apple GPU)\n");
+        return 0;
+    }
+    size_t a = strlen(FX_MSL), b = strlen(UP_MSL);
+    char* src = (char*)malloc(a + b + 1);
+    memcpy(src, FX_MSL, a), memcpy(src + a, UP_MSL, b + 1);
+    g_up_lib = compile(src);
+    free(src);
+    g_up.motion_pipe = g_up_lib ? up_pipeline(@"up_motion", MTLPixelFormatRG16Float, MTLPixelFormatInvalid) : nil;
+    MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+    sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+    sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    g_up_samp = [g_dev newSamplerStateWithDescriptor:sd];
+    [sd release];
+    MTLDepthStencilDescriptor* dd = [[MTLDepthStencilDescriptor alloc] init];
+    dd.depthCompareFunction = MTLCompareFunctionAlways;
+    dd.depthWriteEnabled = YES;
+    g_up.depth_always = [g_dev newDepthStencilStateWithDescriptor:dd];
+    [dd release];
+    g_up.ok = g_up_lib && g_up.motion_pipe;
+    const char* sg = getenv("FFXI_UPSCALE_SIGNS");
+    if (sg)
+        sscanf(sg, "%f %f", &g_up.jsign[0], &g_up.jsign[1]);
+    return g_up.ok;
+}
+
+/* t's texture at the back buffer's size (up), made again when that size or t's format changes */
+static id<MTLTexture> up_tex(GfxTex* t)
+{
+    if (t->up && t->up.width == g_up.out_w && t->up.height == g_up.out_h && t->up.pixelFormat == t->tex.pixelFormat)
+        return t->up;
+    [t->up release];
+    MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t->tex.pixelFormat width:g_up.out_w
+                                                                                height:g_up.out_h mipmapped:NO];
+    d.storageMode = MTLStorageModePrivate;
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | (t->use == GFX_USE_DEPTH ? 0 : MTLTextureUsageShaderWrite);
+    t->up = [g_dev newTextureWithDescriptor:d];
+    t->up_serial = 0;
+    return t->up;
+}
+
+static float halton(uint32_t i, uint32_t b)
+{
+    float f = 1.0f, r = 0.0f;
+    for (; i; i /= b)
+        f /= (float)b, r += f * (float)(i % b);
+    return r;
+}
+
+/* At each Present: the upscaler's setting for the next frame, its jitter, and every target of the world's
+ * size at the size it wants. A target is made again (its contents let go) only when that changes. */
+static void up_sync(GfxTex* bb)
+{
+    int mode = g_fxs.upscale >= 1.5f ? 2 : g_fxs.upscale >= 0.5f ? 1 : 0;
+    if (mode && (!bb || !g_up.world_w || !up_available()))
+        mode = 0;
+    /* half the back buffer across at the least: below MetalFX's performance ratio no scaler keeps the
+     * detail (the spatial one is soft below about 0.75) */
+    float scale = fminf(fmaxf(g_fxs.upscale_scale, 0.5f), 1.0f);
+    if (mode == 1 && scale >= 0.999f)
+        mode = 0; /* the spatial scaler at the same size does nothing */
+    uint32_t ow = bb ? bb->w : 0, oh = bb ? bb->h : 0;
+    uint32_t iw = (uint32_t)(ow * scale + 0.5f) & ~1u, ih = (uint32_t)(oh * scale + 0.5f) & ~1u;
+    if (iw < 64 || ih < 64)
+        mode = 0;
+    if (mode != g_up.mode || (mode && (ow != g_up.out_w || oh != g_up.out_h || iw != g_up.in_w || ih != g_up.in_h)))
+    {
+        if (mode)
+            fprintf(stderr, "[recomp] gfx: upscaling the world from %ux%u to %ux%u (MetalFX %s), its textures' mips %.2f finer\n",
+                iw, ih, ow, oh, mode == 2 ? "temporal" : "spatial", mode == 2 ? -log2f(scale) : 0.0f);
+        else if (g_up.mode)
+            fprintf(stderr, "[recomp] gfx: upscaling off\n");
+        g_up.prev_serial = 0;
+    }
+    g_up.mode = mode, g_up.out_w = ow, g_up.out_h = oh, g_up.in_w = iw, g_up.in_h = ih;
+    /* the textures sampled as at the size the world ends up at: the temporal scaler gathers that detail
+     * over frames; the spatial one has a frame alone, where finer mips only alias (grain on every wall) */
+    g_up.bias = mode == 2 ? log2f(scale) : 0.0f;
+    g_up.jit[0] = g_up.jit[1] = 0.0f;
+    if (mode == 2)
+    {
+        /* the Halton (2, 3) points, about 8 to a pixel of the back buffer's */
+        uint32_t n = (uint32_t)(8.0f / (scale * scale));
+        n = n < 8 ? 8 : n > 64 ? 64 : n;
+        g_up.phase = (g_up.phase + 1) % n;
+        g_up.jit[0] = halton(g_up.phase + 1, 2) - 0.5f, g_up.jit[1] = halton(g_up.phase + 1, 3) - 0.5f;
+    }
+    int remade = 0;
+    for (GfxTex* t = g_targets; t; t = t->next_target)
+    {
+        int want = mode && t != bb && t->world_seen && t->type == GFX_TEX_2D && t->levels == 1 && t->w == g_up.world_w &&
+            t->h == g_up.world_h;
+        uint32_t pw = want ? iw : t->w, ph = want ? ih : t->h;
+        if (want == t->virt && t->tex.width == pw && t->tex.height == ph)
+            continue;
+        if (g_rt == t || g_ds == t)
+            end_pass();
+        [t->tex release], [t->view release], [t->mipview release], [t->up release];
+        t->tex = t->view = t->mipview = t->up = nil;
+        t->up_serial = t->scene = 0;
+        t->virt = want;
+        if (!tex_storage(t, pw, ph))
+        {
+            fprintf(stderr, "[recomp] gfx: upscaling: a %ux%u target failed\n", pw, ph);
+            t->virt = 0;
+            tex_storage(t, t->w, t->h);
+        }
+        remade = 1;
+    }
+    if (remade)
+    {
+        /* the depths the targets were last drawn with may be ones just let go */
+        for (GfxTex* t = g_targets; t; t = t->next_target)
+        {
+            [t->depth_seen release], [t->depth_world release];
+            t->depth_seen = t->depth_world = nil;
+        }
+        bound_forget();
+    }
+}
+
+/* another target of the world's size, drawn from the upscaled world (the copy FFXI shows some frames):
+ * what it holds so far made up to the back buffer's size, and drawn there from now on in this frame */
+static void up_promote(GfxTex* t)
+{
+    if (!g_up_lib || !up_tex(t))
+        return;
+    if (!g_up.copy_pipe || g_up.copy_fmt != t->tex.pixelFormat)
+    {
+        [g_up.copy_pipe release];
+        g_up.copy_pipe = up_pipeline(@"up_copy", t->tex.pixelFormat, MTLPixelFormatInvalid);
+        g_up.copy_fmt = t->tex.pixelFormat;
+    }
+    if (!g_up.copy_pipe)
+        return;
+    flush_pass();
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = t->up;
+    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:g_up.copy_pipe];
+    [e setFragmentTexture:t->view atIndex:0];
+    [e setFragmentSamplerState:g_up_samp atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    t->up_serial = g_serial;
+    t->used = g_serial;
+}
+
+/* depth drawn at another size by up_depth's pass: into dst (pf, its stencil cleared) */
+static void up_depth_pass(id<MTLTexture> src, id<MTLTexture> dst, id<MTLRenderPipelineState> pipe)
+{
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.depthAttachment.texture = dst;
+    rp.depthAttachment.loadAction = MTLLoadActionDontCare;
+    rp.depthAttachment.storeAction = MTLStoreActionStore;
+    if (dst.pixelFormat == MTLPixelFormatDepth32Float_Stencil8)
+    {
+        rp.stencilAttachment.texture = dst;
+        rp.stencilAttachment.loadAction = MTLLoadActionClear;
+        rp.stencilAttachment.clearStencil = 0;
+        rp.stencilAttachment.storeAction = MTLStoreActionStore;
+    }
+    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:pipe];
+    [e setDepthStencilState:g_up.depth_always];
+    [e setFragmentTexture:src atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+}
+
+/* the world's depth at the back buffer's size, into the depth surface's up: nameplates and the effects
+ * drawn after the scaler test against it */
+static void up_depth(id<MTLTexture> depth)
+{
+    GfxTex* ds = NULL;
+    for (GfxTex* t = g_targets; t && !ds; t = t->next_target)
+        if (t->virt && t->use == GFX_USE_DEPTH && t->tex == depth)
+            ds = t;
+    if (!ds || !up_tex(ds))
+        return;
+    if (!g_up.depth_pipe || g_up.depth_fmt != depth.pixelFormat)
+    {
+        [g_up.depth_pipe release];
+        g_up.depth_pipe = up_pipeline(@"up_depth", MTLPixelFormatInvalid, depth.pixelFormat);
+        g_up.depth_fmt = depth.pixelFormat;
+    }
+    if (!g_up.depth_pipe)
+        return;
+    up_depth_pass(depth, ds->up, g_up.depth_pipe);
+    ds->up_serial = g_serial;
+    ds->used = g_serial;
+}
+
+/* the world's depth as MetalFX's temporal scaler takes it: Depth32Float, without the stencil FFXI's
+ * depth surfaces have */
+static id<MTLTexture> up_zcopy(id<MTLTexture> depth)
+{
+    if (depth.pixelFormat == MTLPixelFormatDepth32Float || depth.pixelFormat == MTLPixelFormatDepth16Unorm)
+        return depth;
+    if (!g_up.zcopy || g_up.zcopy.width != depth.width || g_up.zcopy.height != depth.height)
+    {
+        [g_up.zcopy release];
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                    width:depth.width
+                                                                                   height:depth.height
+                                                                                mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        g_up.zcopy = [g_dev newTextureWithDescriptor:d];
+    }
+    if (!g_up.zcopy_pipe)
+        g_up.zcopy_pipe = up_pipeline(@"up_depth", MTLPixelFormatInvalid, MTLPixelFormatDepth32Float);
+    if (!g_up.zcopy || !g_up.zcopy_pipe)
+        return nil;
+    up_depth_pass(depth, g_up.zcopy, g_up.zcopy_pipe);
+    return g_up.zcopy;
+}
+
+/* a scaler for these sizes and formats, made again when they change */
+static id up_scaler(int temporal, MTLPixelFormat cf, MTLPixelFormat df, uint32_t iw, uint32_t ih) API_AVAILABLE(macos(13.0), ios(16.0))
+{
+    uint32_t key[5] = { iw, ih, g_up.out_w, g_up.out_h, (uint32_t)cf | (uint32_t)df << 16 };
+    id* sc = temporal ? &g_up.tscaler : &g_up.sscaler;
+    uint32_t* k = temporal ? g_up.tkey : g_up.skey;
+    if (!memcmp(key, k, sizeof key))
+        return *sc; /* (nil when MetalFX made none for these: not asked again) */
+    [*sc release];
+    *sc = nil;
+    memcpy(k, key, sizeof key);
+    if (temporal)
+    {
+        MTLFXTemporalScalerDescriptor* d = [[MTLFXTemporalScalerDescriptor alloc] init];
+        d.colorTextureFormat = d.outputTextureFormat = cf;
+        d.depthTextureFormat = df;
+        d.motionTextureFormat = MTLPixelFormatRG16Float;
+        d.inputWidth = iw, d.inputHeight = ih, d.outputWidth = g_up.out_w, d.outputHeight = g_up.out_h;
+        /* the scene before its tonemap (scene_hdr): light past 1, which the scaler weighs at an exposure it
+         * finds itself, so a bright lamp's pixel does not ring or ghost across the frames it blends */
+        d.autoExposureEnabled = cf == MTLPixelFormatRGBA16Float;
+        *sc = [d newTemporalScalerWithDevice:g_dev];
+        [d release];
+    }
+    else
+    {
+        MTLFXSpatialScalerDescriptor* d = [[MTLFXSpatialScalerDescriptor alloc] init];
+        d.colorTextureFormat = d.outputTextureFormat = cf;
+        d.inputWidth = iw, d.inputHeight = ih, d.outputWidth = g_up.out_w, d.outputHeight = g_up.out_h;
+        /* the world as it is shown (tonemapped, in the display's gamma), whatever the target's format */
+        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        *sc = [d newSpatialScalerWithDevice:g_dev];
+        [d release];
+    }
+    if (!*sc)
+        fprintf(stderr, "[recomp] gfx: upscaling: MetalFX made no %s scaler for %ux%u to %ux%u\n", temporal ? "temporal" : "spatial",
+            iw, ih, g_up.out_w, g_up.out_h);
+    return *sc;
+}
+
+/* The finished world made up to the back buffer's size (after the effects), into color->up, and its depth
+ * with it */
+static void up_run(GfxTex* color, const GfxScene* s)
+{
+    if (!g_up.mode || !color->virt || g_up.ok != 1)
+        return;
+    @autoreleasepool
+    {
+        flush_pass();
+        id<MTLTexture> ct = color->tex, depth = color->depth_world ? color->depth_world : color->depth_seen;
+        if (depth && (depth.width != ct.width || depth.height != ct.height))
+            depth = nil;
+        if (!up_tex(color))
+            return;
+        /* timed: the upscaler in a command buffer of its own, so its time is its own pass's (MetalFX's encoders take
+         * no timestamps, and the pass after it would count them: ts_frame_end). Not waited for: that drops the GPU's
+         * clock, so the next pass may still count a little of it. */
+        int timed = gfx_pass_timing_on();
+        if (timed && g_cmd)
+            commit_cmd(0);
+        int temporal = g_up.mode == 2 && depth && s->proj[11] != 0.0f;
+        /* the world's own viewport, within its target (FFXI draws it over all of it) */
+        uint32_t cw = s->vp[2] && s->vp[0] + s->vp[2] <= ct.width ? s->vp[2] : (uint32_t)ct.width;
+        uint32_t ch = s->vp[3] && s->vp[1] + s->vp[3] <= ct.height ? s->vp[3] : (uint32_t)ct.height;
+        int done = 0;
+        if (@available(macOS 13.0, iOS 16.0, *))
+        {
+            id<MTLTexture> zt = temporal ? up_zcopy(depth) : nil;
+            if (temporal && zt)
+            {
+                id<MTLFXTemporalScaler> ts = up_scaler(1, ct.pixelFormat, zt.pixelFormat, (uint32_t)ct.width, (uint32_t)ct.height);
+                if (ts && (!g_up.motion || g_up.motion.width != ct.width || g_up.motion.height != ct.height))
+                {
+                    [g_up.motion release];
+                    MTLTextureDescriptor* md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
+                                                                                                  width:ct.width
+                                                                                                 height:ct.height
+                                                                                              mipmapped:NO];
+                    md.storageMode = MTLStorageModePrivate;
+                    md.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+                    g_up.motion = [g_dev newTextureWithDescriptor:md];
+                }
+                if (ts && g_up.motion)
+                {
+                    /* the frame before's camera: continuous when it was the frame just before and the camera
+                     * did not jump (a zone change, a cutscene's cut) */
+                    float vinv[16], m[16];
+                    int have = gfx_mat_inverse(vinv, s->view);
+                    int cont = have && g_up.prev_serial && g_up.prev_serial + 1 == g_serial;
+                    if (cont)
+                    {
+                        float pinv[16];
+                        if (gfx_mat_inverse(pinv, g_up.prev_view))
+                        {
+                            float dx = vinv[12] - pinv[12], dy = vinv[13] - pinv[13], dz = vinv[14] - pinv[14];
+                            cont = dx * dx + dy * dy + dz * dz < 10.0f * 10.0f;
+                        }
+                    }
+                    float minz, maxz;
+                    memcpy(&minz, &s->vp[4], 4);
+                    memcpy(&maxz, &s->vp[5], 4);
+                    if (maxz <= minz)
+                        minz = 0, maxz = 1;
+                    FxU u;
+                    memset(&u, 0, sizeof u);
+                    u.proj[0] = s->proj[0], u.proj[1] = s->proj[5], u.proj[2] = s->proj[8], u.proj[3] = s->proj[9];
+                    u.zp[0] = s->proj[10], u.zp[1] = s->proj[14], u.zp[2] = minz, u.zp[3] = maxz;
+                    u.vp[0] = (float)s->vp[0], u.vp[1] = (float)s->vp[1], u.vp[2] = (float)cw, u.vp[3] = (float)ch;
+                    u.size[0] = (float)ct.width, u.size[1] = (float)ct.height;
+                    u.hand[0] = s->proj[11] < 0.0f ? -1.0f : 1.0f;
+                    memcpy(u.lmat, s->proj, 64);
+                    if (cont)
+                    {
+                        gfx_mat_mul(m, vinv, g_up.prev_view);
+                        gfx_mat_mul(u.reproj, m, g_up.prev_proj);
+                    }
+                    else
+                        memcpy(u.reproj, s->proj, 64);
+                    u.hist[0] = g_up.jit[0], u.hist[1] = g_up.jit[1];
+                    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+                    rp.colorAttachments[0].texture = g_up.motion;
+                    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+                    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
+                    [e setRenderPipelineState:g_up.motion_pipe];
+                    [e setViewport:(MTLViewport){ s->vp[0], s->vp[1], cw, ch, 0, 1 }];
+                    [e setFragmentBytes:&u length:sizeof u atIndex:0];
+                    [e setFragmentTexture:depth atIndex:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    [e endEncoding];
+                    ts.colorTexture = ct;
+                    ts.depthTexture = zt;
+                    ts.motionTexture = g_up.motion;
+                    ts.outputTexture = color->up;
+                    ts.inputContentWidth = cw;
+                    ts.inputContentHeight = ch;
+                    /* where in its pixel each was drawn: the viewport's offset (set_viewport), x right, y down */
+                    ts.jitterOffsetX = g_up.jit[0] * g_up.jsign[0];
+                    ts.jitterOffsetY = g_up.jit[1] * g_up.jsign[1];
+                    ts.motionVectorScaleX = (float)cw;
+                    ts.motionVectorScaleY = (float)ch;
+                    ts.depthReversed = NO;
+                    ts.reset = !cont;
+                    [ts encodeToCommandBuffer:cmd()];
+                    memcpy(g_up.prev_view, s->view, 64), memcpy(g_up.prev_proj, s->proj, 64);
+                    g_up.prev_serial = g_serial;
+                    done = 1;
+                }
+            }
+            if (!done)
+            {
+                id<MTLFXSpatialScaler> ss = up_scaler(0, ct.pixelFormat, MTLPixelFormatInvalid, (uint32_t)ct.width, (uint32_t)ct.height);
+                if (ss)
+                {
+                    ss.colorTexture = ct;
+                    ss.outputTexture = color->up;
+                    ss.inputContentWidth = cw;
+                    ss.inputContentHeight = ch;
+                    [ss encodeToCommandBuffer:cmd()];
+                    g_up.prev_serial = 0;
+                    done = 1;
+                }
+            }
+        }
+        if (!done)
+            return;
+        color->up_serial = g_serial;
+        color->used = g_serial;
+        if (depth)
+            up_depth(depth);
+        flush_pass();
+        if (timed && g_cmd)
+        {
+            [g_cmd addCompletedHandler:^(id<MTLCommandBuffer> d) {
+                gfx_pass_add(GFX_PASS_UPSCALE, (uint64_t)((d.GPUEndTime - d.GPUStartTime) * 1e9));
+            }];
+            commit_cmd(0);
+        }
+        g_up.st_frames++;
+    }
+}
+
+/* the front end's scene with its viewport in the pixels of a texture tw x th standing for color's w x h */
+static GfxScene scene_at(const GfxScene* s, const GfxTex* color, NSUInteger tw, NSUInteger th)
+{
+    GfxScene ps = *s;
+    double sx = (double)tw / color->w, sy = (double)th / color->h;
+    ps.vp[0] = (uint32_t)(s->vp[0] * sx), ps.vp[1] = (uint32_t)(s->vp[1] * sy);
+    ps.vp[2] = (uint32_t)(s->vp[2] * sx + 0.5), ps.vp[3] = (uint32_t)(s->vp[3] * sy + 0.5);
+    return ps;
+}
+
+/* the world this frame goes through the temporal upscaler (up_run's test, ahead of it) */
+static int up_temporal_ahead(const GfxTex* color, const GfxScene* s)
+{
+    if (g_up.mode != 2 || !color->virt || g_up.ok != 1 || s->proj[11] == 0.0f)
+        return 0;
+    id<MTLTexture> depth = color->depth_world ? color->depth_world : color->depth_seen;
+    return depth && depth.width == color->tex.width && depth.height == color->tex.height;
+}
+
+/* the depth surface's upscaled copy this frame (up_depth's), for a depth texture of the world's, or nil */
+static id<MTLTexture> up_depth_tex(id<MTLTexture> depth)
+{
+    for (GfxTex* t = g_targets; t; t = t->next_target)
+        if (t->virt && t->use == GFX_USE_DEPTH && t->tex == depth)
+            return up_fresh(t) ? t->up : nil;
+    return nil;
+}
+
+/* After the temporal upscaler: what is made of the lit scene (scene_fx's bloom, rays and grade, then
+ * post_effects' lamp glows, shafts, depth of field and bloom, then the tonemap) over the upscaled world and its
+ * depth, at the size they are shown. Those effects see the upscaled copy as color->tex for the while. fs: the
+ * front end's scene; ls: at the world's drawn size (all of it there, when the upscaler made nothing). */
+static void up_post(GfxTex* color, const GfxScene* fs, const GfxScene* ls)
+{
+    id<MTLTexture> depth = color->depth_world ? color->depth_world : color->depth_seen;
+    id<MTLTexture> zup = depth ? up_depth_tex(depth) : nil;
+    if (!up_fresh(color) || !zup || zup.width != color->up.width || zup.height != color->up.height)
+    {
+        scene_fx_post(ls, color->tex, depth);
+        post_effects(color, ls);
+        hdr_tone(color, ls);
+        return;
+    }
+    GfxScene us = scene_at(fs, color, color->up.width, color->up.height);
+    id<MTLTexture> drawn = color->tex, dw = color->depth_world, dseen = color->depth_seen;
+    color->tex = color->up, color->depth_world = zup, color->depth_seen = zup;
+    g_world_drawn = drawn;
+    /* the lamps' tiles are the drawn size's pixels: binned again at this size for the shafts, the fog and the glows,
+     * the frame's own put back after (what is drawn after the scene reads them) */
+    int rebin = g_lamps.binned == g_serial;
+    id<MTLBuffer> lb = g_lamps.lb, tb = g_lamps.tb;
+    NSUInteger lo = g_lamps.lo, to = g_lamps.to;
+    float lu[12], lvp[16];
+    memcpy(lu, g_lamps.lu, sizeof lu), memcpy(lvp, g_lamps.vp, sizeof lvp);
+    if (rebin)
+    {
+        lamps_bin(us.view, us.proj, us.vp);
+        memcpy(g_lamps.lu + 6, lu + 6, 6 * sizeof *lu); /* (the rest of LU, set after the binning) */
+    }
+    scene_fx_post(&us, color->tex, zup);
+    post_effects(color, &us);
+    hdr_tone(color, &us);
+    if (rebin)
+    {
+        g_lamps.lb = lb, g_lamps.tb = tb, g_lamps.lo = lo, g_lamps.to = to;
+        memcpy(g_lamps.lu, lu, sizeof lu), memcpy(g_lamps.vp, lvp, sizeof lvp);
+        g_lamps.binned = g_serial;
+    }
+    g_world_drawn = nil;
+    color->tex = drawn, color->depth_world = dw, color->depth_seen = dseen;
+    color->used = g_serial;
+}
 
 void gfx_scene_done(GfxTex* color, const GfxScene* s)
 {
     if (!g_dev || !color || color->type != GFX_TEX_2D)
         return;
+    color->world_seen = 1;
+    g_up.world_w = color->w, g_up.world_h = color->h;
+    const GfxScene* fs = s;
+    GfxScene ps;
+    if (color->virt)
+    {
+        /* drawn at fewer pixels (the upscaler): the viewport at the target's own */
+        ps = scene_at(s, color, color->tex.width, color->tex.height);
+        s = &ps;
+    }
     @autoreleasepool
     {
         hdr_update(color);
     }
     ao_make(color); /* the scene renderer's occlusion, for the next frame's zone and characters */
+    /* Temporal upscaling: the light on the world (occlusion, shadows, bounce light, fog) as it was drawn,
+     * then the upscaler, then what is made of the lit scene at the size it is shown (up_post). The upscaler's
+     * history then holds the lit scene only, not glows, a grade and a tonemap carried over frames, and those
+     * are made at the full size, not made up to it. */
+    int ahead = up_temporal_ahead(color, s);
     if (g_fxs.fx != 0.0f)
-        scene_fx(color, s);
+        scene_fx(color, s, ahead);
     scene_fog(color, s);
+    if (ahead)
+    {
+        up_run(color, s);
+        up_post(color, fs, s);
+        return;
+    }
     post_effects(color, s);
     hdr_tone(color, s);
-    scene_aa(color, s);
+    /* the spatial upscaler (MetalFX's, as FSR 1's; the temporal one's stand-in without a depth) wants its input
+     * anti-aliased: FXAA whatever aa says */
+    scene_aa(color, s, color->virt && g_up.mode != 0);
+    up_run(color, s);
 }
 
-static void scene_fx(GfxTex* color, const GfxScene* s)
+/* the bloom's and rays' targets for a scene bw x bh at their size (scene_fx's bdiv) */
+static int fx_bloom_tex(NSUInteger bw, NSUInteger bh)
+{
+    return fx_tex(&g_fx.b1a, MTLPixelFormatRGBA16Float, bw, bh) && fx_tex(&g_fx.b1b, MTLPixelFormatRGBA16Float, bw, bh) &&
+        fx_tex(&g_fx.b2a, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
+        fx_tex(&g_fx.b2b, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
+        fx_tex(&g_fx.ra, MTLPixelFormatRGBA16Float, bw, bh) && fx_tex(&g_fx.rb, MTLPixelFormatRGBA16Float, bw, bh);
+}
+
+/* the bloom (into b1a, b2a) and the god rays (rb) of src, for fx_comp; ao: the occlusion and shadows fx_bright
+ * shades src with, as fx_comp will */
+static void fx_bloom_rays(const FxU* u, id<MTLTexture> src, id<MTLTexture> ao, id<MTLTexture> depth)
+{
+    static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 }, across2[2] = { 2, 0 }, down2[2] = { 0, 2 };
+    MTLViewport qb = fx_full(g_fx.b1a), e = fx_full(g_fx.b2a);
+    if (u->bloom[1] > 0.0f)
+    {
+        id<MTLTexture> b_in[2] = { src, ao };
+        g_pass = GFX_PASS_BLOOM;
+        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.bright_pipe, qb, u, b_in, 2, NULL);
+        fx_pass(g_fx.b1b, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.b1a, 1, across2);
+        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.b1b, 1, down2);
+        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.down_pipe, e, u, &g_fx.b1a, 1, NULL);
+        fx_pass(g_fx.b2b, MTLLoadActionDontCare, g_fx.gauss_pipe, e, u, &g_fx.b2a, 1, across2);
+        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.gauss_pipe, e, u, &g_fx.b2b, 1, down2);
+    }
+    if (u->rays[0] > 0.0f)
+    {
+        id<MTLTexture> mask_in[2] = { src, depth };
+        g_pass = GFX_PASS_RAYS;
+        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.raymask_pipe, qb, u, mask_in, 2, NULL);
+        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.rays_pipe, qb, u, &g_fx.ra, 1, NULL);
+        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.rb, 1, across);
+        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, u, &g_fx.ra, 1, down);
+    }
+}
+
+/* What scene_fx left for after the temporal upscaler (defer): the bloom, the god rays and the colour grade,
+ * made of the lit scene (ct, in place) at the size it is shown, over its depth there. The light is already in
+ * it, so fx_comp adds only these: no occlusion, shadows, bounce light or fog a second time. */
+static void scene_fx_post(const GfxScene* s, id<MTLTexture> ct, id<MTLTexture> depth)
+{
+    if (g_fx.post_serial != g_serial)
+        return;
+    g_fx.post_serial = 0;
+    FxU u = g_fx.post_u;
+    if (!(u.bloom[1] > 0.0f || u.rays[0] > 0.0f || u.grade[0] > 0.0f) || !depth || depth.width != ct.width ||
+        depth.height != ct.height)
+        return;
+    @autoreleasepool
+    {
+        flush_pass();
+        float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
+        if (vw < 16 || vh < 16 || vx + vw > ct.width || vy + vh > ct.height)
+            vx = vy = 0, vw = (float)ct.width, vh = (float)ct.height;
+        uint32_t bdiv = vw > 2048 ? 4 : vw > 1024 ? 2 : 1;
+        NSUInteger bw = (NSUInteger)((vw + bdiv - 1) / bdiv), bh = (NSUInteger)((vh + bdiv - 1) / bdiv);
+        u.vp[0] = vx, u.vp[1] = vy, u.vp[2] = vw, u.vp[3] = vh;
+        u.size[0] = (float)ct.width, u.size[1] = (float)ct.height;
+        u.ao[1] = 0.0f, u.shadow[0] = 0.0f, u.smap[0] = 0.0f, u.gi[0] = 0.0f, u.fogc[3] = 0.0f;
+        if (!fx_tex(&g_fx.psrc, ct.pixelFormat, ct.width, ct.height) || !fx_bloom_tex(bw, bh))
+            return;
+        if (!g_fx.comp_pipe || g_fx.comp_fmt != ct.pixelFormat)
+        {
+            [g_fx.comp_pipe release];
+            g_fx.comp_pipe = fx_pipeline(@"fx_comp", ct.pixelFormat);
+            g_fx.comp_fmt = ct.pixelFormat;
+        }
+        if (!g_fx.comp_pipe)
+            return;
+        id<MTLBlitCommandEncoder> b = [cmd() blitCommandEncoder];
+        [b copyFromTexture:ct sourceSlice:0 sourceLevel:0 toTexture:g_fx.psrc destinationSlice:0 destinationLevel:0
+                sliceCount:1 levelCount:1];
+        [b endEncoding];
+        fx_bloom_rays(&u, g_fx.psrc, g_fx.psrc, depth);
+        id<MTLTexture> comp_in[7] = { g_fx.psrc, g_fx.psrc, depth, g_fx.b1a, g_fx.b2a, g_fx.rb, g_fx.rb };
+        g_pass = GFX_PASS_COMP;
+        fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 7, NULL);
+    }
+}
+
+static void scene_fx(GfxTex* color, const GfxScene* s, int defer)
 {
     @autoreleasepool
     {
@@ -7894,6 +8807,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                 { g_fxs.grade, g_fxs.sat, g_fxs.contrast, g_fxs.debug },
                 { hand, 0, 0, 0 },
             };
+            /* an HDR scene: the grade after its tonemap (hdr_tone), on the picture as shown, not on the light here (where
+             * the tonemap would squeeze it, and its clamp cut the highlights) */
+            if (g_hdr.t == color && ct.pixelFormat == MTLPixelFormatRGBA16Float)
+                u.grade[0] = 0.0f;
             u.aop[0] = g_fxs.ao_quality >= 1.5f ? 16.0f : g_fxs.ao_quality >= 0.5f ? 10.0f : 6.0f;
             u.aop[1] = gfx_contact_steps();
             u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
@@ -8049,6 +8966,14 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             }
             u.bloom[0] = g_fxs.threshold, u.bloom[1] = g_fxs.post_bloom > 0.0f ? 0.0f : g_fxs.bloom, u.bloom[2] = 0.25f;
             u.rays[0] = u.sunuv[2] > 0.0f ? g_fxs.rays : 0.0f, u.rays[1] = g_fxs.rays_decay, u.rays[2] = g_fxs.rays_length;
+            /* the temporal upscaler next (defer): here only the light on the world as it was drawn (the occlusion,
+             * the sun's shadows, the bounce light, the fog); the bloom, the rays and the grade are made of the lit
+             * scene after it, at the size it is shown (scene_fx_post), so its history holds no glow or grade */
+            if (defer)
+            {
+                g_fx.post_u = u, g_fx.post_serial = g_serial;
+                u.bloom[1] = 0.0f, u.rays[0] = 0.0f, u.grade[0] = 0.0f;
+            }
             if (g_fxs.water > 0.0f && have_v)
                 water_scene(s, vinv, &u, ct);
             /* the world for rays, before the passes that trace them */
@@ -8068,11 +8993,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             if (rt) /* traced: rays reach further, two a texel, kept longer over frames (their noise averaged away) */
                 u.gi[2] = fmaxf(g_fxs.gi_radius * 2.5f, 4.0f), u.gip[2] = 2.0f, u.gip[1] = u.gip[1] > 0.0f ? fmaxf(u.gip[1], 0.95f) : 0.0f;
             if (fx_tex(&g_fx.src, ct.pixelFormat, ct.width, ct.height) && fx_tex(&g_fx.ao0, MTLPixelFormatRGBA16Float, aw, ah) &&
-                fx_tex(&g_fx.ao1, MTLPixelFormatRGBA16Float, aw, ah) && fx_tex(&g_fx.b1a, MTLPixelFormatRGBA16Float, bw, bh) &&
-                fx_tex(&g_fx.b1b, MTLPixelFormatRGBA16Float, bw, bh) &&
-                fx_tex(&g_fx.b2a, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
-                fx_tex(&g_fx.b2b, MTLPixelFormatRGBA16Float, (bw + 1) / 2, (bh + 1) / 2) &&
-                fx_tex(&g_fx.ra, MTLPixelFormatRGBA16Float, bw, bh) && fx_tex(&g_fx.rb, MTLPixelFormatRGBA16Float, bw, bh))
+                fx_tex(&g_fx.ao1, MTLPixelFormatRGBA16Float, aw, ah) &&
+                (defer || fx_bloom_tex(bw, bh))) /* (deferred: made at the shown size, scene_fx_post) */
             {
                 if (!g_fx.comp_pipe || g_fx.comp_fmt != ct.pixelFormat)
                 {
@@ -8086,8 +9008,8 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                     [b copyFromTexture:ct sourceSlice:0 sourceLevel:0 toTexture:g_fx.src destinationSlice:0 destinationLevel:0
                             sliceCount:1 levelCount:1];
                     [b endEncoding];
-                    static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 }, across2[2] = { 2, 0 }, down2[2] = { 0, 2 };
-                    MTLViewport q = fx_full(g_fx.ao0), qb = fx_full(g_fx.b1a), e = fx_full(g_fx.b2a);
+                    static const int32_t across[2] = { 1, 0 }, down[2] = { 0, 1 };
+                    MTLViewport q = fx_full(g_fx.ao0);
                     id<MTLTexture> ao_out = g_fx.ao0;
                     if (u.ao[1] > 0.0f || u.shadow[0] > 0.0f || u.smap[0] > 0.0f)
                     {
@@ -8162,27 +9084,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
                             g_fx.gih_at = to, g_fx.gih_serial = g_serial;
                         }
                     }
-                    if (u.bloom[1] > 0.0f)
-                    {
-                        id<MTLTexture> b_in[2] = { g_fx.src, ao_out }; /* shaded as fx_comp shades */
-                        g_pass = GFX_PASS_BLOOM;
-                        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.bright_pipe, qb, &u, b_in, 2, NULL);
-                        fx_pass(g_fx.b1b, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1a, 1, across2);
-                        fx_pass(g_fx.b1a, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.b1b, 1, down2);
-                        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.down_pipe, e, &u, &g_fx.b1a, 1, NULL);
-                        fx_pass(g_fx.b2b, MTLLoadActionDontCare, g_fx.gauss_pipe, e, &u, &g_fx.b2a, 1, across2);
-                        fx_pass(g_fx.b2a, MTLLoadActionDontCare, g_fx.gauss_pipe, e, &u, &g_fx.b2b, 1, down2);
-                    }
-                    if (u.rays[0] > 0.0f)
-                    {
-                        id<MTLTexture> mask_in[2] = { g_fx.src, depth };
-                        g_pass = GFX_PASS_RAYS;
-                        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.raymask_pipe, qb, &u, mask_in, 2, NULL);
-                        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.rays_pipe, qb, &u, &g_fx.ra, 1, NULL);
-                        fx_pass(g_fx.ra, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.rb, 1, across);
-                        fx_pass(g_fx.rb, MTLLoadActionDontCare, g_fx.gauss_pipe, qb, &u, &g_fx.ra, 1, down);
-                    }
-                    id<MTLTexture> comp_in[7] = { g_fx.src, ao_out, depth, g_fx.b1a, g_fx.b2a, g_fx.rb, gi_out ? gi_out : g_fx.rb };
+                    fx_bloom_rays(&u, g_fx.src, ao_out, depth);
+                    /* (unread when deferred: the source stands in for what is not made yet) */
+                    id<MTLTexture> b1 = defer ? g_fx.src : g_fx.b1a, b2 = defer ? g_fx.src : g_fx.b2a, ry = defer ? g_fx.src : g_fx.rb;
+                    id<MTLTexture> comp_in[7] = { g_fx.src, ao_out, depth, b1, b2, ry, gi_out ? gi_out : ry };
                     g_pass = GFX_PASS_COMP;
                     fx_pass(ct, MTLLoadActionLoad, g_fx.comp_pipe, (MTLViewport){ vx, vy, vw, vh, 0, 1 }, &u, comp_in, 7, NULL);
                     if (rt && (int)g_fxs.debug == 8)
@@ -8476,6 +9381,8 @@ void gfx_present(GfxTex* bb)
                 if (boxed)
                     [e setViewport:(MTLViewport){ g_present_rect.x, g_present_rect.y, g_present_rect.w, g_present_rect.h, 0, 1 }];
                 float sharpen = g_fxs.fx != 0.0f ? g_fxs.sharpen : 0.0f;
+                if (g_up.mode == 2 && g_up.st_frames && g_fxs.upscale_sharpen > sharpen) /* (the spatial scaler sharpens) */
+                    sharpen = g_fxs.upscale_sharpen;
                 [e setRenderPipelineState:sharpen > 0.0f && g_present_cas_pipe ? g_present_cas_pipe : g_present_pipe];
                 [e setFragmentBytes:&sharpen length:sizeof sharpen atIndex:0];
                 [e setFragmentTexture:bb->view atIndex:0];
@@ -8530,6 +9437,7 @@ void gfx_present(GfxTex* bb)
         }
         fps_tick();
         fx_reload();
+        up_sync(bb);
         frame_end();
     }
     gfx_pass_tick();

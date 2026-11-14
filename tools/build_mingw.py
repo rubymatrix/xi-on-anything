@@ -200,6 +200,7 @@ def host64(env, out):
     # whoever started it through inherited handles (the launcher reads it from pipes)
     run(env, ['clang++', '-static', '-mwindows', '-o', exe, '@' + rsp, posix(sdl_lib)] + LIBS)
     shutil.copy(os.path.join(build.SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, out))
+    build.fsr_dlls(out)
     buildinfo.stamp(os.path.join(ROOT, out, 'runtime.json'))
     print('built %s; run: %s --game "%s" ...' % (exe, exe, build.BUILD['game']))
 

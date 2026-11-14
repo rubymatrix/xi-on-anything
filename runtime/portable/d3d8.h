@@ -80,3 +80,5 @@ GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size);
 /* a vertex or index buffer's guest memory (what the game wrote into it), 0 before its first lock */
 uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size);
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6]);
+/* the scene renderer drew the world into the current target with this camera: a scene for the effects (scene.c) */
+void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t vp[6]);
