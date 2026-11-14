@@ -47,7 +47,7 @@ typedef struct Config
     uint16_t auth_port, data_port, view_port;
     char loader_version[24]; /* "": LSB_LOADER_VERSION */
     char background[1024]; /* a picture behind the screen; "": background.png/.jpg beside signin.cfg */
-    int auto_signin;  /* an account sent by the launcher (import.json): sign in as it once its passwords are read */
+    int auto_signin;  /* an account sent by the launcher (import.json): sign in as it once its passwords are read (not on phones) */
     int otp_required; /* ...unless it needs a one-time password, which can't be remembered */
 } Config;
 
@@ -2283,7 +2283,8 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             if (!u->status_error)
                 set_status(u, "", 0);
             /* an account the launcher sent: sign in as it, a moment later (any input stops it), or ask
-             * only for the one-time password */
+             * only for the one-time password. Phones never sign in by themselves: the account and its
+             * passwords are filled in, and the player taps Sign in. */
             int pol = u->cfg.method == SIGNIN_POL;
             int have = u->cfg.user[0] && u->password[0] && (!pol || (u->cfg.sqex_id[0] && u->sqex_password[0]));
             if (u->cfg.auto_signin && u->cfg.remember && have && !u->auto_done && u->screen == SCREEN_SIGNIN)
@@ -2296,10 +2297,14 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
                 }
                 else
                 {
+#ifdef FFXI_MOBILE
+                    u->auto_done = 1;
+#else
                     u->auto_at = SDL_GetTicks() + 1500;
                     char msg[160];
                     snprintf(msg, sizeof msg, "Signing in as %s... tap to stop", u->cfg.user);
                     set_status(u, msg, 0);
+#endif
                 }
             }
         }
