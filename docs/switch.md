@@ -43,7 +43,12 @@ what Ryubing gives a bare `.nro`.
   card, threads, `plat_wait32`/`plat_wake_all32` across threads and with a timeout, atomics, time, the 2 GB
   window, zeroed commits, a partly committed range keeping its contents, decommit + commit zero, the top
   page of the window, 1.9 GB committed.
-- The host (runtime, host64, sign-in screen, mbedtls) compiles for the Switch.
+- The network (with `net-test.host` beside it on the card: `<server> 54231`): DNS and a TCP connection to
+  a LandSandBoat server's sign-in port, from the emulator (34 of 34 with it).
+- `build_switch.py host`: the whole game (the 2025-12-26 build's translation, runtime, host64, sign-in
+  screen, mbedtls) compiles and links, a 28.8 MB `.nro`. In Ryubing it starts, reads `run.args`, finds the
+  game on the card, and stops at the sign-in screen, which needs a graphics back end to draw:
+  `[signin] no window to draw in`.
 
 ## Not yet
 

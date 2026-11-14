@@ -12,6 +12,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <switch.h>
 
@@ -237,6 +241,53 @@ static void test_files(void)
     check(plat_unlink(file) && plat_rmdir(dir), "plat_unlink and plat_rmdir");
 }
 
+/* --- network ---------------------------------------------------------------------------------------- */
+/* sdmc:/switch/xi-on-anything/net-test.host: "name port" (a LandSandBoat server's sign-in, 54231). The
+ * name is resolved and a TCP connection opened and closed: nothing is sent. Without the file, skipped. */
+static void test_net(void)
+{
+    FILE* f = fopen(DIR_ROOT "/net-test.host", "r");
+    if (!f)
+    {
+        say("network: skipped (no net-test.host)\n");
+        return;
+    }
+    char host[256] = "";
+    int port = 54231;
+    if (fscanf(f, "%255s %d", host, &port) < 1)
+        host[0] = 0;
+    fclose(f);
+    if (!host[0])
+        return;
+    Result rc = socketInitializeDefault();
+    check(R_SUCCEEDED(rc), "socketInitializeDefault");
+    if (R_FAILED(rc))
+        return;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    char ports[16];
+    snprintf(ports, sizeof ports, "%d", port);
+    int ok = getaddrinfo(host, ports, &hints, &res) == 0 && res;
+    check(ok, "getaddrinfo resolves the server");
+    if (ok)
+    {
+        struct sockaddr_in* a = (struct sockaddr_in*)res->ai_addr;
+        say("%s is %s\n", host, inet_ntoa(a->sin_addr));
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        uint64_t t0 = rt_monotonic_ns();
+        int c = s >= 0 && connect(s, res->ai_addr, res->ai_addrlen) == 0;
+        check(c, "a TCP connection to the server's sign-in port");
+        if (c)
+            say("connected in %llu ms\n", (unsigned long long)((rt_monotonic_ns() - t0) / 1000000));
+        if (s >= 0)
+            close(s);
+        freeaddrinfo(res);
+    }
+    socketExit();
+}
+
 /* --- time ------------------------------------------------------------------------------------------- */
 static void test_time(void)
 {
@@ -269,6 +320,7 @@ int main(int argc, char** argv)
     test_time();
     test_files();
     test_wait();
+    test_net();
     test_memory();
 
     say("\n%d passed, %d failed: %s\n", g_passed, g_failed, g_failed ? "FAILED" : "ALL PASSED");
