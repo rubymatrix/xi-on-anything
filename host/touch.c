@@ -216,12 +216,64 @@ static void click(SDL_WindowID window, float x, float y)
 }
 
 /* --- the virtual pad -------------------------------------------------------------------------- */
+/* What the fingers want of the pad, set here and put on the pad by pad_update. Touches come in an event
+ * watch on Android's UI thread, holding SDL's event-watch lock; setting the pad there takes the joystick
+ * lock, which the game's thread holds in SDL_UpdateJoysticks while it pushes the pad's own events (and
+ * waits for the watch lock): the two threads deadlocked, the game frozen. So the fingers only say what
+ * they want (g_want_lock guards that and nothing else, and calls nothing while held), and the pad takes
+ * it in its own Update, on the thread that polls it, the joystick lock already held. */
+static SDL_Mutex* g_want_lock;
+static Sint16 g_want_axis[SDL_GAMEPAD_AXIS_COUNT] = {
+    [SDL_GAMEPAD_AXIS_LEFT_TRIGGER] = SDL_JOYSTICK_AXIS_MIN, [SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] = SDL_JOYSTICK_AXIS_MIN
+};
+static bool g_want_button[SDL_GAMEPAD_BUTTON_COUNT];
+
+static void want_axis(int a, Sint16 v)
+{
+    SDL_LockMutex(g_want_lock);
+    g_want_axis[a] = v;
+    SDL_UnlockMutex(g_want_lock);
+}
+
+static void want_button(int b, bool down)
+{
+    SDL_LockMutex(g_want_lock);
+    g_want_button[b] = down;
+    SDL_UnlockMutex(g_want_lock);
+}
+
+static void SDLCALL pad_update(void* unused)
+{
+    (void)unused;
+    static Sint16 axis_set[SDL_GAMEPAD_AXIS_COUNT]; /* what the pad was last given; all of it at first */
+    static int button_set[SDL_GAMEPAD_BUTTON_COUNT];
+    static int first = 1;
+    SDL_Joystick* pad = SDL_GetJoystickFromID(g_vid);
+    if (!pad)
+        return;
+    Sint16 a[SDL_GAMEPAD_AXIS_COUNT];
+    bool b[SDL_GAMEPAD_BUTTON_COUNT];
+    SDL_LockMutex(g_want_lock);
+    memcpy(a, g_want_axis, sizeof a);
+    memcpy(b, g_want_button, sizeof b);
+    SDL_UnlockMutex(g_want_lock);
+    for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i)
+        if (first || a[i] != axis_set[i])
+            axis_set[i] = a[i], SDL_SetJoystickVirtualAxis(pad, i, a[i]);
+    for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i)
+        if (first || (int)b[i] != button_set[i])
+            button_set[i] = b[i], SDL_SetJoystickVirtualButton(pad, i, b[i]);
+    first = 0;
+}
+
+/* Only on SDL's main thread (the game's): never from a touch on the UI thread, for the reason above */
 static void pad_attach(void)
 {
-    if (g_pad)
+    if (g_pad || !SDL_IsMainThread())
         return;
     SDL_VirtualJoystickDesc d;
     SDL_INIT_INTERFACE(&d);
+    d.Update = pad_update;
     d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
     d.vendor_id = 0x045E, d.product_id = 0x028E; /* as an Xbox 360 pad: what the game expects of XInput */
     d.naxes = SDL_GAMEPAD_AXIS_COUNT, d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
@@ -238,11 +290,10 @@ static void pad_attach(void)
 /* every button up, the triggers too (the sticks follow the fingers: sticks()) */
 static void pad_release(void)
 {
-    for (int b = 0; g_pad && b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
-        SDL_SetJoystickVirtualButton(g_pad, b, false);
-    if (g_pad)
-        SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN),
-            SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
+        want_button(b, false);
+    want_axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+    want_axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
     memset(g_down, 0, sizeof g_down);
 }
 
@@ -514,10 +565,10 @@ static void apply(const Control* c, int down)
 {
     if (c->ctl == C_KEY)
         key(g_key_window, (SDL_Scancode)c->btn, down);
-    else if (g_pad && c->ctl == C_BUTTON)
-        g_down[c->btn] = down, SDL_SetJoystickVirtualButton(g_pad, c->btn, down);
-    else if (g_pad && c->ctl == C_TRIGGER) /* the axis's whole range is the trigger's: up at its minimum */
-        SDL_SetJoystickVirtualAxis(g_pad, c->btn, down ? SDL_JOYSTICK_AXIS_MAX : SDL_JOYSTICK_AXIS_MIN);
+    else if (c->ctl == C_BUTTON)
+        g_down[c->btn] = down, want_button(c->btn, down);
+    else if (c->ctl == C_TRIGGER) /* the axis's whole range is the trigger's: up at its minimum */
+        want_axis(c->btn, down ? SDL_JOYSTICK_AXIS_MAX : SDL_JOYSTICK_AXIS_MIN);
 }
 
 static Uint32 SDLCALL release_later(void* control, SDL_TimerID timer, Uint32 interval)
@@ -570,12 +621,10 @@ static void sticks(void)
         else if (f->what == C_LOOK)
             rx = dx / LOOK, ry = dy / LOOK;
     }
-    if (!g_pad)
-        return;
-    SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_LEFTX, axis(lx));
-    SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_LEFTY, axis(ly)); /* SDL: down is positive */
-    SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_RIGHTX, axis(rx));
-    SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_RIGHTY, axis(ry));
+    want_axis(SDL_GAMEPAD_AXIS_LEFTX, axis(lx));
+    want_axis(SDL_GAMEPAD_AXIS_LEFTY, axis(ly)); /* SDL: down is positive */
+    want_axis(SDL_GAMEPAD_AXIS_RIGHTX, axis(rx));
+    want_axis(SDL_GAMEPAD_AXIS_RIGHTY, axis(ry));
 }
 
 static void finger_down(const SDL_TouchFingerEvent* e, float x, float y, int w, int h)
@@ -871,12 +920,16 @@ static void refresh(SDL_Window* win)
     if (show != g_shown)
     {
         g_shown = show;
-        if (show)
-            pad_attach();
-        else
+        if (!show)
             memset(g_fingers, 0, sizeof g_fingers), sticks(), pad_release();
         input_prefer_pad(show ? (uint32_t)g_vid : 0);
         fprintf(stderr, "[touch] controls %s\n", show ? "on" : g_hidden ? "off (put away)" : "off (a controller in use)");
+    }
+    if (g_shown && !g_pad) /* attached on the game's thread only (pad_attach): from a touch, at its next frame */
+    {
+        pad_attach();
+        if (g_pad)
+            input_prefer_pad((uint32_t)g_vid);
     }
     if (win)
         layout(win, g_shown);
@@ -913,6 +966,7 @@ void touch_frame(int in_game)
 void touch_init(void)
 {
     g_lock = SDL_CreateMutex();
+    g_want_lock = SDL_CreateMutex();
     SDL_SetEventFilter(keep_event, NULL);
     SDL_AddEventWatch(touch, NULL);
 }
