@@ -106,6 +106,11 @@ static FILE* g_cap;
 static uint32_t g_cap_esp, g_cap_frame, g_cap_n;
 static uint32_t g_cap_at[32], g_cap_nat; /* <path>.at: draws after which the target is dumped */
 static void cap_present(void);
+static void water_flush(void); /* the PC port's drawing mistakes (fix_water_layers, fix_button_rims) */
+static void fixes_frame(void);
+static void dis_present(void); /* disintegrate (fix_disintegrate) */
+static int g_btn_shadows; /* this frame's button shadows (button_body) */
+static uint32_t g_halo_src, g_halo_low; /* this frame's halo silhouette and its copy's surface (halo_quad) */
 static void scene_present(void);
 
 /* --- formats ----------------------------------------------------------------------------------------- */
@@ -1311,6 +1316,10 @@ static void capture_frame(Obj* bb)
 static void IDirect3DDevice8_Present(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
+    fixes_frame();
+    dis_present();
+    g_btn_shadows = 0, g_halo_src = g_halo_low = 0;
     cap_present();
     scene_present();
     ui_present();
@@ -1638,6 +1647,7 @@ static void IDirect3DDevice8_CreateImageSurface(Guest* g)
 static void IDirect3DDevice8_CopyRects(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
     Obj* s = obj(ARG(1));
     Obj* d = obj(ARG(4));
     if (!s || !d || s->format != d->format)
@@ -1699,6 +1709,7 @@ static void IDirect3DDevice8_CopyRects(Guest* g)
 static void IDirect3DDevice8_SetRenderTarget(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
     if (ARG(1))
     {
         bind(&g_dev.rt, ARG(1));
@@ -1737,6 +1748,7 @@ static void apply_targets(void);
 static void IDirect3DDevice8_Clear(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
     apply_targets();
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
@@ -2089,12 +2101,1014 @@ static void IDirect3DDevice8_GetCurrentTexturePalette(Guest* g)
 static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size, uint32_t up_data,
     uint32_t up_stride);
 
+/* --- the PC port's own drawing mistakes, drawn as the PS2 draws them ----------------------------------------------
+ * After portfix (github.com/voetre/portfix, MIT License, Copyright (c) 2026 voetre), which found and measured both.
+ * Each has a setting, on unless set to 0: fix_water_layers, fix_button_rims, fix_summon_halos, fix_shine,
+ * fix_disintegrate. They are read once a frame (fixes_frame),
+ * not at every draw.
+ *
+ * Water layers. Port Bastok's sea is three flat layers drawn in order: an opaque black one, the scrolling ripples added
+ * on top (SRCALPHA, ONE) with depth written, then a dark tint on the black layer's geometry, 0.023 under the ripples
+ * and tested LESSEQUAL. On the PS2 the tint shows; on the PC its depth fails against the ripples' wherever the
+ * difference is a step of the depth buffer or more, so near the camera only the black and faint ripples are left.
+ * The ripple draw is held back (the whole device state with it) and drawn after the next DrawPrimitive, the tint,
+ * with no depth write: black, tint, ripples on top. Anything else drawn first, a clear, a change of target or
+ * Present lets it go as it was meant to be drawn. (portfix also lifts every water layer: water_lift does that here.)
+ *
+ * Button rims. The title screen's and the config window's buttons are each two quads of one texture: a black copy a
+ * few pixels down and right, alpha blended, as a drop shadow, then the body added (SRCALPHA, ONE). Over the shadow the
+ * sum is the body's colour; along the body's top and left edges, past the shadow, it adds to what is behind and shows
+ * as a light, see-through rim. The PS2's buttons have none, nor does a disabled button (alpha blended). A body drawn
+ * added over its own shadow (same texture, size and uv, the shadow just down and right of it) is drawn alpha blended:
+ * where the shadow lies under it the result is the same. */
+static int g_fix_water = 1, g_fix_buttons = 1, g_fix_halos = 1, g_fix_shine = 1, g_fix_disint = 1;
+static Obj* sub(uint32_t tex, uint32_t face, uint32_t level);
+
+static void fixes_frame(void)
+{
+    g_fix_water = gfx_fx_get("fix_water_layers") != 0.0f;
+    g_fix_buttons = gfx_fx_get("fix_button_rims") != 0.0f;
+    g_fix_halos = gfx_fx_get("fix_summon_halos") != 0.0f;
+    g_fix_shine = gfx_fx_get("fix_shine") != 0.0f;
+    g_fix_disint = gfx_fx_get("fix_disintegrate") != 0.0f;
+}
+
+unsigned d3d8_fixes(void)
+{
+    return (g_fix_shine ? D3D8_FIX_SHINE : 0u) | (g_fix_disint ? D3D8_FIX_DISINTEGRATE : 0u);
+}
+
+/* the held ripple draw: DrawPrimitive's arguments, the scene renderer's site for it, the device state it had */
+static struct
+{
+    int held;
+    uint32_t prim, start, count, zone;
+    State s;
+} g_water;
+
+/* the ripple layer: FVF XYZ|NORMAL|DIFFUSE|TEX1, unlit, added (SRCALPHA, ONE) with depth written, its texture
+ * coordinates scrolled (COUNT2), stage 0 MODULATE */
+static int water_ripple(const State* s)
+{
+    const uint32_t* rs = s->rs;
+    return s->vs == 0x152u && rs[14] == 1 && rs[27] == 1 && rs[19] == 5 && rs[20] == 2 && rs[137] == 0 &&
+        s->tss[0][24] == 2 && s->tss[0][1] == 4;
+}
+
+static void water_hold(uint32_t prim, uint32_t start, uint32_t count)
+{
+    g_water.held = 1, g_water.prim = prim, g_water.start = start, g_water.count = count, g_water.zone = g_draw_zone;
+    g_water.s = g_dev.cur;
+}
+
+/* the held ripple draw, drawn now in its own state with no depth write; the device's state is then put back */
+static void water_flush(void)
+{
+    if (!g_water.held)
+        return;
+    g_water.held = 0;
+    static State keep;
+    keep = g_dev.cur;
+    g_dev.cur = g_water.s;
+    g_dev.cur.rs[14] = 0; /* ZWRITEENABLE */
+    static int said;
+    if (!said++)
+        rt_log("[recomp] d3d8: water layers: a ripple layer drawn after its tint, as on the PS2 (fix_water_layers)\n");
+    uint32_t zone = g_draw_zone;
+    g_draw_zone = g_water.zone;
+    draw(g_water.prim, g_water.count, g_water.start, 0, 0, 0, 0);
+    g_draw_zone = zone;
+    g_dev.cur = keep;
+}
+
+/* Summon halos (Carbuncle's blue aura, other summons'): the model is drawn into a silhouette texture the scene's size
+ * (4096 at a 4096 background; 2048 here), copied down to a 256x256 target with one quad, and the copy drawn back over
+ * the scene as full-screen quads: three tinted ghosts alpha blended, nudged ~3 pixels in a pattern that turns each
+ * frame, one opaque alpha-tested copy, then the silhouette itself on top. One texel of the copy is 8-16 of the scene's
+ * pixels, so the opaque copy sticks out past the model in steps, and the nudges, in the PS2's 640-wide frame's pixels,
+ * don't part the ghosts from the model: a thin stepped rim instead of the PS2's soft halo. The quads that read the copy
+ * are drawn from the full-size silhouette instead, their nudge scaled by the target's width / 640. Colours, blending,
+ * the ghosts and their pattern are the game's. (portfix's optional cap on the halo's reach, /portfix halomax, isn't
+ * here.) */
+
+/* 0, or a copy of a halo quad's vertices nudged for the full-size silhouette, which is bound in its place (tex[0]) */
+static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride)
+{
+    const State* s = &g_dev.cur;
+    if (prim != 5 || count != 2 || stride != 28 || s->vs != 0x144u || !data || !s->tex[0])
+        return 0;
+    Obj* rt = obj(g_dev.rt);
+    if (!rt)
+        return 0;
+    if (rt->width == 256 && rt->height == 256) /* the copy-down: the silhouette and the copy's surface */
+    {
+        g_halo_src = s->tex[0], g_halo_low = g_dev.rt;
+        return 0;
+    }
+    Obj* low = g_halo_low ? obj(g_halo_low) : NULL;
+    Obj* src = g_halo_src ? obj(g_halo_src) : NULL;
+    if (!low || !src || low->container != s->tex[0] || src->kind != O_TEXTURE || !rt->width)
+        return 0;
+    static uint32_t buf;
+    if (!buf)
+        buf = gheap_alloc(4 * 28, 1);
+    static int said;
+    if (!said++)
+        rt_log("[recomp] d3d8: summon halos: drawn from the %ux%u silhouette (fix_summon_halos)\n", src->width, src->height);
+    memcpy(GUEST_PTR(buf), GUEST_PTR(data), 4 * 28);
+    float k = (float)rt->width / 640.0f, x0 = u2f(rd32(data)), y0 = u2f(rd32(data + 4));
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        uint32_t v = buf + 28u * i;
+        wr32(v, f2u(u2f(rd32(v)) + x0 * (k - 1.0f)));
+        wr32(v + 4, f2u(u2f(rd32(v + 4)) + y0 * (k - 1.0f)));
+    }
+    return buf;
+}
+
+/* Shine (fix_shine). Two kinds, one draw each on the PC, both added by stage 1 as MODULATEALPHA_ADDCOLOR (CURRENT,
+ * TEXTURE): current + current alpha x texture, where stage 0's alpha is the texture's alpha x strength / 2 (TFACTOR's
+ * alpha) x 2, the PS2's alpha read on the 0xFF = 1.0 scale instead of its 0x80 = 1.0: half the PS2's shine.
+ * - Sphere map (gold plates and the like: texture coordinates CAMERASPACENORMAL | 1): the identity texture matrix
+ *   reads (nx, ny), a quarter of the map, its dark corner on a face turned to the camera. Drawn with the PS2's
+ *   mapping, u = 0.5 + 0.5 nx, v = 0.5 - 0.5 ny, and twice the strength: stage 1 = texture x 2 x current's alpha into
+ *   TEMP, stage 2 = current + TEMP.
+ * - The light's highlight on weapons and armour (CAMERASPACEREFLECTIONVECTOR | 1, a cube): the texture matrix turns the
+ *   reflection over (diag(1, -1, -1)), so the spot is found looking away from the light; the PS2's sphere-mapped spot
+ *   texture pasted on the cube's -Z face has half its spread; and it is white, at half strength. Drawn with the flip
+ *   taken out, a cube rebuilt from the game's -Z face with the PS2's spread (radius 0.6 x sin(angle / 2), 0.5 the
+ *   texture's edge), and stage 1 = cube x TFACTOR x 4 into TEMP with TFACTOR's colour half light 0's diffuse, stage 2
+ *   = current + current alpha x TEMP. TFACTOR's alpha (the strength) and the stages' alpha results are the game's.
+ * The shiny batches some weapon files lost (drawn with the plain material) are restored by host/ps2fix.c. */
+static uint32_t g_spot_cube, g_spot_from; /* the highlight cube built from the game's (g_spot_from) */
+
+/* 1 sphere-map shine, 2 the light's highlight, 0 neither */
+static int shine_kind(const State* s)
+{
+    const uint32_t* t = s->tss[1];
+    if (t[1] != 18 || t[2] != 1 || t[3] != 2) /* MODULATEALPHA_ADDCOLOR (CURRENT, TEXTURE) */
+        return 0;
+    return t[11] == (0x10000u | 1) ? 1 : t[11] == (0x30000u | 1) ? 2 : 0;
+}
+
+/* a direction's texel of the game's spot face, bilinear, the spot's corner colour outside */
+static uint32_t spot_sample(const uint32_t* spot, uint32_t n, float u, float v)
+{
+    float x = u * (float)n - 0.5f, y = v * (float)n - 0.5f, acc[4] = { 0, 0, 0, 0 };
+    int x0 = (int)floorf(x), y0 = (int)floorf(y);
+    float fx = x - (float)x0, fy = y - (float)y0;
+    for (int k = 0; k < 4; ++k)
+    {
+        int xi = x0 + (k & 1), yi = y0 + (k >> 1);
+        float w = ((k & 1) ? fx : 1.0f - fx) * ((k >> 1) ? fy : 1.0f - fy);
+        uint32_t c = xi >= 0 && yi >= 0 && xi < (int)n && yi < (int)n ? spot[yi * (int)n + xi] : (spot[0] & 0xFF000000u);
+        for (int b = 0; b < 4; ++b)
+            acc[b] += w * (float)(c >> (8 * b) & 0xFF);
+    }
+    uint32_t out = 0;
+    for (int b = 0; b < 4; ++b)
+        out |= ((uint32_t)lroundf(acc[b]) & 0xFF) << (8 * b);
+    return out;
+}
+
+/* the highlight cube for the game's (built once a cube), or 0 when it can't be made from it */
+static uint32_t spot_cube(uint32_t game)
+{
+    if (game == g_spot_from && g_spot_cube)
+        return g_spot_cube;
+    Obj* g = obj(game);
+    Obj* face = sub(game, 5, 0); /* D3DCUBEMAP_FACE_NEGATIVE_Z */
+    if (!g || g->kind != O_CUBE || !face || !face->mem || (face->format != 21 && face->format != 22) || face->width < 8 ||
+        face->width != face->height)
+        return 0;
+    uint32_t n = face->width, pitch = fmt_pitch(face->format, n);
+    uint32_t* spot = (uint32_t*)malloc(4u * n * n);
+    if (!spot)
+        return 0;
+    for (uint32_t y = 0; y < n; ++y)
+        memcpy(spot + y * n, (const uint8_t*)GUEST_PTR(face->mem) + y * pitch, 4u * n);
+    const uint32_t N = 128;
+    if (g_spot_cube)
+        obj_release(g_spot_cube), g_spot_cube = 0;
+    uint32_t cube = new_texture(O_CUBE, N, N, 1, 0, 21 /* A8R8G8B8 */, 1 /* MANAGED */);
+    for (uint32_t f = 0; f < 6; ++f)
+    {
+        Obj* s = sub(cube, f, 0);
+        uint8_t* px = (uint8_t*)GUEST_PTR(obj_mem(s));
+        uint32_t sp = fmt_pitch(21, N);
+        for (uint32_t y = 0; y < N; ++y)
+            for (uint32_t x = 0; x < N; ++x)
+            {
+                /* this texel's direction, in Direct3D's cube face layout */
+                float a = 2.0f * ((float)x + 0.5f) / (float)N - 1.0f, b = 2.0f * ((float)y + 0.5f) / (float)N - 1.0f, d[3];
+                switch (f)
+                {
+                case 0: d[0] = 1, d[1] = -b, d[2] = -a; break;
+                case 1: d[0] = -1, d[1] = -b, d[2] = a; break;
+                case 2: d[0] = a, d[1] = 1, d[2] = b; break;
+                case 3: d[0] = a, d[1] = -1, d[2] = -b; break;
+                case 4: d[0] = a, d[1] = -b, d[2] = 1; break;
+                default: d[0] = -a, d[1] = -b, d[2] = -1; break;
+                }
+                float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), c = -d[2] / len; /* cos from the axis (-Z) */
+                float r = 0.6f * sqrtf(fmaxf(0.0f, (1.0f - c) * 0.5f)), side = sqrtf(d[0] * d[0] + d[1] * d[1]);
+                /* the same way round as the game's face near the axis: face -Z texel (u, v) is direction (-u, -v) */
+                float u = side > 1e-6f ? 0.5f - r * d[0] / side : 0.5f, v = side > 1e-6f ? 0.5f - r * d[1] / side : 0.5f;
+                uint32_t t = spot_sample(spot, n, u, v);
+                memcpy(px + y * sp + x * 4u, &t, 4);
+            }
+        mark_dirty(s);
+    }
+    free(spot);
+    g_spot_cube = cube, g_spot_from = game;
+    return cube;
+}
+
+/* 1 when a shine draw was drawn here, as the PS2 draws it */
+static int shine_draw(uint32_t prim, uint32_t count, uint32_t indices, uint32_t isize)
+{
+    State* s = &g_dev.cur;
+    int kind = shine_kind(s);
+    uint32_t cube = 0;
+    if (!kind || (kind == 2 && !(cube = spot_cube(s->tex[1]))))
+        return 0;
+    uint32_t keep[3][32], tf = s->rs[60], tex1 = s->tex[1];
+    float keep_m[16];
+    memcpy(keep, s->tss[1], sizeof keep);
+    memcpy(keep_m, s->xf[17], sizeof keep_m); /* D3DTS_TEXTURE1 */
+    uint32_t* t1 = s->tss[1];
+    uint32_t* t2 = s->tss[2];
+    if (kind == 1)
+    {
+        static const float ps2[16] = { 0.5f, 0, 0, 0, 0, -0.5f, 0, 0, 0, 0, 0, 0, 0.5f, 0.5f, 0, 1 };
+        memcpy(s->xf[17], ps2, sizeof ps2);
+        t1[1] = 5, t1[2] = 2, t1[3] = 1 | 0x20; /* MODULATE2X (TEXTURE, CURRENT | ALPHAREPLICATE) */
+        t2[1] = 7, t2[2] = 1, t2[3] = 5;        /* ADD (CURRENT, TEMP) */
+    }
+    else
+    {
+        for (int c = 0; c < 4; ++c) /* diag(1, -1, -1) x the matrix: its second and third rows negated */
+            s->xf[17][4 + c] = -keep_m[4 + c], s->xf[17][8 + c] = -keep_m[8 + c];
+        const Light* l0 = &s->light[0];
+        float rgb[3] = { 1, 1, 1 };
+        if (l0->enabled)
+            for (int i = 0; i < 3; ++i)
+                rgb[i] = u2f(l0->v[1 + i]); /* D3DLIGHT8 Diffuse */
+        s->rs[60] = tf & 0xFF000000u;
+        for (int i = 0; i < 3; ++i)
+            s->rs[60] |= (uint32_t)lroundf(fminf(1.0f, fmaxf(0.0f, rgb[i] * 0.5f)) * 255.0f) << (16 - 8 * i);
+        s->tex[1] = cube;
+        t1[1] = 6, t1[2] = 2, t1[3] = 3; /* MODULATE4X (TEXTURE, TFACTOR) */
+        t2[1] = 18, t2[2] = 1, t2[3] = 5; /* MODULATEALPHA_ADDCOLOR (CURRENT, TEMP) */
+    }
+    t1[28] = 5;          /* RESULTARG TEMP */
+    t2[4] = 2, t2[5] = 5; /* ALPHAOP SELECTARG1 (TEMP) */
+    s->tss[3][1] = 1, s->tss[3][4] = 1; /* stage 3 off */
+    static int said[2];
+    if (!said[kind - 1]++)
+        rt_log(kind == 1 ? "[recomp] d3d8: shine: sphere-mapped shine drawn as on the PS2 (fix_shine)\n"
+                         : "[recomp] d3d8: shine: the light's highlight drawn as on the PS2 (fix_shine)\n");
+    draw(prim, count, 0, indices, isize, 0, 0);
+    memcpy(s->tss[1], keep, sizeof keep);
+    memcpy(s->xf[17], keep_m, sizeof keep_m);
+    s->rs[60] = tf, s->tex[1] = tex1;
+    return 1;
+}
+
+/* Disintegrate (fix_disintegrate). Some effects break a model up: most notably the Shadow Lord's change of form in the
+ * Throne Room (effect file 16/98), and Eald'Narche's, Kam'lanaut's and Selh'teus's. The effect sweeps a particle over
+ * the body; every frame its op 0x65 marks a sphere around it, and on the PS2 each body triangle with a vertex inside a
+ * sphere leaves the body and flies off as a textured piece, with purple smoke and a heat haze where it broke. The PC
+ * runs the same particles, but its interpreter sends op 0x65 to the do-nothing case: the body stays whole.
+ * host/ps2fix.c records the spheres (d3d8_disint_sphere, the actor named by its bone palette) and, as each part of a
+ * character is skinned on the CPU into world space, which palette and vertex buffers it was (d3d8_disint_part). A
+ * capturing actor's part draws (DrawIndexedPrimitive from those buffers) are drawn here: the triangles newly inside a
+ * sphere are taken as pieces (their positions, uv, texture, and colours lit with the draw's own lights, as the PS2
+ * copies the body's lit colours) and the part is drawn from an index list without them. They are drawn one depth bias
+ * step nearer from the actor's first sphere on: the second form is the same mesh in the same pose drawn after the
+ * first, opaque, and would win every depth tie and cover it at once; on the PS2 the first stays on top and only its
+ * holes show the second. The pieces go in before the first interface draw on the target the body was drawn on, with
+ * the PS2's values (mt00's 'disg'): 40 ticks, rising 0.012 a tick (plus up to +-0.003), shrinking from (0.8, 0.8, 1)
+ * to 0.02, tumbling up to (0.0314, 0.0332, 0.0332) radians a tick, one tumble and rise per 30 Hz frame shared by that
+ * frame's pieces; depth tested, no depth write, no blending, MODULATE2X (texture, diffuse). On frames that took
+ * triangles, once a 30 Hz frame at one of them, host/ps2fix.c emits the smoke through the game and a haze element
+ * is made here (g000's 'dist'): a fan of the scene copied, shifted 0.07 in its own frame, turning 0.0698 radians and
+ * rising 0.002 a tick for 30 ticks, its centre's alpha up to 0x78 of 0x80, blended over the scene. An actor with no
+ * spheres for 3 seconds gets its body back. Differences from the PS2 (as portfix's): triangles are taken one at a
+ * time, not a GS packet (about 4) at a time; the PC's meshes cut the body into other triangles; the colours are the
+ * PC's lighting; the haze copies the scene once a frame. */
+#define DIS_TICK 0.06f        /* effect ticks a millisecond */
+#define DIS_PSFRAME 0.03f     /* PS2 frames a millisecond */
+#define DIS_PIECE_LIFE 40.0f  /* ticks */
+#define DIS_PIECE_RISE 0.012f /* a tick */
+#define DIS_PIECE_DRIFT 0.003f
+#define DIS_PIECE_END 0.02f /* its size at the end */
+#define DIS_PIECE_COLOUR 0xFF312029u /* an unlit piece: the body's usual lit colour */
+#define DIS_HAZE_LIFE 30.0f
+#define DIS_HAZE_SHIFT 0.07f
+#define DIS_HOLD_MS 3000u
+#define DIS_MAX_PIECES 20000u
+
+typedef struct DisPart
+{
+    uint64_t key;
+    uint16_t* tri;  /* 3 a triangle: the game's index values */
+    uint8_t* taken; /* a triangle */
+    uint32_t ntri, ntaken, kept;
+    uint32_t ib, ibsize; /* guest memory: the triangles not taken */
+    uint8_t dirty;
+} DisPart;
+
+typedef struct DisActor
+{
+    uint32_t bones; /* its bone palette, as the skinning reads it */
+    uint64_t last;  /* ms: its last sphere */
+    DisPart* parts;
+    uint32_t nparts, cap;
+} DisActor;
+
+typedef struct DisPiece
+{
+    float p[3][3], uv[3][2], spin[3], drift;
+    uint32_t tex, c[3];
+    uint64_t born;
+    uint8_t lit;
+} DisPiece;
+
+typedef struct DisSphere
+{
+    uint32_t bones;
+    float c[3], r;
+} DisSphere;
+
+static struct
+{
+    DisSphere fresh[256], cur[256]; /* marked since the last Present; in use this frame */
+    uint32_t nfresh, ncur;
+    DisActor actors[8];
+    uint32_t nactors;
+    uint32_t part;  /* the palette of the part skinned last, when it is a capturing actor's; else 0 */
+    uint32_t vb[4]; /* its buffers: positions (0, and 1 for the mirrored half), normals (2, 3) */
+    DisPiece* pieces;
+    uint32_t npieces, cappieces;
+    struct
+    {
+        float p[3];
+        uint64_t born;
+    } haze[512];
+    uint32_t nhaze;
+    struct
+    {
+        uint32_t rt;
+        float view[16], proj[16];
+    } views[4]; /* the views the capturing bodies were drawn with this frame, by target */
+    uint32_t nviews;
+    int drawn; /* the pieces, this frame */
+    uint32_t hits, last_hits;                /* triangles taken since Present, and in the frame before */
+    float hit_at[4][3], last_hit_at[4][3];   /* four of them, picked at random: their centres */
+    uint64_t smoke_at;                       /* ms: the smoke last made */
+    uint64_t elem_frame;                     /* the 30 Hz frame of elem_spin and elem_drift */
+    float elem_spin[3], elem_drift;
+    uint32_t haze_tex;   /* a copy of the scene target, for the haze */
+    uint32_t vbuf, vcap; /* guest memory: the pieces' and haze's vertices */
+    uint32_t rand;
+} g_dis = { .rand = 0x9E3779B9u };
+
+static uint64_t dis_ms(void) { return rt_monotonic_ns() / 1000000u; }
+
+static float dis_rand(void) /* 0..1 */
+{
+    g_dis.rand = g_dis.rand * 1664525u + 1013904223u;
+    return (float)(g_dis.rand >> 8) / 16777216.0f;
+}
+
+static DisActor* dis_actor(uint32_t bones)
+{
+    for (uint32_t i = 0; i < g_dis.nactors; ++i)
+        if (g_dis.actors[i].bones == bones)
+            return &g_dis.actors[i];
+    return NULL;
+}
+
+static void dis_actor_free(DisActor* a)
+{
+    for (uint32_t i = 0; i < a->nparts; ++i)
+    {
+        free(a->parts[i].tri), free(a->parts[i].taken);
+        if (a->parts[i].ib)
+            gheap_free(a->parts[i].ib);
+    }
+    free(a->parts);
+    memset(a, 0, sizeof *a);
+}
+
+/* everything let go: the fix turned off */
+static void dis_clear(void)
+{
+    for (uint32_t i = 0; i < g_dis.nactors; ++i)
+        dis_actor_free(&g_dis.actors[i]);
+    for (uint32_t i = 0; i < g_dis.npieces; ++i)
+        if (g_dis.pieces[i].tex)
+            obj_release(g_dis.pieces[i].tex);
+    g_dis.nactors = g_dis.npieces = g_dis.nhaze = g_dis.nfresh = g_dis.ncur = 0;
+    g_dis.part = 0;
+    memset(g_dis.vb, 0, sizeof g_dis.vb);
+}
+
+void d3d8_disint_sphere(uint32_t bones, const float c[3], float r)
+{
+    if (!g_fix_disint || g_dis.nfresh >= 256)
+        return;
+    DisSphere* s = &g_dis.fresh[g_dis.nfresh++];
+    s->bones = bones, s->r = r;
+    memcpy(s->c, c, sizeof s->c);
+}
+
+void d3d8_disint_part(uint32_t palette, const uint32_t vb[4])
+{
+    g_dis.part = g_fix_disint && palette && dis_actor(palette) ? palette : 0;
+    if (g_dis.part)
+        memcpy(g_dis.vb, vb, sizeof g_dis.vb);
+    else
+        memset(g_dis.vb, 0, sizeof g_dis.vb);
+}
+
+int d3d8_disint_capturing(uint32_t palette)
+{
+    return g_fix_disint && palette && dis_actor(palette) != NULL;
+}
+
+int d3d8_disint_smoke(float at[4][3])
+{
+    if (!g_fix_disint)
+        return 0;
+    uint64_t now = dis_ms(), gap = now - g_dis.smoke_at;
+    uint32_t hits = g_dis.last_hits < 4 ? g_dis.last_hits : 4;
+    uint32_t ticks = gap > 150 ? 1u : (uint32_t)((float)gap * DIS_PSFRAME + 0.5f); /* 30 Hz frames gone by */
+    ticks = ticks < hits ? ticks : hits;
+    for (uint32_t e = 0; e < ticks && g_dis.nhaze < 512; ++e)
+    {
+        memcpy(g_dis.haze[g_dis.nhaze].p, g_dis.last_hit_at[e], 12);
+        g_dis.haze[g_dis.nhaze++].born = now;
+    }
+    if (ticks)
+    {
+        g_dis.last_hits = 0;
+        g_dis.smoke_at = gap > 150 ? now : g_dis.smoke_at + (uint64_t)((float)ticks / DIS_PSFRAME + 0.5f);
+        memcpy(at, g_dis.last_hit_at, 12u * ticks);
+    }
+    return (int)ticks;
+}
+
+/* Present: this frame's spheres are used by the next frame's draws */
+static void dis_present(void)
+{
+    g_dis.drawn = 0, g_dis.nviews = 0, g_dis.part = 0;
+    memset(g_dis.vb, 0, sizeof g_dis.vb);
+    if (!g_fix_disint)
+    {
+        if (g_dis.nactors || g_dis.npieces || g_dis.nhaze)
+            dis_clear();
+        return;
+    }
+    g_dis.last_hits = g_dis.hits;
+    memcpy(g_dis.last_hit_at, g_dis.hit_at, sizeof g_dis.hit_at);
+    g_dis.hits = 0;
+    memcpy(g_dis.cur, g_dis.fresh, g_dis.nfresh * sizeof g_dis.cur[0]);
+    g_dis.ncur = g_dis.nfresh, g_dis.nfresh = 0;
+    uint64_t now = dis_ms();
+    for (uint32_t i = 0; i < g_dis.ncur; ++i)
+    {
+        DisActor* a = dis_actor(g_dis.cur[i].bones);
+        if (!a && g_dis.nactors < 8)
+        {
+            a = &g_dis.actors[g_dis.nactors++];
+            memset(a, 0, sizeof *a);
+            a->bones = g_dis.cur[i].bones;
+        }
+        if (a)
+            a->last = now;
+    }
+    for (uint32_t i = 0; i < g_dis.nactors;)
+        if (now - g_dis.actors[i].last > DIS_HOLD_MS)
+        {
+            dis_actor_free(&g_dis.actors[i]);
+            g_dis.actors[i] = g_dis.actors[--g_dis.nactors];
+            memset(&g_dis.actors[g_dis.nactors], 0, sizeof g_dis.actors[0]);
+        }
+        else
+            ++i;
+}
+
+/* a body's lit colour at a vertex, as the fixed-function pipeline lights it (D3DLIGHT8, D3DMATERIAL8 as dwords) */
+static uint32_t dis_lit(const State* s, const float* p, const float* nin)
+{
+    float n[3] = { nin[0], nin[1], nin[2] }, l2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+    float inv = l2 > 1e-12f ? 1.0f / sqrtf(l2) : 0.0f, amb[3], ma[3], md[3], c[3];
+    for (int j = 0; j < 3; ++j)
+    {
+        n[j] *= inv;
+        amb[j] = (float)(s->rs[139] >> (16 - 8 * j) & 0xFF) / 255.0f; /* AMBIENT */
+        md[j] = u2f(s->mat[j]), ma[j] = u2f(s->mat[4 + j]);
+        c[j] = u2f(s->mat[12 + j]) + ma[j] * amb[j];
+    }
+    int used = 0;
+    for (int i = 0; i < MAX_LIGHTS && used < 8; ++i)
+    {
+        const Light* L = &s->light[i];
+        if (!L->enabled)
+            continue;
+        ++used;
+        const uint32_t* v = L->v;
+        float d[3], att = 1.0f;
+        if (v[0] == 3) /* directional */
+            d[0] = -u2f(v[16]), d[1] = -u2f(v[17]), d[2] = -u2f(v[18]);
+        else
+        {
+            for (int j = 0; j < 3; ++j)
+                d[j] = u2f(v[13 + j]) - p[j];
+            float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (dist > u2f(v[19]))
+                continue;
+            float q = u2f(v[21]) + u2f(v[22]) * dist + u2f(v[23]) * dist * dist;
+            att = q > 1e-6f ? 1.0f / q : 1.0f;
+        }
+        float ll = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (ll < 1e-12f)
+            continue;
+        for (int j = 0; j < 3; ++j)
+            d[j] /= ll;
+        if (v[0] == 2) /* spot */
+        {
+            float dx = u2f(v[16]), dy = u2f(v[17]), dz = u2f(v[18]), dl = sqrtf(dx * dx + dy * dy + dz * dz);
+            float rho = dl > 1e-12f ? -(d[0] * dx + d[1] * dy + d[2] * dz) / dl : 1.0f;
+            float cp = cosf(u2f(v[25]) * 0.5f), ct = cosf(u2f(v[24]) * 0.5f);
+            if (rho <= cp)
+                continue;
+            if (rho < ct && ct > cp)
+                att *= powf((rho - cp) / (ct - cp), u2f(v[20]));
+        }
+        float nd = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+        nd = nd > 0.0f ? nd : 0.0f;
+        for (int j = 0; j < 3; ++j)
+            c[j] += att * (ma[j] * u2f(v[9 + j]) + md[j] * u2f(v[1 + j]) * nd);
+    }
+    uint32_t out = 0xFF000000u;
+    for (int j = 0; j < 3; ++j)
+        out |= (uint32_t)(fminf(fmaxf(c[j], 0.0f), 1.0f) * 255.0f + 0.5f) << (16 - 8 * j);
+    return out;
+}
+
+/* the part draw's triangles (a list or a strip unpacked), read once */
+static void dis_read(DisPart* p, uint32_t prim, uint32_t count, uint32_t indices, const Obj* ib)
+{
+    uint32_t n = prim == 4 ? count * 3 : count + 2;
+    if (!indices || indices < ib->mem || indices + 2u * n > ib->mem + ib->size)
+        return;
+    p->tri = (uint16_t*)malloc(6u * count);
+    p->taken = (uint8_t*)calloc(count ? count : 1, 1);
+    if (!p->tri || !p->taken)
+    {
+        free(p->tri), free(p->taken), p->tri = NULL, p->taken = NULL;
+        return;
+    }
+    const uint8_t* idx = (const uint8_t*)GUEST_PTR(indices);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uint16_t t[3];
+        memcpy(t, idx + 2u * (prim == 4 ? 3 * i : i), 6);
+        if (prim == 5 && (i & 1))
+        {
+            uint16_t x = t[0];
+            t[0] = t[1], t[1] = x;
+        }
+        if (t[0] == t[1] || t[1] == t[2] || t[0] == t[2])
+            continue;
+        memcpy(p->tri + 3 * p->ntri++, t, 6);
+    }
+}
+
+/* a capturing actor's part draw: the triangles inside this frame's spheres taken, the rest drawn; 1 when drawn here */
+static int dis_draw(uint32_t prim, uint32_t count, uint32_t indices, uint32_t isize)
+{
+    State* s = &g_dev.cur;
+    if (!g_dis.part || (prim != 4 && prim != 5) || isize != 2)
+        return 0;
+    uint32_t pos = s->stream[0];
+    int half = !pos || s->stride[0] != 12 ? -1 : pos == g_dis.vb[0] ? 0 : pos == g_dis.vb[1] ? 1 : -1;
+    Obj* ib = obj(s->ib);
+    Obj* pv = obj(pos);
+    DisActor* a = dis_actor(g_dis.part);
+    if (half < 0 || !ib || !ib->mem || !pv || !a)
+        return 0;
+    uint32_t base = s->base_vertex, start = (indices - ib->mem) / 2;
+    /* keyed by the positions too: a mirrored part (the other arm) is the same index range drawn from the skinner's
+     * second output, and on the PS2 each side breaks up on its own */
+    uint64_t key = ((uint64_t)s->ib << 32 ^ (uint64_t)start << 12 ^ (uint64_t)count << 1 ^ (uint64_t)(prim == 5)) ^
+        (((uint64_t)pos ^ (uint64_t)base << 24) * 0x9E3779B97F4A7C15ull);
+    DisPart* p = NULL;
+    for (uint32_t i = 0; i < a->nparts && !p; ++i)
+        if (a->parts[i].key == key)
+            p = &a->parts[i];
+    if (!p)
+    {
+        if (a->nparts == a->cap)
+        {
+            uint32_t cap = a->cap ? a->cap * 2 : 64;
+            DisPart* np = (DisPart*)realloc(a->parts, cap * sizeof *np);
+            if (!np)
+                return 0;
+            a->parts = np, a->cap = cap;
+        }
+        p = &a->parts[a->nparts++];
+        memset(p, 0, sizeof *p);
+        p->key = key;
+        dis_read(p, prim, count, indices, ib);
+    }
+    int any = 0;
+    for (uint32_t i = 0; i < g_dis.ncur && !any; ++i)
+        any = g_dis.cur[i].bones == g_dis.part;
+    uint32_t verts = pv->mem ? pv->size / 12 : 0;
+    if (any && p->ntaken < p->ntri && verts)
+    {
+        const uint8_t* pp = (const uint8_t*)GUEST_PTR(pv->mem);
+        Obj* uv = obj(s->stream[2]);
+        uint32_t uvs = s->stride[2];
+        const uint8_t* up = uv && uv->mem && uvs >= 8 ? (const uint8_t*)GUEST_PTR(uv->mem) : NULL;
+        /* the normals, skinned with the positions (stream 1); unit length, or it isn't a normal buffer */
+        Obj* nv = s->rs[137] && s->stream[1] == g_dis.vb[half + 2] && s->stride[1] == 12 ? obj(s->stream[1]) : NULL;
+        const uint8_t* np = nv && nv->mem && nv->size / 12 >= verts ? (const uint8_t*)GUEST_PTR(nv->mem) : NULL;
+        if (np)
+        {
+            float n0[3];
+            memcpy(n0, np, 12);
+            float l2 = n0[0] * n0[0] + n0[1] * n0[1] + n0[2] * n0[2];
+            if (l2 < 0.8f || l2 > 1.2f)
+                np = NULL;
+        }
+        uint64_t now = dis_ms();
+        for (uint32_t i = 0; i < p->ntri; ++i)
+        {
+            if (p->taken[i])
+                continue;
+            float v[3][3];
+            uint32_t vi[3];
+            int ok = 1, in = 0;
+            for (int k = 0; k < 3 && ok; ++k)
+            {
+                vi[k] = base + p->tri[3 * i + k];
+                ok = vi[k] < verts;
+                if (ok)
+                    memcpy(v[k], pp + 12u * vi[k], 12);
+            }
+            for (uint32_t j = 0; ok && j < g_dis.ncur && !in; ++j)
+            {
+                const DisSphere* sp = &g_dis.cur[j];
+                for (int k = 0; sp->bones == g_dis.part && k < 3 && !in; ++k)
+                {
+                    float x = v[k][0] - sp->c[0], y = v[k][1] - sp->c[1], z = v[k][2] - sp->c[2];
+                    in = x * x + y * y + z * z < sp->r * sp->r;
+                }
+            }
+            if (!in)
+                continue;
+            p->taken[i] = 1, ++p->ntaken, p->dirty = 1, ++g_dis.hits;
+            uint32_t slot = g_dis.hits <= 4 ? g_dis.hits - 1 : (uint32_t)(dis_rand() * (float)g_dis.hits);
+            if (slot < 4)
+                for (int j = 0; j < 3; ++j)
+                    g_dis.hit_at[slot][j] = (v[0][j] + v[1][j] + v[2][j]) / 3.0f;
+            if (g_dis.npieces >= DIS_MAX_PIECES)
+                continue;
+            if (g_dis.npieces == g_dis.cappieces)
+            {
+                uint32_t cap = g_dis.cappieces ? g_dis.cappieces * 2 : 1024;
+                DisPiece* n = (DisPiece*)realloc(g_dis.pieces, cap * sizeof *n);
+                if (!n)
+                    continue;
+                g_dis.pieces = n, g_dis.cappieces = cap;
+            }
+            DisPiece* f = &g_dis.pieces[g_dis.npieces++];
+            memset(f, 0, sizeof *f);
+            for (int k = 0; k < 3; ++k)
+            {
+                memcpy(f->p[k], v[k], 12);
+                if (up && (vi[k] + 1) * uvs <= uv->size)
+                    memcpy(f->uv[k], up + vi[k] * uvs, 8);
+                if (np)
+                    f->c[k] = dis_lit(s, v[k], (const float*)(np + 12u * vi[k]));
+            }
+            f->lit = np != NULL;
+            /* mt00's element: a random tumble up to op 0c's rates and a rise up to op 03's on op 02's, one a 30 Hz frame */
+            uint64_t elem = now * 3 / 100;
+            if (elem != g_dis.elem_frame)
+            {
+                static const float spin[3] = { 0.0314f, 0.0332f, 0.0332f };
+                g_dis.elem_frame = elem;
+                for (int j = 0; j < 3; ++j)
+                    g_dis.elem_spin[j] = spin[j] * (dis_rand() * 2.0f - 1.0f);
+                g_dis.elem_drift = DIS_PIECE_DRIFT * (dis_rand() * 2.0f - 1.0f);
+            }
+            memcpy(f->spin, g_dis.elem_spin, sizeof f->spin);
+            f->drift = g_dis.elem_drift;
+            f->born = now;
+            if ((f->tex = s->tex[0]) != 0)
+                obj_addref(f->tex);
+        }
+        static int said;
+        if (!said++)
+            rt_log("[recomp] d3d8: disintegrate: a model broken into pieces as on the PS2 (fix_disintegrate)\n");
+    }
+    /* the view this body is drawn with, for the pieces */
+    uint32_t vi = 0;
+    while (vi < g_dis.nviews && g_dis.views[vi].rt != g_dev.rt)
+        ++vi;
+    if (vi == g_dis.nviews && vi < 4)
+    {
+        g_dis.views[vi].rt = g_dev.rt;
+        memcpy(g_dis.views[vi].view, s->xf[2], sizeof g_dis.views[vi].view); /* D3DTS_VIEW */
+        memcpy(g_dis.views[vi].proj, s->xf[3], sizeof g_dis.views[vi].proj); /* D3DTS_PROJECTION */
+        g_dis.nviews = vi + 1;
+    }
+    uint32_t bias = s->rs[47]; /* ZBIAS: a step nearer */
+    s->rs[47] = bias + 1;
+    if (!p->ntaken)
+        draw(prim, count, 0, indices, isize, 0, 0);
+    else
+    {
+        if (p->dirty)
+        {
+            p->dirty = 0, p->kept = 0;
+            if (!p->ib && p->ntri)
+                p->ib = gheap_alloc(6u * p->ntri, 0), p->ibsize = 6u * p->ntri;
+            uint16_t* out = p->ib ? (uint16_t*)GUEST_PTR(p->ib) : NULL;
+            for (uint32_t i = 0; out && i < p->ntri; ++i)
+                if (!p->taken[i])
+                    memcpy(out + 3 * p->kept++, p->tri + 3 * i, 6);
+        }
+        if (p->kept) /* else all gone: nothing to draw */
+            draw(4, p->kept, 0, p->ib, 2, 0, 0);
+    }
+    s->rs[47] = bias;
+    return 1;
+}
+
+/* room for n vertices of 24 bytes in guest memory */
+static uint32_t dis_vbuf(uint32_t n)
+{
+    if (n * 24u > g_dis.vcap)
+    {
+        if (g_dis.vbuf)
+            gheap_free(g_dis.vbuf);
+        g_dis.vcap = n * 24u * 2u;
+        g_dis.vbuf = gheap_alloc(g_dis.vcap, 0);
+        if (!g_dis.vbuf)
+            g_dis.vcap = 0;
+    }
+    return g_dis.vbuf;
+}
+
+static void dis_vtx(uint8_t* o, float x, float y, float z, uint32_t c, float u, float v)
+{
+    float f[3] = { x, y, z }, t[2] = { u, v };
+    memcpy(o, f, 12), memcpy(o + 12, &c, 4), memcpy(o + 16, t, 8);
+}
+
+/* the target's pixels as the GPU holds them: a scaled render target's are its drawn size */
+static void dis_gpu_size(const Obj* s, uint32_t* w, uint32_t* h)
+{
+    const Obj* c = s->container ? obj(s->container) : NULL;
+    *w = c && c->pw ? c->pw : s->width, *h = c && c->pw ? c->ph : s->height;
+}
+
+/* g000's 'dist' haze: a fan of a centre and four corners (a diamond of radius 1, op 0f scaling it to 0.4) facing the
+ * camera, turning 0.0698 radians and rising 0.002 a tick for 30 ticks, textured with the scene itself: each vertex
+ * reads the picture at its own place shifted by (0.07, 0.07) in the element's frame. The centre's alpha climbs, holds
+ * near 0x78 of 0x80 and falls; the corners have none. Depth tested, no depth write, alpha blended. */
+static void dis_draw_haze(const float* V, const float* P, uint64_t now)
+{
+    Obj* rt = obj(g_dev.rt);
+    if (!rt)
+        return;
+    uint32_t sf, sl, gw, gh;
+    GfxTex* sg = surface_gpu(rt, &sf, &sl);
+    dis_gpu_size(rt, &gw, &gh);
+    Obj* ht = g_dis.haze_tex ? obj(g_dis.haze_tex) : NULL;
+    if (ht && (ht->width != rt->width || ht->height != rt->height || ht->format != rt->format))
+        obj_release(g_dis.haze_tex), g_dis.haze_tex = 0, ht = NULL;
+    if (!ht)
+    {
+        g_dis.haze_tex = new_texture(O_TEXTURE, rt->width, rt->height, 1, USAGE_RENDERTARGET, rt->format, 0);
+        ht = obj(g_dis.haze_tex);
+    }
+    uint32_t hw = ht && ht->pw ? ht->pw : ht ? ht->width : 0, hh = ht && ht->pw ? ht->ph : ht ? ht->height : 0;
+    if (!sg || !ht || !ht->gpu || hw != gw || hh != gh)
+        return;
+    gfx_copy(sg, sf, sl, 0, 0, gw, gh, ht->gpu, 0, 0, 0, 0);
+    const uint32_t* vp = g_dev.cur.vp;
+    float vx = (float)vp[0], vy = (float)vp[1], vw = (float)vp[2], vh = (float)vp[3];
+    static const float rim[5][2] = { { 0, -1 }, { -1, 0 }, { 0, 1 }, { 1, 0 }, { 0, -1 } };
+    uint32_t buf = dis_vbuf(12u * g_dis.nhaze), n = 0;
+    if (!buf)
+        return;
+    uint8_t* o = (uint8_t*)GUEST_PTR(buf);
+    for (uint32_t i = 0; i < g_dis.nhaze; ++i)
+    {
+        float t = (float)(now - g_dis.haze[i].born) * DIS_TICK, u = t / DIS_HAZE_LIFE;
+        float a = fminf(2.3f * (1.0f - fabsf(2.0f * u - 1.0f)), 1.0f) * 0.94f;
+        a = fminf(fmaxf(a, 0.0f), 1.0f);
+        float p[3] = { g_dis.haze[i].p[0], g_dis.haze[i].p[1] - 0.002f * t, g_dis.haze[i].p[2] }, c[3]; /* y is down */
+        for (int j = 0; j < 3; ++j)
+            c[j] = p[0] * V[j] + p[1] * V[4 + j] + p[2] * V[8 + j] + V[12 + j];
+        float cs = cosf(0.0698f * t) * 0.4f, sn = sinf(0.0698f * t) * 0.4f, fan[6][6];
+        for (int k = 0; k < 6; ++k)
+        {
+            float lx = k ? rim[k - 1][0] : 0.0f, ly = k ? rim[k - 1][1] : 0.0f, sx = lx + DIS_HAZE_SHIFT, sy = ly + DIS_HAZE_SHIFT;
+            float q[3] = { c[0] + lx * cs - ly * sn, c[1] + lx * sn + ly * cs, c[2] };
+            float qs[3] = { c[0] + sx * cs - sy * sn, c[1] + sx * sn + sy * cs, c[2] };
+            float x = qs[0] * P[0] + qs[1] * P[4] + qs[2] * P[8] + P[12], y = qs[0] * P[1] + qs[1] * P[5] + qs[2] * P[9] + P[13];
+            float w = qs[0] * P[3] + qs[1] * P[7] + qs[2] * P[11] + P[15], iw = fabsf(w) > 1e-6f ? 1.0f / w : 0.0f;
+            fan[k][0] = q[0], fan[k][1] = q[1], fan[k][2] = q[2];
+            fan[k][3] = k ? 0.0f : a;
+            fan[k][4] = (vx + (x * iw * 0.5f + 0.5f) * vw) / (float)rt->width;
+            fan[k][5] = (vy + (0.5f - y * iw * 0.5f) * vh) / (float)rt->height;
+        }
+        for (int k = 1; k < 5; ++k)
+        {
+            const int tri[3] = { 0, k, k + 1 };
+            for (int m = 0; m < 3; ++m, ++n)
+            {
+                const float* f = fan[tri[m]];
+                dis_vtx(o + 24u * n, f[0], f[1], f[2], (uint32_t)(f[3] * 255.0f) << 24 | 0xFFFFFFu, f[4], f[5]);
+            }
+        }
+    }
+    State* s = &g_dev.cur;
+    static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    memcpy(s->xf[2], id, sizeof id);
+    s->rs[27] = 1, s->rs[19] = 5, s->rs[20] = 6; /* ALPHABLENDENABLE, SRCALPHA, INVSRCALPHA */
+    s->tss[0][1] = 2, s->tss[0][2] = 2;           /* SELECTARG1 TEXTURE */
+    s->tss[0][4] = 3, s->tss[0][6] = 0;           /* alpha SELECTARG2 DIFFUSE */
+    s->tss[0][13] = s->tss[0][14] = 3;            /* CLAMP */
+    s->tex[0] = g_dis.haze_tex;
+    draw(4, n / 3, 0, 0, 0, buf, 24);
+}
+
+/* the pieces (and haze), drawn before the first interface draw on a target a capturing body was drawn on */
+static void dis_before_draw(void)
+{
+    if (!g_fix_disint || g_dis.drawn || (!g_dis.npieces && !g_dis.nhaze) || !g_dis.nviews || g_dev.cur.vs != 0x144u)
+        return;
+    uint32_t vi = 0;
+    while (vi < g_dis.nviews && g_dis.views[vi].rt != g_dev.rt)
+        ++vi;
+    if (vi == g_dis.nviews) /* an offscreen interface-style pass, not the scene */
+        return;
+    g_dis.drawn = 1;
+    uint64_t now = dis_ms();
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < g_dis.npieces; ++i)
+        if ((float)(now - g_dis.pieces[i].born) * DIS_TICK >= DIS_PIECE_LIFE)
+        {
+            if (g_dis.pieces[i].tex)
+                obj_release(g_dis.pieces[i].tex);
+        }
+        else
+            g_dis.pieces[w++] = g_dis.pieces[i];
+    g_dis.npieces = w, w = 0;
+    for (uint32_t i = 0; i < g_dis.nhaze; ++i)
+        if ((float)(now - g_dis.haze[i].born) * DIS_TICK < DIS_HAZE_LIFE)
+            g_dis.haze[w++] = g_dis.haze[i];
+    g_dis.nhaze = w;
+    if (!g_dis.npieces && !g_dis.nhaze)
+        return;
+    static State keep;
+    keep = g_dev.cur;
+    State* s = &g_dev.cur;
+    const float* V = g_dis.views[vi].view;
+    const float* P = g_dis.views[vi].proj;
+    static const float id[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    /* the PS2's piece pass: depth tested, no depth write, no blending */
+    s->rs[7] = 1, s->rs[14] = 0, s->rs[23] = 4;    /* ZENABLE, ZWRITEENABLE, ZFUNC LESSEQUAL */
+    s->rs[8] = 3, s->rs[22] = 1, s->rs[137] = 0;   /* FILLMODE SOLID, CULLMODE NONE, LIGHTING */
+    s->rs[28] = 0, s->rs[27] = 0, s->rs[15] = 0;   /* FOGENABLE, ALPHABLENDENABLE, ALPHATESTENABLE */
+    s->rs[52] = 0, s->rs[168] = 0xF, s->rs[47] = 0; /* STENCILENABLE, COLORWRITEENABLE, ZBIAS */
+    s->rs[151] = 0, s->rs[167] = 0;               /* VERTEXBLEND, INDEXEDVERTEXBLENDENABLE */
+    s->ps = 0, s->vs = 0x142;                     /* XYZ | DIFFUSE | TEX1 */
+    for (int st = 1; st < 8; ++st)
+        s->tex[st] = 0, s->tss[st][1] = 1, s->tss[st][4] = 1;
+    uint32_t* t0 = s->tss[0];
+    t0[11] = 0, t0[24] = 0;                  /* TEXCOORDINDEX, TEXTURETRANSFORMFLAGS */
+    t0[1] = 5, t0[2] = 2, t0[3] = 0;          /* MODULATE2X (TEXTURE, DIFFUSE) */
+    t0[4] = 3, t0[6] = 0;                     /* alpha SELECTARG2 DIFFUSE */
+    t0[28] = 1;                               /* RESULTARG CURRENT */
+    t0[16] = t0[17] = 2, t0[18] = 0;          /* LINEAR, no mipmaps */
+    t0[13] = t0[14] = 1;                      /* WRAP */
+    memcpy(s->xf[24], id, sizeof id);        /* WORLD */
+    memcpy(s->xf[2], V, sizeof id);
+    memcpy(s->xf[3], P, sizeof id);
+    /* one draw a run of the same texture (they come part by part) */
+    uint32_t buf = dis_vbuf(3u * (g_dis.npieces < 4096 ? g_dis.npieces : 4096));
+    for (uint32_t i = 0; buf && i < g_dis.npieces;)
+    {
+        uint32_t tex = g_dis.pieces[i].tex, n = 0;
+        uint8_t* o = (uint8_t*)GUEST_PTR(buf);
+        for (; i < g_dis.npieces && g_dis.pieces[i].tex == tex && n < 4096; ++i, ++n)
+        {
+            const DisPiece* f = &g_dis.pieces[i];
+            /* y points down, so rising is -y; the element scales by op 0f's (0.8, 0.8, 1) shrinking to 0.02, and turns
+             * about z, then y, then x, about its corners summed and scaled by 0.333 */
+            float t = (float)(now - f->born) * DIS_TICK, rise = (DIS_PIECE_RISE + f->drift) * t;
+            float k = 1.0f - (1.0f - DIS_PIECE_END) * t / DIS_PIECE_LIFE, sc[3] = { 0.8f * k, 0.8f * k, k }, cs[3], sn[3], cen[3];
+            for (int j = 0; j < 3; ++j)
+            {
+                cs[j] = cosf(f->spin[j] * t), sn[j] = sinf(f->spin[j] * t);
+                cen[j] = (f->p[0][j] + f->p[1][j] + f->p[2][j]) * 0.333f;
+            }
+            for (int m = 0; m < 3; ++m)
+            {
+                float q[3], x, y, z;
+                for (int j = 0; j < 3; ++j)
+                    q[j] = (f->p[m][j] - cen[j]) * sc[j];
+                x = q[0] * cs[2] - q[1] * sn[2], y = q[0] * sn[2] + q[1] * cs[2], q[0] = x, q[1] = y;
+                x = q[0] * cs[1] + q[2] * sn[1], z = q[2] * cs[1] - q[0] * sn[1], q[0] = x, q[2] = z;
+                y = q[1] * cs[0] - q[2] * sn[0], z = q[1] * sn[0] + q[2] * cs[0], q[1] = y, q[2] = z;
+                dis_vtx(o + 24u * (3 * n + (uint32_t)m), cen[0] + q[0], cen[1] + q[1] - rise, cen[2] + q[2],
+                    f->lit ? f->c[m] : DIS_PIECE_COLOUR, f->uv[m][0], f->uv[m][1]);
+            }
+        }
+        s->tex[0] = tex;
+        draw(4, n, 0, 0, 0, buf, 24);
+    }
+    if (g_dis.nhaze)
+        dis_draw_haze(V, P, now);
+    g_dev.cur = keep;
+}
+
+/* this frame's button shadows: black quads, alpha blended, for button_body to find a body's own */
+typedef struct BtnQuad
+{
+    uint32_t tex;
+    float x0, y0, x1, y1, u0, v0, u1, v1;
+} BtnQuad;
+static BtnQuad g_btn_shadow[64];
+
+/* 1 for a button's body drawn added over its own shadow: draw it alpha blended instead (portfix's ButtonDraw) */
+static int button_body(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride)
+{
+    const State* s = &g_dev.cur;
+    const uint32_t* rs = s->rs;
+    if (prim != 5 || count != 2 || stride != 28 || s->vs != 0x144u || !data || !s->tex[0] || rs[27] != 1 || rs[19] != 5 ||
+        (rs[20] != 2 && rs[20] != 6))
+        return 0;
+    BtnQuad q = { s->tex[0], 1e30f, 1e30f, -1e30f, -1e30f, 1e30f, 1e30f, -1e30f, -1e30f };
+    int black = 1;
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        uint32_t v = data + 28u * i, c = rd32(v + 16);
+        float x = u2f(rd32(v)), y = u2f(rd32(v + 4)), u = u2f(rd32(v + 20)), t = u2f(rd32(v + 24));
+        q.x0 = fminf(q.x0, x), q.x1 = fmaxf(q.x1, x), q.y0 = fminf(q.y0, y), q.y1 = fmaxf(q.y1, y);
+        q.u0 = fminf(q.u0, u), q.u1 = fmaxf(q.u1, u), q.v0 = fminf(q.v0, t), q.v1 = fmaxf(q.v1, t);
+        black = black && ((c >> 16) & 0xFF) <= 0x10 && ((c >> 8) & 0xFF) <= 0x10 && (c & 0xFF) <= 0x10;
+    }
+    if (rs[20] == 6) /* INVSRCALPHA: a shadow, if black */
+    {
+        if (black && g_btn_shadows < (int)(sizeof g_btn_shadow / sizeof g_btn_shadow[0]))
+            g_btn_shadow[g_btn_shadows++] = q;
+        return 0;
+    }
+    float w = q.x1 - q.x0, h = q.y1 - q.y0;
+    if (!(w > 0.0f) || !(h > 0.0f))
+        return 0;
+    /* the body may be a pixel or so shorter or narrower than its shadow (the config window's small buttons: 48x15
+     * over 48x16), from the same corner of the texture */
+    float crop = fmaxf(1.5f, h * 0.1f);
+    for (int i = 0; i < g_btn_shadows; ++i)
+    {
+        const BtnQuad* sh = &g_btn_shadow[i];
+        float dx = sh->x0 - q.x0, dy = sh->y0 - q.y0;
+        if (sh->tex == q.tex && fabsf(sh->x1 - sh->x0 - w) <= crop && fabsf(sh->y1 - sh->y0 - h) <= crop && dx > 0.0f &&
+            dy > 0.0f && dx <= h * 0.25f && dy <= h * 0.25f && fabsf(sh->u0 - q.u0) <= 1e-3f && fabsf(sh->v0 - q.v0) <= 1e-3f &&
+            fabsf(sh->u1 - q.u1) <= 0.05f && fabsf(sh->v1 - q.v1) <= 0.05f)
+        {
+            static int said;
+            if (!said++)
+                rt_log("[recomp] d3d8: button rims: a button body drawn over its shadow alpha blended (fix_button_rims)\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount) */
 static void IDirect3DDevice8_DrawPrimitive(Guest* g)
 {
+    dis_before_draw();
     g_cap_esp = g->esp;
     world_draw_begin(g);
-    draw(ARG(1), ARG(3), ARG(2), 0, 0, 0, 0);
+    if (g_fix_water && water_ripple(&g_dev.cur))
+        water_flush(), water_hold(ARG(1), ARG(2), ARG(3));
+    else
+        draw(ARG(1), ARG(3), ARG(2), 0, 0, 0, 0), water_flush(); /* a held ripple layer over this one */
     g_draw_zone = 0;
     RET(D3D_OK, 4);
 }
@@ -2103,13 +3117,17 @@ static void IDirect3DDevice8_DrawPrimitive(Guest* g)
  * comes from the indices themselves, not minIndex and NumVertices */
 static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
 {
+    water_flush();
+    dis_before_draw();
     g_cap_esp = g->esp;
     world_draw_begin(g);
     Obj* ib = obj(g_dev.cur.ib);
     if (ib && ib->mem)
     {
         uint32_t isize = ib->format == FMT_INDEX32 ? 4 : 2;
-        draw(ARG(1), ARG(5), 0, ib->mem + ARG(4) * isize, isize, 0, 0);
+        uint32_t at = ib->mem + ARG(4) * isize;
+        if (!(g_fix_disint && dis_draw(ARG(1), ARG(5), at, isize)) && !(g_fix_shine && shine_draw(ARG(1), ARG(5), at, isize)))
+            draw(ARG(1), ARG(5), 0, at, isize, 0, 0);
     }
     else
         gfx_prof_skip(GFX_SKIP_NO_INDICES);
@@ -2238,6 +3256,8 @@ static uint32_t inset_quad(uint32_t data, const Obj* t)
 
 static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
 {
+    water_flush();
+    dis_before_draw();
     g_cap_esp = g->esp;
     if (!(g_dev.cur.vs & 1) && (g_dev.cur.vs & 0xE) == 4 && ARG(3) && rd32(ARG(3) + 8) == 0x3f7ffffeu)
         g_probe_sky = 1; /* transformed vertices at the sky's depth */
@@ -2252,7 +3272,23 @@ static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
     }
     else if (t0 && ARG(1) == 5 && ARG(2) == 2 && ARG(4) == 28 && g_dev.cur.vs == 0x144)
         data = inset_quad(data, t0);
-    draw(ARG(1), ARG(2), 0, 0, 0, data, ARG(4));
+    uint32_t halo = g_fix_halos ? halo_quad(ARG(1), ARG(2), data, ARG(4)) : 0;
+    if (halo)
+    {
+        uint32_t t = g_dev.cur.tex[0];
+        g_dev.cur.tex[0] = g_halo_src; /* the full-size silhouette in place of its copy */
+        draw(ARG(1), ARG(2), 0, 0, 0, halo, ARG(4));
+        g_dev.cur.tex[0] = t;
+    }
+    else if (g_fix_buttons && button_body(ARG(1), ARG(2), ARG(3), ARG(4)))
+    {
+        uint32_t dst = g_dev.cur.rs[20];
+        g_dev.cur.rs[20] = 6; /* DESTBLEND INVSRCALPHA */
+        draw(ARG(1), ARG(2), 0, 0, 0, data, ARG(4));
+        g_dev.cur.rs[20] = dst;
+    }
+    else
+        draw(ARG(1), ARG(2), 0, 0, 0, data, ARG(4));
     bind(&g_dev.cur.stream[0], 0);
     g_dev.cur.stride[0] = 0;
     RET(D3D_OK, 5);
@@ -2262,6 +3298,8 @@ static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
  * IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride) */
 static void IDirect3DDevice8_DrawIndexedPrimitiveUP(Guest* g)
 {
+    water_flush();
+    dis_before_draw();
     g_cap_esp = g->esp;
     draw(ARG(1), ARG(4), 0, ARG(5), ARG(6) == FMT_INDEX32 ? 4 : 2, ARG(7), ARG(8));
     bind(&g_dev.cur.stream[0], 0);

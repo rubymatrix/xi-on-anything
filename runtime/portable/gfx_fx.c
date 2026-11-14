@@ -252,6 +252,17 @@ static const struct
     { "scene_sun_test_turn", offsetof(GfxFxSettings, scene_sun_test_turn), 0.0f },
     /* the game's water models raised this far (units) over the zone surfaces laid at their level (d3d8.c water_lift) */
     { "water_lift", offsetof(GfxFxSettings, water_lift), 0.15f },
+    /* the PC port's own drawing mistakes, drawn as the PS2 draws them (d3d8.c, after portfix): 0 leaves each as the PC
+     * draws it. Port Bastok's sea's tint under its ripples, not lost near the camera; menu buttons without the light rim
+     * along their top and left edges */
+    { "fix_water_layers", offsetof(GfxFxSettings, fix_water_layers), 1.0f },
+    { "fix_button_rims", offsetof(GfxFxSettings, fix_button_rims), 1.0f },
+    /* summons' halos drawn from the full-size silhouette with nudges scaled to the target: a soft halo, not a stepped rim */
+    { "fix_summon_halos", offsetof(GfxFxSettings, fix_summon_halos), 1.0f },
+    /* sphere-mapped metal and the light's highlight on weapons and armour at the PS2's mapping and strength */
+    { "fix_shine", offsetof(GfxFxSettings, fix_shine), 1.0f },
+    /* the PS2's break-up of a model (the Shadow Lord's change of form): pieces, smoke and haze */
+    { "fix_disintegrate", offsetof(GfxFxSettings, fix_disintegrate), 1.0f },
     /* the scene renderer's bounce light (gfx_gi_metal.inc): 0 off, else how much of it the zone and characters take;
      * needs scene 1 or 2 and ray queries */
     { "scene_gi", offsetof(GfxFxSettings, scene_gi), 0.0f },

@@ -46,6 +46,9 @@ the Lighting and Atmosphere pages.
 | Color grading | Graphics › [Color] Color Grading | `grade` | 1.0 (0–1) |
 | Saturation | Graphics › [Color] Saturation | `sat` | 1.12 (0.5–1.5) |
 | Contrast | Graphics › [Color] Contrast | `contrast` | 0.2 (0–0.5) |
+| Shine as on the PS2: sphere-mapped metal at the PS2's mapping and strength, the light's highlight on weapons and armour, and the shiny batches some weapon files lost drawn shiny again (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Shine | `fix_shine` | 1 PS2; 0 as the PC draws it (dull, half strength) |
+| Disintegrate as on the PS2: effects that break a model up (the Shadow Lord's change of form, Eald'Narche's, Kam'lanaut's, Selh'teus's) take it apart into tumbling pieces with smoke and a heat haze (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Disintegrate | `fix_disintegrate` | 1 PS2; 0 as the PC draws it (the model stays whole) |
+| Summons' halos (Carbuncle's) soft, as on the PS2: drawn from the full-size silhouette, not its 256×256 copy (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Summon Halos | `fix_summon_halos` | 1 PS2; 0 as the PC draws them (a thin stepped rim) |
 
 ## 3. Lighting and shadows
 
@@ -120,6 +123,7 @@ the Lighting and Atmosphere pages.
 | Clarity depth | | `water_clarity` | 3.0 |
 | Soft edge | | `water_soft` | 0.15 |
 | Ripple tilt / density | | `water_ripple`, `water_scale` | 0.25 / 0.6 |
+| Port Bastok's sea keeps its tint near the camera: its ripple layer drawn after the tint, as the PS2 does (after [portfix](https://github.com/voetre/portfix)) | Water › [Water] Layer Order | `fix_water_layers` | 1 PS2; 0 as the PC draws it (black close up) |
 
 ## 7. World detail and distance
 
@@ -143,6 +147,7 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+| Menu buttons without the PC's light rim on their top and left edges, as on the PS2 (after [portfix](https://github.com/voetre/portfix)) | Interface › [Menus: Buttons] Button Edges | | fx `fix_button_rims` | 1 PS2; 0 as the PC draws them |
 | Addon scale | Interface › [Addons] Addon Scale | | | 1 (0.5–3), apart from UI Scale; modern.cfg `addon_scale`. Addons draw, place and get the mouse in their own pixels, the back buffer's over this (Windower's UI resolution, Ashita's screen size); the overlay scales them up, ImGui's text made at that size |
 | Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
 
@@ -246,6 +251,7 @@ Config
     │   ├── [Quality] ....... Overall Quality, Renderer, Anti-Aliasing, Texture Filtering, Sharpening
     │   ├── [Color] ......... High Dynamic Range, Tone Mapping, Exposure, Color Grading, Saturation,
     │   │                     Contrast
+    │   ├── [PS2 Accuracy] .. Summon Halos, Shine, Disintegrate
     │   └── [World Detail] .. Draw Distance, Character Distance
     ├── Shadows
     │   ├── [Sun and Moon] .. Shadows, Softness, Sun Size, Soft Quality, Detail
@@ -263,7 +269,7 @@ Config
     │   ├── [Bloom] ......... Strength, Effect Glow, Lamp Glow
     │   └── [Depth of Field]  Strength, Sharp Distance
     ├── Water
-    │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift
+    │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift, Layer Order
     ├── Legacy (the older effects, Renderer: Legacy)
     │   ├── [Lighting] ...... Modern Lighting, Bounce Light
     │   ├── [Shadows] ....... Sun Shadows, Shadow Casters, Shadow Edges, Shadow Detail, Indoor Shadows
@@ -273,6 +279,7 @@ Config
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
     │   ├── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   ├── [Menus: Buttons]  Button Edges
     │   ├── [Addons] ........ Addon Scale
     │   └── [Keyboard] ...... Command Key (macOS, iOS)
     ├── Gamepad (also the game's Gamepad buttons)

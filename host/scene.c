@@ -1092,6 +1092,8 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     uint32_t tint = rd32(FFXI_SCENE_TINT);
     if ((tint >> 24) != 0x80 || rd8(FFXI_SCENE_SHINE) || rd8(FFXI_SCENE_SHADOW_MODE) == 1)
         return ++g_ccount.why[2], 0; /* a fading actor (its own target), the shine pass, the silhouette shadows */
+    if (d3d8_disint_capturing(rd32(FFXI_SCENE_PALETTE)))
+        return ++g_ccount.why[2], 0; /* breaking up (disintegrate): the game's draws, which d3d8.c takes apart */
     uint32_t total = rd16(counts) + rd16(counts + 2) + rd32(vbuf + 0x60);
     /* the command stream once without drawing: no environment maps, a texture before every draw, nothing unknown */
     int have_tex = 0, envmap = 0;

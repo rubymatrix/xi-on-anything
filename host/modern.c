@@ -613,6 +613,13 @@ static const Row GRAPHICS_ROWS[] = {
     { "Color Grading", "grade", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Richer color and contrast." },
     { "Saturation", "sat", SLIDER, 0, { 0 }, { 0 }, 0.5f, 1.5f, "How strong the colors are, with Color Grading." },
     { "Contrast", "contrast", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Darker darks and brighter lights, with Color Grading." },
+    HEADER_ROW("PS2 Accuracy"),
+    { "Summon Halos", "fix_summon_halos", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "Summons such as Carbuncle wear the PS2's soft halo. PC: a thin stepped rim, as the PC version draws it." },
+    { "Shine", "fix_shine", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "Gold and polished metal catch the light as on the PS2. PC: dull, half as bright, as the PC version draws it." },
+    { "Disintegrate", "fix_disintegrate", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "Some effects break a model into pieces as on the PS2, such as the Shadow Lord's change of form. PC: it stays whole." },
     HEADER_ROW("World Detail"),
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },
@@ -692,6 +699,8 @@ static const Row WATER_ROWS[] = {
     { "Sun Highlight", "water_spec", SLIDER, 0, { 0 }, { 0 }, 0, 4.0f, "The sun's glint on the water." },
     { "Foam", "water_foam", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Foam where the water meets the shore." },
     { "Surface Lift", "water_lift", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Raises the water over shallow ground it would sink into." },
+    { "Layer Order", "fix_water_layers", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "Port Bastok's sea keeps its blue near the camera, as on the PS2. PC: black close up, as the PC version draws it." },
 };
 
 /* the older effects on the game's own draws (Renderer: Legacy); the modern renderer turns their lighting off */
@@ -773,6 +782,9 @@ static const Row INTERFACE_ROWS[] = {
         "Job Points in the main menu's Status." },
     { "Alter Ego Points", "@hide6", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "Alter Ego Points in the main menu's Status." },
+    HEADER_ROW("Menus: Buttons"),
+    { "Button Edges", "fix_button_rims", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "The title and config buttons without the light, see-through rim on their top and left edges, as on the PS2." },
     HEADER_ROW("Addons"),
     { "Addon Scale", "@addon_scale", SLIDER, 0, { 0 }, { 0 }, 0.5f, 3.0f,
         "How large addons draw, apart from UI Scale. Their windows and text grow with it." },
