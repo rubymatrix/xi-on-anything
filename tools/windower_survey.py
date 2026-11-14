@@ -43,7 +43,8 @@ LOGIN = [
     packet(0x00A, 0x104, [(0x04, le(PLAYER_ID, 4)), (0x08, le(PLAYER_INDEX, 2)), (0x30, le(230, 2)),
                           (0x84, b'Tester'), (0xB4, b'\x01'), (0xB7, b'\x06'), (0xBD, b'\x63'), (0xC2, b'\x31'),
                           (0xE8, le(1500, 4)), (0xEC, le(50, 4))]),
-    packet(0x061, 0x70, [(0x04, le(1500, 4)), (0x08, le(50, 4)), (0x0C, bytes([1, 99, 6, 49]))]),
+    packet(0x061, 0x70, [(0x04, le(1500, 4)), (0x08, le(50, 4)), (0x0C, bytes([1, 99, 6, 49])),
+                         (0x6C, le(2500, 4))]),  # exemplar points to master level 1 (master level 0)
     packet(0x0DF, 0x28, [(0x04, le(PLAYER_ID, 4)), (0x08, le(1400, 4)), (0x0C, le(40, 4)), (0x10, le(1000, 4)),
                          (0x14, le(PLAYER_INDEX, 2)), (0x16, bytes([93, 80])), (0x20, bytes([1, 99, 6, 49]))]),
 ]

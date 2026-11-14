@@ -67,6 +67,10 @@ The app shares its Documents folder through the Files app and Finder (`UIFileSha
 the `FINAL FANTASY XI` folder, with its viewer folder beside it as on desktop, into the app's
 Documents. Without `--game`, the app uses `Documents/FINAL FANTASY XI`.
 
+A build with the PlayOnline client signs in to PlayOnline and updates these files first
+([building.md](building.md#playonline-sign-in-on-iphone-ipad-and-android)), so the folder has to
+stay writable where it is.
+
 `Documents/run.args` adds arguments, one per line, with no shell expansion (as on Android). The log
 goes to `Documents/host64.log` unless the app runs with a terminal (`run`).
 

@@ -88,8 +88,12 @@
 #include "gamecore_config.h"
 #include "lsb_login.h"
 #include "signin.h"
+#ifdef FFXI_POL
+#include "signin_pol.h"
+#endif
 #include "appdefaults.h"
 #include "modern.h"
+#include "vicons.h"
 #include "cexi.h"
 #include "discord.h"
 #include "frame.h"
@@ -127,6 +131,30 @@ extern const RtModule rt_module_ffxi; /* recomp.py --module ffxi */
 #define FFXI_BASE 0x0F000000u /* where FFXi.dll goes: free, below FFXiMain */
 #define DEFAULT_GAME_SERVER 0x7F000001u /* 127.0.0.1: a server on this machine */
 #define XI_APP_ID "xi-on-anything"      /* Linux: the windows' app id, its .desktop file's name */
+
+#if defined(FFXI_WRAP_PROBE_TEST) && !defined(FFXI_ANDROID_VULKAN)
+/* FFXiMain 2025-11-12's occlusion test of a screen rectangle (0x1006c110): its eighth argument is 0 for the sun
+ * flare's, at the sky's depth (d3d8_probe_test). FFXI_PROBE_DRAW=1 leaves it as the game draws it. */
+extern GuestFn rt_wrap_probe_test;
+extern const GuestFn rt_orig_probe_test;
+static void probe_test(Guest* g) { d3d8_probe_test(g, rt_orig_probe_test, (rt_arg(g, 7) & 0xFFu) != 0); }
+#endif
+
+static void probe_hooks_init(void)
+{
+#if defined(FFXI_WRAP_PROBE_TEST) && !defined(FFXI_ANDROID_VULKAN)
+    static const uint8_t entry[16] = { 0x83, 0xec, 0x18, 0x53, 0x55, 0x56, 0x57, 0x8b,
+                                       0x7c, 0x24, 0x2c, 0x89, 0x4c, 0x24, 0x14, 0xd9 }; /* its first bytes */
+    const char* keep = getenv("FFXI_PROBE_DRAW");
+    int ok = FFXI_WRAP_PROBE_TEST == 0x1006c110u && !rt_wrap_probe_test && !(keep && keep[0] == '1');
+    for (int i = 0; ok && i < 16; ++i)
+        ok = rd8(FFXI_WRAP_PROBE_TEST + RD + i) == entry[i];
+    if (ok)
+        rt_wrap_probe_test = probe_test, d3d8_probe_wrapped();
+    rt_log("[recomp] d3d8: characters' occlusion probes %s\n",
+        ok ? "answered without drawing" : "drawn as the game draws them");
+#endif
+}
 
 /* FFXiEntry {989D790D-6236-11D4-80E9-00105A81E890}, IFFXiEntry {989D790C-...} */
 static const uint8_t CLSID_FFXiEntry[16] = { 0x0D, 0x79, 0x9D, 0x98, 0x36, 0x62, 0xD4, 0x11,
@@ -379,8 +407,8 @@ static int parse_hex(const char* s, uint8_t* out, size_t n)
 
 /* --pol-status stdio: the game's PlayOnline requests go to the launcher that holds the PlayOnline
  * session, which sends them on it as retail's core does on its own: the status requests (slots
- * 195/196, the request: at the lobby, at character select, on leaving the world), the content ID
- * list (slots 175/176, the request: loaded again in the game) and the in-game message client's
+ * 195/196: at the lobby, at character select, on leaving the world), the content ID list (slots
+ * 175/176: loaded again in the game) and the in-game message client's
  * (slots 278/275/280: list, read and delete the member's messages). One line out
  * on stdout per request,
  *     [pol-req] begin <id> <verb> <data: hex>
@@ -391,7 +419,7 @@ static int parse_hex(const char* s, uint8_t* out, size_t n)
  * request timeout. */
 #define POL_REQ_SLOTS 8
 #define POL_REQ_TIMEOUT_MS 100000
-#define POL_REQ_MAX 0x4000 /* the largest payload: a message body (polcore reads at most 0x2000) */
+#define POL_REQ_MAX 0x4000 /* the largest payload: a message body (retail reads at most 0x2000) */
 typedef struct PolReqSlot
 {
     volatile uint32_t state; /* 0 free, 1 waiting for the launcher, 2 answered */
@@ -480,6 +508,20 @@ static void pol_req_stdio_reader(void* arg)
     }
 }
 
+#ifdef FFXI_POL
+/* the sign-in screen's own PlayOnline session (signin_pol.h), in this process */
+static int32_t pol_req_own_begin(void* ctx, const char* verb, const uint8_t* data, uint32_t n)
+{
+    (void)ctx;
+    return signin_pol_request_begin(verb, data, n);
+}
+
+static int32_t pol_req_own_poll(void* ctx, int32_t id, uint8_t* out, uint32_t cap, uint32_t* got)
+{
+    (void)ctx;
+    return signin_pol_request_poll(id, out, cap, got);
+}
+#endif
 
 /* w:h (16:9), wxh, w/h, or a ratio (1.778); 0 if it is none of those */
 static double parse_shape(const char* s)
@@ -1006,6 +1048,21 @@ static void chat_keyboard(void)
 }
 #endif
 
+/* host/vicons.c reads the install through the DAT overlays, as the game would */
+static char g_vicons_game[1024];
+
+static uint8_t* vicons_read(const char* rel, size_t* size)
+{
+    char guest[1200], path[1200];
+    snprintf(guest, sizeof guest, "%s\\%s", g_vicons_game, rel);
+    for (char* c = guest; *c; ++c)
+        if (*c == '/')
+            *c = '\\';
+    if (!vfs_overlay_path(guest, path, sizeof path) && !vfs_host_path(guest, path, sizeof path))
+        return NULL;
+    return plat_read_file(path, size);
+}
+
 static void present_hook(void)
 {
 #if defined(FFXI_ANDROID_VULKAN)
@@ -1447,7 +1504,32 @@ int main(int argc, char** argv)
             return 0;
         if (r > 0)
         {
-            game_server = sr.server;
+            if (sr.method == SIGNIN_POL)
+            {
+                /* as a launcher's --session and --auth: the game's hosts through DNS, below */
+                gamecore_set_session(sr.session);
+                gamecore_set_auth_block(sr.auth);
+                memset(sr.session, 0, sizeof sr.session);
+                have_session = 1;
+#ifdef FFXI_POL
+                /* the game's own status requests on the session the screen signed in */
+                GamecoreRequestHost h = { pol_req_own_begin, pol_req_own_poll, NULL };
+                gamecore_set_request_host(&h);
+                static uint8_t table[64 * 0x68], htable[64 * 0x28];
+                int32_t st[5];
+                uint64_t id, key;
+                if (signin_pol_state(table, htable, st, &id, &key))
+                {
+                    gamecore_set_contents(table);
+                    gamecore_set_handles(htable);
+                    gamecore_set_presence(st[0], st[1], st[2], st[3], st[4]);
+                    gamecore_set_member_id(id);
+                    gamecore_set_member_key(key);
+                }
+#endif
+            }
+            else
+                game_server = sr.server;
             user32_adopt_window(sr.window);
 #ifdef FFXI_MOBILE
             g_signin_window = sr.window;
@@ -1666,11 +1748,19 @@ int main(int argc, char** argv)
     ole_register_class(CLSID_FFXiEntry, FFXI_BASE);
     gamecore_init();
     geometry_hooks_init();
+    probe_hooks_init();
     d3d8_setup();
     d3d8_set_present_hook(present_hook);
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
         &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen, &g_fps_limit };
     modern_init(&ms);
+    /* status icons drawn from vectors (host/vicons.c); FFXI_VECTOR_ICONS=0 keeps the game's */
+    if (!getenv("FFXI_VECTOR_ICONS") || strcmp(getenv("FFXI_VECTOR_ICONS"), "0"))
+    {
+        snprintf(g_vicons_game, sizeof g_vicons_game, "%s", game);
+        vicons_init(vicons_read);
+        d3d8_set_texture_source(vicons_texture);
+    }
     setup_nameplates();
     setup_water();
     setup_lod();

@@ -391,6 +391,93 @@ static void test_state_blocks(void)
     call(g_dev, D_DeleteStateBlock, 1, block);
 }
 
+/* the fading-character composite (fade_scissor): a render-target texture T laid over the back buffer, point
+ * filtered, alpha tested GREATER 0 on T's alpha */
+static void composite(uint32_t tex)
+{
+    call(g_dev, D_SetTexture, 2, 0, tex);
+    call(g_dev, D_SetTextureStageState, 3, 0, 1, 4 /* COLOROP MODULATE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 3, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 4, 4 /* ALPHAOP MODULATE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 6, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTextureStageState, 3, 1, 4, 1 /* stage 1 ALPHAOP DISABLE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 16, 1); /* MAGFILTER point */
+    call(g_dev, D_SetTextureStageState, 3, 0, 17, 1); /* MINFILTER point */
+    call(g_dev, D_SetRenderState, 2, 15, 1);          /* ALPHATESTENABLE */
+    call(g_dev, D_SetRenderState, 2, 24, 0);          /* ALPHAREF 0 */
+    call(g_dev, D_SetRenderState, 2, 25, 5);          /* ALPHAFUNC GREATER */
+    call(g_dev, D_SetVertexShader, 1, 0x144);
+    uint32_t v = galloc(4 * sizeof(UiVert));
+    UiVert q[4] = { { 0, 0, 0.5f, 1, 0xFFFFFFFFu, 0, 0 }, { W, 0, 0.5f, 1, 0xFFFFFFFFu, 1, 0 }, { 0, H, 0.5f, 1, 0xFFFFFFFFu, 0, 1 },
+                    { W, H, 0.5f, 1, 0xFFFFFFFFu, 1, 1 } };
+    memcpy(GUEST_PTR(v), q, sizeof q);
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v, (uint32_t)sizeof(UiVert));
+    call(g_dev, D_SetRenderState, 2, 15, 0);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+}
+
+/* What a DrawPrimitiveUP draws into a fading character's scratch target is what the composite keeps, even with a
+ * vertex buffer bound whose vertices are elsewhere: the rectangle followed is the UP draw's own vertices'. */
+static void test_fade_scissor_up(void)
+{
+    call(g_dev, D_SetRenderState, 2, 7, 0);   /* ZENABLE off */
+    call(g_dev, D_SetRenderState, 2, 137, 0); /* LIGHTING off */
+    call(g_dev, D_SetRenderState, 2, 22, 1);  /* CULL none */
+    call(g_dev, D_CreateTexture, 7, W, H, 1, 1 /* RENDERTARGET */, 21 /* A8R8G8B8 */, 0, g_out);
+    uint32_t tex = rd32(g_out);
+    call(tex, T_GetSurfaceLevel, 2, 0, g_out);
+    uint32_t surf = rd32(g_out);
+    /* the first composite of T: followed from its next clear */
+    call(g_dev, D_SetRenderTarget, 2, surf, 0);
+    clear(0x00000000u);
+    call(g_dev, D_SetRenderTarget, 2, g_bb, 0);
+    composite(tex);
+
+    /* a vertex buffer whose four vertices cover the top-left quarter, bound to stream 0 */
+    uint32_t pp = galloc(4);
+    call(g_dev, D_CreateVertexBuffer, 5, 4 * 16, 0x8, 0x42, 1, g_out);
+    uint32_t vb = rd32(g_out);
+    call(vb, B_Lock, 4, 0, 0, pp, 0);
+    float tl[4][4] = { { -1, 1, 0.5f, 0 }, { 0, 1, 0.5f, 0 }, { -1, 0, 0.5f, 0 }, { 0, 0, 0.5f, 0 } };
+    memcpy(GUEST_PTR(rd32(pp)), tl, sizeof tl);
+    call(vb, B_Unlock, 0);
+    call(g_dev, D_SetStreamSource, 3, 0, vb, 16);
+
+    /* T cleared to alpha 0, then a red quad in its bottom-right quarter, drawn UP */
+    call(g_dev, D_SetRenderTarget, 2, surf, 0);
+    clear(0x00000000u);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(g_dev, D_SetTextureStageState, 3, 0, 1, 2 /* COLOROP SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 4, 2 /* ALPHAOP SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 0 /* DIFFUSE */);
+    call(g_dev, D_SetVertexShader, 1, 0x42);
+    uint32_t v = galloc(4 * 16);
+    float br[4][4] = { { 0, 0, 0.5f, 0 }, { 1, 0, 0.5f, 0 }, { 0, -1, 0.5f, 0 }, { 1, -1, 0.5f, 0 } };
+    for (int i = 0; i < 4; ++i)
+    {
+        uint32_t c = 0xFFFF0000u;
+        memcpy(&br[i][3], &c, 4);
+    }
+    memcpy(GUEST_PTR(v), br, sizeof br);
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v, 16u);
+
+    /* laid over a black back buffer: the red is there */
+    call(g_dev, D_SetRenderTarget, 2, g_bb, 0);
+    clear(0xFF000000u);
+    composite(tex);
+    CHECK(pixel(24, 24) == 0xFF0000 && pixel(4, 4) == 0, "fade composite after an UP draw with a buffer bound: %06x %06x (want ff0000 000000)",
+        pixel(24, 24), pixel(4, 4));
+
+    call(g_dev, D_SetStreamSource, 3, 0, 0, 0);
+    call(g_dev, D_SetRenderState, 2, 7, 1);
+    call(surf, S_Release, 0);
+    call(vb, D_Release, 0);
+    call(tex, D_Release, 0);
+}
+
 int main(void)
 {
     if (!gwin_init())
@@ -427,6 +514,7 @@ int main(void)
     test_copyrects();
     test_texture_pack();
     test_state_blocks();
+    test_fade_scissor_up();
     call(g_dev, D_Present, 4, 0, 0, 0, 0);
     printf(g_fails ? "d3d8_test: %d failed\n" : "d3d8_test: ok\n", g_fails);
     return g_fails != 0;

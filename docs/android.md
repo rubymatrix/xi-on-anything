@@ -7,8 +7,11 @@ back ends keep their own build paths.
 
 The APK is a debug client. It opens on the sign-in screen, as the desktop and
 iPhone builds do, or signs in to a LandSandBoat server with the account given in
-`run.args` as `--user` and `--pass`. Passwords are not saved on Android (there is
-no keychain here), and `--session`/`--auth` on the command line are refused. It
+`run.args` as `--user` and `--pass`. Remember Password keeps passwords in the
+Android Keystore: each one encrypted with an AES key the Keystore makes and
+holds (`MainActivity.keychainSet`, `host/keychain.c`), only the ciphertext in the
+app's private preferences; no password is written anywhere in the clear.
+`--session`/`--auth` on the command line are refused. It
 contains no password, game files, captures or generated game code: bring your
 own compatible client installation and server. The C++ back end does not
 implement the Modern FX extensions; the game's own D3D8 lighting, fog, textures
@@ -16,10 +19,49 @@ and shadows work. Config > Advanced shows only the pages that apply here: Displa
 (Frame Rate, Interface Shape and the window and resolution settings), Interface
 and Addons. It plays with the touch controls below, a controller, or a keyboard.
 
+## From the launcher
+
+The launcher's phone page (Phone > Android) does everything below for a player,
+on macOS, Linux or Windows: it fetches the Android tools (the NDK, SDK platform
+and build tools, platform tools and CMake from Google's repository, pinned by
+their checksums, and a Java 17 when there is none), lists the devices `adb`
+sees, with what to do about USB or wireless debugging, and runs
+
+```sh
+python3 tools/build_android.py install --device SERIAL --keystore KEY.p12 --key-alias xi
+```
+
+with the key's password in `XI_ANDROID_KEYSTORE_PASS`. `install` builds the
+dependencies once (`android_deps.py`), the API 29 host, and the APK, then
+installs it with `adb install -r -d`, keeping the app's files. The launcher
+makes one signing key per player and asks them to back it up: Android installs
+an update only when it is signed with the same key as the app there. Without
+`--keystore`, `build_android_apk.py` signs with a test key in the dependency
+cache, for development only.
+
+The APK's `versionName` is `runtime.json`'s version and its `versionCode` the
+game build's digits (20261102), what the launcher reads back
+(`dumpsys package`) to say whether the phone's app is current, as the iPhone
+app's `CFBundleShortVersionString` and `CFBundleVersion`.
+
+Without `run.args`, the app runs the game in its external files folder
+(`/sdcard/Android/data/com.rubymatrix.xionanything/files/FINAL FANTASY XI`, the
+PlayOnline viewer beside it; an older `game` folder there still works), with
+the base registry the APK carries (`ffxi.reg`) and no `--server`, so the
+sign-in screen's server is used. The launcher copies the game there with
+`adb push` and updates it with only the files changed since the phone's
+`patch.ver`, `patch.cfg` and then `patch.ver` last. An account sent from the
+launcher goes into the app's private files (`adb shell run-as`, its stdin, which needs
+the debuggable APK), never into shared storage: `host/signin.c` reads that
+`import.json` once at start, puts its passwords in the Keystore, removes it and
+fills in the sign-in screen. Phones never sign in by themselves: the player taps
+Sign in (an account that needs a one-time password gets its code field focused).
+
 ## Build on macOS or Linux
 
-Requirements: Python 3.12+ (`capstone`, `pefile`), CMake, Ninja, JDK 17, Android SDK
-platform 36 and build-tools 36.0.0, and NDK 27.0.12077973. Set the paths for your machine:
+Requirements: Python 3.12+ (`capstone`, `pefile`), CMake and Ninja (the SDK's
+`cmake;3.22.1` package has both), JDK 17, Android SDK platform 36 and build-tools
+36.0.0, and NDK 27.0.12077973. Set the paths for your machine:
 
 ```sh
 export ANDROID_HOME=/path/to/android-sdk
@@ -28,8 +70,14 @@ export JAVA_HOME=/path/to/jdk17
 python3 tools/build_posix.py prepare --game /path/to/FINAL-FANTASY-XI
 python3 tools/android_deps.py
 python3 tools/build_android.py host --native-tls
-python3 tools/build_android_apk.py
+python3 tools/build_android_apk.py [--keystore your-key.p12 --key-alias xi]
 ```
+
+LuaJIT is built with the NDK's own `make`; its two host tools with `clang`
+(`XI_HOST_CC` names another compiler). On Windows, where MSVC's `cl` does not
+take LuaJIT's GCC-style flags, point it at llvm-mingw's clang, with forward
+slashes and no spaces in the path, for example
+`XI_HOST_CC=C:/llvm-mingw-20250114-ucrt-x86_64/bin/clang.exe`.
 
 `android_deps.py` downloads hash-pinned SDL3 3.4.16, glslang 16.5.0 and its
 SPIRV-Tools and SPIRV-Headers dependencies, and builds them for ARM64. Downloads
@@ -44,7 +92,8 @@ translated from the same prepared files. All generated game code stays ignored.
 `--native-tls` targets API 29 and its ELF TLS; without it the build targets API 28
 with emulated TLS. The object cache keys include the compiler command. Packaging
 checks the library's hash against its build metadata and sets the matching
-minimum API. The signing key is created in the dependency directory. Neither the
+minimum API. Without `--keystore`, a test signing key is created in the
+dependency directory. Neither the
 build nor packaging installs an APK or changes device settings.
 
 The APK is `build/android/xi-native-test.apk`, package `com.rubymatrix.xionanything`,

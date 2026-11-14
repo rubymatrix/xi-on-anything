@@ -63,6 +63,8 @@ int keychain_set(const char* key, const char* password)
     CFRelease(change);
     CFRelease(q);
     CFRelease(data);
+    if (st != errSecSuccess) /* -34018 errSecMissingEntitlement: the app has no application-identifier */
+        fprintf(stderr, "[keychain] not saved: OSStatus %d\n", (int)st);
     return st == errSecSuccess;
 }
 
@@ -244,6 +246,125 @@ void keychain_delete(const char* key)
 }
 
 int keychain_available(void) { return ss(); }
+
+#elif defined(__ANDROID__)
+#include <jni.h>
+#include <SDL3/SDL.h>
+
+/* The activity's keychainGet/Set/Delete (MainActivity.java): an AES key the Android Keystore keeps,
+ * the passwords only ever stored encrypted with it, in the app's private preferences. Any thread:
+ * SDL attaches it to the VM, and the activity's own class is used (an attached thread's FindClass
+ * can't see the app's classes). */
+static JNIEnv* activity(jobject* out, jclass* cls)
+{
+    JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
+    *out = env ? (jobject)SDL_GetAndroidActivity() : NULL;
+    if (!*out)
+        return NULL;
+    *cls = (*env)->GetObjectClass(env, *out);
+    return env;
+}
+
+static void done(JNIEnv* env, jobject act, jclass cls)
+{
+    if ((*env)->ExceptionCheck(env))
+    {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, act);
+}
+
+int keychain_get(const char* key, char* out, size_t n)
+{
+    jobject act;
+    jclass cls;
+    JNIEnv* env = activity(&act, &cls);
+    if (!env)
+        return 0;
+    int ok = 0;
+    jmethodID m = (*env)->GetMethodID(env, cls, "keychainGet", "(Ljava/lang/String;)[B");
+    jstring k = m ? (*env)->NewStringUTF(env, key) : NULL;
+    jbyteArray data = k ? (jbyteArray)(*env)->CallObjectMethod(env, act, m, k) : NULL;
+    if (data && !(*env)->ExceptionCheck(env))
+    {
+        jsize len = (*env)->GetArrayLength(env, data);
+        jbyte* bytes = (*env)->GetByteArrayElements(env, data, NULL);
+        ok = bytes && len >= 0 && (size_t)len < n;
+        if (ok)
+        {
+            memcpy(out, bytes, (size_t)len);
+            out[len] = 0;
+        }
+        if (bytes)
+        {
+            memset(bytes, 0, (size_t)len);
+            (*env)->ReleaseByteArrayElements(env, data, bytes, 0); /* the zeros go back to the array */
+        }
+        (*env)->DeleteLocalRef(env, data);
+    }
+    if (k)
+        (*env)->DeleteLocalRef(env, k);
+    done(env, act, cls);
+    return ok;
+}
+
+int keychain_set(const char* key, const char* password)
+{
+    jobject act;
+    jclass cls;
+    JNIEnv* env = activity(&act, &cls);
+    if (!env)
+        return 0;
+    int ok = 0;
+    jmethodID m = (*env)->GetMethodID(env, cls, "keychainSet", "(Ljava/lang/String;[B)Z");
+    jstring k = m ? (*env)->NewStringUTF(env, key) : NULL;
+    jsize len = (jsize)strlen(password);
+    jbyteArray data = k ? (*env)->NewByteArray(env, len) : NULL;
+    if (data)
+    {
+        (*env)->SetByteArrayRegion(env, data, 0, len, (const jbyte*)password);
+        ok = (*env)->CallBooleanMethod(env, act, m, k, data) && !(*env)->ExceptionCheck(env); /* it zeroes data */
+        (*env)->DeleteLocalRef(env, data);
+    }
+    if (k)
+        (*env)->DeleteLocalRef(env, k);
+    done(env, act, cls);
+    if (!ok)
+        fprintf(stderr, "[keychain] not saved\n");
+    return ok;
+}
+
+void keychain_delete(const char* key)
+{
+    jobject act;
+    jclass cls;
+    JNIEnv* env = activity(&act, &cls);
+    if (!env)
+        return;
+    jmethodID m = (*env)->GetMethodID(env, cls, "keychainDelete", "(Ljava/lang/String;)V");
+    jstring k = m ? (*env)->NewStringUTF(env, key) : NULL;
+    if (k)
+    {
+        (*env)->CallVoidMethod(env, act, m, k);
+        (*env)->DeleteLocalRef(env, k);
+    }
+    done(env, act, cls);
+}
+
+/* the activity is there to ask (not in the offscreen tests) */
+int keychain_available(void)
+{
+    jobject act;
+    jclass cls;
+    JNIEnv* env = activity(&act, &cls);
+    if (!env)
+        return 0;
+    int ok = (*env)->GetMethodID(env, cls, "keychainSet", "(Ljava/lang/String;[B)Z") != NULL;
+    done(env, act, cls);
+    return ok;
+}
 
 #elif !defined(FFXI_UWP)
 

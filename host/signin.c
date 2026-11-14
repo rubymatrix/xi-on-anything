@@ -2,7 +2,10 @@
  *
  * Two windows drawn as the game's Config pages are: Sign in (the LandSandBoat username, the
  * password, the one-time code, Sign in and Settings) and Settings (the server, remembering the
- * password, trusting this computer, the window theme, full screen). Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
+ * password, trusting this computer, the window theme, full screen). In a build with the PlayOnline
+ * client (FFXI_POL, signin_pol.h) Settings also picks the method: for PlayOnline, Sign in asks for
+ * the Square Enix ID and its password, the PlayOnline ID and its password, and the one-time
+ * password of a Square Enix account that has one. Keys: Tab and Up/Down move between rows, Left/Right along a row's buttons, Enter or Space
  * picks, Escape goes back or quits; the mouse clicks. A controller: the D-pad moves, A picks or opens
  * the on-screen keyboard over a field, B goes back, Start signs in.
  *
@@ -21,6 +24,10 @@
 #include "plat.h"
 #include "sewave.h"
 #include "signin.h"
+#ifdef FFXI_POL
+#include "build.h" /* FFXI_SHA256: the FFXiMain.dll this client runs */
+#include "signin_pol.h"
+#endif
 #include "discord.h"
 #include "uidraw.h"
 
@@ -29,7 +36,9 @@
 
 typedef struct Config
 {
+    int method; /* SIGNIN_LSB, or SIGNIN_POL in a build with its client */
     char server[128];
+    char sqex_id[64]; /* PlayOnline: the member's Square Enix ID, "" for none */
     char user[64];
     int remember;
     int trust; /* xiloader's "trust this computer" (lsb_login.h) */
@@ -38,6 +47,8 @@ typedef struct Config
     uint16_t auth_port, data_port, view_port;
     char loader_version[24]; /* "": LSB_LOADER_VERSION */
     char background[1024]; /* a picture behind the screen; "": background.png/.jpg beside signin.cfg */
+    int auto_signin;  /* an account sent by the launcher (import.json): sign in as it once its passwords are read (not on phones) */
+    int otp_required; /* ...unless it needs a one-time password, which can't be remembered */
 } Config;
 
 static void config_path(const char* dir, const char* name, char* out, size_t n)
@@ -173,8 +184,12 @@ static void config_load(const char* path, Config* c)
         if (!v)
             continue;
         *v++ = 0;
-        if (!strcmp(line, "server"))
+        if (!strcmp(line, "method"))
+            c->method = !strcmp(v, "pol") ? SIGNIN_POL : SIGNIN_LSB;
+        else if (!strcmp(line, "server"))
             SDL_strlcpy(c->server, v, sizeof c->server);
+        else if (!strcmp(line, "sqex_id"))
+            SDL_strlcpy(c->sqex_id, v, sizeof c->sqex_id);
         else if (!strcmp(line, "user"))
             SDL_strlcpy(c->user, v, sizeof c->user);
         else if (!strcmp(line, "remember"))
@@ -195,6 +210,10 @@ static void config_load(const char* path, Config* c)
             c->view_port = (uint16_t)atoi(v);
         else if (!strcmp(line, "loader_version"))
             SDL_strlcpy(c->loader_version, v, sizeof c->loader_version);
+        else if (!strcmp(line, "auto_signin"))
+            c->auto_signin = atoi(v) != 0;
+        else if (!strcmp(line, "otp_required"))
+            c->otp_required = atoi(v) != 0;
     }
     fclose(f);
 }
@@ -207,7 +226,10 @@ static void config_save(const char* path, const Config* c)
         fprintf(stderr, "[signin] cannot write %s\n", path);
         return;
     }
-    fprintf(f, "server=%s\nuser=%s\nremember=%d\ntheme=%d\n", c->server, c->user, c->remember, c->theme);
+    fprintf(f, "method=%s\nserver=%s\nuser=%s\nremember=%d\ntheme=%d\n", c->method == SIGNIN_POL ? "pol" : "lsb",
+        c->server, c->user, c->remember, c->theme);
+    if (c->sqex_id[0])
+        fprintf(f, "sqex_id=%s\n", c->sqex_id);
     fprintf(f, "fullscreen_space=%d\ntrust=%d\n", c->space, c->trust);
     if (c->background[0])
         fprintf(f, "background=%s\n", c->background);
@@ -215,12 +237,164 @@ static void config_save(const char* path, const Config* c)
         fprintf(f, "auth_port=%u\ndata_port=%u\nview_port=%u\n", c->auth_port, c->data_port, c->view_port);
     if (c->loader_version[0])
         fprintf(f, "loader_version=%s\n", c->loader_version);
+    if (c->auto_signin)
+        fprintf(f, "auto_signin=1\notp_required=%d\n", c->otp_required);
     fclose(f);
 }
 
 static void keychain_key(const Config* c, char* out, size_t n)
 {
-    snprintf(out, n, "lsb:%s:%s", c->server, c->user);
+    if (c->method == SIGNIN_POL)
+        snprintf(out, n, "pol:%s", c->user);
+    else
+        snprintf(out, n, "lsb:%s:%s", c->server, c->user);
+}
+
+/* the Square Enix ID's password, kept beside a PlayOnline member's own: "" for none */
+static void keychain_key_sqex(const Config* c, char* out, size_t n)
+{
+    if (c->method == SIGNIN_POL && c->sqex_id[0])
+        snprintf(out, n, "sqex:%s", c->sqex_id);
+    else
+        out[0] = 0;
+}
+
+/* ---- an account handed over by the launcher on a computer ----
+ * The launcher's phone page puts import.json beside signin.cfg (devicectl, into the iPhone app's
+ * own container, which the Files app doesn't show; on Android into the app's private files): the
+ * sign-in method and IDs, which become the screen's, and the passwords, which go straight to the
+ * keychain. The file is overwritten and
+ * removed at once. One string member's value, JSON-unescaped (\uXXXX as UTF-8); 1 if it is there. */
+static int json_string(const char* text, const char* key, char* out, size_t n)
+{
+    char pat[80];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char* p = strstr(text, pat);
+    if (!p || !n)
+        return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ':')
+        ++p;
+    if (*p++ != '"')
+        return 0;
+    size_t o = 0;
+    for (; *p && *p != '"'; ++p)
+    {
+        unsigned c = (unsigned char)*p;
+        if (c == '\\')
+        {
+            c = (unsigned char)*++p;
+            switch (c)
+            {
+            case 'n': c = '\n'; break;
+            case 't': c = '\t'; break;
+            case 'r': c = '\r'; break;
+            case 'b': c = '\b'; break;
+            case 'f': c = '\f'; break;
+            case 'u':
+            {
+                unsigned v = 0;
+                for (int i = 0; i < 4; ++i)
+                {
+                    char h = p[1 + i];
+                    v = v * 16 + (unsigned)(h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : 0);
+                }
+                p += 4;
+                char u[3];
+                int k = v < 0x80 ? (u[0] = (char)v, 1)
+                        : v < 0x800 ? (u[0] = (char)(0xc0 | v >> 6), u[1] = (char)(0x80 | (v & 0x3f)), 2)
+                                    : (u[0] = (char)(0xe0 | v >> 12), u[1] = (char)(0x80 | (v >> 6 & 0x3f)), u[2] = (char)(0x80 | (v & 0x3f)), 3);
+                for (int i = 0; i < k && o + 1 < n; ++i)
+                    out[o++] = u[i];
+                continue;
+            }
+            default: break; /* \" \\ \/ */
+            }
+            if (!c)
+                break;
+        }
+        if (o + 1 < n)
+            out[o++] = (char)c;
+    }
+    out[o] = 0;
+    return 1;
+}
+
+static void import_account(const char* dir, const char* cfg_path, Config* c)
+{
+    char path[1100];
+    config_path(dir, "import.json", path, sizeof path);
+#ifdef __ANDROID__
+    /* Android: the launcher puts it in the app's private files (adb run-as), out of shared storage */
+    const char* own = SDL_GetAndroidInternalStoragePath();
+    char private_path[1100];
+    FILE* there = own && snprintf(private_path, sizeof private_path, "%s/import.json", own) < (int)sizeof private_path
+                      ? fopen(private_path, "rb")
+                      : NULL;
+    if (there)
+    {
+        fclose(there);
+        SDL_strlcpy(path, private_path, sizeof path);
+    }
+#endif
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        return;
+    char text[4096];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+    /* gone before anything else: whatever happens below, the passwords don't stay in a file */
+    f = fopen(path, "r+b");
+    if (f)
+    {
+        char zero[256] = { 0 };
+        for (size_t left = n; left; left -= left < sizeof zero ? left : sizeof zero)
+            fwrite(zero, 1, left < sizeof zero ? left : sizeof zero, f);
+        fclose(f);
+    }
+    remove(path);
+
+    char method[8] = "", user[64] = "", sqex_id[64] = "", server[128] = "", password[128] = "", sqex_password[128] = "";
+    json_string(text, "method", method, sizeof method);
+    json_string(text, "user", user, sizeof user);
+    json_string(text, "sqex_id", sqex_id, sizeof sqex_id);
+    json_string(text, "server", server, sizeof server);
+    json_string(text, "password", password, sizeof password);
+    json_string(text, "sqex_password", sqex_password, sizeof sqex_password);
+    char text_flags[64] = "";
+    const char* flag = strstr(text, "\"otp_required\"");
+    if (flag)
+        SDL_strlcpy(text_flags, flag, sizeof text_flags);
+    SDL_memset(text, 0, sizeof text);
+    if (!user[0])
+    {
+        fprintf(stderr, "[signin] import.json names no account\n");
+        return;
+    }
+#ifdef FFXI_POL
+    c->method = !strcmp(method, "pol") ? SIGNIN_POL : SIGNIN_LSB;
+#endif
+    SDL_strlcpy(c->user, user, sizeof c->user);
+    SDL_strlcpy(c->sqex_id, c->method == SIGNIN_POL ? sqex_id : "", sizeof c->sqex_id);
+    if (c->method == SIGNIN_LSB && server[0])
+        SDL_strlcpy(c->server, server, sizeof c->server);
+    c->remember = 1;
+    c->auto_signin = 1;
+    c->otp_required = strstr(text_flags, "\"otp_required\":true") != NULL || strstr(text_flags, "\"otp_required\": true") != NULL;
+    config_save(cfg_path, c);
+    char key[256];
+    int saved = 0;
+    keychain_key(c, key, sizeof key);
+    if (password[0])
+        saved = keychain_set(key, password);
+    keychain_key_sqex(c, key, sizeof key);
+    if (key[0] && sqex_password[0])
+        saved &= keychain_set(key, sqex_password);
+    SDL_memset(password, 0, sizeof password);
+    SDL_memset(sqex_password, 0, sizeof sqex_password);
+    fprintf(stderr, "[signin] signed-in account from the launcher: %s%s\n",
+        c->method == SIGNIN_POL ? "PlayOnline" : c->server, saved ? ", its passwords in the keychain" : "");
 }
 
 /* The game's display settings when nothing else gives them: a window of 1920x1080, as the
@@ -309,7 +483,13 @@ enum
 typedef struct Job
 {
     SDL_AtomicInt state;
+    int method;
     char server[128], user[64], password[128], otp[32];
+    char sqex_id[64], sqex_password[128];
+    uint8_t session[16], auth[0x34]; /* PlayOnline's V and authCode */
+    const char* host_game;           /* PlayOnline: the install it brings up to date first */
+    SDL_SpinLock progress_lock;      /* ...and how that goes, for the status line */
+    char progress[256];
     int trust;
     uint16_t auth_port, data_port, view_port;
     char loader_version[24], version_used[24];
@@ -319,10 +499,43 @@ typedef struct Job
 
 static Job g_job;
 
+#ifdef FFXI_POL
+static void job_progress(void* arg, const char* message, float fraction)
+{
+    Job* j = arg;
+    SDL_LockSpinlock(&j->progress_lock);
+    if (fraction >= 0)
+        snprintf(j->progress, sizeof j->progress, "%s (%d%%)", message, (int)(fraction * 100.0f + 0.5f));
+    else
+        snprintf(j->progress, sizeof j->progress, "%s", message);
+    SDL_UnlockSpinlock(&j->progress_lock);
+}
+#endif
+
 static void job_thread(void* arg)
 {
     Job* j = arg;
     int ok = 0;
+#ifdef FFXI_POL
+    if (j->method == SIGNIN_POL)
+    {
+        /* PlayOnline's lobby takes only the newest client: the install is brought up to date
+         * first, before the sign-in, whose session value would go stale meanwhile */
+#ifdef FFXI_SHA256
+        const char* sha = FFXI_SHA256;
+#else
+        const char* sha = NULL;
+#endif
+        ok = signin_pol_update(j->host_game, sha, job_progress, j, j->error, sizeof j->error);
+        if (ok)
+        {
+            job_progress(j, "Signing in to PlayOnline...", -1);
+            ok = signin_pol(j->user, j->password, j->sqex_id, j->sqex_password, j->otp, j->session, j->auth,
+                j->error, sizeof j->error);
+        }
+    }
+    else
+#endif
     if (!net_resolve_ipv4(j->server, &j->ip))
         snprintf(j->error, sizeof j->error, "Cannot find the server \"%s\".", j->server);
     else
@@ -342,6 +555,7 @@ static void job_thread(void* arg)
         ok = lsb_login(&l, j->error, sizeof j->error);
     }
     memset(j->password, 0, sizeof j->password);
+    memset(j->sqex_password, 0, sizeof j->sqex_password);
     if (ok)
         fprintf(stderr, "[signin] signed in as %s on %s\n", j->user, j->server);
     else
@@ -358,6 +572,8 @@ typedef struct Keyjob
     SDL_AtomicInt state; /* 0 idle, 1 reading, 2 read */
     char key[256], password[128];
     int found;
+    char key2[256], password2[128]; /* a PlayOnline member's Square Enix password; key2 "" for none */
+    int found2;
 } Keyjob;
 
 static Keyjob g_keyread;
@@ -366,12 +582,14 @@ static void keyread_thread(void* arg)
 {
     Keyjob* k = arg;
     k->found = keychain_get(k->key, k->password, sizeof k->password);
+    k->found2 = k->key2[0] && keychain_get(k->key2, k->password2, sizeof k->password2);
     SDL_SetAtomicInt(&k->state, 2);
 }
 
 typedef struct Keysave
 {
     char key[256], password[128];
+    char key2[256], password2[128]; /* as Keyjob's */
     int remember;
 } Keysave;
 
@@ -386,7 +604,12 @@ static void keysave_thread(void* arg)
     }
     else
         keychain_delete(k->key);
+    if (k->key2[0] && k->remember && k->password2[0])
+        keychain_set(k->key2, k->password2);
+    else if (k->key2[0] && !k->remember)
+        keychain_delete(k->key2);
     memset(k->password, 0, sizeof k->password);
+    memset(k->password2, 0, sizeof k->password2);
     free(k);
 }
 
@@ -444,10 +667,13 @@ enum
 {
     ID_USER,
     ID_PASSWORD,
+    ID_SQEX_PASSWORD,
     ID_OTP,
     ID_SIGNIN,
     ID_SETTINGS,
+    ID_METHOD,
     ID_SERVER,
+    ID_SQEX_ID,
     ID_REMEMBER,
     ID_TRUST,
     ID_THEME,
@@ -478,6 +704,7 @@ typedef struct Ui
 {
     Config cfg;
     char password[128], otp[32];
+    char sqex_password[128]; /* PlayOnline: the Square Enix ID's */
     int screen, focus, sub; /* sub: the option of a choice the cursor is on */
     int caret, anchor;      /* the focused field's caret, and the other end of its selection (= caret: none) */
     int caret_id;           /* the control they are for */
@@ -495,6 +722,8 @@ typedef struct Ui
     int theme_loaded;
     Uint64 focus_time;
     Uint64 opened;              /* when the screen came up: a keychain wait says so after a moment */
+    Uint64 auto_at;             /* an automatic sign-in (cfg.auto_signin) starts then; 0 for none */
+    int auto_done;              /* tried, stopped or failed: not again this run */
     Uint64 anim_at;             /* when the window began opening, or closing */
     int closing, close_result;  /* closing: then signin_run returns close_result */
     Uint64 press_at;            /* the last button pressed: when, which control, which option */
@@ -567,23 +796,37 @@ static void build(Ui* u)
     static const char* const ONOFF[] = { "ON", "OFF" },
                              *const THEMES[] = { "1", "2", "3", "4", "5", "6", "7", "8" },
                              *const SPACE[] = { "Own Space", "In Place" };
+#ifdef FFXI_POL
+    static const char* const METHODS[] = { "LandSandBoat", "PlayOnline" };
+#endif
+    int pol = u->cfg.method == SIGNIN_POL;
     Widget old[8];
     int nold = u->nw;
     memcpy(old, u->w, sizeof old);
     u->nw = 0;
     if (u->screen == SCREEN_SIGNIN)
     {
-        add(u, W_TEXT, ID_USER, "Username", u->cfg.user, sizeof u->cfg.user);
-        add(u, W_SECRET, ID_PASSWORD, "Password", u->password, sizeof u->password);
-        add(u, W_TEXT, ID_OTP, "One-time Code", u->otp, sizeof u->otp);
+        if (pol) /* the Square Enix account first, as the Viewer asks for it */
+        {
+            add(u, W_TEXT, ID_SQEX_ID, "Square Enix ID", u->cfg.sqex_id, sizeof u->cfg.sqex_id);
+            add(u, W_SECRET, ID_SQEX_PASSWORD, "Square Enix Password", u->sqex_password, sizeof u->sqex_password);
+        }
+        add(u, W_TEXT, ID_USER, pol ? "PlayOnline ID" : "Username", u->cfg.user, sizeof u->cfg.user);
+        add(u, W_SECRET, ID_PASSWORD, pol ? "PlayOnline Password" : "Password", u->password, sizeof u->password);
+        add(u, W_TEXT, ID_OTP, pol ? "One-time Password" : "One-time Code", u->otp, sizeof u->otp);
         add(u, W_BUTTON, ID_SIGNIN, "Sign In", NULL, 0);
         add(u, W_BUTTON, ID_SETTINGS, "Settings", NULL, 0);
     }
     else
     {
-        add(u, W_TEXT, ID_SERVER, "Server", u->cfg.server, sizeof u->cfg.server);
+#ifdef FFXI_POL
+        options(u, ID_METHOD, "Sign-in Method", 2, METHODS);
+#endif
+        if (!pol) /* PlayOnline's servers are its own: no server to pick */
+            add(u, W_TEXT, ID_SERVER, "Server", u->cfg.server, sizeof u->cfg.server);
         options(u, ID_REMEMBER, "Remember Password", 2, ONOFF);
-        options(u, ID_TRUST, "Trust This Computer", 2, ONOFF);
+        if (!pol) /* xiloader's */
+            options(u, ID_TRUST, "Trust This Computer", 2, ONOFF);
         options(u, ID_THEME, "Window Theme", 8, THEMES);
         options(u, ID_SPACE, "Full Screen", 2, SPACE);
         add(u, W_BUTTON, ID_BACK, "Back", NULL, 0);
@@ -616,6 +859,8 @@ static void build(Ui* u)
 /* the option a choice is set to */
 static int choice_value(const Ui* u, int id)
 {
+    if (id == ID_METHOD)
+        return u->cfg.method == SIGNIN_POL ? 1 : 0;
     if (id == ID_REMEMBER)
         return u->cfg.remember ? 0 : 1;
     if (id == ID_TRUST)
@@ -640,26 +885,66 @@ static void set_status(Ui* u, const char* s, int error)
         sound(u, SND_ERROR);
 }
 
+/* where control id is on this screen, else -1 */
+static int index_of(const Ui* u, int id)
+{
+    for (int i = 0; i < u->nw; ++i)
+        if (u->w[i].id == id)
+            return i;
+    return -1;
+}
+
+/* the first field still to fill in (the one-time code may stay empty), else Sign In */
+static int first_empty(const Ui* u)
+{
+    for (int i = 0; i < u->nw; ++i)
+        if (u->w[i].text && u->w[i].id != ID_OTP && !u->w[i].text[0])
+            return i;
+    return index_of(u, ID_SIGNIN);
+}
+
 static void start_signin(Ui* u)
 {
     if (busy())
         return;
-    if (!u->cfg.server[0])
+    int pol = u->cfg.method == SIGNIN_POL;
+    if (!pol && !u->cfg.server[0])
     {
         set_status(u, "Set the server in Settings first.", 1);
         return;
     }
-    if (!u->cfg.user[0] || !u->password[0])
+    if (!u->cfg.user[0] || !u->password[0] || (pol && (!u->cfg.sqex_id[0] || !u->sqex_password[0])))
     {
-        set_status(u, "Enter your username and password.", 1);
-        u->focus = !u->cfg.user[0] ? 0 : 1;
+        set_status(u, pol ? "Enter your Square Enix ID, PlayOnline ID and both passwords." :
+                            "Enter your username and password.", 1);
+        u->focus = first_empty(u);
         return;
     }
+#ifdef FFXI_POL
+    if (pol)
+    {
+        /* PlayOnline IDs are upper case */
+        for (char* p = u->cfg.user; *p; ++p)
+            if (*p >= 'a' && *p <= 'z')
+                *p = (char)(*p - 32);
+        if (!signin_pol_id_valid(u->cfg.user))
+        {
+            set_status(u, "That is not a PlayOnline ID (8 letters and digits).", 1);
+            u->focus = index_of(u, ID_USER);
+            return;
+        }
+    }
+#endif
     Job* j = &g_job;
-    SDL_strlcpy(j->server, u->cfg.server, sizeof j->server);
+    j->method = u->cfg.method;
+    j->host_game = u->host_game;
+    j->progress[0] = 0;
+    SDL_strlcpy(j->server, pol ? "PlayOnline" : u->cfg.server, sizeof j->server);
     SDL_strlcpy(j->user, u->cfg.user, sizeof j->user);
     SDL_strlcpy(j->password, u->password, sizeof j->password);
     SDL_strlcpy(j->otp, u->otp, sizeof j->otp);
+    SDL_strlcpy(j->sqex_id, pol ? u->cfg.sqex_id : "", sizeof j->sqex_id);
+    SDL_strlcpy(j->sqex_password, pol ? u->sqex_password : "", sizeof j->sqex_password);
     j->trust = u->cfg.trust;
     j->auth_port = u->cfg.auth_port, j->data_port = u->cfg.data_port, j->view_port = u->cfg.view_port;
     SDL_strlcpy(j->loader_version, u->cfg.loader_version, sizeof j->loader_version);
@@ -679,7 +964,14 @@ static void choose(Ui* u, int id, int v)
 {
     if (v == choice_value(u, id))
         return;
-    if (id == ID_REMEMBER)
+    if (id == ID_METHOD)
+    {
+        u->cfg.method = v == 1 ? SIGNIN_POL : SIGNIN_LSB;
+        u->password[0] = u->otp[0] = u->sqex_password[0] = 0; /* another account's */
+        set_status(u, "", 0); /* the method's own line (PlayOnline's says where passwords go) */
+        build(u); /* the Server and Square Enix ID rows come and go with it */
+    }
+    else if (id == ID_REMEMBER)
     {
         u->cfg.remember = v == 0;
         if (u->cfg.remember && !keychain_available())
@@ -1105,7 +1397,11 @@ static void measure(const Ui* u, int* pw, int* ph, int* pcx, int* pright)
 static const uint8_t* status_text(const Ui* u, char* msg, size_t n)
 {
     if (busy())
-        SDL_strlcpy(msg, "Connecting...", n);
+    {
+        SDL_LockSpinlock(&g_job.progress_lock);
+        SDL_strlcpy(msg, g_job.progress[0] ? g_job.progress : "Connecting...", n);
+        SDL_UnlockSpinlock(&g_job.progress_lock);
+    }
     else if (u->status[0])
     {
         SDL_strlcpy(msg, u->status, n);
@@ -1113,8 +1409,17 @@ static const uint8_t* status_text(const Ui* u, char* msg, size_t n)
     }
     else if (SDL_GetAtomicInt(&g_keyread.state) == 1 && SDL_GetTicks() - u->opened > 1500)
         SDL_strlcpy(msg, "Waiting keychain...", n);
+    else if (u->screen == SCREEN_SIGNIN && u->cfg.method == SIGNIN_POL)
+        /* where the passwords go: to PlayOnline's sign-in (signin_pol.h), and keysave_thread hands
+         * remembered ones to the device's password store, never to a file of ours */
+        SDL_strlcpy(msg, keychain_available() ? "Your passwords go only to Square Enix's servers. Remembered ones are "
+                                                "kept by this device's keychain, never by XI on Anything."
+                                              : "Your passwords go only to Square Enix's servers. XI on Anything does "
+                                                "not keep them.", n);
     else if (u->screen == SCREEN_SIGNIN)
-        snprintf(msg, n, "Sign in to %s", u->cfg.server[0] ? u->cfg.server : "(no server)");
+        snprintf(msg, n, "Sign in to %s", u->cfg.method == SIGNIN_POL ? "PlayOnline"
+                                          : u->cfg.server[0]               ? u->cfg.server
+                                                                           : "(no server)");
     else
         SDL_strlcpy(msg, "Settings", n);
     return WHITE;
@@ -1530,7 +1835,7 @@ static void screen_keyboard(Ui* u, SDL_Window* win)
     SDL_PropertiesID p = SDL_CreateProperties();
     SDL_SetNumberProperty(p, SDL_PROP_TEXTINPUT_TYPE_NUMBER,
         f->kind == W_SECRET ? SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN
-        : f->id == ID_USER  ? SDL_TEXTINPUT_TYPE_TEXT_USERNAME
+        : f->id == ID_USER || f->id == ID_SQEX_ID ? SDL_TEXTINPUT_TYPE_TEXT_USERNAME
         : f->id == ID_OTP   ? SDL_TEXTINPUT_TYPE_NUMBER
                             : SDL_TEXTINPUT_TYPE_TEXT);
     SDL_SetNumberProperty(p, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
@@ -1751,10 +2056,15 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     config_path(dir, "settings.reg", out->settings_reg, sizeof out->settings_reg);
 
     Config* c = &u->cfg;
+    c->method = SIGNIN_LSB;
     c->remember = 1, c->theme = 1;
     c->space = setup->default_space >= 0 ? setup->default_space != 0 : 1;
     SDL_strlcpy(c->server, setup->default_server ? setup->default_server : "127.0.0.1", sizeof c->server);
     config_load(cfg_path, c);
+    import_account(dir, cfg_path, c);
+#ifndef FFXI_POL
+    c->method = SIGNIN_LSB; /* saved by a build with the PlayOnline client */
+#endif
     if (setup->server)
         SDL_strlcpy(c->server, setup->server, sizeof c->server);
     if (setup->user)
@@ -1786,6 +2096,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     else if (c->remember && c->user[0])
     {
         keychain_key(c, g_keyread.key, sizeof g_keyread.key);
+        keychain_key_sqex(c, g_keyread.key2, sizeof g_keyread.key2);
         read_keychain = 1; /* once the window is up */
     }
     if (setup->otp)
@@ -1872,7 +2183,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
 
     /* start where there is something to type */
     build(u);
-    focus_on(u, !c->user[0] ? 0 : !u->password[0] ? 1 : 3);
+    focus_on(u, first_empty(u));
     start_typing(win);
     if (read_keychain)
     {
@@ -1909,6 +2220,14 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         SDL_Event e;
         while (SDL_PollEvent(&e))
         {
+            /* the player's own input stops an automatic sign-in that hasn't started */
+            if (u->auto_at && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                                  e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN))
+            {
+                u->auto_at = 0, u->auto_done = 1;
+                set_status(u, "", 0);
+                continue;
+            }
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                 done = 1;
             else if (e.type == SDL_EVENT_GAMEPAD_ADDED)
@@ -1948,16 +2267,53 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
         /* the saved password, when macOS has let us read it: into an empty field */
         if (SDL_GetAtomicInt(&g_keyread.state) == 2)
         {
+            int was_empty = u->screen == SCREEN_SIGNIN && u->focus == first_empty(u);
             if (g_keyread.found && !u->password[0])
-            {
                 SDL_strlcpy(u->password, g_keyread.password, sizeof u->password);
-                if (u->screen == SCREEN_SIGNIN && u->focus == 1)
-                    u->focus = 2; /* on to the code */
+            if (g_keyread.found2 && !u->sqex_password[0])
+                SDL_strlcpy(u->sqex_password, g_keyread.password2, sizeof u->sqex_password);
+            if (was_empty) /* on past what the keychain filled in: to the code, when there is one */
+            {
+                int code = index_of(u, ID_OTP), next = first_empty(u);
+                u->focus = next == index_of(u, ID_SIGNIN) && code >= 0 ? code : next;
             }
             memset(g_keyread.password, 0, sizeof g_keyread.password);
+            memset(g_keyread.password2, 0, sizeof g_keyread.password2);
             SDL_SetAtomicInt(&g_keyread.state, 0);
             if (!u->status_error)
                 set_status(u, "", 0);
+            /* an account the launcher sent: sign in as it, a moment later (any input stops it), or ask
+             * only for the one-time password. Phones never sign in by themselves: the account and its
+             * passwords are filled in, and the player taps Sign in. */
+            int pol = u->cfg.method == SIGNIN_POL;
+            int have = u->cfg.user[0] && u->password[0] && (!pol || (u->cfg.sqex_id[0] && u->sqex_password[0]));
+            if (u->cfg.auto_signin && u->cfg.remember && have && !u->auto_done && u->screen == SCREEN_SIGNIN)
+            {
+                if (u->cfg.otp_required)
+                {
+                    u->auto_done = 1;
+                    u->focus = index_of(u, ID_OTP);
+                    set_status(u, "Enter your one-time password to sign in.", 0);
+                }
+                else
+                {
+#ifdef FFXI_MOBILE
+                    u->auto_done = 1;
+#else
+                    u->auto_at = SDL_GetTicks() + 1500;
+                    char msg[160];
+                    snprintf(msg, sizeof msg, "Signing in as %s... tap to stop", u->cfg.user);
+                    set_status(u, msg, 0);
+#endif
+                }
+            }
+        }
+        if (u->auto_at && SDL_GetTicks() >= u->auto_at)
+        {
+            u->auto_at = 0;
+            u->auto_done = 1;
+            if (u->screen == SCREEN_SIGNIN && !busy())
+                start_signin(u);
         }
         int state = SDL_GetAtomicInt(&g_job.state);
         if (state == JOB_FAILED)
@@ -1965,6 +2321,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             SDL_SetAtomicInt(&g_job.state, JOB_IDLE);
             set_status(u, g_job.error[0] ? g_job.error : "The sign-in failed.", 1);
             u->otp[0] = 0; /* one-time codes are single use */
+            u->auto_done = 1, u->auto_at = 0; /* no automatic retry */
         }
         else if (state == JOB_DONE)
         {
@@ -1974,6 +2331,8 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             {
                 keychain_key(c, ks->key, sizeof ks->key);
                 SDL_strlcpy(ks->password, u->password, sizeof ks->password);
+                keychain_key_sqex(c, ks->key2, sizeof ks->key2);
+                SDL_strlcpy(ks->password2, u->sqex_password, sizeof ks->password2);
                 ks->remember = c->remember;
                 if (!plat_thread_start(keysave_thread, ks))
                     free(ks);
@@ -1981,7 +2340,11 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
             /* the loader version the server asked for, sent from the start next time */
             if (g_job.version_used[0])
                 SDL_strlcpy(c->loader_version, g_job.version_used, sizeof c->loader_version);
+            out->method = g_job.method;
             out->server = g_job.ip;
+            memcpy(out->session, g_job.session, sizeof out->session);
+            memcpy(out->auth, g_job.auth, sizeof out->auth);
+            memset(g_job.session, 0, sizeof g_job.session);
             SDL_SetAtomicInt(&g_job.state, JOB_IDLE);
             begin_close(u, 1);
         }
@@ -2000,6 +2363,7 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     for (int i = 0; i < 4; ++i)
         sewave_free(&u->snd[i]);
     memset(u->password, 0, sizeof u->password);
+    memset(u->sqex_password, 0, sizeof u->sqex_password);
     dat_sheet_free(&u->lobbywin);
     close_dat(&u->pc);
     close_dat(&u->keytop);

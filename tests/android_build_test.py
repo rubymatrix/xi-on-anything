@@ -163,19 +163,44 @@ class PackageRebuildTest(unittest.TestCase):
                 raise RuntimeError('synthetic dex failure')
             (Path(args[args.index('--output') + 1]) / 'classes.dex').write_bytes(b'dex')
         elif command == 'aapt':
+            self.aapt_args = [str(arg) for arg in args]
             with zipfile.ZipFile(args[args.index('-F') + 1], 'w'):
                 pass
         elif command == 'zipalign':
             shutil.copyfile(args[-2], args[-1])
         elif command == 'apksigner' and args[1] == 'sign':
+            self.signed_with = [str(arg) for arg in args]
             shutil.copyfile(args[-1], args[args.index('--out') + 1])
         else:
             self.assertTrue(command == 'llvm-strip' or (command == 'apksigner' and args[1] == 'verify'), args)
 
-    def package(self):
-        with patch.object(sys, 'argv', ['build_android_apk.py', '--build-dir', str(self.build)]):
+    def package(self, *extra):
+        with patch.object(sys, 'argv', ['build_android_apk.py', '--build-dir', str(self.build), *extra]):
             with contextlib.redirect_stdout(io.StringIO()):
                 build_android_apk.main()
+
+    def test_versions_are_the_runtime_and_game_build(self):
+        (self.sources / 'Current.java').write_text('current')
+        with patch.object(build_android_apk.buildinfo, 'runtime', lambda: {'version': '0.2.43', 'build': '2026-11-02'}):
+            self.package()
+        args = self.aapt_args
+        self.assertEqual('20261102', args[args.index('--version-code') + 1])
+        self.assertEqual('0.2.43', args[args.index('--version-name') + 1])
+        self.assertIn('--replace-version', args)
+
+    def test_player_key_signs_with_its_password_from_the_environment(self):
+        (self.sources / 'Current.java').write_text('current')
+        key = self.directory / 'player.p12'
+        with self.assertRaisesRegex(RuntimeError, 'XI_ANDROID_KEYSTORE_PASS'):
+            self.package('--keystore', str(key))
+        key.write_bytes(b'key')
+        with patch.dict(os.environ, {'XI_ANDROID_KEYSTORE_PASS': 'secret'}):
+            self.package('--keystore', str(key), '--key-alias', 'xi')
+        args = self.signed_with
+        self.assertEqual(str(key), args[args.index('--ks') + 1])
+        self.assertEqual('env:XI_ANDROID_KEYSTORE_PASS', args[args.index('--ks-pass') + 1])
+        self.assertEqual('xi', args[args.index('--ks-key-alias') + 1])
+        self.assertNotIn('secret', ' '.join(args))
 
     def test_rebuild_excludes_removed_java_classes(self):
         current = self.sources / 'Current.java'

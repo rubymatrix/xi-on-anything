@@ -3,6 +3,7 @@
 #include "gthread.h"
 #include "gwin.h"
 #include "plat.h"
+#include "runtime.h"
 
 #if !defined(RT_GUEST_WINDOW)
 /* the browser (flat guest memory, no window): the kernels need a Guest outside guest memory and the host
@@ -13,6 +14,22 @@
 /* the batch this thread is running, if any; the feature bytes in guest memory are never changed */
 static RT_TLS Guest* batch_guest;
 static RT_TLS GeometryLayout batch_layout;
+
+/* why a batch ran the translation instead: the log names the first of each, then every power of two */
+enum
+{
+    ADMITTED,
+    REJECT_STATE,    /* x87 control word, host FP controls, a callback, an SSE feature byte, the Guest's address */
+    REJECT_EMPTY,    /* no rigid or weighted vertices */
+    REJECT_LAYOUT,   /* header count, duplicate index, stack pointer or a span out of range */
+    REJECT_WORK,     /* more than GEOMETRY_MAX_WORK units */
+    REJECT_UNMAPPED, /* reads or writes a page that is not committed */
+    REJECT_ALIAS,    /* writes over its own inputs, metadata or the stack */
+    REJECTS
+};
+static const char* const reject_names[REJECTS] = {
+    "admitted", "game or host state", "no work", "layout", "work cap", "unmapped page", "alias"};
+static uint64_t batches[REJECTS]; /* counted under the guest lock */
 
 /* Admission for the SSE route. The original SSE code allows aliases, but a batch whose outputs
  * overwrite its own sources, matrices or metadata would carry the deliberate x87 (53-bit) versus SSE
@@ -70,79 +87,102 @@ static int read32(uint64_t address, uint32_t* value)
 static int clear(const Written* a, uint64_t address, uint64_t bytes, int check_pages)
 {
     Span r;
-    if (!span(address, bytes, &r) || overlap(r, a->stack))
-        return 0;
+    if (!span(address, bytes, &r))
+        return REJECT_LAYOUT;
+    if (overlap(r, a->stack))
+        return REJECT_ALIAS;
     for (unsigned j = 0; j < a->count; ++j)
         if (overlap(r, a->output[j]))
-            return 0;
-    return !check_pages || mapped(r);
+            return REJECT_ALIAS;
+    return check_pages && !mapped(r) ? REJECT_UNMAPPED : ADMITTED;
 }
-/* whether the batch is in bounds, has work, aliases nothing it writes and reads only mapped pages */
+/* whether the batch is in bounds, has work, aliases nothing it writes and reads only mapped pages:
+ * ADMITTED, or the first reason it is not */
 static int geometry_alias_guard(const Guest* g, const GeometryLayout* layout)
 {
     uint32_t header, indices, object, counts, raw_duplicates;
     uint16_t primary;
     uint64_t mesh = g->ecx;
+    int why;
     if (!read32(mesh + 0x42, &header) || !read32(mesh + 0x48, &indices) ||
         !read32(mesh + 0x5e, &object) || !read32(layout->counts, &counts) ||
         !read32((uint64_t)object + 0x60, &raw_duplicates))
-        return 0;
+        return REJECT_UNMAPPED;
     uint32_t rigid = counts & 65535u, weighted = counts >> 16;
     /* no array scans or reads through unused pointers when there is no work */
-    if ((int32_t)raw_duplicates < 0 || (!rigid && !weighted))
-        return 0;
+    if ((int32_t)raw_duplicates < 0)
+        return REJECT_LAYOUT;
+    if (!rigid && !weighted)
+        return REJECT_EMPTY;
     uint32_t duplicates = raw_duplicates;
-    if (!read16(header, &primary) || primary != rigid)
-        return 0;
+    if (!read16(header, &primary))
+        return REJECT_UNMAPPED;
     uint64_t count = (uint64_t)rigid + weighted + duplicates;
-    if (count > 65535u || g->esp < 256u || g->esp > UINT32_MAX - 4u)
-        return 0;
+    if (primary != rigid || count > 65535u || g->esp < 256u || g->esp > UINT32_MAX - 4u)
+        return REJECT_LAYOUT;
     uint16_t model_flags;
     Span mode_range;
     if (!read16(mesh + 0x32, &model_flags) || !span(mesh + 0x34, 1, &mode_range) || !mapped(mode_range))
-        return 0;
+        return REJECT_UNMAPPED;
     int dual = rd8((uint32_t)(mesh + 0x34)) & 1;
     /* bounds the scans below and the batch itself (in work units, not time) before any output or
      * array pointer is followed */
     uint64_t work = ((uint64_t)rigid + 2ull * weighted + 2ull * duplicates) * (dual ? 2u : 1u);
     if (work > GEOMETRY_MAX_WORK)
-        return 0;
+        return REJECT_WORK;
     Written a;
     a.count = dual ? 4 : 2;
     if (!span((uint64_t)g->esp - 256u, 260, &a.stack) || !mapped(a.stack))
-        return 0;
+        return REJECT_UNMAPPED;
     for (unsigned j = 0; j < a.count; ++j)
     {
         uint32_t output;
-        if (!read32((uint64_t)object + 0x8eu + j * 4, &output) || !span(output, count * 12, &a.output[j]) ||
-            overlap(a.output[j], a.stack))
-            return 0;
+        if (!read32((uint64_t)object + 0x8eu + j * 4, &output))
+            return REJECT_UNMAPPED;
+        if (!span(output, count * 12, &a.output[j]))
+            return REJECT_LAYOUT;
+        if (overlap(a.output[j], a.stack))
+            return REJECT_ALIAS;
         for (unsigned k = 0; k < j; ++k)
             if (overlap(a.output[j], a.output[k]))
-                return 0;
+                return REJECT_ALIAS;
         if (!mapped(a.output[j]))
-            return 0;
+            return REJECT_UNMAPPED;
     }
     /* metadata the parent reads must not alias an output; unused fields are not read */
     uint32_t info;
-    if (!clear(&a, mesh + 0x32, 0x30, 0) || !clear(&a, (uint64_t)object + 0x5c, 0x42, 0) ||
-        !clear(&a, header, 2, 0) || !clear(&a, layout->info, 4, 0) || !clear(&a, layout->callback, 4, 0) ||
-        !clear(&a, layout->palette, 4, 0) || !clear(&a, layout->counts, 4, 0) || !read32(layout->info, &info) ||
-        !clear(&a, (uint64_t)info + 9, 4, 0) || !clear(&a, indices, ((uint64_t)rigid + weighted) * 4, 0))
-        return 0;
+    if ((why = clear(&a, mesh + 0x32, 0x30, 0)) || (why = clear(&a, (uint64_t)object + 0x5c, 0x42, 0)) ||
+        (why = clear(&a, header, 2, 0)) || (why = clear(&a, layout->info, 4, 0)) ||
+        (why = clear(&a, layout->callback, 4, 0)) || (why = clear(&a, layout->palette, 4, 0)) ||
+        (why = clear(&a, layout->counts, 4, 0)))
+        return why;
+    if (!read32(layout->info, &info))
+        return REJECT_UNMAPPED;
+    if ((why = clear(&a, (uint64_t)info + 9, 4, 0)) ||
+        (why = clear(&a, indices, ((uint64_t)rigid + weighted) * 4, 0)))
+        return why;
     uint64_t source_bytes = (uint64_t)rigid * 24 + (uint64_t)weighted * 56;
     uint32_t source;
-    if (!read32((uint64_t)object + 0x6e, &source) || !clear(&a, source, source_bytes, 1))
-        return 0;
-    if (dual && (!read32((uint64_t)object + 0x76, &source) || !clear(&a, source, source_bytes, 1)))
-        return 0;
+    if (!read32((uint64_t)object + 0x6e, &source))
+        return REJECT_UNMAPPED;
+    if ((why = clear(&a, source, source_bytes, 1)))
+        return why;
+    if (dual)
+    {
+        if (!read32((uint64_t)object + 0x76, &source))
+            return REJECT_UNMAPPED;
+        if ((why = clear(&a, source, source_bytes, 1)))
+            return why;
+    }
     /* The descriptor words actually used, mapped as one span: a rigid descriptor's second word is
      * unused, so a final rigid descriptor's need not be mapped. Collects the bones (at most 128)
      * they name, so only the remap entries in use are read below. */
     uint64_t descriptor_bytes = weighted ? ((uint64_t)rigid + weighted) * 4 : (uint64_t)rigid * 4 - 2;
     Span descriptors;
-    if (!span(indices, descriptor_bytes, &descriptors) || !mapped(descriptors))
-        return 0;
+    if (!span(indices, descriptor_bytes, &descriptors))
+        return REJECT_LAYOUT;
+    if (!mapped(descriptors))
+        return REJECT_UNMAPPED;
     uint32_t used[4] = {0, 0, 0, 0};
     for (uint32_t j = 0; j < rigid + weighted; ++j)
     {
@@ -162,15 +202,17 @@ static int geometry_alias_guard(const Guest* g, const GeometryLayout* layout)
     if (duplicates)
     {
         uint32_t list;
-        if (!read32((uint64_t)object + 0x5c, &list) || !clear(&a, list, (uint64_t)duplicates * 2, 1))
-            return 0;
+        if (!read32((uint64_t)object + 0x5c, &list))
+            return REJECT_UNMAPPED;
+        if ((why = clear(&a, list, (uint64_t)duplicates * 2, 1)))
+            return why;
         for (uint32_t j = 0; j < duplicates; ++j)
             if (rd16((uint32_t)((uint64_t)list + (uint64_t)j * 2)) >= rigid + weighted)
-                return 0;
+                return REJECT_LAYOUT;
     }
     uint32_t matrix_base, remap = 0;
     if (!read32(layout->palette, &matrix_base) || ((model_flags & 0x80u) && !read32(mesh + 0x3c, &remap)))
-        return 0;
+        return REJECT_UNMAPPED;
     uint64_t matrix_first = UINT64_MAX, matrix_end = 0;
     for (unsigned bone = 0; bone < 128; ++bone)
         if (used[bone >> 5] & (1u << (bone & 31)))
@@ -179,12 +221,16 @@ static int geometry_alias_guard(const Guest* g, const GeometryLayout* layout)
             if (model_flags & 0x80u)
             {
                 uint64_t address = (uint64_t)remap + bone * 2u;
-                if (!clear(&a, address, 2, 0) || !read16(address, &slot))
-                    return 0;
+                if ((why = clear(&a, address, 2, 0)))
+                    return why;
+                if (!read16(address, &slot))
+                    return REJECT_UNMAPPED;
             }
             Span matrix;
-            if (!span((uint64_t)matrix_base + (uint64_t)slot * 64, 64, &matrix) || !mapped(matrix))
-                return 0;
+            if (!span((uint64_t)matrix_base + (uint64_t)slot * 64, 64, &matrix))
+                return REJECT_LAYOUT;
+            if (!mapped(matrix))
+                return REJECT_UNMAPPED;
             if (matrix.begin < matrix_first)
                 matrix_first = matrix.begin;
             if (matrix.end > matrix_end)
@@ -215,22 +261,24 @@ static int relocated(const GeometryLayout* in, GeometryLayout* out)
 
 /* x87 control word 0x023f (53-bit, nearest, exceptions masked), supported host FP controls, a
  * Guest outside guest memory, no callback installed and both SSE feature bytes clear; then the
- * alias guard. */
-static int admitted(Guest* g, const GeometryLayout* layout)
+ * alias guard. ADMITTED, or the first reason not. */
+static int admission(Guest* g, const GeometryLayout* layout)
 {
     if (g->fcw != 0x023f || !geometry_simd_supported())
-        return 0;
+        return REJECT_STATE;
     uintptr_t host = (uintptr_t)g, base = (uintptr_t)rt_guest_base;
     if (host - base <= UINT32_MAX || host + sizeof(*g) - 1 - base <= UINT32_MAX)
-        return 0;
+        return REJECT_STATE;
     uint32_t info, callback;
-    if (!read32(layout->info, &info) || !info || !read32(layout->callback, &callback) || callback)
-        return 0;
+    if (!read32(layout->info, &info) || !read32(layout->callback, &callback))
+        return REJECT_UNMAPPED;
+    if (!info || callback)
+        return REJECT_STATE;
     Span features;
     if (!span((uint64_t)info + 9, 4, &features) || !mapped(features))
-        return 0;
+        return REJECT_UNMAPPED;
     if (rd8(info + 9) || rd8(info + 12))
-        return 0;
+        return REJECT_STATE;
     return geometry_alias_guard(g, layout);
 }
 
@@ -242,7 +290,11 @@ int geometry_guest_run(Guest* g, const GeometryLayout* layout, GuestFn body)
     if (!relocated(layout, &current))
         return 0;
     gt_noyield(1);
-    int accepted = admitted(g, &current);
+    int why = admission(g, &current), accepted = why == ADMITTED;
+    uint64_t seen = ++batches[why];
+    if (!accepted && !(seen & (seen - 1)))
+        rt_log("[recomp] geometry: %llu %s left to the translation (%s), %llu admitted\n", (unsigned long long)seen,
+               seen == 1 ? "batch" : "batches", reject_names[why], (unsigned long long)batches[ADMITTED]);
     if (accepted)
     {
         batch_layout = current;

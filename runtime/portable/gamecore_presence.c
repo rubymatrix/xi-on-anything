@@ -300,14 +300,15 @@ static void s272_concat(Guest* g)
     RETC(0);
 }
 
-/* --- PlayOnline messages (the member's messages) ------------------------
+/* --- PlayOnline messages -------------------------------------------------------------------------
  * With a PlayOnline sign-in the game's in-game message client runs as on retail (slot 836): it lists
  * the member's messages on the server (278/279), reads each new one (275/276), saves it under the
  * Viewer's pub\homeNN\msg folders through the file channels (921-931) by the name 284 makes, and
- * deletes it from the server (280/281). The network part goes to the host's request channel. */
+ * deletes it from the server (280/281). All of it goes to the host's request channel, the headers as
+ * the game holds them: what PlayOnline does with them, and a message's file name, are the PlayOnline
+ * client's (not in this repository), which answers the requests. */
 static GamecoreRequestHost g_request_host;
 static int g_have_request_host;
-static uint64_t g_member_key;
 
 void gamecore_set_request_host(const GamecoreRequestHost* host)
 {
@@ -323,51 +324,30 @@ const GamecoreRequestHost* gamecore_request_host(void)
 
 void gamecore_set_member_key(uint64_t key)
 {
-    g_member_key = key;
+    (void)key; /* the PlayOnline client keeps it: its requests take the game's own values */
 }
 
-/* their names (0x100078a0 and its encoder) */
-static const char B64[] = "";
-
-static void b64_header(const uint8_t h[0x48], char out[97])
+/* A request answered at once (a message's file name, and back): asked, then polled until the host
+ * answers, at most 10 s. The host's result. */
+static int32_t request_now(const char* verb, const uint8_t* data, uint32_t n, uint8_t* out, uint32_t cap, uint32_t* got)
 {
-    for (int i = 0, o = 0; i < 0x48; i += 3)
+    *got = 0;
+    if (!g_have_request_host)
+        return -260;
+    int32_t id = g_request_host.begin(g_request_host.ctx, verb, data, n);
+    if (id < 0)
+        return id;
+    for (int waited = 0; waited < 10000; waited += 2)
     {
-        uint32_t v = (uint32_t)h[i] << 16 | (uint32_t)h[i + 1] << 8 | h[i + 2];
-        for (int k = 3; k >= 0; --k)
-            out[o + 3 - k] = B64[(v >> (6 * k)) & 63];
-        o += 4;
+        int32_t r = g_request_host.poll(g_request_host.ctx, id, out, cap, got);
+        if (r != 0)
+            return r;
+        plat_sleep_ms(2);
     }
-    out[96] = 0;
+    return -260;
 }
 
-static void unb64_header(const char* in, uint8_t h[0x48])
-{
-    for (int i = 0, o = 0; i < 96; i += 4, o += 3)
-    {
-        uint32_t v = 0;
-        for (int k = 0; k < 4; ++k)
-        {
-            const char* p = in[i + k] ? strchr(B64, in[i + k]) : NULL;
-            v = v << 6 | (uint32_t)(p ? p - B64 : 0);
-        }
-        h[o] = (uint8_t)(v >> 16), h[o + 1] = (uint8_t)(v >> 8), h[o + 2] = (uint8_t)v;
-    }
-}
-
-/* A header's ids between the wire form (id ^ 0x0) and the form the game holds
- * (also ^ the member key): sender always, receiver unless the Type is 17 (polcore 0x1001b640,
- * 0x1001bd00). Its own inverse. */
-static void rekey_header(uint8_t h[0x48])
-{
-    uint64_t k = 0x0ull ^ g_member_key;
-    int type17 = ((h[0x3e] | h[0x3f] << 8) & 0xf80) == 0x880;
-    for (int at = 0; at <= (type17 ? 0 : 8); at += 8)
-        for (int b = 0; b < 8; ++b)
-            h[at + b] ^= (uint8_t)(k >> (8 * b));
-}
-
-/* the requests 278/275/280 start, by the handle the game polls with (as polcore's 4 contexts) */
+/* the requests 278/275/280 start, by the handle the game polls with (as retail's 4 contexts) */
 typedef struct MsgRequest
 {
     int32_t id;   /* the host's; -1 free */
@@ -384,7 +364,7 @@ static int32_t msg_begin(int kind, const char* verb, const uint8_t* data, uint32
         if (g_msg[i].id < 0)
             slot = i;
     if (slot < 0)
-        return -256; /* no free context (0x1001eba0) */
+        return -256; /* no free context */
     int32_t id = g_request_host.begin(g_request_host.ctx, verb, data, n);
     if (id < 0)
         return id;
@@ -404,20 +384,16 @@ static int32_t msg_poll(int32_t h, int kind)
     {
         if (r > 0 && kind == 278)
         {
-            /* the headers in the game's form, and bValid cleared in the rest (0x10027660) */
+            /* the headers, and bValid cleared in the rest */
             uint32_t n = got / 0x48;
-            for (uint32_t i = 0; i < n; ++i)
-            {
-                rekey_header(buf + 0x48 * i);
-                memcpy(GUEST_PTR(m->dst + 0x48 * i), buf + 0x48 * i, 0x48);
-            }
+            memcpy(GUEST_PTR(m->dst), buf, (size_t)n * 0x48);
             for (uint32_t i = n; i < m->cap; ++i)
                 wr8(m->dst + 0x48 * i + 0x3f, rd8(m->dst + 0x48 * i + 0x3f) & 0x7f);
         }
         else if (r > 0 && kind == 275 && got)
             memcpy(GUEST_PTR(m->dst), buf, got < m->cap ? got : m->cap);
         else if (r > 0 && kind == 175 && got == sizeof g_contents)
-            gamecore_set_contents(buf); /* what 177 hands out from now on, as polcore's table */
+            gamecore_set_contents(buf); /* what 177 hands out from now on */
         else if (r == -5136 && kind == 175)
             r = 1; /* a launcher from before "contentlist" does not know it: the table stays as it is */
         m->id = -1;
@@ -426,7 +402,7 @@ static int32_t msg_poll(int32_t h, int kind)
     return r;
 }
 
-/* 278 (0x1001bf30): list the member's messages , a0 = headers, a1 = how many */
+/* 278: list the member's messages, a0 = headers, a1 = how many */
 static void s278_fetch_headers(Guest* g)
 {
     if (!g_have_request_host)
@@ -435,14 +411,14 @@ static void s278_fetch_headers(Guest* g)
         RETC(0);
     }
     uint8_t cap[2] = { (uint8_t)ARG(1), (uint8_t)(ARG(1) >> 8) };
-    RETC((uint32_t)msg_begin(278, "msglist", cap, 2, ARG(0), ARG(1)));
+    RETC((uint32_t)msg_begin(278, "gmsglist", cap, 2, ARG(0), ARG(1)));
 }
 
 static void s279_fetch_poll(Guest* g) { RETC(g_have_request_host ? (uint32_t)msg_poll((int32_t)ARG(0), 278) : 1u); }
 
-/* 175 (0x1001e520 -> 0x1001d2f0): load the member's content ID list again (the request); the
- * request's handle. In the game, after the lobby's status, retail's core sends it on its own; its
- * reply refills the table 177 reads. 176 (0x1001e540 -> 0x1001d340) polls it: 0 busy, 1 done. */
+/* 175: load the member's content ID list again; the request's handle. In the game, after the
+ * lobby's status, retail's core sends it on its own; its reply refills the table 177 reads. 176
+ * polls it: 0 busy, 1 done. */
 static void s175_content_begin(Guest* g)
 {
     if (!g_have_request_host)
@@ -452,28 +428,22 @@ static void s175_content_begin(Guest* g)
 
 static void s176_content_poll(Guest* g) { RETC(g_have_request_host ? (uint32_t)msg_poll((int32_t)ARG(0), 175) : 1u); }
 
-/* 275 (0x1001bfc0): read a message (the request), a0 = its header, a1 = the body (header +0x38 bytes) */
+/* 275: read a message, a0 = its header, a1 = the body (header +0x38 bytes) */
 static void s275_read(Guest* g)
 {
     if (!g_have_request_host)
         RETC(0);
-    uint8_t h[0x48];
-    memcpy(h, ARGP(0), 0x48);
-    rekey_header(h);
-    RETC((uint32_t)msg_begin(275, "msgread", h, 0x48, ARG(1), rd32(ARG(0) + 0x38)));
+    RETC((uint32_t)msg_begin(275, "gmsgread", ARGP(0), 0x48, ARG(1), rd32(ARG(0) + 0x38)));
 }
 
 static void s276_read_poll(Guest* g) { RETC(g_have_request_host ? (uint32_t)msg_poll((int32_t)ARG(0), 275) : 1u); }
 
-/* 280 (0x1001c070): delete a message on the server (the request), a0 = its header */
+/* 280: delete a message on the server, a0 = its header */
 static void s280_delete(Guest* g)
 {
     if (!g_have_request_host)
         RETC(0);
-    uint8_t h[0x48];
-    memcpy(h, ARGP(0), 0x48);
-    rekey_header(h);
-    RETC((uint32_t)msg_begin(280, "msgdelete", h, 0x48, 0, 0));
+    RETC((uint32_t)msg_begin(280, "gmsgdelete", ARGP(0), 0x48, 0, 0));
 }
 
 static void s281_delete_poll(Guest* g) { RETC(g_have_request_host ? (uint32_t)msg_poll((int32_t)ARG(0), 280) : 1u); }
@@ -489,15 +459,20 @@ static void s277_free(Guest* g)
 
 static void s282_unread(Guest* g) { RETC(rd16(ARG(0) + 0x3E) >> 15); }
 
-/* 284-287 (0x1001acb0..): a message's file: GetPath 7 (received, new), 8 (received, read), 5, 6
- * (sent), then the 96-character base64 of its header in the wire form; the header is left as it was */
+/* 284-287: a message's file: GetPath 7 (received, new), 8 (received, read), 5, 6 (sent), then the
+ * name the PlayOnline client gives its header (96 characters); the header is left as it was */
 static void s28x_path(Guest* g, uint32_t dir)
 {
     char path[1024], name[97];
-    uint8_t h[0x48];
-    memcpy(h, ARGP(0), 0x48);
-    rekey_header(h);
-    b64_header(h, name);
+    uint8_t got_name[128];
+    uint32_t got = 0;
+    if (request_now("msgname", ARGP(0), 0x48, got_name, sizeof got_name, &got) <= 0 || got < 96)
+    {
+        ((char*)ARGP(1))[0] = 0;
+        RETC(0xFFFFEC00u);
+    }
+    memcpy(name, got_name, 96);
+    name[96] = 0;
     gamecore_path(dir, path, sizeof path);
     snprintf((char*)ARGP(1), 0x200, "%s%s", path, name);
     RETC(0);
@@ -516,15 +491,16 @@ static void s288_mail_callback(Guest* g)
     RETC(ARG(0));
 }
 
-/* 291 (0x1001b640): a file's name (96 characters at least) -> its header, in the game's form */
+/* 291: a file's name (96 characters at least) -> its header, as the game holds it */
 static void s291_decode_index(Guest* g)
 {
     const char* name = (const char*)ARGP(0);
     if (strnlen(name, 0x60) < 0x60)
         RETC(0xFFFFEC00u);
     uint8_t h[0x48];
-    unb64_header(name, h);
-    rekey_header(h);
+    uint32_t got = 0;
+    if (request_now("msgheader", (const uint8_t*)name, 0x60, h, sizeof h, &got) <= 0 || got != 0x48)
+        RETC(0xFFFFEC00u);
     memcpy(ARGP(1), h, 0x48);
     RETC(0);
 }

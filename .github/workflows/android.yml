@@ -2,43 +2,11 @@
 # with Linux GCC and Clang and macOS Clang, and an NDK build of the Android GPU and TLS test fixtures.
 name: Android
 
+# Only a published release runs it (the launcher's release workflow publishes them here): no pull
+# requests, no pushes to main, no runs by hand.
 on:
-  pull_request:
-    paths:
-      - 'android/**'
-      - 'host/android_main.c'
-      - 'host/benchmark.*'
-      - 'host/host64.c'
-      - 'runtime/portable/d3d8.c'
-      - 'runtime/portable/gfx.h'
-      - 'runtime/portable/gfx_*'
-      - 'runtime/portable/present_rect.h'
-      - 'tests/android_*'
-      - 'tests/benchmark_test.c'
-      - 'tests/gfx_*'
-      - 'tools/android*.py'
-      - 'tools/build*.py'
-      - 'meta/builds.json'
-      - '.github/workflows/android.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'android/**'
-      - 'host/android_main.c'
-      - 'host/benchmark.*'
-      - 'host/host64.c'
-      - 'runtime/portable/d3d8.c'
-      - 'runtime/portable/gfx.h'
-      - 'runtime/portable/gfx_*'
-      - 'runtime/portable/present_rect.h'
-      - 'tests/android_*'
-      - 'tests/benchmark_test.c'
-      - 'tests/gfx_*'
-      - 'tools/android*.py'
-      - 'tools/build*.py'
-      - 'meta/builds.json'
-      - '.github/workflows/android.yml'
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read

@@ -144,6 +144,7 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+| Addon scale | Interface › [Addons] Addon Scale | | | 1 (0.5–3), apart from UI Scale; modern.cfg `addon_scale`. Addons draw, place and get the mouse in their own pixels, the back buffer's over this (Windower's UI resolution, Ashita's screen size); the overlay scales them up, ImGui's text made at that size |
 | Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
 
 ### Gamepad
@@ -168,6 +169,7 @@ The sticks (movement and camera) and the button combinations (`padexsin000`) are
 | Setting | CLI | App / Env | Notes |
 |---|---|---|---|
 | Texture packs | `--textures <dir>` (×8) | `FFXI_BUNDLED_TEXTURES` | default `<data dir>/textures`, then bundled `assets/textures` (font, slot bar) |
+| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/vicons.c`). A texture pack's entry for the same icon wins |
 | DAT overlays (XIPivot-style) | `--dats <dir>` (×8) | `FFXIDats` | first folder wins |
 | Custom server items | `--cexi off\|items\|full` | `FFXICexi` | CatsEyeXI-style ids |
 
@@ -216,12 +218,12 @@ Not for players.
 | Area | Switches |
 |---|---|
 | Effects | `debug` (fx), `FFXI_FX_DEBUG` |
-| Rendering | `FFXI_DRAWLOG`, `FFXI_TEXLOG`, `FFXI_TEXDUMP`, `FFXI_PROBE`, `FFXI_ASYNC_READBACK`, `FFXI_UI_NATIVE`, `FFXI_FPS` |
+| Rendering | `FFXI_DRAWLOG`, `FFXI_TEXLOG`, `FFXI_TEXDUMP`, `FFXI_PROBE`, `FFXI_PROBE_DRAW`, `FFXI_FADE_SCISSOR`, `FFXI_ASYNC_READBACK`, `FFXI_UI_NATIVE`, `FFXI_FPS` |
 | GPU validation | `FFXI_VK_VALIDATION`, `FFXI_D3D12_DEBUG` |
 | World | `FFXI_LODLOG`, `FFXI_WATERLOG`, `FFXI_PRIMELOG` |
 | Files / net | `FFXI_DATS_TRACE`, `FFXI_NET_TRACE` |
 | Recompiler | `FFXI_RECOMP_TRACE`, `FFXI_RECOMP_MISSING` |
-| Profiling | `FFXI_PROFILE`, `FFXI_SAMPLE` |
+| Profiling | `FFXI_PROFILE`, `FFXI_SAMPLE`, `FFXI_GPU_TIMES` |
 
 ---
 
@@ -272,6 +274,7 @@ Config
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
     │   ├── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   ├── [Addons] ........ Addon Scale
     │   └── [Keyboard] ...... Command Key (macOS, iOS)
     ├── Gamepad (also the game's Gamepad buttons)
     │   ├── [Buttons] ....... Select / Confirm, Cancel, Active Window, Main Menu, Autorun,

@@ -108,6 +108,8 @@ _libs = _libs or {}
 -- A coroutine that yielded (coroutine.sleep: xi.lua's scheduler token) goes on as a task: the
 -- task re-yields the same token to xi.lua's scheduler and resumes the coroutine when it's due.
 local scheduled = setmetatable({}, { __mode = 'k' }) -- coroutine -> task
+-- xi.lua's sleep, kept before an addon replaces coroutine.sleep (GearSwap does)
+local co_sleep = coroutine.sleep
 
 local function report(err, where)
     native.error(tostring(err), where or 'handler')
@@ -160,7 +162,7 @@ end
 function coroutine.schedule(fn, time)
     local co = co_create(fn)
     local t = xi.tasks.spawn(function()
-        coroutine.sleep(tonumber(time) or 0)
+        co_sleep(tonumber(time) or 0)
         local ok, a, b = co_resume(co)
         while ok and co_status(co) == 'suspended' do
             co_yield(a, b)
@@ -694,7 +696,7 @@ windower.regex = partial({
     end,
 }, 'windower.regex')
 
--- Screen and UI sizes: the overlay draws in the game's pixels, so the UI resolution is the same.
+-- Screen and UI sizes: the addons' pixels (the back buffer's over Addon Scale, xi_ui_size).
 function windower.get_windower_settings()
     local w, h = native.ui.screen()
     if not w or w == 0 then w, h = 1920, 1080 end

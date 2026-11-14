@@ -34,17 +34,17 @@ void gamecore_set_contents(const uint8_t table[64 * 0x68]);
  * retail's core keeps it (pol_member_id). Without them: one handle 0, and a fixed id. */
 void gamecore_set_handles(const uint8_t table[64 * 0x28]);
 void gamecore_set_member_id(uint64_t id);
-/* The key polcore keeps the member's ids under (its 0x100aa848, launcher pol_member_key): the
- * message headers the game handles carry ids under it (slots 279, 284-287, 291). */
+/* Kept for hosts that still pass it; the PlayOnline client, which answers the requests, uses its own. */
 void gamecore_set_member_key(uint64_t key);
 /* Where the game's PlayOnline requests go, for a PlayOnline sign-in: begin(verb, data) returns an
  * id >= 0 or a negative error; poll(id) returns 0 while pending, then the result (> 0 done, < 0
  * failed) with the reply's payload in out (*got bytes, at most cap). Verbs: "status" (slot 195's
- * six int32s; payload V and the authCode when the request went out), "msglist" (u16 cap; payload
- * the 0x48-byte headers of the member's PlayOnline messages, wire form), "msgread" and "msgdelete"
- * (a header, wire form; payload the message body), "contentlist" (no data; payload the member's
- * content table, 64 records of 0x68, as slot 177 hands them out). Called on the game thread with
- * the guest lock held: neither may block. */
+ * six int32s; payload V and the authCode when the request went out), "gmsglist" (u16 cap; payload
+ * the 0x48-byte headers of the member's PlayOnline messages, as the game holds them), "gmsgread"
+ * and "gmsgdelete" (such a header; payload the message body), "msgname" (such a header; payload
+ * its 96-character file name) and "msgheader" (a file name; payload its header), "contentlist" (no
+ * data; payload the member's content table, 64 records of 0x68, as slot 177 hands them out). Called
+ * on the game thread with the guest lock held: neither may block. */
 typedef struct GamecoreRequestHost
 {
     int32_t (*begin)(void* ctx, const char* verb, const uint8_t* data, uint32_t n);

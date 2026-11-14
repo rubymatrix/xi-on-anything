@@ -1,11 +1,13 @@
-# The Linux kit (tools/linux/kit.sh) for the launcher's Linux and Steam Deck installs: built from each
-# push to main and republished under the kit-linux pre-release, with the commit its sources are in
+# The Linux kit (tools/linux/kit.sh) for the launcher's Linux and Steam Deck installs: built for each
+# release and republished under the kit-linux pre-release, with the commit its sources are in
 # (kit.json), which the launcher downloads beside it.
 name: linux-kit
+# Only a published release runs it (the launcher's release workflow publishes them here): no pull
+# requests, no pushes to main, no runs by hand.
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  release:
+    types: [published]
+
 permissions:
   contents: write
 jobs:
@@ -32,5 +34,5 @@ jobs:
         run: |
           gh release view kit-linux >/dev/null 2>&1 || \
             gh release create kit-linux --prerelease --title "Linux kit" \
-              --notes "What the launcher builds the Linux client from (tools/linux/kit.sh). Replaced on every push to main."
+              --notes "What the launcher builds the Linux client from (tools/linux/kit.sh). Replaced with every release."
           gh release upload kit-linux build/xi-kit-linux-x86_64.tar.gz --clobber

@@ -84,7 +84,8 @@ extern uint32_t rt_image_lo, rt_image_hi; /* runtime range of the image */
 #define REGS_DECL                                                                                \
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;                                             \
     unsigned cf, pf, af, zf, sf, of, df;                                                         \
-    (void)af
+    unsigned rt_sp_n = 0; /* back edges taken here while another thread waited (RT_SAFEPOINT) */ \
+    (void)af, (void)rt_sp_n
 #define REGS_LOAD                                                                                \
     eax = g->eax; ecx = g->ecx; edx = g->edx; ebx = g->ebx;                                      \
     esp = g->esp; ebp = g->ebp; esi = g->esi; edi = g->edi;                                      \
@@ -113,11 +114,15 @@ void rt_rdtsc(Guest* g);
 /* The guest-wide lock: one guest thread runs
  * translated code at a time. The platform bridge releases it around every native call and takes
  * it on every host->guest entry; a loop that never calls out would starve the other guest threads,
- * so every backward jump is a safepoint that yields when another thread is waiting. The same
- * hand-off is what gives arm64 x86's memory ordering for the guest. */
+ * so backward jumps are safepoints that yield when another thread is waiting. The same
+ * hand-off is what gives arm64 x86's memory ordering for the guest. While a thread waits, only every
+ * RT_SAFEPOINT_EVERY-th back edge in a function calls out, counted in a local so the check stays in
+ * registers: the call at each one cost 7-10% of the game thread, as the sound threads keep the lock
+ * contended nearly all the time. */
 extern RT_HOT_GLOBAL volatile uint32_t rt_lock_contended;
 void rt_safepoint(void);
-#define RT_SAFEPOINT do { if (rt_lock_contended) rt_safepoint(); } while (0)
+#define RT_SAFEPOINT_EVERY 64u
+#define RT_SAFEPOINT do { if (rt_lock_contended && !(++rt_sp_n & (RT_SAFEPOINT_EVERY - 1u))) rt_safepoint(); } while (0)
 
 #define RT_UNIMPL(addr, text) do { REGS_STORE; rt_fatal(g, (addr), "unimplemented: " text); } while (0)
 #define RT_BADJUMP(addr) do { REGS_STORE; rt_fatal(g, (addr), "jump to an address with no translation"); } while (0)

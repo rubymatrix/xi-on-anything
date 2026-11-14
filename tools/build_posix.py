@@ -9,6 +9,8 @@
         offscreen, without the game (tests/gfx_test.c, tests/d3d8_test.c)
   python3 tools/build_posix.py vfstest                   the game's paths to host paths (runtime/portable/vfs.c),
         without the game (tests/vfs_test.c)
+  python3 tools/build_posix.py keytest                   the graphics back ends' map hash and compare
+        (runtime/portable/gfx_key.h), without a GPU (tests/gfx_key_test.c)
   python3 tools/build_posix.py datuitest --game <folder>  the game's UI art read from its DATs (host/datui.c):
         parse checks, and renders in build/datui/ (tests/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
@@ -88,12 +90,59 @@ else:
         GFX_LIBS = ['-L' + os.path.join(os.environ['XI_DEPS'], 'lib')] + GFX_LIBS
 HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime/portable/dsound.c',
                 'runtime/portable/input.c', 'runtime/portable/dinput.c', 'runtime/portable/ws2.c', 'host/host64.c',
-                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/cexi.c', 'host/discord.c', 'host/frame.c', 'host/scene.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/keychain.c', 'host/appdefaults.c',
+                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/cexi.c', 'host/discord.c', 'host/frame.c', 'host/scene.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/vicons.c', 'host/keychain.c', 'host/appdefaults.c',
                 'runtime/portable/geometry_hooks.c'] + GFX_SOURCES
 # the addon host (host/addons/, docs/addons.md): C, C++ (ImGui) and its embedded Lua
 ADDON_SOURCES = sorted('host/addons/' + f for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'host', 'addons'))
                        if f.endswith('.c') or f.endswith('.cpp')) + ['generated/addons_lua.c']
 ADDON_LIBS = ('luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
+# The PlayOnline sign-in, which is not in this repository: XI_POL names a folder whose
+# xi-build.json lists the C sources to compile (one of them implements host/signin_pol.h) and the
+# Rust crate to link, and the sign-in screen gets PlayOnline as a method.
+def pol(rust_target=None, out=None, env=None):
+    """The PlayOnline sign-in's sources, the flags for them and for ours, and the archives to link
+    (its crate built for rust_target into out), or ([], [], []) without XI_POL. XI_POL's xi-build.json
+    names the C sources and the crate, or, for a prebuilt client, "prebuilt": {rust_target: [the
+    static libraries]}, and then there are no sources."""
+    folder = os.environ.get('XI_POL')
+    if not folder:
+        return [], [], []
+    folder = os.path.abspath(os.path.expanduser(folder))
+    try:
+        with open(os.path.join(folder, 'xi-build.json')) as f:
+            m = json.load(f)
+    except OSError as e:
+        raise SystemExit('XI_POL=%s: %s' % (folder, e))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # a prebuilt client (what the launcher ships): its static libraries for this target, no sources
+    if 'prebuilt' in m:
+        libs = m['prebuilt'].get(rust_target or '')
+        if not libs:
+            raise SystemExit('XI_POL=%s has no PlayOnline client for %s' % (folder, rust_target))
+        libs = [os.path.join(folder, a) for a in libs]
+        missing = [a for a in libs if not os.path.isfile(a)]
+        if missing:
+            raise SystemExit('XI_POL=%s has no %s' % (folder, ', '.join(missing)))
+        return [], ['-DFFXI_POL', '-I', os.path.join(root, 'host')], libs
+    sources = [os.path.join(folder, s) for s in m['sources']]
+    manifest = os.path.join(folder, m['crate'], 'Cargo.toml')
+    missing = [s for s in sources + [manifest] if not os.path.isfile(s)]
+    if missing:
+        raise SystemExit('XI_POL=%s has no %s' % (folder, ', '.join(missing)))
+    target_dir = os.path.join(out or os.path.join(root, 'build'), 'pol')
+    cmd = ['cargo', 'build', '--release', '--manifest-path', manifest, '--target-dir', target_dir] + (
+        ['--target', rust_target] if rust_target else [])
+    print('>', ' '.join(cmd), flush=True)
+    subprocess.check_call(cmd, env=dict(os.environ, **(env or {})))
+    archive = os.path.join(target_dir, *([rust_target] if rust_target else []), 'release', m['lib'])
+    return sources, ['-DFFXI_POL', '-I', folder, '-I', os.path.join(root, 'host')], [archive]
+
+
+# The PlayOnline client stays out of what a build exports: hosts export their own symbols for the
+# addons' FFI (-export_dynamic), so its sources compile with hidden visibility, its crate links
+# hidden (load_hidden / exclude-libs), and the app that ships is stripped of local symbols and debug
+# information, which name its functions. The unstripped build stays beside it for debugging.
+POL_CFLAGS = ['-fvisibility=hidden', '-g0']
 
 
 def posix(p):
@@ -334,7 +383,9 @@ def host64_kit(game, kitdir):
     # the headers: SDL3's public ones are the same on every platform (third_party/sdl3/include)
     addon_cflags, _ = addons(make=False)
     inc = ['-I', 'third_party/sdl3/include'] + thirdparty.flags('mbedtls') + addon_cflags
-    objs += compile_stale(k['device_sources'], 'build/obj/host64-kit', inc)
+    # and host/kit_mem.c: compiler_rt's memcpy, memcmp and the rest local to host64, so its libraries use
+    # glibc's. In the same call: the folder's .flags records one set, and another would rebuild them all
+    objs += compile_stale(k['device_sources'] + ['host/kit_mem.c'], 'build/obj/host64-kit', inc)
     libs = [os.path.join(kitdir, 'lib', l) for l in k['libs'] if l != 'libxi.a']
     # libxi.a whole, as the other builds link every object: addons find win32_ffi.c's and gdifont_ffi.c's
     # functions by name (ffi.C), so nothing references them and an archive would leave them out
@@ -382,6 +433,13 @@ def vfstest():
     run(CC + CFLAGS + ['-o', 'build/vfs_test', 'tests/vfs_test.c', 'runtime/portable/vfs.c', 'runtime/portable/plat_posix.c',
                        '-lpthread'])
     run(['build/vfs_test'])
+
+
+def keytest():
+    """runtime/portable/gfx_key.h on this host: tests/gfx_key_test.c."""
+    os.makedirs(os.path.join(ROOT, 'build'), exist_ok=True)
+    run(CC + CFLAGS + ['-o', 'build/gfx_key_test', 'tests/gfx_key_test.c'])
+    run(['build/gfx_key_test'])
 
 
 DESKTOP_ID = 'xi-on-anything'  # host64's app id on Linux (host64.c XI_APP_ID)
@@ -573,7 +631,7 @@ APP_INFO_PLIST = '''<?xml version="1.0" encoding="UTF-8"?>
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'datuitest', 'app', 'kit', 'desktop'])
+    ap.add_argument('target', choices=['prepare', 'boot64', 'host64', 'gfxtest', 'vfstest', 'keytest', 'datuitest', 'app', 'kit', 'desktop'])
     ap.add_argument('--out', default='build/kit')  # kit: where it goes
     ap.add_argument('--kit')  # host64: build from this kit
     ap.add_argument('--game', default=os.path.expanduser('~/SquareEnix/FINAL FANTASY XI'))
@@ -597,6 +655,8 @@ def main():
         return gfxtest()
     if args.target == 'vfstest':
         return vfstest()
+    if args.target == 'keytest':
+        return keytest()
     if args.target == 'kit':
         return kit(args.out)
     game = os.path.abspath(args.game)

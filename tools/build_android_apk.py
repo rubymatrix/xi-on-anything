@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Package the Android host built by tools/build_android.py into a signed test APK, with the SDK's
-own tools (javac, d8, aapt, zipalign, apksigner) and no Gradle.
+"""Package the Android host built by tools/build_android.py into a signed APK, with the SDK's own
+tools (javac, d8, aapt, zipalign, apksigner) and no Gradle.
 
-  python3 tools/build_android_apk.py [--build-dir build/android]
+  python3 tools/build_android_apk.py [--build-dir build/android] [--keystore file.p12 [--key-alias xi]]
 
 The APK is <build dir>/xi-native-test.apk: SDL's Java and android/, libSDL3.so, and libmain.so with its
-debug info stripped. Its minimum API follows the library's build-config.json. The signing key is made
-once, in the dependency cache. Nothing is installed on a device.
+debug info stripped. Its minimum API follows the library's build-config.json; its versionName is
+runtime.json's version and its versionCode the game build's digits (20261102), what the launcher reads
+back from a phone. --keystore signs it with that key (its password in XI_ANDROID_KEYSTORE_PASS): a
+player's own, which every later update must be signed with too, or Android refuses it. Without it, a
+test key made once in the dependency cache signs it. Nothing is installed on a device.
 """
 
 import argparse
@@ -17,10 +20,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 
 from android_toolchain import CACHE, ROOT, SDK, SDL, TC
+import buildinfo
 
 BT = SDK / 'build-tools/36.0.0'
 ANDROID_JAR = SDK / 'platforms/android-36/android.jar'
@@ -28,7 +33,14 @@ JDK = Path(os.environ.get('JAVA_HOME', str(Path(shutil.which('javac') or '/missi
 
 
 def run(args):
-    subprocess.run(list(map(str, args)), check=True, cwd=ROOT)
+    args = list(map(str, args))
+    if sys.platform == 'win32' and not Path(args[0]).suffix:
+        # build-tools on Windows: d8 and apksigner are .bat, aapt and zipalign .exe
+        for ext in ('.exe', '.bat'):
+            if Path(args[0] + ext).exists():
+                args[0] += ext
+                break
+    subprocess.run(args, check=True, cwd=ROOT)
 
 
 def build_metadata(directory):
@@ -48,6 +60,14 @@ def build_metadata(directory):
     return minimum_api, actual
 
 
+def version():
+    """(versionCode, versionName): the game build's digits (20261102; 1 before tools/prepare.py) and
+    the client's version (runtime.json), as the iPhone app's CFBundleVersion and short version."""
+    info = buildinfo.runtime()
+    digits = (info['build'] or '').replace('-', '')
+    return (int(digits) if digits.isdigit() else 1), info['version']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument(
@@ -56,6 +76,8 @@ def main():
         default=ROOT / 'build/android',
         help='Exact input library and build-config directory; outputs stay within it',
     )
+    parser.add_argument('--keystore', type=Path, help='PKCS#12 key to sign with; its password in XI_ANDROID_KEYSTORE_PASS')
+    parser.add_argument('--key-alias', default='xi', help="the key's alias in --keystore")
     args = parser.parse_args()
     directory = args.build_dir.resolve()
     minimum_api, actual = build_metadata(directory)
@@ -82,6 +104,8 @@ def main():
         run(
             [
                 JDK / 'bin/javac',
+                '-encoding',  # SDL's sources are UTF-8; javac's default is the system code page on Windows
+                'UTF-8',
                 '-source',
                 '8',
                 '-target',
@@ -108,15 +132,29 @@ def main():
             + sorted(classes.rglob('*.class'))
         )
         unsigned = out / 'unsigned.apk'
+        code, name = version()
+        # the base registry the app starts the game with (MainActivity.getArguments), as the iPhone
+        # app's bundle has it
+        assets = out / 'assets'
+        assets.mkdir()
+        if (ROOT / 'ffxi.reg').is_file():
+            shutil.copyfile(ROOT / 'ffxi.reg', assets / 'ffxi.reg')
         run(
             [
                 BT / 'aapt',
                 'package',
                 '-f',
+                '--version-code',
+                str(code),
+                '--version-name',
+                name,
+                '--replace-version',
                 '-M',
                 manifest,
                 '-S',
                 ROOT / 'android/app/src/main/res',
+                '-A',
+                assets,
                 '-I',
                 ANDROID_JAR,
                 '-F',
@@ -131,28 +169,33 @@ def main():
             archive.write(CACHE / 'sdl-build/libSDL3.so', 'lib/arm64-v8a/libSDL3.so')
             archive.write(library, 'lib/arm64-v8a/libmain.so')
 
-        keystore = CACHE / 'test-signing.p12'
-        if not keystore.exists():
-            run(
-                [
-                    JDK / 'bin/keytool',
-                    '-genkeypair',
-                    '-keystore',
-                    keystore,
-                    '-storepass',
-                    'android',
-                    '-keypass',
-                    'android',
-                    '-alias',
-                    'localtest',
-                    '-dname',
-                    'CN=XI Native Local Test',
-                    '-keyalg',
-                    'RSA',
-                    '-validity',
-                    '3650',
-                ]
-            )
+        if args.keystore:
+            if not args.keystore.is_file() or 'XI_ANDROID_KEYSTORE_PASS' not in os.environ:
+                raise RuntimeError('--keystore needs the key file and XI_ANDROID_KEYSTORE_PASS')
+            keystore, alias, password = args.keystore, args.key_alias, 'env:XI_ANDROID_KEYSTORE_PASS'
+        else:
+            keystore, alias, password = CACHE / 'test-signing.p12', 'localtest', 'pass:android'
+            if not keystore.exists():
+                run(
+                    [
+                        JDK / 'bin/keytool',
+                        '-genkeypair',
+                        '-keystore',
+                        keystore,
+                        '-storepass',
+                        'android',
+                        '-keypass',
+                        'android',
+                        '-alias',
+                        'localtest',
+                        '-dname',
+                        'CN=XI Native Local Test',
+                        '-keyalg',
+                        'RSA',
+                        '-validity',
+                        '3650',
+                    ]
+                )
         aligned = out / 'aligned.apk'
         run([BT / 'zipalign', '-f', '-P', '16', '4', unsigned, aligned])
         apk = directory / 'xi-native-test.apk'
@@ -163,9 +206,9 @@ def main():
                 '--ks',
                 keystore,
                 '--ks-pass',
-                'pass:android',
+                password,
                 '--ks-key-alias',
-                'localtest',
+                alias,
                 '--out',
                 apk,
                 aligned,
@@ -181,6 +224,8 @@ def main():
                     'build_dir': str(directory),
                     'unstripped_lib_sha256': actual,
                     'packed_lib_sha256': hashlib.sha256(library.read_bytes()).hexdigest(),
+                    'version_code': code,
+                    'version_name': name,
                 }
             )
         )

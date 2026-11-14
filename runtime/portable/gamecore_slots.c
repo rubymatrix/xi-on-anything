@@ -5,9 +5,9 @@
  * Every slot FFXI uses is cdecl: the caller pops the arguments, so slots return with RETC.
  *
  * Session and lobby (gamecore-slots.session.txt). FFXiMain's lobby bring-up (0x100ed7f0) calls,
- * in order: 818 pump, 221/222 resolve the lobby's host name, 195/196 the presence status request
- * (the request), 936 the authCode block, 1003 the session value V. On retail, V is the first 16
- * bytes of the account server's the request reply; here the host supplies it (gamecore_set_session),
+ * in order: 818 pump, 221/222 resolve the lobby's host name, 195/196 the presence status request,
+ * 936 the authCode block, 1003 the session value V. On retail, V comes back with the status
+ * request's reply; here the host supplies it (gamecore_set_session),
  * byte-identical to the session value in LSB's account table, which LSB's lobby checks. */
 #include <stdio.h>
 #include <string.h>
@@ -95,7 +95,7 @@ static void s222_dns_poll(Guest* g)
 
 /* 195 (0x1001db60): begin the presence status request (handle, chr, mode, openstat, friendauth,
  * class; -2 = keep). Range checks as retail. With a status host (a PlayOnline sign-in) the request
- * goes to PlayOnline as retail's does, the request on the member's session: at the lobby (class 1,
+ * goes to PlayOnline as retail's does, on the member's session: at the lobby (class 1,
  * no character), at character select (the handle and the character in it) and on leaving the world
  * (no character). Without one it needs no network. */
 static void s195_status_begin(Guest* g)

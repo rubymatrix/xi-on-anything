@@ -1,6 +1,7 @@
 package com.rubymatrix.xionanything;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
@@ -18,11 +19,27 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.util.Base64;
+import android.util.Log;
+
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.util.ArrayList;
+import java.util.Arrays;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 
 import org.libsdl.app.SDLActivity;
 
@@ -330,7 +347,10 @@ public final class MainActivity extends SDLActivity {
         return new String[] {"SDL3", "main"};
     }
 
-    // run.args (one argument per line) replaces the default command line below.
+    // run.args (one argument per line) replaces the default command line below. The game is the
+    // "FINAL FANTASY XI" folder the launcher's phone page copies here (the PlayOnline viewer beside
+    // it), else an older setup's "game"; the base registry is the APK's own. No --server: the sign-in
+    // screen's (or an account the launcher sent) is used.
     @Override
     protected String[] getArguments() {
         File base = getExternalFilesDir(null);
@@ -351,9 +371,86 @@ public final class MainActivity extends SDLActivity {
                 throw new IllegalStateException(e);
             }
         }
-        return new String[] {"--game", new File(base, "game").getPath(), "--data-dir", data.getPath(), "--reg",
-                new File(base, "ffxi.reg").getPath(), "--reg-overlay", new File(data, "settings.reg").getPath(),
-                "--user-dir", new File(data, "USER").getPath(), "--server", "127.0.0.1",
-                "--fps-divisor", "2", "--aspect", "off"};
+        File game = new File(base, "FINAL FANTASY XI");
+        if (!game.isDirectory())
+            game = new File(base, "game");
+        File reg = new File(getFilesDir(), "ffxi.reg");
+        try (InputStream in = getAssets().open("ffxi.reg"); OutputStream out = new FileOutputStream(reg)) {
+            byte[] buf = new byte[8192];
+            for (int n; (n = in.read(buf)) > 0;)
+                out.write(buf, 0, n);
+        } catch (IOException e) {
+            reg = new File(base, "ffxi.reg"); // a build without the asset: one put there by hand
+        }
+        return new String[] {"--game", game.getPath(), "--data-dir", data.getPath(), "--reg", reg.getPath(),
+                "--reg-overlay", new File(data, "settings.reg").getPath(), "--user-dir",
+                new File(data, "USER").getPath(), "--fps-divisor", "2", "--aspect", "off"};
+    }
+
+    /* Saved sign-in passwords (host/keychain.c, from any thread): each one encrypted with an AES key
+     * that the Android Keystore makes and keeps (it never leaves the Keystore, and with a secure lock
+     * screen it is in the device's hardware), the ciphertext in this app's private preferences. No
+     * password is written anywhere in the clear. Keys are the sign-in's ("lsb:server:user"). */
+    private static final String KEY_ALIAS = "xi-signin";
+
+    private static SecretKey keychainKey() throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        if (ks.containsAlias(KEY_ALIAS))
+            return ((KeyStore.SecretKeyEntry) ks.getEntry(KEY_ALIAS, null)).getSecretKey();
+        KeyGenerator gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        gen.init(new KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build());
+        return gen.generateKey();
+    }
+
+    private SharedPreferences keychainStore() {
+        return getSharedPreferences("keychain", MODE_PRIVATE);
+    }
+
+    // the entry's name: the key, as a Base64 that preferences' XML keeps as it is
+    private static String keychainEntry(String key) {
+        return Base64.encodeToString(key.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP | Base64.URL_SAFE);
+    }
+
+    public synchronized boolean keychainSet(String key, byte[] password) {
+        try {
+            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(Cipher.ENCRYPT_MODE, keychainKey());
+            byte[] iv = c.getIV(), sealed = c.doFinal(password);
+            byte[] blob = new byte[1 + iv.length + sealed.length];
+            blob[0] = (byte) iv.length;
+            System.arraycopy(iv, 0, blob, 1, iv.length);
+            System.arraycopy(sealed, 0, blob, 1 + iv.length, sealed.length);
+            return keychainStore().edit().putString(keychainEntry(key), Base64.encodeToString(blob, Base64.NO_WRAP)).commit();
+        } catch (Exception e) {
+            Log.w("XI", "keychain: not saved: " + e);
+            return false;
+        } finally {
+            Arrays.fill(password, (byte) 0);
+        }
+    }
+
+    public synchronized byte[] keychainGet(String key) {
+        String text = keychainStore().getString(keychainEntry(key), null);
+        if (text == null)
+            return null;
+        try {
+            byte[] blob = Base64.decode(text, Base64.NO_WRAP);
+            int n = blob[0];
+            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(Cipher.DECRYPT_MODE, keychainKey(), new GCMParameterSpec(128, blob, 1, n));
+            return c.doFinal(blob, 1 + n, blob.length - 1 - n);
+        } catch (Exception e) {
+            Log.w("XI", "keychain: unreadable: " + e); // the Keystore's key gone (a restored backup, say)
+            return null;
+        }
+    }
+
+    public synchronized void keychainDelete(String key) {
+        keychainStore().edit().remove(keychainEntry(key)).commit();
     }
 }
