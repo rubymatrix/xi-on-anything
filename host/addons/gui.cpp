@@ -195,6 +195,7 @@ struct XiText
     uint32_t parent = 0;
     int anchor = 0; /* Ashita's FrameAnchor: 0 top left, 1 top right, 2 bottom left, 3 bottom right */
     int locked = 0, can_focus = 1;
+    int em = 0; /* size is the em, as Windows' fonts (Windower's, Ashita's), not ImGui's line */
     float ext_w = 0, ext_h = 0; /* as drawn last */
     uint32_t order;
 };
@@ -290,7 +291,7 @@ extern "C" int xi_text_set(uint32_t id, const char* f, double n, const char* s)
     NUM("color", color); NUM("stroke_color", stroke_color); NUM("stroke", stroke); NUM("bg_visible", bg_visible);
     NUM("bg_color", bg_color); NUM("pad", pad); NUM("right", right); NUM("bottom", bottom); NUM("width", w_fixed);
     NUM("height", h_fixed); NUM("parent", parent); NUM("anchor", anchor); NUM("locked", locked);
-    NUM("can_focus", can_focus);
+    NUM("can_focus", can_focus); NUM("em", em);
     else return 0;
 #undef NUM
     return 1;
@@ -363,6 +364,59 @@ extern "C" int xi_prim_get(uint32_t id, const char* f, double* n)
  * fontconfig (fontconfig_file). */
 static std::unordered_map<std::string, ImFont*> g_fonts;
 static ImFont* g_default_font;
+/* ImGui's size for a font is its ascent to descent (hhea); Windows' CreateFont with a negative
+ * height, what Windower's and Ashita's point sizes become, sizes the em. This is the first over
+ * the second (Arial 1.12): a text with em set is drawn at its size times this. */
+static std::unordered_map<ImFont*, float> g_font_em;
+
+static float em_factor(const std::string& path)
+{
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp)
+        return 1.0f;
+    unsigned char b[4096];
+    size_t n = fread(b, 1, sizeof b, fp);
+    auto u16 = [&](size_t o) { return o + 2 <= n ? (unsigned)(b[o] << 8 | b[o + 1]) : 0u; };
+    auto u32 = [&](size_t o) { return o + 4 <= n ? (uint32_t)u16(o) << 16 | u16(o + 2) : 0u; };
+    size_t base = 0;
+    if (n >= 16 && !memcmp(b, "ttcf", 4))
+        base = u32(12); /* a collection: its first font */
+    unsigned em = 0;
+    int asc = 0, desc = 0;
+    for (unsigned i = 0, tables = u16(base + 4); i < tables; ++i)
+    {
+        size_t rec = base + 12 + i * 16;
+        if (rec + 16 > n)
+            break;
+        uint32_t off = u32(rec + 8);
+        unsigned char tag[4];
+        memcpy(tag, b + rec, 4);
+        unsigned char t[54] = { 0 };
+        if (!memcmp(tag, "head", 4) || !memcmp(tag, "hhea", 4))
+        {
+            fseek(fp, (long)off, SEEK_SET);
+            if (fread(t, 1, sizeof t, fp) < 8)
+                continue;
+            if (tag[1] == 'e')
+                em = (unsigned)(t[18] << 8 | t[19]);
+            else
+                asc = (int16_t)(t[4] << 8 | t[5]), desc = (int16_t)(t[6] << 8 | t[7]);
+        }
+    }
+    fclose(fp);
+    if (!em || asc - desc <= 0)
+        return 1.0f;
+    return (float)(asc - desc) / (float)em;
+}
+
+/* the ImGui size a text is drawn at */
+static float text_px(ImFont* f, float size, int em)
+{
+    if (!em)
+        return size;
+    auto it = g_font_em.find(f);
+    return it != g_font_em.end() ? size * it->second : size;
+}
 
 static int file_exists(const char* p)
 {
@@ -539,11 +593,17 @@ static ImFont* font_for(const std::string& family, int bold, int italic)
         return it->second;
     ImFont* f = NULL;
     std::string path = font_file(family, bold, italic);
+    /* Windows' font mapper gives a family it doesn't have (xivbar's "sans-serif", for one) Arial,
+     * with Arial's metrics: the default font standing in is smaller and sits higher. */
+    if (path.empty() && !family.empty())
+        path = font_file("Arial", bold, italic);
     if (!path.empty())
     {
         ImFontConfig cfg;
         cfg.OversampleH = 2;
         f = ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), 16.0f, &cfg);
+        if (f)
+            g_font_em[f] = em_factor(path);
     }
     if (!f)
     {
@@ -641,7 +701,7 @@ static void text_extents(XiText* t, float* w, float* h)
         return;
     }
     ImFont* f = font_for(t->family, t->bold, t->italic);
-    ImVec2 sz = measure(f, t->size, t->text);
+    ImVec2 sz = measure(f, text_px(f, t->size, t->em), t->text);
     *w = t->w_fixed > 0 ? t->w_fixed : sz.x + t->pad * 2;
     *h = t->h_fixed > 0 ? t->h_fixed : sz.y + t->pad * 2;
 }
@@ -680,7 +740,8 @@ static void draw_text(ImDrawList* dl, XiText* t)
         dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), im_color(t->bg_color));
     std::vector<Run> runs;
     runs_of(t->text, t->color, runs);
-    float cx = x + t->pad, cy = y + t->pad, line_h = f->CalcTextSizeA(t->size, FLT_MAX, 0, "A").y;
+    const float px = text_px(f, t->size, t->em);
+    float cx = x + t->pad, cy = y + t->pad, line_h = f->CalcTextSizeA(px, FLT_MAX, 0, "A").y;
     for (const Run& r : runs)
     {
         const char* s = r.s;
@@ -697,12 +758,12 @@ static void draw_text(ImDrawList* dl, XiText* t)
                     for (int dy = -1; dy <= 1; ++dy)
                         for (int dx = -1; dx <= 1; ++dx)
                             if (dx || dy)
-                                dl->AddText(f, t->size, ImVec2(cx + dx * k, cy + dy * k), sc, s, e);
+                                dl->AddText(f, px, ImVec2(cx + dx * k, cy + dy * k), sc, s, e);
                 }
-                dl->AddText(f, t->size, ImVec2(cx, cy), im_color(r.color), s, e);
+                dl->AddText(f, px, ImVec2(cx, cy), im_color(r.color), s, e);
                 if (t->bold && f == g_default_font)
-                    dl->AddText(f, t->size, ImVec2(cx + 1, cy), im_color(r.color), s, e);
-                cx += f->CalcTextSizeA(t->size, FLT_MAX, 0, s, e).x;
+                    dl->AddText(f, px, ImVec2(cx + 1, cy), im_color(r.color), s, e);
+                cx += f->CalcTextSizeA(px, FLT_MAX, 0, s, e).x;
             }
             if (nl)
             {
