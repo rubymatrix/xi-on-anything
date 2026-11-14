@@ -80,3 +80,10 @@ GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size);
 /* a vertex or index buffer's guest memory (what the game wrote into it), 0 before its first lock */
 uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size);
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6]);
+/* The scene renderer drew the world with this camera (its view, projection and viewport) under the camera's light: the
+ * frame's camera for the effects on the finished scene (Modern Fog, shafts, bloom, tone mapping). The world's own draws
+ * no longer reach the device, so without it the effects ran only on frames where something the game still draws
+ * itself (a mob with a shine pass) was in view. ambient and fog_col as 0..1, fog = (start, end), sun = the direction
+ * toward it in the world (w = 1 when there is one) and its colour. */
+void d3d8_world_camera(const float view[16], const float proj[16], const uint32_t vp[6], const float ambient[4],
+    const float fog_col[4], const float fog[2], const float sun_dir[4], const float sun_col[4]);
