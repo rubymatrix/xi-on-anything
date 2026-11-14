@@ -3629,6 +3629,49 @@ static void scene_finish(const char* why)
     g_scene.done = 1;
 }
 
+void d3d8_world_camera(const float view[16], const float proj[16], const uint32_t vp[6], const float ambient[4],
+    const float fog_col[4], const float fog[2], const float sun_dir[4], const float sun_col[4])
+{
+    uint32_t face, level;
+    Obj* rt = obj(g_dev.rt);
+    GfxTex* c = rt ? surface_gpu(rt, &face, &level) : NULL;
+    /* the world's scene, as a 3D draw into it would count (scene_note): the large target, not another walk's */
+    if (!c || face || level || (uint64_t)rt->width * rt->height * 2 < (uint64_t)g_dev.pp[0] * g_dev.pp[1] ||
+        (g_scene.world && c != g_scene.world) || proj[11] == 0.0f)
+        return;
+    for (int i = 0; i < 4; ++i)
+        if (g_scene.tally[i].t == c || !g_scene.tally[i].t || i == 3)
+        {
+            if (g_scene.tally[i].t != c)
+                g_scene.tally[i].t = c, g_scene.tally[i].n = 0;
+            g_scene.tally[i].n++;
+            break;
+        }
+    if (c != g_scene.rt)
+    {
+        scene_finish("switch");
+        g_scene.rt = c, g_scene.draws = 0, g_scene.done = 0, g_scene.cam_rank = 0, g_scene.sun_draw = 0;
+    }
+    if (g_scene.done)
+        return;
+    g_scene.draws++;
+    /* the world's camera over any draw's: a fogged draw of the game's (rank 2) can't take it back */
+    GfxScene* sc = &g_scene.s;
+    g_scene.cam_rank = 2, g_scene.cam_draw = g_scene.draws;
+    memcpy(sc->proj, proj, 64);
+    memcpy(sc->view, view, 64);
+    memcpy(sc->vp, vp, sizeof sc->vp);
+    memcpy(sc->ambient, ambient, 16);
+    memcpy(sc->fogcolor, fog_col, 16);
+    sc->fog[0] = fog[0], sc->fog[1] = fog[1], sc->fog[2] = 1.0f;
+    if (sun_dir[3] != 0.0f)
+    {
+        sun_vote(sun_dir, sun_col, 1.0f);
+        if (!g_scene.sun_draw)
+            g_scene.sun_draw = g_scene.draws;
+    }
+}
+
 static void scene_note(GfxDraw* d)
 {
     d->caster = 0;

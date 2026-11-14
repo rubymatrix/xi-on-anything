@@ -846,6 +846,22 @@ static void flush(void)
         list_add(&all, &g_blend.v[i]);
     for (uint32_t i = 0; i < g_late.n; ++i)
         list_add(&all, &g_late.v[i]);
+    {
+        /* the effects' camera (d3d8_world_camera), under the light where the camera is: the zone's environment */
+#ifdef FFXI_SCENE_ENV
+        uint32_t cenv = rd32(FFXI_SCENE_ENV);
+#else
+        uint32_t cenv = g_npicks ? g_picks[0].env : 0;
+#endif
+        const EnvLight* ce = NULL;
+        for (uint32_t k = 0; k < nenvs && !ce; ++k)
+            if (envs[k].env == cenv)
+                ce = &envs[k];
+        static EnvLight cam_env;
+        if (!ce)
+            env_light(&cam_env, cenv, mgr), ce = &cam_env;
+        d3d8_world_camera(f_view, f_proj, vp, ce->ambient, ce->fog_col, ce->fog, ce->sun_dir, ce->sun_col);
+    }
     GfxWorldFrame f;
     memset(&f, 0, sizeof f);
     memcpy(f.view, f_view, sizeof f_view);
