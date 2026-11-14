@@ -2129,6 +2129,11 @@ static void fixes_frame(void)
     g_fix_shine = gfx_fx_get("fix_shine") != 0.0f;
 }
 
+unsigned d3d8_fixes(void)
+{
+    return (g_fix_shine ? D3D8_FIX_SHINE : 0u);
+}
+
 /* the held ripple draw: DrawPrimitive's arguments, the scene renderer's site for it, the device state it had */
 static struct
 {
@@ -2229,7 +2234,8 @@ static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t
  *   texture pasted on the cube's -Z face has half its spread; and it is white, at half strength. Drawn with the flip
  *   taken out, a cube rebuilt from the game's -Z face with the PS2's spread (radius 0.6 x sin(angle / 2), 0.5 the
  *   texture's edge), and stage 1 = cube x TFACTOR x 4 into TEMP with TFACTOR's colour half light 0's diffuse, stage 2
- *   = current + current alpha x TEMP. TFACTOR's alpha (the strength) and the stages' alpha results are the game's. */
+ *   = current + current alpha x TEMP. TFACTOR's alpha (the strength) and the stages' alpha results are the game's.
+ * The shiny batches some weapon files lost (drawn with the plain material) are restored by host/ps2fix.c. */
 static uint32_t g_spot_cube, g_spot_from; /* the highlight cube built from the game's (g_spot_from) */
 
 /* 1 sphere-map shine, 2 the light's highlight, 0 neither */

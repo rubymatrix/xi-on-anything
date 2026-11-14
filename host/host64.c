@@ -116,6 +116,7 @@
 #include "geometry_guest.h"
 #include "watermark.h"
 #include "scene.h"
+#include "ps2fix.h"
 #ifdef FFXI_MOBILE
 #include <SDL3/SDL.h>
 #include "display_fit.h"
@@ -1681,6 +1682,7 @@ int main(int argc, char** argv)
     setup_nameplates();
     setup_water();
     setup_lod();
+    ps2fix_setup();
     scene_setup();
     frame_setup();
     setup_cull_prime();

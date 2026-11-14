@@ -123,7 +123,8 @@
         "frame_look1": "0x1001f5d9",
         "frame_look2": "0x1002017c",
         "fx_draw": "0x10046070",
-        "model_draw": "0x1002b6e0"
+        "model_draw": "0x1002b6e0",
+        "skin_part": "0x1002ddf4"
       },
       "modern": {
         "mgr": "0x10621838",
@@ -704,7 +705,8 @@
         "frame_cam_swing": "0x1001fad8",
         "frame_cam_wait": "0x1001f9ac",
         "frame_look1": "0x1001f3e9",
-        "frame_look2": "0x1001ff8c"
+        "frame_look2": "0x1001ff8c",
+        "skin_part": "0x1002dc04"
       },
       "modern": {
         "mgr": "0x105eca90",
@@ -1130,7 +1132,8 @@
         "frame_look1": "0x1001f5d9",
         "frame_look2": "0x1002017c",
         "fx_draw": "0x10046070",
-        "model_draw": "0x1002b6e0"
+        "model_draw": "0x1002b6e0",
+        "skin_part": "0x1002ddf4"
       },
       "wraps": {
         "parse_input": "0x10080dc0",
@@ -1692,7 +1695,8 @@
         "frame_look1": "0x1001f5d9",
         "frame_look2": "0x1002017c",
         "fx_draw": "0x10046070",
-        "model_draw": "0x1002b6e0"
+        "model_draw": "0x1002b6e0",
+        "skin_part": "0x1002ddf4"
       },
       "wraps": {
         "parse_input": "0x10080dc0",
