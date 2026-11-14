@@ -47,6 +47,7 @@ the Lighting and Atmosphere pages.
 | Saturation | Graphics › [Color] Saturation | `sat` | 1.12 (0.5–1.5) |
 | Contrast | Graphics › [Color] Contrast | `contrast` | 0.2 (0–0.5) |
 | Shine as on the PS2: sphere-mapped metal at the PS2's mapping and strength, the light's highlight on weapons and armour, and the shiny batches some weapon files lost drawn shiny again (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Shine | `fix_shine` | 1 PS2; 0 as the PC draws it (dull, half strength) |
+| Disintegrate as on the PS2: effects that break a model up (the Shadow Lord's change of form, Eald'Narche's, Kam'lanaut's, Selh'teus's) take it apart into tumbling pieces with smoke and a heat haze (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Disintegrate | `fix_disintegrate` | 1 PS2; 0 as the PC draws it (the model stays whole) |
 | Summons' halos (Carbuncle's) soft, as on the PS2: drawn from the full-size silhouette, not its 256×256 copy (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Summon Halos | `fix_summon_halos` | 1 PS2; 0 as the PC draws them (a thin stepped rim) |
 
 ## 3. Lighting and shadows
@@ -250,7 +251,7 @@ Config
     │   ├── [Quality] ....... Overall Quality, Renderer, Anti-Aliasing, Texture Filtering, Sharpening
     │   ├── [Color] ......... High Dynamic Range, Tone Mapping, Exposure, Color Grading, Saturation,
     │   │                     Contrast
-    │   ├── [PS2 Accuracy] .. Summon Halos, Shine
+    │   ├── [PS2 Accuracy] .. Summon Halos, Shine, Disintegrate
     │   └── [World Detail] .. Draw Distance, Character Distance
     ├── Shadows
     │   ├── [Sun and Moon] .. Shadows, Softness, Sun Size, Soft Quality, Detail

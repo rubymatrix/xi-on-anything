@@ -91,7 +91,9 @@
         "scene_char_draw": "0x1002dc10",
         "scene_char_draw_end": "0x1002f0d3",
         "scene_env": "0x1065cb04",
-        "scene_light_pool": "0x10632040"
+        "scene_light_pool": "0x10632040",
+        "particle_world_pos": "0x10044c40",
+        "particle_emit": "0x100496f0"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
@@ -124,7 +126,8 @@
         "frame_look2": "0x1002017c",
         "fx_draw": "0x10046070",
         "model_draw": "0x1002b6e0",
-        "skin_part": "0x1002ddf4"
+        "skin_part": "0x1002ddf4",
+        "particle_op": "0x1004a9e1"
       },
       "modern": {
         "mgr": "0x10621838",
@@ -684,7 +687,9 @@
         "scene_char_draw": "0x1002da20",
         "scene_char_draw_end": "0x1002eee3",
         "scene_env": "0x10627d5c",
-        "scene_light_pool": "0x105fd298"
+        "scene_light_pool": "0x105fd298",
+        "particle_world_pos": "0x10044a50",
+        "particle_emit": "0x10049500"
       },
       "hooks": {
         "nameplate_scale": "0x100861e6",
@@ -706,7 +711,8 @@
         "frame_cam_wait": "0x1001f9ac",
         "frame_look1": "0x1001f3e9",
         "frame_look2": "0x1001ff8c",
-        "skin_part": "0x1002dc04"
+        "skin_part": "0x1002dc04",
+        "particle_op": "0x1004a7f1"
       },
       "modern": {
         "mgr": "0x105eca90",
@@ -1100,7 +1106,9 @@
         "scene_char_draw": "0x1002dc10",
         "scene_char_draw_end": "0x1002f0d3",
         "scene_env": "0x1065cb04",
-        "scene_light_pool": "0x10632040"
+        "scene_light_pool": "0x10632040",
+        "particle_world_pos": "0x10044c40",
+        "particle_emit": "0x100496f0"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
@@ -1133,7 +1141,8 @@
         "frame_look2": "0x1002017c",
         "fx_draw": "0x10046070",
         "model_draw": "0x1002b6e0",
-        "skin_part": "0x1002ddf4"
+        "skin_part": "0x1002ddf4",
+        "particle_op": "0x1004a9e1"
       },
       "wraps": {
         "parse_input": "0x10080dc0",
@@ -1663,7 +1672,9 @@
         "scene_char_draw": "0x1002dc10",
         "scene_char_draw_end": "0x1002f0d3",
         "scene_env": "0x1065dcbc",
-        "scene_light_pool": "0x106331f8"
+        "scene_light_pool": "0x106331f8",
+        "particle_world_pos": "0x10044c40",
+        "particle_emit": "0x100496f0"
       },
       "hooks": {
         "nameplate_scale": "0x100863d6",
@@ -1696,7 +1707,8 @@
         "frame_look2": "0x1002017c",
         "fx_draw": "0x10046070",
         "model_draw": "0x1002b6e0",
-        "skin_part": "0x1002ddf4"
+        "skin_part": "0x1002ddf4",
+        "particle_op": "0x1004a9e1"
       },
       "wraps": {
         "parse_input": "0x10080dc0",

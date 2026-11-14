@@ -618,6 +618,8 @@ static const Row GRAPHICS_ROWS[] = {
         "Summons such as Carbuncle wear the PS2's soft halo. PC: a thin stepped rim, as the PC version draws it." },
     { "Shine", "fix_shine", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
         "Gold and polished metal catch the light as on the PS2. PC: dull, half as bright, as the PC version draws it." },
+    { "Disintegrate", "fix_disintegrate", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "Some effects break a model into pieces as on the PS2, such as the Shadow Lord's change of form. PC: it stays whole." },
     HEADER_ROW("World Detail"),
     { "Draw Distance", "draw", SLIDER, 0, { 0 }, { 0 }, 1, 6, "How far out the world is drawn." },
     { "Character Distance", "draw_entities", SLIDER, 0, { 0 }, { 0 }, 1, 4, "How far out characters are drawn." },

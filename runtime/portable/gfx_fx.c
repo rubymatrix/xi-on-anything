@@ -261,6 +261,8 @@ static const struct
     { "fix_summon_halos", offsetof(GfxFxSettings, fix_summon_halos), 1.0f },
     /* sphere-mapped metal and the light's highlight on weapons and armour at the PS2's mapping and strength */
     { "fix_shine", offsetof(GfxFxSettings, fix_shine), 1.0f },
+    /* the PS2's break-up of a model (the Shadow Lord's change of form): pieces, smoke and haze */
+    { "fix_disintegrate", offsetof(GfxFxSettings, fix_disintegrate), 1.0f },
     /* the scene renderer's bounce light (gfx_gi_metal.inc): 0 off, else how much of it the zone and characters take;
      * needs scene 1 or 2 and ray queries */
     { "scene_gi", offsetof(GfxFxSettings, scene_gi), 0.0f },

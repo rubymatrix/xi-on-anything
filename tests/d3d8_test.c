@@ -696,6 +696,75 @@ static void test_shine_spot(void)
     call(cube, D_Release, 0);
 }
 
+/* Disintegrate (d3d8.c dis_draw, after portfix): a part of two triangles (positions only, stride 12, as the game skins
+ * them) drawn indexed after an effect marked a sphere on a corner of the first (d3d8_disint_sphere, then Present) and
+ * the part was skinned with that actor's palette (d3d8_disint_part). The first triangle is taken from the body and
+ * drawn as a piece before the next interface draw: the body's white is gone from its centre, and the piece is there,
+ * the white texture x the unlit piece colour x 2 (624052). The second triangle is drawn as it was. As the PC draws it,
+ * both are the body's white. */
+static void test_disintegrate(void)
+{
+    call(g_dev, D_SetRenderTarget, 2, g_bb, g_ds);
+    call(g_dev, D_SetRenderState, 2, 7, 1);   /* ZENABLE */
+    call(g_dev, D_SetRenderState, 2, 23, 4);  /* ZFUNC LESSEQUAL */
+    call(g_dev, D_SetRenderState, 2, 137, 0); /* LIGHTING off */
+    call(g_dev, D_SetRenderState, 2, 22, 1);  /* CULL none */
+    call(g_dev, D_SetRenderState, 2, 27, 0);  /* no blending */
+    uint32_t tex = solid_texture(0xFFFFFFFFu), pp = galloc(4);
+    float pos[6][3] = { { -0.9f, 0.9f, 0.5f }, { -0.1f, 0.9f, 0.5f }, { -0.9f, 0.1f, 0.5f },
+                        { 0.1f, -0.1f, 0.5f }, { 0.9f, -0.1f, 0.5f }, { 0.1f, -0.9f, 0.5f } };
+    call(g_dev, D_CreateVertexBuffer, 5, (uint32_t)sizeof pos, 0x8, 0x2, 1, g_out);
+    uint32_t vb = rd32(g_out);
+    call(vb, B_Lock, 4, 0, 0, pp, 0);
+    memcpy(GUEST_PTR(rd32(pp)), pos, sizeof pos);
+    call(vb, B_Unlock, 0);
+    call(g_dev, D_CreateIndexBuffer, 5, 6 * 2, 0x8, 101, 1, g_out);
+    uint32_t ib = rd32(g_out);
+    call(ib, B_Lock, 4, 0, 0, pp, 0);
+    uint16_t idx[6] = { 0, 1, 2, 3, 4, 5 };
+    memcpy(GUEST_PTR(rd32(pp)), idx, sizeof idx);
+    call(ib, B_Unlock, 0);
+    const uint32_t bones = 0x12340000u;
+    const float at[3] = { -0.9f, 0.9f, 0.5f };
+    d3d8_disint_sphere(bones, at, 0.1f);
+    call(g_dev, D_Present, 4, 0, 0, 0, 0); /* the spheres are the next frame's */
+    uint32_t parts[4] = { vb, 0, 0, 0 };
+    d3d8_disint_sphere(bones, at, 0.1f);
+    d3d8_disint_part(bones, parts);
+    clear(0xFF000000u);
+    call(g_dev, D_SetTexture, 2, 0, tex);
+    call(g_dev, D_SetTextureStageState, 3, 0, 1, 2 /* SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 4, 2);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 2);
+    call(g_dev, D_SetVertexShader, 1, 0x2);
+    call(g_dev, D_SetStreamSource, 3, 0, vb, 12);
+    call(g_dev, D_SetIndices, 2, ib, 0);
+    call(g_dev, D_BeginScene, 0);
+    call(g_dev, D_DrawIndexedPrimitive, 5, 4 /* LIST */, 0, 6, 0, 2);
+    uint32_t body = pixel(6, 6);
+    /* an interface draw, out of the way: the pieces go in before it */
+    call(g_dev, D_SetRenderState, 2, 7, 0);
+    call(g_dev, D_SetVertexShader, 1, 0x144);
+    uint32_t v = galloc(4 * sizeof(UiVert));
+    UiVert q[4] = { { 30, 0, 0.5f, 1, 0xFFFFFFFFu, 0, 0 }, { 32, 0, 0.5f, 1, 0xFFFFFFFFu, 1, 0 },
+                    { 30, 2, 0.5f, 1, 0xFFFFFFFFu, 0, 1 }, { 32, 2, 0.5f, 1, 0xFFFFFFFFu, 1, 1 } };
+    memcpy(GUEST_PTR(v), q, sizeof q);
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v, (uint32_t)sizeof(UiVert));
+    call(g_dev, D_EndScene, 0);
+    uint32_t piece = pixel(6, 6), kept = pixel(22, 22);
+    CHECK(body == 0 && kept == 0xFFFFFF, "disintegrate: the body at the taken triangle %06x, at the other %06x (want 000000 "
+        "ffffff; ffffff ffffff as the PC draws it)", body, kept);
+    CHECK(piece >= 0x613F51 && piece <= 0x634153, "disintegrate: the piece %06x (want about 624052)", piece);
+    call(g_dev, D_SetIndices, 2, 0, 0);
+    call(g_dev, D_SetStreamSource, 3, 0, 0, 0);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(g_dev, D_Present, 4, 0, 0, 0, 0);
+    call(ib, D_Release, 0);
+    call(vb, D_Release, 0);
+    call(tex, D_Release, 0);
+}
+
 int main(void)
 {
     if (!gwin_init())
@@ -740,6 +809,7 @@ int main(void)
     test_summon_halos();
     test_shine_sphere();
     test_shine_spot();
+    test_disintegrate();
     call(g_dev, D_Present, 4, 0, 0, 0, 0);
     printf(g_fails ? "d3d8_test: %d failed\n" : "d3d8_test: ok\n", g_fails);
     return g_fails != 0;
