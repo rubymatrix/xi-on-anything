@@ -263,6 +263,8 @@ static const struct
     { "fix_shine", offsetof(GfxFxSettings, fix_shine), 1.0f },
     /* the PS2's break-up of a model (the Shadow Lord's change of form): pieces, smoke and haze */
     { "fix_disintegrate", offsetof(GfxFxSettings, fix_disintegrate), 1.0f },
+    /* the summon halos' reach capped at this many yalms (0 none, as on the PS2; portfix's halomax default 0.018) */
+    { "fix_halo_max", offsetof(GfxFxSettings, fix_halo_max), 0.0f },
     /* the scene renderer's bounce light (gfx_gi_metal.inc): 0 off, else how much of it the zone and characters take;
      * needs scene 1 or 2 and ray queries */
     { "scene_gi", offsetof(GfxFxSettings, scene_gi), 0.0f },
