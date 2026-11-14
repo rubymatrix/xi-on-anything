@@ -109,6 +109,7 @@ static void cap_present(void);
 static void water_flush(void); /* the PC port's drawing mistakes (fix_water_layers, fix_button_rims) */
 static void fixes_frame(void);
 static int g_btn_shadows; /* this frame's button shadows (button_body) */
+static uint32_t g_halo_src, g_halo_low; /* this frame's halo silhouette and its copy's surface (halo_quad) */
 static void scene_present(void);
 
 /* --- formats ----------------------------------------------------------------------------------------- */
@@ -1316,7 +1317,7 @@ static void IDirect3DDevice8_Present(Guest* g)
     WORLD_FLUSH();
     water_flush();
     fixes_frame();
-    g_btn_shadows = 0;
+    g_btn_shadows = 0, g_halo_src = g_halo_low = 0;
     cap_present();
     scene_present();
     ui_present();
@@ -2100,7 +2101,7 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
 
 /* --- the PC port's own drawing mistakes, drawn as the PS2 draws them ----------------------------------------------
  * After portfix (github.com/voetre/portfix, MIT License, Copyright (c) 2026 voetre), which found and measured both.
- * Each has a setting, on unless set to 0: fix_water_layers, fix_button_rims. They are read once a frame (fixes_frame),
+ * Each has a setting, on unless set to 0: fix_water_layers, fix_button_rims, fix_summon_halos. They are read once a frame (fixes_frame),
  * not at every draw.
  *
  * Water layers. Port Bastok's sea is three flat layers drawn in order: an opaque black one, the scrolling ripples added
@@ -2117,12 +2118,13 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
  * as a light, see-through rim. The PS2's buttons have none, nor does a disabled button (alpha blended). A body drawn
  * added over its own shadow (same texture, size and uv, the shadow just down and right of it) is drawn alpha blended:
  * where the shadow lies under it the result is the same. */
-static int g_fix_water = 1, g_fix_buttons = 1;
+static int g_fix_water = 1, g_fix_buttons = 1, g_fix_halos = 1;
 
 static void fixes_frame(void)
 {
     g_fix_water = gfx_fx_get("fix_water_layers") != 0.0f;
     g_fix_buttons = gfx_fx_get("fix_button_rims") != 0.0f;
+    g_fix_halos = gfx_fx_get("fix_summon_halos") != 0.0f;
 }
 
 /* the held ripple draw: DrawPrimitive's arguments, the scene renderer's site for it, the device state it had */
@@ -2163,6 +2165,48 @@ static void water_flush(void)
     draw(g_water.prim, g_water.count, g_water.start, 0, 0, 0, 0);
     g_draw_zone = zone;
     g_dev.cur = keep;
+}
+
+/* Summon halos (Carbuncle's blue aura, other summons'): the model is drawn into a silhouette texture the scene's size
+ * (4096 at a 4096 background; 2048 here), copied down to a 256x256 target with one quad, and the copy drawn back over
+ * the scene as full-screen quads: three tinted ghosts alpha blended, nudged ~3 pixels in a pattern that turns each
+ * frame, one opaque alpha-tested copy, then the silhouette itself on top. One texel of the copy is 8-16 of the scene's
+ * pixels, so the opaque copy sticks out past the model in steps, and the nudges, in the PS2's 640-wide frame's pixels,
+ * don't part the ghosts from the model: a thin stepped rim instead of the PS2's soft halo. The quads that read the copy
+ * are drawn from the full-size silhouette instead, their nudge scaled by the target's width / 640. Colours, blending,
+ * the ghosts and their pattern are the game's. (portfix's optional cap on the halo's reach, /portfix halomax, isn't
+ * here.) */
+
+/* 0, or a copy of a halo quad's vertices nudged for the full-size silhouette, which is bound in its place (tex[0]) */
+static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride)
+{
+    const State* s = &g_dev.cur;
+    if (prim != 5 || count != 2 || stride != 28 || s->vs != 0x144u || !data || !s->tex[0])
+        return 0;
+    Obj* rt = obj(g_dev.rt);
+    if (!rt)
+        return 0;
+    if (rt->width == 256 && rt->height == 256) /* the copy-down: the silhouette and the copy's surface */
+    {
+        g_halo_src = s->tex[0], g_halo_low = g_dev.rt;
+        return 0;
+    }
+    Obj* low = g_halo_low ? obj(g_halo_low) : NULL;
+    Obj* src = g_halo_src ? obj(g_halo_src) : NULL;
+    if (!low || !src || low->container != s->tex[0] || src->kind != O_TEXTURE || !rt->width)
+        return 0;
+    static uint32_t buf;
+    if (!buf)
+        buf = gheap_alloc(4 * 28, 1);
+    memcpy(GUEST_PTR(buf), GUEST_PTR(data), 4 * 28);
+    float k = (float)rt->width / 640.0f, x0 = u2f(rd32(data)), y0 = u2f(rd32(data + 4));
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        uint32_t v = buf + 28u * i;
+        wr32(v, f2u(u2f(rd32(v)) + x0 * (k - 1.0f)));
+        wr32(v + 4, f2u(u2f(rd32(v + 4)) + y0 * (k - 1.0f)));
+    }
+    return buf;
 }
 
 /* this frame's button shadows: black quads, alpha blended, for button_body to find a body's own */
@@ -2383,7 +2427,15 @@ static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
     }
     else if (t0 && ARG(1) == 5 && ARG(2) == 2 && ARG(4) == 28 && g_dev.cur.vs == 0x144)
         data = inset_quad(data, t0);
-    if (g_fix_buttons && button_body(ARG(1), ARG(2), ARG(3), ARG(4)))
+    uint32_t halo = g_fix_halos ? halo_quad(ARG(1), ARG(2), data, ARG(4)) : 0;
+    if (halo)
+    {
+        uint32_t t = g_dev.cur.tex[0];
+        g_dev.cur.tex[0] = g_halo_src; /* the full-size silhouette in place of its copy */
+        draw(ARG(1), ARG(2), 0, 0, 0, halo, ARG(4));
+        g_dev.cur.tex[0] = t;
+    }
+    else if (g_fix_buttons && button_body(ARG(1), ARG(2), ARG(3), ARG(4)))
     {
         uint32_t dst = g_dev.cur.rs[20];
         g_dev.cur.rs[20] = 6; /* DESTBLEND INVSRCALPHA */

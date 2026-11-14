@@ -498,6 +498,74 @@ static void test_button_rims(void)
     call(tex, D_Release, 0);
 }
 
+/* A summon's halo (d3d8.c halo_quad, after portfix): the model drawn into a silhouette target the screen's size, copied
+ * down to 256x256 with one quad, then the copy drawn over the scene as quads nudged by a few PS2 pixels. Fixed, a quad
+ * reading the copy samples the silhouette instead, its nudge times the target's width / 640 (here 32 / 640): the
+ * square stays where the silhouette has it (within a pixel). As the PC draws it, the copy lands the whole nudge, 8
+ * pixels, right. */
+static void test_summon_halos(void)
+{
+    call(g_dev, D_SetRenderState, 2, 7, 0);  /* ZENABLE off */
+    call(g_dev, D_SetRenderState, 2, 27, 0); /* no blending */
+    call(g_dev, D_SetRenderState, 2, 15, 0); /* no alpha test while drawing the silhouette */
+    call(g_dev, D_SetVertexShader, 1, 0x144);
+    uint32_t sil, low, sil_s, low_s;
+    call(g_dev, D_CreateTexture, 7, W, H, 1, 1 /* RENDERTARGET */, 21, 0, g_out);
+    sil = rd32(g_out);
+    call(sil, T_GetSurfaceLevel, 2, 0, g_out);
+    sil_s = rd32(g_out);
+    call(g_dev, D_CreateTexture, 7, 256, 256, 1, 1, 21, 0, g_out);
+    low = rd32(g_out);
+    call(low, T_GetSurfaceLevel, 2, 0, g_out);
+    low_s = rd32(g_out);
+    uint32_t v = galloc(4 * sizeof(UiVert));
+    call(g_dev, D_BeginScene, 0);
+    /* the silhouette: an opaque white square 12..20 on a target cleared to alpha 0 */
+    call(g_dev, D_SetRenderTarget, 2, sil_s, 0);
+    clear(0x00000000u);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(g_dev, D_SetTextureStageState, 3, 0, 1, 2 /* COLOROP SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 4, 2 /* ALPHAOP SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 0 /* DIFFUSE */);
+    UiVert sq[4] = { { 12, 12, 0.5f, 1, 0xFFFFFFFFu, 0, 0 }, { 20, 12, 0.5f, 1, 0xFFFFFFFFu, 1, 0 },
+                     { 12, 20, 0.5f, 1, 0xFFFFFFFFu, 0, 1 }, { 20, 20, 0.5f, 1, 0xFFFFFFFFu, 1, 1 } };
+    memcpy(GUEST_PTR(v), sq, sizeof sq);
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v, (uint32_t)sizeof(UiVert));
+    /* the copy-down into 256x256, colour and alpha from the silhouette */
+    call(g_dev, D_SetRenderTarget, 2, low_s, 0);
+    call(g_dev, D_SetTexture, 2, 0, sil);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 16, 1); /* point */
+    call(g_dev, D_SetTextureStageState, 3, 0, 17, 1);
+    UiVert cp[4] = { { 0, 0, 0.5f, 1, 0xFFFFFFFFu, 0, 0 }, { 256, 0, 0.5f, 1, 0xFFFFFFFFu, 1, 0 },
+                     { 0, 256, 0.5f, 1, 0xFFFFFFFFu, 0, 1 }, { 256, 256, 0.5f, 1, 0xFFFFFFFFu, 1, 1 } };
+    memcpy(GUEST_PTR(v), cp, sizeof cp);
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v, (uint32_t)sizeof(UiVert));
+    /* the copy back over a black scene, alpha tested, nudged 8 right */
+    call(g_dev, D_SetRenderTarget, 2, g_bb, 0);
+    clear(0xFF000000u);
+    call(g_dev, D_SetTexture, 2, 0, low);
+    call(g_dev, D_SetRenderState, 2, 15, 1); /* ALPHATESTENABLE */
+    call(g_dev, D_SetRenderState, 2, 24, 0); /* ALPHAREF 0 */
+    call(g_dev, D_SetRenderState, 2, 25, 5); /* ALPHAFUNC GREATER */
+    UiVert q[4] = { { 8, 0, 0.5f, 1, 0xFFFFFFFFu, 0, 0 }, { 8 + W, 0, 0.5f, 1, 0xFFFFFFFFu, 1, 0 },
+                    { 8, H, 0.5f, 1, 0xFFFFFFFFu, 0, 1 }, { 8 + W, H, 0.5f, 1, 0xFFFFFFFFu, 1, 1 } };
+    memcpy(GUEST_PTR(v), q, sizeof q);
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v, (uint32_t)sizeof(UiVert));
+    call(g_dev, D_EndScene, 0);
+    uint32_t left = pixel(13, 16), right = pixel(25, 16);
+    CHECK(left == 0xFFFFFF && right == 0, "summon halos: (13,16) %06x, (25,16) %06x (want ffffff 000000; 000000 ffffff as "
+        "the PC draws it)", left, right);
+    call(g_dev, D_SetRenderState, 2, 15, 0);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(sil_s, S_Release, 0);
+    call(low_s, S_Release, 0);
+    call(sil, D_Release, 0);
+    call(low, D_Release, 0);
+}
+
 int main(void)
 {
     if (!gwin_init())
@@ -539,6 +607,7 @@ int main(void)
     test_state_blocks();
     test_water_layers();
     test_button_rims();
+    test_summon_halos();
     call(g_dev, D_Present, 4, 0, 0, 0, 0);
     printf(g_fails ? "d3d8_test: %d failed\n" : "d3d8_test: ok\n", g_fails);
     return g_fails != 0;
