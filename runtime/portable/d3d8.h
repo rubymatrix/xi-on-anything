@@ -56,8 +56,11 @@ enum
 {
     D3D8_FIX_SHINE = 1,
     D3D8_FIX_DISINTEGRATE = 2,
+    D3D8_FIX_HALO_MAX = 4, /* summon halos capped (fix_halo_max): d3d8_skinned_at wanted */
 };
 unsigned d3d8_fixes(void);
+/* the first bone of the part being skinned (host/ps2fix.c), in the world: where a summon's halo is, for its cap */
+void d3d8_skinned_at(const float at[3]);
 /* Disintegrate (host/ps2fix.c, d3d8.c): a sphere an effect's op 0x65 marked this frame for the actor whose bone palette
  * is `bones`; the part just skinned (its palette, and its vertex buffers: positions, the mirrored half's positions,
  * normals, the mirrored half's normals, 0 for none); and the smoke due now: how many (0-4) and where, each also a

@@ -459,6 +459,15 @@ static void particle_op(Guest* g)
 static void skin_part(Guest* g)
 {
     unsigned fx = d3d8_fixes();
+#ifdef FFXI_SCENE_PALETTE
+    if (g_split_ok && (fx & D3D8_FIX_HALO_MAX))
+    {
+        /* the halo cap's model position: the first bone's translation (portfix's SkinAt) */
+        uint32_t pal = rd32(FFXI_SCENE_PALETTE);
+        if (readable(pal + 48, 12))
+            d3d8_skinned_at((const float*)GUEST_PTR(pal + 48));
+    }
+#endif
     if (g_split_ok && (fx & D3D8_FIX_SHINE))
         split_part(g->ecx);
     else if (g_nparts)

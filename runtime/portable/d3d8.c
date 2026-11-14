@@ -111,6 +111,7 @@ static void fixes_frame(void);
 static void dis_present(void); /* disintegrate (fix_disintegrate) */
 static int g_btn_shadows; /* this frame's button shadows (button_body) */
 static uint32_t g_halo_src, g_halo_low; /* this frame's halo silhouette and its copy's surface (halo_quad) */
+static float g_halo_depth; /* the halo's model's depth at the copy-down, for the cap (fix_halo_max); 0 none */
 static void scene_present(void);
 
 /* --- formats ----------------------------------------------------------------------------------------- */
@@ -2191,6 +2192,9 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
  * added over its own shadow (same texture, size and uv, the shadow just down and right of it) is drawn alpha blended:
  * where the shadow lies under it the result is the same. */
 static int g_fix_water = 1, g_fix_buttons = 1, g_fix_halos = 1, g_fix_shine = 1, g_fix_disint = 1;
+static float g_halo_max;     /* fix_halo_max: yalms, 0 no cap */
+static float g_skin_at[3];   /* the first bone of the part skinned last (host/ps2fix.c), in the world */
+static int g_skin_at_set;
 static Obj* sub(uint32_t tex, uint32_t face, uint32_t level);
 
 static void fixes_frame(void)
@@ -2200,11 +2204,19 @@ static void fixes_frame(void)
     g_fix_halos = gfx_fx_get("fix_summon_halos") != 0.0f;
     g_fix_shine = gfx_fx_get("fix_shine") != 0.0f;
     g_fix_disint = gfx_fx_get("fix_disintegrate") != 0.0f;
+    g_halo_max = gfx_fx_get("fix_halo_max");
 }
 
 unsigned d3d8_fixes(void)
 {
-    return (g_fix_shine ? D3D8_FIX_SHINE : 0u) | (g_fix_disint ? D3D8_FIX_DISINTEGRATE : 0u);
+    return (g_fix_shine ? D3D8_FIX_SHINE : 0u) | (g_fix_disint ? D3D8_FIX_DISINTEGRATE : 0u) |
+        (g_fix_halos && g_halo_max > 0.0f ? D3D8_FIX_HALO_MAX : 0u);
+}
+
+void d3d8_skinned_at(const float at[3])
+{
+    memcpy(g_skin_at, at, sizeof g_skin_at);
+    g_skin_at_set = 1;
 }
 
 /* the held ripple draw: DrawPrimitive's arguments, the scene renderer's site for it, the device state it had */
@@ -2258,7 +2270,12 @@ static void water_flush(void)
  * don't part the ghosts from the model: a thin stepped rim instead of the PS2's soft halo. The quads that read the copy
  * are drawn from the full-size silhouette instead, their nudge scaled by the target's width / 640. Colours, blending,
  * the ghosts and their pattern are the game's. (portfix's optional cap on the halo's reach, /portfix halomax, isn't
- * here.) */
+ * here.)
+ *
+ * The cap (fix_halo_max, off unless set, as on the PS2; portfix's /portfix halomax): the nudges are a fixed part of
+ * the picture, so against the model they grow with distance - at depth z, x0 / 320 x z / P00 and y0 / 320 x z / P11
+ * yalms. Over the cap they shrink to it, their directions kept. The model's depth is taken at the copy-down from the
+ * first bone of the part skinned last (host/ps2fix.c), through the view. */
 
 /* 0, or a copy of a halo quad's vertices nudged for the full-size silhouette, which is bound in its place (tex[0]) */
 static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride)
@@ -2272,6 +2289,9 @@ static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t
     if (rt->width == 256 && rt->height == 256) /* the copy-down: the silhouette and the copy's surface */
     {
         g_halo_src = s->tex[0], g_halo_low = g_dev.rt;
+        const float* v = s->xf[2]; /* D3DTS_VIEW */
+        g_halo_depth = g_halo_max > 0.0f && g_skin_at_set
+            ? fabsf(g_skin_at[0] * v[2] + g_skin_at[1] * v[6] + g_skin_at[2] * v[10] + v[14]) : 0.0f;
         return 0;
     }
     Obj* low = g_halo_low ? obj(g_halo_low) : NULL;
@@ -2286,6 +2306,19 @@ static uint32_t halo_quad(uint32_t prim, uint32_t count, uint32_t data, uint32_t
         rt_log("[recomp] d3d8: summon halos: drawn from the %ux%u silhouette (fix_summon_halos)\n", src->width, src->height);
     memcpy(GUEST_PTR(buf), GUEST_PTR(data), 4 * 28);
     float k = (float)rt->width / 640.0f, x0 = u2f(rd32(data)), y0 = u2f(rd32(data + 4));
+    const float* P = s->xf[3]; /* D3DTS_PROJECTION */
+    if (g_halo_max > 0.0f && g_halo_depth > 0.0f && P[0] > 0.0f && P[5] > 0.0f)
+    {
+        float sep = hypotf(x0 / 320.0f * g_halo_depth / P[0], y0 / 320.0f * g_halo_depth / P[5]);
+        if (sep > g_halo_max)
+        {
+            static int capped;
+            if (!capped++)
+                rt_log("[recomp] d3d8: summon halos: reach capped at %.3f yalms, the model %.1f yalms away (fix_halo_max)\n",
+                    (double)g_halo_max, (double)g_halo_depth);
+            k *= g_halo_max / sep;
+        }
+    }
     for (uint32_t i = 0; i < 4; ++i)
     {
         uint32_t v = buf + 28u * i;
