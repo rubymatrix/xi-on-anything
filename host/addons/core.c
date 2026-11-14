@@ -14,6 +14,7 @@
  * the call: the addon is marked dead and its state abandoned (never closed: it may be corrupt), and
  * the game carries on. */
 #include <ctype.h>
+#include <math.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -28,6 +29,7 @@
 #include "gthread.h"
 #include "gwin.h"
 #include "plat.h"
+#include "../modern.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -1211,7 +1213,7 @@ void addons_frame(void)
     process_unloads();
     /* the drawing events, inside the overlay's frame: Ashita's d3d_present, Windower's prerender */
     uint32_t w = 0, h = 0;
-    d3d8_backbuffer_size(&w, &h);
+    xi_ui_size(&w, &h);
     if (xi_headless && !w)
         w = 1920, h = 1080;
     if (w && h)
@@ -1222,6 +1224,16 @@ void addons_frame(void)
         xi_frame_draw("postrender");
     }
     xi_prof_frame_end();
+}
+
+float xi_ui_scale(void) { return xi_headless ? 1.0f : modern_addon_scale(); }
+
+void xi_ui_size(uint32_t* w, uint32_t* h)
+{
+    d3d8_backbuffer_size(w, h);
+    float s = xi_ui_scale();
+    if (*w && *h && s != 1.0f)
+        *w = (uint32_t)lroundf((float)*w / s), *h = (uint32_t)lroundf((float)*h / s);
 }
 
 /* The frame's drawing events, inside the overlay's frame. */

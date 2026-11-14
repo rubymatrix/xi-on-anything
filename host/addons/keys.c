@@ -251,12 +251,12 @@ static int run_binds(uint8_t dik, int down)
 
 /* --- the hook --------------------------------------------------------------------------------- */
 
-static float g_sx = 1, g_sy = 1; /* window points -> overlay (back buffer) pixels */
+static float g_sx = 1, g_sy = 1; /* window points -> the addons' pixels (xi_ui_size) */
 
 static void scale_for(int ww, int wh)
 {
     uint32_t bw = 0, bh = 0;
-    d3d8_backbuffer_size(&bw, &bh);
+    xi_ui_size(&bw, &bh);
     g_sx = ww > 0 && bw ? (float)bw / (float)ww : 1.0f;
     g_sy = wh > 0 && bh ? (float)bh / (float)wh : 1.0f;
 }
@@ -266,8 +266,11 @@ static int mouse(int msg, float px, float py, int delta)
 {
     int x = (int)(px * g_sx), y = (int)(py * g_sy);
     float vx = px, vy = py;
-    if (user32_view_point(&vx, &vy)) /* presented into part of the window (iOS's safe area) */
-        x = (int)vx, y = (int)vy;
+    if (user32_view_point(&vx, &vy)) /* presented into part of the window (iOS's safe area): back buffer pixels */
+    {
+        float s = xi_ui_scale();
+        x = (int)(vx / s), y = (int)(vy / s);
+    }
     int taken = xi_gui_mouse(msg, x, y, delta);
     XiEvent e;
     memset(&e, 0, sizeof e);

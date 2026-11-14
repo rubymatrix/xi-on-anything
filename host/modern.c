@@ -177,6 +177,7 @@ static ModernSetup g_setup;
 static char g_data_dir[1024], g_game[1024];
 static float g_ui_aspect;
 static unsigned g_hide;
+static float g_addon_px = 1.0f; /* Addon Scale: back buffer pixels an addon's pixel */
 static void hide_apply(void);
 static int g_own_shadows = -1; /* the player's Config > Shadows while host64 holds it at Off (game_shadows_follow) */
 static int g_fx_touched, g_host_touched;
@@ -423,6 +424,8 @@ static float get(const Row* r)
         return g_setup.nameplate_sy ? *g_setup.nameplate_sy : 1.0f;
     if (!strncmp(r->key, "@hide", 5))
         return g_hide >> atoi(r->key + 5) & 1 ? 0.0f : 1.0f;
+    if (!strcmp(r->key, "@addon_scale"))
+        return g_addon_px;
     if (!strcmp(r->key, "@cmd_ctrl"))
         return (float)user32_cmd_as_ctrl();
     if (!strcmp(r->key, "@addon"))
@@ -508,6 +511,11 @@ static void set(const Row* r, float v)
         g_hide = v != 0.0f ? g_hide & ~bit : g_hide | bit;
         g_host_touched = 1;
         hide_apply();
+    }
+    else if (!strcmp(r->key, "@addon_scale"))
+    {
+        g_addon_px = v;
+        g_host_touched = 1;
     }
     else if (!strcmp(r->key, "@cmd_ctrl"))
     {
@@ -765,6 +773,9 @@ static const Row INTERFACE_ROWS[] = {
         "Job Points in the main menu's Status." },
     { "Alter Ego Points", "@hide6", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "Alter Ego Points in the main menu's Status." },
+    HEADER_ROW("Addons"),
+    { "Addon Scale", "@addon_scale", SLIDER, 0, { 0 }, { 0 }, 0.5f, 3.0f,
+        "How large addons draw, apart from UI Scale. Their windows and text grow with it." },
 #ifdef __APPLE__
     HEADER_ROW("Keyboard"),
     { "Command Key", "@cmd_ctrl", CHOICE, 2, { "Command", "Ctrl" }, { 0, 1 }, 0, 0,
@@ -912,6 +923,7 @@ static void save(void)
             if (g_own_shadows >= 0)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
             fprintf(f, "cmd_ctrl=%d\n", user32_cmd_as_ctrl());
+            fprintf(f, "addon_scale=%g\n", (double)g_addon_px);
             if (g_setup.nameplate_fix && g_setup.nameplate_sx && g_setup.nameplate_sy)
                 fprintf(f, "nameplates=%d\nnameplate_scale=%gx%g\n", *g_setup.nameplate_fix,
                     (double)*g_setup.nameplate_sx, (double)*g_setup.nameplate_sy);
@@ -1368,10 +1380,10 @@ static Page PAGES[] = {
         LEGACY_ROWS, sizeof LEGACY_ROWS / sizeof LEGACY_ROWS[0] },
 #endif
 #ifdef __APPLE__
-    { "menu    interfaw", "Interface", "Nameplates, items of the game's own menus shown or hidden, and the Command key.",
+    { "menu    interfaw", "Interface", "Nameplates, items of the game's own menus shown or hidden, addons' size, and the Command key.",
         0x1c0201u,
 #else
-    { "menu    interfaw", "Interface", "Nameplates, and items of the game's own menus shown or hidden.", 0x1c0201u,
+    { "menu    interfaw", "Interface", "Nameplates, items of the game's own menus shown or hidden, and addons' size.", 0x1c0201u,
 #endif
         INTERFACE_ROWS, sizeof INTERFACE_ROWS / sizeof INTERFACE_ROWS[0] },
     { "menu    gamepadw", "Gamepad", "Which button does what: the game's gamepad settings.", 0x1c0209u,
@@ -2888,6 +2900,11 @@ static void menu_apply(int mw, int mh)
     windows_follow(w0, h0, mw, mh);
 }
 
+float modern_addon_scale(void)
+{
+    return g_addon_px < 0.5f ? 0.5f : g_addon_px > 4.0f ? 4.0f : g_addon_px;
+}
+
 void modern_window_size(int w, int h, int menu_w, int menu_h)
 {
     w &= ~1, h &= ~1;
@@ -3087,6 +3104,12 @@ void modern_init(const ModernSetup* setup)
         *setup->nameplate_sx = sx, *setup->nameplate_sy = sy;
     if (cfg_value(path, "cmd_ctrl", buf, sizeof buf))
         user32_set_cmd_as_ctrl(atoi(buf) != 0);
+    if (cfg_value(path, "addon_scale", buf, sizeof buf))
+    {
+        float v = strtof(buf, NULL);
+        if (v >= 0.5f && v <= 4.0f)
+            g_addon_px = v;
+    }
     if (cfg_value(path, "game_shadows", buf, sizeof buf))
     {
         long v = strtol(buf, NULL, 10);

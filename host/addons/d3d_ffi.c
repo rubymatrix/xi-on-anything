@@ -535,9 +535,10 @@ static void state_defaults(DState* s)
     }
 }
 
+/* in the addons' pixels (xi_ui_size): what they draw the overlay scales up */
 static void bb_size(uint32_t* w, uint32_t* h)
 {
-    d3d8_backbuffer_size(w, h);
+    xi_ui_size(w, h);
     if (!*w || !*h)
         *w = 1920, *h = 1080; /* the harness, or before the game's device exists */
 }

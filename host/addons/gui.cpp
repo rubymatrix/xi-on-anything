@@ -916,7 +916,7 @@ static void render_list(ImDrawList* dl, uint32_t w, uint32_t h)
     dd.CmdLists.Size = dd.CmdLists.Capacity = 1;
     dd.DisplayPos = ImVec2(0, 0);
     dd.DisplaySize = ImVec2((float)w, (float)h);
-    dd.FramebufferScale = ImVec2(1, 1);
+    dd.FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
     render_draw_data(&dd, w, h);
     dd.CmdLists.Data = NULL;
     dd.CmdLists.Size = dd.CmdLists.Capacity = 0;
@@ -940,7 +940,7 @@ static void overlay(GfxTex* bb, uint32_t w, uint32_t h)
         objects.CmdLists.Size = objects.CmdLists.Capacity = 1;
         objects.DisplayPos = ImVec2(0, 0);
         objects.DisplaySize = ImVec2((float)w, (float)h);
-        objects.FramebufferScale = ImVec2(1, 1);
+        objects.FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
         render_draw_data(&objects, w, h);
         objects.CmdLists.Data = NULL; /* not ImGui's to free */
         objects.CmdLists.Size = objects.CmdLists.Capacity = 0;
@@ -1054,8 +1054,11 @@ extern "C" void xi_gui_begin(uint32_t w, uint32_t h)
         return;
     ensure_up();
     ImGuiIO& io = ImGui::GetIO();
+    /* w x h are the addons' pixels; the back buffer's are xi_ui_scale() each, so ImGui's text is
+     * made at that density (crisp, not stretched) and everything drawn is scaled up by it */
+    float s = xi_ui_scale();
     io.DisplaySize = ImVec2((float)w, (float)h);
-    io.DisplayFramebufferScale = ImVec2(1, 1);
+    io.DisplayFramebufferScale = ImVec2(s, s);
     static uint64_t last;
     uint64_t now = rt_monotonic_ns();
     io.DeltaTime = last ? (float)((now - last) / 1e9) : 1.0f / 60.0f;

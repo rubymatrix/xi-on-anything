@@ -143,6 +143,7 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+| Addon scale | Interface › [Addons] Addon Scale | | | 1 (0.5–3), apart from UI Scale; modern.cfg `addon_scale`. Addons draw, place and get the mouse in their own pixels, the back buffer's over this (Windower's UI resolution, Ashita's screen size); the overlay scales them up, ImGui's text made at that size |
 | Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
 
 ### Gamepad
@@ -272,6 +273,7 @@ Config
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
     │   ├── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   ├── [Addons] ........ Addon Scale
     │   └── [Keyboard] ...... Command Key (macOS, iOS)
     ├── Gamepad (also the game's Gamepad buttons)
     │   ├── [Buttons] ....... Select / Confirm, Cancel, Active Window, Main Menu, Autorun,
