@@ -57,12 +57,12 @@ static int focused(void)
     return w && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS);
 }
 
-/* Back buffer pixels per window point. */
+/* Addon pixels (xi_ui_size) per window point. */
 static void scale(SDL_Window* w, float* sx, float* sy)
 {
     uint32_t bw = 0, bh = 0;
     int ww = 0, wh = 0;
-    d3d8_backbuffer_size(&bw, &bh);
+    xi_ui_size(&bw, &bh);
     if (w)
         SDL_GetWindowSize(w, &ww, &wh);
     *sx = ww > 0 && bw ? (float)bw / (float)ww : 1.0f;
@@ -72,7 +72,7 @@ static void scale(SDL_Window* w, float* sx, float* sy)
 static void client_size(SDL_Window* w, int32_t* cw, int32_t* ch)
 {
     uint32_t bw = 0, bh = 0;
-    d3d8_backbuffer_size(&bw, &bh);
+    xi_ui_size(&bw, &bh);
     if (bw && bh)
     {
         *cw = (int32_t)bw, *ch = (int32_t)bh;

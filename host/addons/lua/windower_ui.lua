@@ -5,8 +5,9 @@ and images libraries drive.
     require('xi.windower_ui')(windower, helpers)
 
 Objects are named by the addon (Windower's API takes names, ours ids). Font sizes are points in
-Windower (96 dpi: 4/3 of a pixel), pixels in xi.ui. Positions are the game's pixels, which is
-what get_windower_settings reports as the UI resolution. A right-justified text's x is its right
+Windower (96 dpi: 4/3 of a pixel), pixels in xi.ui. Positions are the addons' pixels (the back
+buffer's over Config > Interface > Addon Scale), which is what get_windower_settings reports as the
+UI resolution. A right-justified text's x is its right
 edge, as in Windower.
 --]==]
 

@@ -584,7 +584,7 @@ static int u_texture_size(lua_State* L)
 static int u_screen(lua_State* L)
 {
     uint32_t w = 0, h = 0;
-    d3d8_backbuffer_size(&w, &h);
+    xi_ui_size(&w, &h);
     lua_pushnumber(L, w);
     lua_pushnumber(L, h);
     return 2;

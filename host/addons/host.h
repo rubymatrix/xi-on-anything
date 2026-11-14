@@ -105,6 +105,11 @@ typedef struct XiEvent
 void xi_raise(XiEvent* e);
 /* A drawing event with no data (present, postrender). */
 void xi_frame_draw(const char* name);
+/* The addons' pixel: back buffer pixels each (Config > Interface > Addons, modern_addon_scale), and
+ * the screen in them, the back buffer's size over it. Addons draw, place and are told the mouse in
+ * these; the overlay scales them up as it draws (gui.cpp). */
+float xi_ui_scale(void);
+void xi_ui_size(uint32_t* w, uint32_t* h);
 /* Only addons of one kind (-1: all). */
 void xi_raise_kind(XiEvent* e, int kind);
 

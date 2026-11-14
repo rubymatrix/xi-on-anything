@@ -31,6 +31,11 @@ void modern_frame(void);
  * window's over the UI scale): applied between frames as Config > Display applies a size it picks. */
 void modern_window_size(int w, int h, int menu_w, int menu_h);
 
+/* Config > Interface > Addons: back buffer pixels an addon's pixel. Addons draw and are told the
+ * screen in their own pixels (the back buffer's over this), which the overlay scales up as it draws.
+ * Apart from the game's UI Scale; 1 unless the player chose another. */
+float modern_addon_scale(void);
+
 /* Config > Addons: the addon host's installed addons, a row each (host/addons/manage.c). Each call
  * is on the game's thread. */
 typedef struct ModernAddons

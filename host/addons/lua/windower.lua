@@ -696,7 +696,7 @@ windower.regex = partial({
     end,
 }, 'windower.regex')
 
--- Screen and UI sizes: the overlay draws in the game's pixels, so the UI resolution is the same.
+-- Screen and UI sizes: the addons' pixels (the back buffer's over Addon Scale, xi_ui_size).
 function windower.get_windower_settings()
     local w, h = native.ui.screen()
     if not w or w == 0 then w, h = 1920, 1080 end
