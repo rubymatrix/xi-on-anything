@@ -1400,6 +1400,8 @@ extern "C" int xi_gui_text(const char* utf8)
 extern "C" int xi_gui_wants_keyboard(void) { return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard; }
 extern "C" int xi_gui_wants_mouse(void) { return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse; }
 
+extern "C" void xi_gui_stop(void) { g_up = 0; }
+
 extern "C" void xi_gui_free_owned(Addon* a)
 {
     for (size_t i = 0; i < g_texts.size();)

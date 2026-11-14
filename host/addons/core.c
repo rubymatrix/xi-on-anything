@@ -1253,4 +1253,5 @@ void addons_shutdown(void)
     xi_log("shutting down: unloading %u addons", g_naddons);
     while (g_naddons)
         unload_now(g_addons[g_naddons - 1]);
+    xi_gui_stop();
 }
