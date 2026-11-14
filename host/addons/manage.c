@@ -3,8 +3,9 @@
  * more than one, as //addon load picks), which are on, and which are new.
  *
  * <data dir>/addons.cfg remembers them, a line each: "name = on" or "name = off". The ones on load
- * on the first frame (with the kinds' own scripts); one installed since the list was last shown is
- * new until the page closes, and off. A switch on the page loads or unloads on the next frame,
+ * on the first frame, after the kinds' own scripts (default.txt, init.txt, boot.txt), in the file's
+ * line order (the page lists them by name; an addon new to the file goes last); one installed
+ * since the list was last shown is new until the page closes, and off. A switch on the page loads or unloads on the next frame,
  * outside the menu's code, and is written to the file then; one that fails to load is written off,
  * so a broken addon is not tried again each start. */
 #include <stdio.h>
@@ -120,13 +121,15 @@ static void save_file(void)
 
 static int by_name(const void* a, const void* b) { return strcasecmp(((const Listed*)a)->name, ((const Listed*)b)->name); }
 
-static int listed(const char* name)
+static int find_listed(const char* name)
 {
     for (int i = 0; i < g_nlist; ++i)
         if (!strcasecmp(g_list[i].name, name))
-            return 1;
-    return 0;
+            return i;
+    return -1;
 }
+
+static int listed(const char* name) { return find_listed(name) >= 0; }
 
 /* the folders as they are now; what the page asked for and the new marks carry over */
 static int scan(void)
@@ -223,14 +226,20 @@ void xi_manage_frame(void)
     {
         started = 1;
         scan();
+        /* in the file's order, so its lines say which addon's handlers run first (an addon that
+         * counts actions after LuAshitacast, which holds and re-injects them) */
+        for (int j = 0; j < g_nknown; ++j)
+        {
+            Known* k = &g_known[j];
+            int i = find_listed(k->name);
+            if (k->on && i >= 0 && !xi_addon_find(g_list[i].name) && !xi_addon_load(g_list[i].name, g_list[i].kind))
+                k->on = 0, g_pending = 1; /* written below: not tried again */
+        }
         char fresh[400] = "";
         int nfresh = 0;
         for (int i = 0; i < g_nlist; ++i)
         {
-            Known* k = known(g_list[i].name);
-            if (k && k->on && !xi_addon_find(g_list[i].name) && !xi_addon_load(g_list[i].name, g_list[i].kind))
-                k->on = 0, g_pending = 1; /* written below: not tried again */
-            if (!k)
+            if (!known(g_list[i].name))
             {
                 size_t n = strlen(fresh);
                 if (n + strlen(g_list[i].name) + 3 < sizeof fresh)

@@ -16,6 +16,13 @@ windows, text and images over the game's frame.
 - Load them as you would there: `/addon load <name>`, `//lua load <name>`, or at start from
   `ashita/scripts/default.txt` or `windower/scripts/init.txt`. `/bind`, `/alias` and
   `//exec` work too.
+- **Load order** is the order handlers run in (for `packet_out`, which addon sees a packet first).
+  The startup scripts load first, then the addons turned on in Config > Addons, in the order of
+  their lines in `addons.cfg` (in the data folder; move a line to move the addon). An addon loaded
+  or reloaded later (`/addon reload luashitacast`) goes last. As in Ashita, a handler that runs
+  before LuAshitacast's sees each action it holds twice: its re-injected copy (`injected=true`)
+  and the game's original, which LuAshitacast blocks only after. Skip the `injected=true` copies,
+  or put the addon's line after LuAshitacast's.
 - Addons that patch the game's code (instantchat, macrofix, fastswap and the like) work through
   translated variants of the patched functions, chosen while the addon's bytes are in place.
 - **Native plugins** (Ashita and Windower DLLs) don't run: they're 32-bit Windows code. Addons that
