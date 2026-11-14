@@ -19,11 +19,12 @@ platform needs the same two things from you:
 | Xbox One / Series | Experimental | Developer Mode, sideloaded | [xbox-one.md](xbox-one.md) |
 | PS4 | Experimental | Jailbroken console, fake PKG | [ps4.md](ps4.md) |
 | Android (ARM64) | Experimental | Debug APK | [../android.md](../android.md) |
+| Nintendo Switch | In progress, not playable | Homebrew `.nro`, built on your PC | [switch.md](switch.md) |
 
 ## Where each port's code is
 
-Everything builds from `main` except the PS4 port, which is on its own branch, `port/ps4`, until it
-is merged; check it out before following its guide.
+Everything builds from `main` except the PS4 and Switch ports, which are on their own branches,
+`port/ps4` and `port/switch`, until they are merged; check one out before following its guide.
 
 ## Common to every build from source
 

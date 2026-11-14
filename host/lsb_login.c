@@ -54,7 +54,9 @@ typedef SOCKET sock_t;
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#if !defined(__SWITCH__) /* the Switch: no terminal (read_secret) */
 #include <termios.h>
+#endif
 #include <unistd.h>
 typedef int sock_t;
 #define SOCK_BAD (-1)
@@ -667,7 +669,7 @@ int net_resolve_ipv4(const char* name, uint32_t* out)
 
 int read_secret(const char* prompt, char* out, size_t n)
 {
-#if defined(FFXI_UWP)
+#if defined(FFXI_UWP) || defined(__SWITCH__)
     (void)prompt, (void)out, (void)n;
     return 0; /* no terminal: the app asks */
 #elif defined(_WIN32)

@@ -96,11 +96,13 @@ def compile_one(job):
     return str(obj), None
 
 
-def compile_many(srcs, group, extra=()):
+def compile_many(srcs, group, extra=(), workers=None):
+    """workers: at most this many compilers at once (the generated files are ~3 MB of C each, and GCC at
+    -O2 takes gigabytes for one: XI_SWITCH_JOBS for those, default 6)"""
     jobs = [(s, OUT / 'obj' / group / (s.replace('/', '_') + '.o'), extra) for s in srcs]
     print(f'{group}: {len(jobs)} files (compiling the ones changed since the last build)', flush=True)
     errors = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers or os.cpu_count() or 4) as ex:
         for name, err in ex.map(compile_one, jobs):
             if err:
                 errors.append((name, err))
@@ -149,6 +151,58 @@ def plat_test(_a):
     OUT.mkdir(parents=True, exist_ok=True)
     objs = compile_many(PLAT_TEST, 'plat-test')
     return link_nro(objs, 'plat-test', ['-lnx', '-lm'], title='XI on Anything platform test')
+
+
+# mbedtls' time and entropy from runtime/portable/tls_nx.c (switch/mbedtls_config.h), for it and its includers
+MBEDTLS_CONFIG = ['-I' + (ROOT / 'switch').as_posix(), '-DTF_PSA_CRYPTO_USER_CONFIG_FILE=<mbedtls_config.h>',
+                  '-DMBEDTLS_USER_CONFIG_FILE=<mbedtls_config.h>']
+
+
+def desktop_tools():
+    """build.py / build_posix.py / thirdparty.py, with the third-party libraries (mbedtls) compiled by
+    devkitA64 into build/switch/third_party: thirdparty.py reads its compilers when it is imported."""
+    # forward slashes: thirdparty.py shlex-splits these, which would eat Windows' backslashes
+    os.environ['XI_CC'] = Path(tc.tool('gcc')).as_posix()
+    os.environ['XI_CXX'] = Path(tc.tool('g++')).as_posix()
+    os.environ['XI_AR'] = Path(tc.tool('ar')).as_posix()
+    os.environ['XI_TP_DIR'] = str(OUT / 'third_party')
+    os.environ['XI_TP_CFLAGS'] = ' '.join(ARCH + ['-D__SWITCH__', '-ffunction-sections', '-I' + (tc.LIBNX / 'include').as_posix()]
+                                          + [shlex.quote(f) for f in MBEDTLS_CONFIG])
+    os.environ.update({k: v for k, v in tc.env().items() if k == 'DEVKITPRO'})
+    import build
+    import build_posix
+    import thirdparty
+    return build, build_posix, thirdparty
+
+
+def host(a):
+    """The game, headless for now (gfx_null.c): build/switch/xi-on-anything.nro."""
+    tc.require()
+    OUT.mkdir(parents=True, exist_ok=True)
+    build, bp, thirdparty = desktop_tools()
+    if build.BUILD is None:
+        raise SystemExit('prepare the game first: python tools/prepare.py --game "<FINAL FANTASY XI folder>"')
+    print(f'game build {build.BUILD["build"]}', flush=True)
+    if not a.no_translate:
+        # the desktop translation, shared with host64 (generated/all) and FFXi.dll's (generated/ffxi)
+        bp.translate()
+        bp.run([sys.executable, 'recomp/recomp.py', '--meta', build.FFXI_META, '--image', bp.GEN_FFXI_IMAGE,
+                '--retail', build.FFXI_RETAIL, '--module', 'ffxi', '--out', 'generated/ffxi', '--all'])
+    build.write_build_h()  # generated/build.h: this game build's addresses (translate() writes it too)
+    thirdparty.build('mbedtls')
+    tls = thirdparty.flags('mbedtls') + MBEDTLS_CONFIG
+    # ours first: its errors show in seconds, the translation's compile takes a while
+    sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
+    hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + [
+        'runtime/portable/gfx_null.c', 'runtime/portable/sdl_nx.c', 'runtime/portable/tls_nx.c', 'host/addons_none.c']
+    objs = compile_many(bp.PORTABLE + hosts, 'host', sdl + tls + ['-Dmain=xi_host_main'])
+    objs += compile_many(['host/switch_main.c'], 'entry', sdl)
+    # GCC's names for the generated C's warnings (GEN_WARNINGS is clang's)
+    warn = ['-w']
+    jobs = int(os.environ.get('XI_SWITCH_JOBS', '6'))
+    objs += compile_many(bp.generated('all'), 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
+    objs += compile_many(bp.generated('ffxi'), 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
+    return link_nro(objs, 'xi-on-anything', [thirdparty.archive('mbedtls'), '-lnx', '-lm'])
 
 
 # --- the SD card ---------------------------------------------------------------------------------------
@@ -275,6 +329,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = ap.add_subparsers(dest='target', required=True)
     sub.add_parser('plat-test')
+    h = sub.add_parser('host')
+    h.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
     s = sub.add_parser('setup')
     s.add_argument('--sd', required=True, help="the SD card's root folder, or emu")
     s.add_argument('--nro')
@@ -292,7 +348,7 @@ def main():
     lg = sub.add_parser('logs')
     lg.add_argument('--sd', required=True)
     a = ap.parse_args()
-    {'plat-test': plat_test, 'setup': setup, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
+    {'plat-test': plat_test, 'host': host, 'setup': setup, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
 
 
 if __name__ == '__main__':

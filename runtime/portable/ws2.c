@@ -18,6 +18,7 @@ typedef SOCKET host_sock;
 #define host_close closesocket
 static int host_errno(void) { return WSAGetLastError(); }
 #else
+#include <arpa/inet.h> /* ntohl and friends: the Switch's newlib has them only here */
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -138,7 +139,9 @@ static uint32_t wsa_error(int e)
     case ENOBUFS: return WSAENOBUFS;
     case EISCONN: return WSAEISCONN;
     case ENOTCONN: return WSAENOTCONN;
+#if defined(ESHUTDOWN) /* not in the Switch's newlib */
     case ESHUTDOWN: return WSAESHUTDOWN;
+#endif
     case ETIMEDOUT: return WSAETIMEDOUT;
     case ECONNREFUSED: return WSAECONNREFUSED;
     case EHOSTUNREACH: return WSAEHOSTUNREACH;
