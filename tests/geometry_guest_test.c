@@ -339,7 +339,7 @@ int main(void)
     const char* reasons[] = {"(game or host state)", "(no work)", "(layout)",
                              "(work cap)",           "(unmapped page)", "(alias)"};
     for (unsigned i = 0; i < sizeof reasons / sizeof *reasons; ++i)
-        need(strstr(logged, reasons[i]) != NULL, cases, reasons[i]);
+        need(strstr(logged, reasons[i]) != NULL, cases++, reasons[i]);
     printf("{\"alias_guard_cases\":%u,\"unexpected_admissions\":0,\"Guest_or_memory_changes\":0}\n", cases);
     geometry_test_release(rt_guest_base);
     return 0;

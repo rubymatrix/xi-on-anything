@@ -7,9 +7,16 @@
 #include <stdint.h>
 #include <string.h>
 
-/* four lanes of xor-multiply, so the multiplies overlap, then fmix64: a multiply carries bits only upward, and
- * the maps index buckets by the low bits, so the finaliser folds the high half of every word into them. Never 0:
- * 0 marks an empty slot. */
+/* one word into a lane: a multiply carries bits only upward, so without the rotate a difference in a word's top
+ * bit (a float's sign) would stay in the lane's top bit, and two of them in one lane would cancel */
+static inline uint64_t gfx_key_mix(uint64_t lane, uint64_t word, uint64_t k)
+{
+    lane = (lane ^ word) * k;
+    return lane << 31 | lane >> 33;
+}
+
+/* four lanes of xor-multiply-rotate, so the multiplies overlap, then fmix64: the maps index buckets by the low
+ * bits, so the finaliser folds the high half of every lane into them. Never 0: 0 marks an empty slot. */
 static inline uint64_t gfx_key_hash(const void* p, size_t n)
 {
     const uint8_t* b = (const uint8_t*)p;
@@ -23,21 +30,21 @@ static inline uint64_t gfx_key_hash(const void* p, size_t n)
         memcpy(&w1, b + i + 8, 8);
         memcpy(&w2, b + i + 16, 8);
         memcpy(&w3, b + i + 24, 8);
-        a = (a ^ w0) * k1;
-        c = (c ^ w1) * k2;
-        d = (d ^ w2) * k3;
-        e = (e ^ w3) * k0;
+        a = gfx_key_mix(a, w0, k1);
+        c = gfx_key_mix(c, w1, k2);
+        d = gfx_key_mix(d, w2, k3);
+        e = gfx_key_mix(e, w3, k0);
     }
     for (; i + 8 <= n; i += 8)
     {
         memcpy(&w0, b + i, 8);
-        a = (a ^ w0) * k1;
+        a = gfx_key_mix(a, w0, k1);
     }
     if (i < n)
     {
         w0 = 0;
         memcpy(&w0, b + i, n - i);
-        a = (a ^ w0) * k1;
+        a = gfx_key_mix(a, w0, k1);
     }
     uint64_t h = a ^ c * k0 ^ d * k1 ^ e * k2 ^ n;
     h ^= h >> 33;

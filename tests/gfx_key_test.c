@@ -1,7 +1,8 @@
 /* runtime/portable/gfx_key.h, the back ends' map hash and compare, without a GPU: the hash is nonzero and
- * depends on every byte and the length, single-bit changes reach the bucket index (the low bits), keys that
- * differ only in the high half of a word spread over buckets, nothing reads past the key (a key ending at an
- * inaccessible page), and gfx_key_eq agrees with memcmp at every length, offset and differing byte.
+ * depends on every byte and the length, single-bit changes reach the bucket index (the low bits), two words'
+ * top-bit flips do not cancel, keys that differ only in the high half of a word spread over buckets, nothing
+ * reads past the key (a key ending at an inaccessible page), and gfx_key_eq agrees with memcmp at every length,
+ * offset and differing byte.
  *
  * usage: python3 tools/build_posix.py keytest (exit status 0 when every check passes) */
 #include <stdint.h>
@@ -62,6 +63,23 @@ int main(void)
         memcpy(other, key, n);
         other[n] = 0;
         check(gfx_key_hash(other, n + 1) != h, "the length changes the hash", n, n);
+    }
+
+    /* two words' top bits (two floats' signs) flipped together, in one lane or two, at every pair of words */
+    for (size_t s = 0; s < sizeof sizes / sizeof *sizes; ++s)
+    {
+        size_t n = sizes[s];
+        for (size_t i = 0; i < n; ++i)
+            key[i] = rand8();
+        uint64_t h = gfx_key_hash(key, n);
+        for (size_t x = 7; x < n; x += 4)
+            for (size_t y = x + 4; y < n; y += 4)
+            {
+                memcpy(other, key, n);
+                other[x] ^= 0x80;
+                other[y] ^= 0x80;
+                check(gfx_key_hash(other, n) != h, "two sign-bit flips change the hash", n, y);
+            }
     }
 
     /* keys that differ only in bytes 4-7 of one word (as PipeKey's depth and x8/topo/fill do) spread over

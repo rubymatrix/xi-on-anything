@@ -167,10 +167,13 @@ static int geometry_alias_guard(const Guest* g, const GeometryLayout* layout)
         return REJECT_UNMAPPED;
     if ((why = clear(&a, source, source_bytes, 1)))
         return why;
-    if (dual && !read32((uint64_t)object + 0x76, &source))
-        return REJECT_UNMAPPED;
-    if (dual && (why = clear(&a, source, source_bytes, 1)))
-        return why;
+    if (dual)
+    {
+        if (!read32((uint64_t)object + 0x76, &source))
+            return REJECT_UNMAPPED;
+        if ((why = clear(&a, source, source_bytes, 1)))
+            return why;
+    }
     /* The descriptor words actually used, mapped as one span: a rigid descriptor's second word is
      * unused, so a final rigid descriptor's need not be mapped. Collects the bones (at most 128)
      * they name, so only the remap entries in use are read below. */
