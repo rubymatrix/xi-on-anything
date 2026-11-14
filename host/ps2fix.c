@@ -17,22 +17,44 @@
  * part in ecx. Part +0x36 is its command stream: records of a 16-bit op and a 16-bit count, 0x80n1 a material (0x2e
  * bytes), 0x80n0 a texture (0x12, its name at +6), 0x54 a triangle list (4 + count x 30 bytes), 0xffff the end.
  *
+ * Disintegrate (fix_disintegrate; d3d8.c draws it). Effects such as the Shadow Lord's change of form (16/98) sweep a
+ * particle over a model, and its op 0x65 (record 65 07 00 00 | generator handle | radius at +0xc, animated by the
+ * particle's op 0x6a) marks a sphere around it each frame for the actor the generator plays on (generator +0x3c): on
+ * the PS2 the body's triangles inside it break off. The PC's per-particle interpreter sends op 0x65 to its do-nothing
+ * case. "particle_op" is the interpreter's dispatch (mov eax,[ebp] / and eax,0FFh / dec eax / cmp eax,6Dh / ja /
+ * jmp [eax*4+table]: ebx the particle, ebp the op's record, [esp+48h] the generator); for op 0x65 the sphere goes to
+ * d3d8.c with the actor's bone palette ([[actor+0x6b8]+0x14]), centred on the particle's world position (the game's
+ * "particle_world_pos", thiscall (particle, float out[3])). On frames that took triangles d3d8_disint_smoke says
+ * where to make the purple smoke: the game's own "particle_emit" (thiscall (generator, parent)) emits generator mt01
+ * (op 0x3c in the creation list of the generator at record +8, g000) on a copy of this particle moved onto a taken
+ * triangle (its local position solved by three probes of the world position and Cramer's rule). The PC never
+ * registers g000's own haze element, so that is d3d8.c's too. As each part is skinned, skin_part tells d3d8.c whose it
+ * was (the palette the skinning reads, "scene_palette") and its vertex buffers: mesh (part +0x5e) +0x44 positions,
+ * +0x48 normals, and for a part with bit 0 of +0x34 the mirrored half's at +0x50 and +0x54.
+ *
  * The sites are checked against the game's bytes (portfix's patterns) before anything is hooked; a build without
  * them, or whose bytes differ, runs without these fixes and says so. */
 #include "ps2fix.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "build.h"
 #include "d3d8.h"
+#include "gthread.h"
 #include "gwin.h"
 #include "runtime.h"
 #include "shinesplit.h"
 
 #ifdef FFXI_HOOK_SKIN_PART
 extern GuestFn rt_hook_skin_part;
+#endif
+#if defined(FFXI_HOOK_PARTICLE_OP) && defined(FFXI_PARTICLE_WORLD_POS) && defined(FFXI_SCENE_PALETTE) && \
+    defined(FFXI_HOOK_SKIN_PART)
+#define HAVE_DISINT 1
+extern GuestFn rt_hook_particle_op;
 #endif
 
 /* committed guest pages over [p, p + n) */
@@ -332,13 +354,128 @@ static void split_undo(void)
     memset(g_seen, 0, sizeof g_seen);
 }
 
+/* --- disintegrate ---------------------------------------------------------------------------------------------- */
+static int g_split_ok, g_disint_ok, g_emit_ok;
+
+#ifdef HAVE_DISINT
+static uint32_t g_out, g_parent; /* guest memory: a world position, the smoke's stand-in parent */
+
+static int world_pos(uint32_t particle, float out[3])
+{
+    guest_thiscall(FFXI_PARTICLE_WORLD_POS, particle, 1, (uint32_t[]){ g_out });
+    memcpy(out, GUEST_PTR(g_out), 12);
+    return isfinite(out[0]) && isfinite(out[1]) && isfinite(out[2]);
+}
+
+static float det3(const float k[3][3])
+{
+    return k[0][0] * (k[1][1] * k[2][2] - k[1][2] * k[2][1]) - k[0][1] * (k[1][0] * k[2][2] - k[1][2] * k[2][0]) +
+        k[0][2] * (k[1][0] * k[2][1] - k[1][1] * k[2][0]);
+}
+
+/* the purple smoke, where d3d8.c says triangles were taken: mt01 emitted on a copy of the particle moved there */
+static void smoke(uint32_t particle, uint32_t rec)
+{
+    float at[4][3];
+    int n = d3d8_disint_smoke(at);
+    if (!n || !g_emit_ok)
+        return;
+    uint32_t h, gen = 0, list, op;
+    if (readable(rec + 8, 4) && (h = rd32(rec + 8)) && readable(h, 4) && (gen = rd32(h)) && readable(gen + 0xE4, 4) &&
+        (list = rd32(gen + 0xE4)))
+    {
+        gen = 0;
+        for (int i = 0; i < 64 && readable(list, 8) && ((op = rd32(list)) & 0xFF) && (op >> 8 & 0x1F); ++i, list += 4 * (op >> 8 & 0x1F))
+            if ((op & 0xFF) == 0x3C && (h = rd32(list + 4)) && readable(h, 4))
+            {
+                gen = rd32(h);
+                break;
+            }
+    }
+    else
+        gen = 0;
+    if (!gen || !readable(gen, 0xE8) || !readable(particle, 0x200))
+        return;
+    for (int e = 0; e < n; ++e)
+    {
+        /* the parent's position (+0x54) is in its own frame: the one that puts it at the triangle. The world position
+         * is affine in it, so three unit steps give the matrix. */
+        memcpy(GUEST_PTR(g_parent), GUEST_PTR(particle), 0x200);
+        uint32_t local = g_parent + 0x54;
+        float l0[3], w0[3], m[3][3];
+        memcpy(l0, GUEST_PTR(local), 12);
+        if (!world_pos(g_parent, w0))
+            continue;
+        for (int c = 0; c < 3; ++c)
+        {
+            float w[3], l[3];
+            memcpy(l, l0, 12), l[c] += 1.0f, memcpy(GUEST_PTR(local), l, 12);
+            world_pos(g_parent, w);
+            for (int r = 0; r < 3; ++r)
+                m[r][c] = w[r] - w0[r];
+        }
+        float det = det3((const float(*)[3])m);
+        if (!(fabsf(det) > 1e-9f))
+            continue;
+        float d[3] = { at[e][0] - w0[0], at[e][1] - w0[1], at[e][2] - w0[2] }, l[3];
+        for (int c = 0; c < 3; ++c) /* Cramer's rule */
+        {
+            float k[3][3];
+            memcpy(k, m, sizeof k);
+            for (int r = 0; r < 3; ++r)
+                k[r][c] = d[r];
+            l[c] = l0[c] + det3((const float(*)[3])k) / det;
+        }
+        memcpy(GUEST_PTR(local), l, 12);
+        wr32(gen + 0xCC, 0); /* the generator's countdown: emit now */
+#ifdef FFXI_PARTICLE_EMIT
+        guest_thiscall(FFXI_PARTICLE_EMIT, gen, 1, (uint32_t[]){ g_parent });
+#endif
+    }
+}
+
+static void particle_op(Guest* g)
+{
+    if (rd8(g->ebp) != 0x65 || !(d3d8_fixes() & D3D8_FIX_DISINTEGRATE))
+        return;
+    uint32_t particle = g->ebx, rec = g->ebp, gen = rd32(g->esp + 0x48), actor, holder, bones;
+    if (!readable(gen + 0x3C, 4) || !readable(rec + 0xC, 4) || !(actor = rd32(gen + 0x3C)) || !readable(actor + 0x6B8, 4) ||
+        !(holder = rd32(actor + 0x6B8)) || !readable(holder + 0x14, 4) || (bones = rd32(holder + 0x14)) < 0x10000)
+        return;
+    float r, c[3];
+    uint32_t ru = rd32(rec + 0xC);
+    memcpy(&r, &ru, 4);
+    if (!(r > 0.0f) || r > 1000.0f || !world_pos(particle, c))
+        return;
+    d3d8_disint_sphere(bones, c, r);
+    static int said;
+    if (!said++)
+        rt_log("[recomp] ps2fix: disintegrate: an effect's op 0x65 marks the model (fix_disintegrate)\n");
+    smoke(particle, rec);
+}
+#endif
+
 #ifdef FFXI_HOOK_SKIN_PART
 static void skin_part(Guest* g)
 {
-    if (d3d8_fixes() & D3D8_FIX_SHINE)
+    unsigned fx = d3d8_fixes();
+    if (g_split_ok && (fx & D3D8_FIX_SHINE))
         split_part(g->ecx);
     else if (g_nparts)
         split_undo();
+#ifdef HAVE_DISINT
+    if (g_disint_ok && (fx & D3D8_FIX_DISINTEGRATE))
+    {
+        uint32_t part = g->ecx, mesh = readable(part + 0x5E, 4) ? rd32(part + 0x5E) : 0, vb[4] = { 0, 0, 0, 0 };
+        if (mesh && readable(mesh + 0x44, 0x14) && readable(part + 0x34, 1))
+        {
+            vb[0] = rd32(mesh + 0x44), vb[2] = rd32(mesh + 0x48);
+            if ((rd8(part + 0x34) & 1) && rd32(mesh + 0x50) && rd32(mesh + 0x54))
+                vb[1] = rd32(mesh + 0x50), vb[3] = rd32(mesh + 0x54);
+        }
+        d3d8_disint_part(rd32(FFXI_SCENE_PALETTE), vb);
+    }
+#endif
 }
 #endif
 
@@ -355,12 +492,42 @@ void ps2fix_setup(void)
             fn = f;
     if (!fn || !bytes_at(at - 2, "8B CB E8") || at + 5 + rd32(at + 1) != fn + 0x15C0)
     {
-        rt_log("[recomp] ps2fix: build %s's skinning call isn't where expected; shine batches off\n", FFXI_BUILD);
+        rt_log("[recomp] ps2fix: build %s's skinning call isn't where expected; shine batches and disintegrate off\n",
+            FFXI_BUILD);
         return;
     }
+    g_split_ok = 1;
+#ifdef HAVE_DISINT
+    /* skin_part_b reads the palette with mov eax,[palette] 20 bytes in; the dispatch's table has op 0x65 at the
+     * do-nothing case op 0x47 shares (unless something else took it) */
+    uint32_t op = FFXI_HOOK_PARTICLE_OP, table = rd32(op + 21);
+    if (rd8(fn + 20) != 0xA1 || rd32(fn + 21) != FFXI_SCENE_PALETTE)
+        rt_log("[recomp] ps2fix: build %s's skinning palette isn't where expected; disintegrate off\n", FFXI_BUILD);
+    else if (!bytes_at(op, "8B 45 00 25 FF 00 00 00 48 83 F8 6D 0F 87 ?? ?? ?? ?? FF 24 85") || !readable(table, 4 * 0x6E) ||
+        rd32(table + 4 * (0x65 - 1)) != rd32(table + 4 * (0x47 - 1)))
+        rt_log("[recomp] ps2fix: build %s's particle op dispatch isn't where expected; disintegrate off\n", FFXI_BUILD);
+    else if (!bytes_at(FFXI_PARTICLE_WORLD_POS, "83 EC 0C 56 8B F1 8D 46 54 8B 4E 54"))
+        rt_log("[recomp] ps2fix: build %s's particle position isn't where expected; disintegrate off\n", FFXI_BUILD);
+    else
+    {
+        g_out = gheap_alloc(16, 1), g_parent = gheap_alloc(0x200, 1);
+        g_disint_ok = g_out && g_parent;
+#ifdef FFXI_PARTICLE_EMIT
+        g_emit_ok = bytes_at(FFXI_PARTICLE_EMIT, "83 EC 4C 53 55 56 8B F1 57 C6 44 24 13 00 F6 86 DC 00 00 00 01");
+#endif
+        if (!g_emit_ok)
+            rt_log("[recomp] ps2fix: build %s's particle emit isn't where expected; disintegrate without its smoke\n",
+                FFXI_BUILD);
+        if (g_disint_ok)
+            rt_hook_particle_op = particle_op;
+    }
+#else
+    (void)g_disint_ok, (void)g_emit_ok;
+    rt_log("[recomp] ps2fix: build %s has no particle op hook; disintegrate off\n", FFXI_BUILD);
+#endif
     rt_hook_skin_part = skin_part;
 #else
-    (void)split_part, (void)split_undo, (void)bytes_at;
-    rt_log("[recomp] ps2fix: build %s has no skinning hook; shine batches off\n", FFXI_BUILD);
+    (void)split_part, (void)split_undo, (void)bytes_at, (void)g_split_ok, (void)g_disint_ok, (void)g_emit_ok;
+    rt_log("[recomp] ps2fix: build %s has no skinning hook; shine batches and disintegrate off\n", FFXI_BUILD);
 #endif
 }
