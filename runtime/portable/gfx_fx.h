@@ -53,6 +53,7 @@ enum
     GFX_PASS_POST_SHAFTS,  /* post_shafts: the march, its resolve over frames, onto the scene */
     GFX_PASS_HDR,          /* scene_hdr: the target made float (once), the tonemap */
     GFX_PASS_LAMPS,        /* scene_lamp_glow: the lamps' glows */
+    GFX_PASS_UPSCALE,      /* the upscaler: its motion and depth passes and MetalFX, a command buffer of its own while timed */
     GFX_NPASSES
 };
 /* timing is on: FFXI_PROFILE=1, or /fx prof */

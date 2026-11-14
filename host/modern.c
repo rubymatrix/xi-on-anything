@@ -376,12 +376,6 @@ static const float QUALITY[NQUALITY][NQUALITY_KEYS] = {
     { 2, 1, 1, 1, 1, 2, 2048, 1, 4, 1, 2, 1, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 }, /* Max */
 };
 
-/* Graphics' Renderer: the scene renderer lit per pixel or per vertex, or the older effects on the game's own draws
- * (scene 0). The older effects' lighting is turned off under the scene renderer (its own shadows, occlusion and post
- * effects replace them) and back to its defaults (gfx_fx.c) for it. */
-static const char* const LEGACY_KEYS[] = { "light", "sun", "ao", "gi", "shadow", "rays", "bloom" };
-static const float LEGACY_ON[] = { 2.0f, 0.45f, 0.8f, 0.0f, 0.3f, 0.6f, 0.3f };
-
 /* the level the settings are at; NQUALITY (Custom) when none */
 static int quality_now(void)
 {
@@ -416,8 +410,8 @@ static float get(const Row* r)
         return g_ui_aspect;
     if (!strcmp(r->key, "@quality"))
         return (float)quality_now();
-    if (!strcmp(r->key, "@renderer"))
-        return roundf(gfx_fx_get("scene"));
+    if (!strcmp(r->key, "@renderer")) /* (Per Vertex, 1, as Deferred: a file from before it went) */
+        return gfx_fx_get("scene") >= 0.5f ? 2.0f : 0.0f;
     if (!strcmp(r->key, "@nameplates"))
         return g_setup.nameplate_fix ? (float)*g_setup.nameplate_fix : 1.0f;
     if (!strcmp(r->key, "@nameplate_size"))
@@ -488,8 +482,6 @@ static void set(const Row* r, float v)
     else if (!strcmp(r->key, "@renderer"))
     {
         fx_put("scene", v);
-        for (size_t i = 0; i < sizeof LEGACY_KEYS / sizeof LEGACY_KEYS[0]; ++i)
-            fx_put(LEGACY_KEYS[i], v > 0.5f ? 0.0f : LEGACY_ON[i]);
     }
     else if (!strcmp(r->key, "@quality"))
     {
@@ -598,12 +590,30 @@ static const Row GRAPHICS_ROWS[] = {
     HEADER_ROW("Quality"),
     { "Overall Quality", "@quality", CHOICE, 4, { "Low", "Medium", "Max", "Custom" }, { 0, 1, 2, 3 }, 0, 0,
         "Sets the renderer, shadows, lighting and post effects. Low is lightest; Max has everything on. Custom: as you set them." },
-    { "Renderer", "@renderer", CHOICE, 3, { "Per Pixel", "Per Vertex", "Legacy" }, { 2, 1, 0 }, 0, 0,
-        "How the world is drawn: the modern renderer lit per pixel or per vertex, or the game's own draws with the older effects." },
+    { "Renderer", "@renderer", CHOICE, 2, { "Original", "Deferred" }, { 0, 2 }, 0, 0,
+        "How the world is drawn: the game's own draws, as it shipped, or the modern renderer, lit per pixel." },
     { "Anti-Aliasing", "aa", CHOICE, 2, { "Off", "FXAA" }, { 0, 1 }, 0, 0, "Smooths the world's jagged edges." },
     { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
         "Sharper ground and walls at an angle." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
+    HEADER_ROW("Upscaling"),
+#ifdef __APPLE__
+    { "Upscaling", "upscale", CHOICE, 3, { "Off", "Spatial", "Temporal" }, { 0, 1, 2 }, 0, 0,
+        "Draws the world at fewer pixels and makes it up to the window's with MetalFX. Temporal is sharper and smooths edges too." },
+#elif defined(_WIN32)
+    { "Upscaling", "upscale", CHOICE, 3, { "Off", "FSR 1", "FSR 4 / 3.1" }, { 0, 1, 2 }, 0, 0,
+        "Draws the world at fewer pixels and makes it up to the window's. FSR 4 on a Radeon RX 6000 or later, FSR 3.1 on other GPUs. From the next start." },
+#else
+    { "Upscaling", "upscale", CHOICE, 2, { "Off", "FSR 1" }, { 0, 1 }, 0, 0,
+        "Draws the world at fewer pixels and makes it up to the window's with FSR 1. From the next start." },
+#endif
+    { "Render Scale", "upscale_scale", CHOICE, 3, { "Quality", "Balanced", "Performance" }, { 0.77f, 0.67f, 0.5f }, 0, 0,
+#ifdef __APPLE__
+        "How many pixels the world is drawn at before upscaling: Quality the most, Performance the fewest." },
+#else
+        "How many pixels the world is drawn at before upscaling: Quality the most, Performance the fewest. From the next start." },
+#endif
+    { "Upscale Sharpening", "upscale_sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail after upscaling." },
     HEADER_ROW("Color"),
     { "High Dynamic Range", "scene_hdr", TOGGLE, 2, { "ON", "OFF" }, { 1, 0 }, 0, 0,
         "Bright lights, highlights and glows keep their brightness past white, then roll off. Modern renderer." },
@@ -694,33 +704,6 @@ static const Row WATER_ROWS[] = {
     { "Surface Lift", "water_lift", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Raises the water over shallow ground it would sink into." },
 };
 
-/* the older effects on the game's own draws (Renderer: Legacy); the modern renderer turns their lighting off */
-static const Row LEGACY_ROWS[] = {
-    HEADER_ROW("Lighting"),
-    { "Modern Lighting", "light", CHOICE, 3, { "Off", "Per Vertex", "Per Pixel" }, { 0, 1, 2 }, 0, 0,
-        "The game's draws lit with smoother light." },
-    { "Bounce Light", "gi", SLIDER, 0, { 0 }, { 0 }, 0, 3.0f, "Sunlit ground and walls light what stands near them. Off at the left." },
-    HEADER_ROW("Shadows"),
-    { "Sun Shadows", "sun", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "How dark the sun's shadows are." },
-    { "Shadow Casters", "sun_casters", CHOICE, 3, { "Characters", "World", "All" }, { 1, 2, 0 }, 0, 0,
-        "Who casts sun shadows: characters, the world, or both." },
-    { "Shadow Edges", "sun_soft", CHOICE, 2, { "Hard", "Soft" }, { 0, 0.03f }, 0, 0,
-        "Hard edges that soften only far from the caster, or soft ones." },
-    { "Shadow Detail", "sun_detail", CHOICE, 3, { "Low", "Normal", "High" }, { 2048, 4096, 8192 }, 0, 0,
-        "Sharper shadows close up. High uses more video memory." },
-    { "Indoor Shadows", "moghouse", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f,
-        "How much of the sun's shadows reach indoors: your Mog House, caves, towers. Off lights them as the game does." },
-    HEADER_ROW("Ambient Occlusion"),
-    { "Strength", "ao", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Soft shade where surfaces meet." },
-    { "Quality", "ao_quality", CHOICE, 3, { "Low", "Medium", "High" }, { 0, 1, 2 }, 0, 0,
-        "How many samples the shade and the contact shadows take a frame. Low is lightest on the GPU." },
-    { "Radius", "radius", SLIDER, 0, { 0 }, { 0 }, 0.25f, 3.0f, "How far from a corner the shade reaches." },
-    HEADER_ROW("Glow"),
-    { "God Rays", "rays", SLIDER, 0, { 0 }, { 0 }, 0, 1.5f, "Shafts of light from the sun." },
-    { "Bloom", "bloom", SLIDER, 0, { 0 }, { 0 }, 0, 2.0f, "A glow around bright lights." },
-    { "Haze", "fog", SLIDER, 0, { 0 }, { 0 }, 0, 0.02f, "Haze over distance, lit by the sun." },
-    { "Bloom Threshold", "threshold", SLIDER, 0, { 0 }, { 0 }, 0.3f, 1.0f, "How bright a light must be to glow. Lower: more glows." },
-};
 #endif
 
 /* Config > Gamepad: a row a function of padsin000 a button does, in FFXiPadConfig.exe's words (its
@@ -1366,7 +1349,7 @@ static Page PAGES[] = {
     { "menu    displayw", "Display", "Window mode, resolution, the interface's size and shape, and the frame rate.",
         0x1c0209u, DISPLAY_ROWS, sizeof DISPLAY_ROWS / sizeof DISPLAY_ROWS[0] },
 #if !defined(FFXI_ANDROID_VULKAN)
-    { "menu    graphicw", "Graphics", "Overall quality, the renderer, anti-aliasing, filtering, color and draw distance.",
+    { "menu    graphicw", "Graphics", "Overall quality, the renderer, anti-aliasing, filtering, upscaling, color and draw distance.",
         0x1c0201u, GRAPHICS_ROWS, sizeof GRAPHICS_ROWS / sizeof GRAPHICS_ROWS[0] },
     { "menu    shadowsw", "Shadows", "Sun, moon and lamp shadows: how dark, how soft, how detailed.", 0x1c0201u,
         SHADOWS_ROWS, sizeof SHADOWS_ROWS / sizeof SHADOWS_ROWS[0] },
@@ -1376,8 +1359,6 @@ static Page PAGES[] = {
         sizeof ATMOSPHERE_ROWS / sizeof ATMOSPHERE_ROWS[0] },
     { "menu    waterw  ", "Water", "Modern water: reflection, highlights, foam.", 0x1c0201u, WATER_ROWS,
         sizeof WATER_ROWS / sizeof WATER_ROWS[0] },
-    { "menu    legacyfw", "Legacy", "The older effects on the game's own draws (Renderer: Legacy).", 0x1c0201u,
-        LEGACY_ROWS, sizeof LEGACY_ROWS / sizeof LEGACY_ROWS[0] },
 #endif
 #ifdef __APPLE__
     { "menu    interfaw", "Interface", "Nameplates, items of the game's own menus shown or hidden, addons' size, and the Command key.",

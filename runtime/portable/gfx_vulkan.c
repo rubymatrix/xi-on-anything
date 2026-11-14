@@ -9354,8 +9354,8 @@ static const char POST_GLSL[] =
     "void main() {\n"
     "  vec4 c = texelFetch(t0, ivec2(gl_FragCoord.xy), 0);\n"
     "  vec3 v = max(c.rgb, 0.0);\n"
-    "  if (u.bloom.x < 0.5) { oc = vec4(min(v, 1.0), c.a); return; }\n"
-    "  if (u.bloom.x < 1.5) {\n"
+    "  if (u.bloom.x < 0.5) v = min(v, 1.0);\n"
+    "  else if (u.bloom.x < 1.5) {\n"
     "    v *= u.bloom.y;\n"
     "    float m = max(v.r, max(v.g, v.b)), kn = u.bloom.w;\n"
     "    if (m > kn) {\n"
@@ -9363,12 +9363,15 @@ static const char POST_GLSL[] =
     "      vec3 h = v * (r / m);\n"
     "      v = mix(h, vec3(r), clamp((m - 1.0) / (u.bloom.z - 1.0), 0.0, 1.0) * 0.5); // the brightest toward white\n"
     "    }\n"
-    "    oc = vec4(clamp(v, 0.0, 1.0), c.a);\n"
-    "    return;\n"
+    "    v = clamp(v, 0.0, 1.0);\n"
+    "  } else {\n"
+    "    vec3 t = aces(pow(v, vec3(2.2)) * u.bloom.y) / aces(vec3(u.bloom.z));\n"
+    "    v = pow(clamp(t, 0.0, 1.0), vec3(1.0 / 2.2));\n"
     "  }\n"
-    "  vec3 l = pow(v, vec3(2.2)) * u.bloom.y;\n"
-    "  vec3 t = aces(l) / aces(vec3(u.bloom.z));\n"
-    "  oc = vec4(pow(clamp(t, 0.0, 1.0), vec3(1.0 / 2.2)), c.a);\n"
+    "  // then the colour grade (u.dof: strength, saturation, contrast; scene_fx's without HDR), on the picture as shown\n"
+    "  vec3 x = clamp(mix(vec3(dot(v, vec3(0.2126, 0.7152, 0.0722))), v, u.dof.y), 0.0, 1.0);\n"
+    "  x = mix(x, x * x * (3.0 - 2.0 * x), u.dof.z);\n"
+    "  oc = vec4(mix(v, x, u.dof.x), c.a);\n"
     "}\n"
     "#endif\n";
 
@@ -9441,7 +9444,7 @@ static const char FOG_GLSL[] =
     "  vec3 dir = v / max(l, 1e-4);\n"
     "  float T = exp(-air_tau(u.p.x, u.p.y, dir, d));\n"
     "  float g = u.sun.w, mu = dot(dir, u.sun.xyz);\n"
-    "  float mie = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float mie = min(0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5), 1.0); /* (held to 1, as the shafts) */\n"
     "  float ray = 0.75 * (1.0 + mu * mu); // (Rayleigh: a little more toward and away from the sun than across)\n"
     "  vec3 I = (u.airc.rgb * ray + u.sunc.rgb * mie) * (1.0 - T);\n"
     "  if (u.lt.z > 0.0 && u.p.z > 0.0) I += air_lamps(u.lt, fp, u.cam.xyz, dir, d, u.p.z, u.dbg.y, u.p.x, u.p.y);\n"
@@ -9520,7 +9523,8 @@ static const char SHAFT_GLSL[] =
     "  float j = fract(fract(52.9829189 * fract(dot(lp, vec2(0.06711056, 0.00583715)))) + u.p.w);\n"
     "  int n = int(u.p.z);\n"
     "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
-    "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  // the forward lobe held to 1 (at g 0.6 it is 2.5 looking into the sun: the low sun washed the whole view out)\n"
+    "  float ph = min(0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5), 1.0);\n"
     "  float ray = 0.75 * (1.0 + mu * mu);\n"
     "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0, llast = 1.0, A = 0.0;\n"
     "  for (int i = 0; i < n; ++i) {\n"
@@ -9952,7 +9956,7 @@ static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float v
     if (s->sun_dir[3] != 0.0f)
         sc[0] = s->sun_color[0], sc[1] = s->sun_color[1], sc[2] = s->sun_color[2];
     float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
-    float k = g_fxs.post_shafts * g_shd.u.info[2] * 1.5f * (0.25f + 0.75f * low * low);
+    float k = g_fxs.post_shafts * g_shd.u.info[2] * (0.35f + 0.65f * low * low); /* (up to 1: 1.5 was too much at dawn and dusk) */
     for (int c = 0; c < 3; ++c)
         u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
     u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
@@ -10326,6 +10330,8 @@ static void hdr_tone(GfxTex* color, const GfxScene* s)
     memset(&u, 0, sizeof u);
     u.bloom[0] = g_fxs.tonemap, u.bloom[1] = fmaxf(g_fxs.exposure, 0.01f), u.bloom[2] = fmaxf(g_fxs.tone_white, 1.01f);
     u.bloom[3] = fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f);
+    /* the grade with it, on the picture as shown (scene_fx leaves it to this with HDR) */
+    u.dof[0] = g_fxs.fx != 0.0f ? g_fxs.grade : 0.0f, u.dof[1] = g_fxs.sat, u.dof[2] = g_fxs.contrast;
     GfxTex* in[3] = { g_hdr.src, NULL, NULL };
     VkSampler ns[3] = { g_near_samp, VK_NULL_HANDLE, VK_NULL_HANDLE };
     float fv[4] = { vx, vy, vw, vh };
@@ -10476,6 +10482,9 @@ static void scene_fx(GfxTex* color, const GfxScene* s)
             { g_fxs.grade, g_fxs.sat, g_fxs.contrast, g_fxs.debug },
             { hand, 0, 0, 0 },
         };
+        /* an HDR scene: the grade after its tonemap (hdr_tone), on the picture as shown, not on the light here */
+        if (g_hdr.t == color && ct->vf == VK_FORMAT_R16G16B16A16_SFLOAT)
+            u.grade[0] = 0.0f;
         u.aop[0] = g_fxs.ao_quality >= 1.5f ? 16.0f : g_fxs.ao_quality >= 0.5f ? 10.0f : 6.0f;
         u.aop[1] = gfx_contact_steps();
         u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;

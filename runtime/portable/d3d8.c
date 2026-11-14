@@ -4918,6 +4918,50 @@ GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size)
     return static_buffer(b);
 }
 
+/* The scene renderer drew the world into the current target with this camera (scene.c flush): a scene of its own for
+ * the effects, as the game's fogged draws would have made it. With the zone and characters drawn by it, the game's own
+ * 3D draws are what is left over (a few fogged objects), and none are in view when the camera looks up at the sky: the
+ * scene never began, and the effects went off with the camera's angle. */
+void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t vp[6])
+{
+    uint32_t face, level;
+    Obj* rt = obj(g_dev.rt);
+    GfxTex* c = rt ? surface_gpu(rt, &face, &level) : NULL;
+    if (!c || face || level || !obj(g_dev.ds) || (uint64_t)rt->width * rt->height * 2 < (uint64_t)g_dev.pp[0] * g_dev.pp[1] ||
+        proj[11] == 0.0f)
+        return;
+    for (int i = 0; i < 4; ++i) /* (counted as scene_note counts the game's: the world's target is the most drawn to) */
+        if (g_scene.tally[i].t == c || !g_scene.tally[i].t || i == 3)
+        {
+            if (g_scene.tally[i].t != c)
+                g_scene.tally[i].t = c, g_scene.tally[i].n = 0;
+            g_scene.tally[i].n++;
+            break;
+        }
+    if (g_scene.world && c != g_scene.world)
+        return;
+    if (c != g_scene.rt)
+    {
+        scene_finish("switch");
+        g_scene.rt = c, g_scene.draws = 0, g_scene.done = 0, g_scene.cam_rank = 0, g_scene.sun_draw = 0;
+    }
+    if (g_scene.done)
+        return;
+    g_scene.draws++;
+    if (g_scene.cam_rank < 2) /* the camera the world was drawn with, over any the game's unfogged draws gave */
+    {
+        const uint32_t* rs = g_dev.cur.rs;
+        GfxScene* sc = &g_scene.s;
+        g_scene.cam_rank = 2, g_scene.cam_draw = g_scene.draws;
+        memcpy(sc->proj, proj, 64);
+        memcpy(sc->view, view, 64);
+        memcpy(sc->vp, vp, sizeof sc->vp);
+        color4(sc->ambient, rs[139]);
+        color4(sc->fogcolor, rs[34]);
+        sc->fog[0] = u2f(rs[36]), sc->fog[1] = u2f(rs[37]), sc->fog[2] = rs[28] ? 1.0f : 0.0f;
+    }
+}
+
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
 {
     if (!g_dev.rt)

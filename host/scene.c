@@ -871,6 +871,8 @@ static void flush(void)
         gfx_world_draw(&f);
     if (have_chars && cf.nitem)
         gfx_chars_draw(&cf); /* the characters after the zone, as the game draws them */
+    if (total || (have_chars && cf.nitem))
+        d3d8_world_scene(f_view, f_proj, vp); /* the effects' scene, whatever of the game's own draws is in view */
     ++g_count.flushes;
 done:
     /* the next batch (a second walk this frame: the game's reflections, a menu's model view) starts empty */

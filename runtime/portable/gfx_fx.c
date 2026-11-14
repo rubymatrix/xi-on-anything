@@ -28,29 +28,29 @@ static const struct
     float def;
 } FX_SETTINGS[] = {
     { "fx", offsetof(GfxFxSettings, fx), 1.0f },
-    { "ao", offsetof(GfxFxSettings, ao), 0.8f },
+    { "ao", offsetof(GfxFxSettings, ao), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "radius", offsetof(GfxFxSettings, radius), 1.0f },
     { "grade", offsetof(GfxFxSettings, grade), 1.0f },
-    { "sat", offsetof(GfxFxSettings, sat), 1.12f },
-    { "contrast", offsetof(GfxFxSettings, contrast), 0.2f },
+    { "sat", offsetof(GfxFxSettings, sat), 1.25f },
+    { "contrast", offsetof(GfxFxSettings, contrast), 0.4f },
     { "sharpen", offsetof(GfxFxSettings, sharpen), 0.3f },
     { "filter", offsetof(GfxFxSettings, filter), 1.0f },
     { "aniso", offsetof(GfxFxSettings, aniso), 16.0f },
-    { "fog", offsetof(GfxFxSettings, fog), 0.004f },
+    { "fog", offsetof(GfxFxSettings, fog), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "fog_falloff", offsetof(GfxFxSettings, fog_falloff), 0.08f },
     { "fog_height", offsetof(GfxFxSettings, fog_height), 2.0f },
     { "fog_max", offsetof(GfxFxSettings, fog_max), 0.5f },
     { "fog_sun", offsetof(GfxFxSettings, fog_sun), 0.5f },
     { "fog_g", offsetof(GfxFxSettings, fog_g), 0.6f },
-    { "bloom", offsetof(GfxFxSettings, bloom), 0.3f },
+    { "bloom", offsetof(GfxFxSettings, bloom), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "threshold", offsetof(GfxFxSettings, threshold), 0.75f },
-    { "rays", offsetof(GfxFxSettings, rays), 0.6f },
+    { "rays", offsetof(GfxFxSettings, rays), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "rays_decay", offsetof(GfxFxSettings, rays_decay), 0.965f },
     { "rays_length", offsetof(GfxFxSettings, rays_length), 0.85f },
-    { "light", offsetof(GfxFxSettings, light), 2.0f },
-    { "shadow", offsetof(GfxFxSettings, shadow), 0.3f },
+    { "light", offsetof(GfxFxSettings, light), 0.0f }, /* (the older effects: off, FX_FIXED) */
+    { "shadow", offsetof(GfxFxSettings, shadow), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "shadow_length", offsetof(GfxFxSettings, shadow_length), 0.6f },
-    { "sun", offsetof(GfxFxSettings, sun), 0.45f },
+    { "sun", offsetof(GfxFxSettings, sun), 0.0f }, /* (the older effects: off, FX_FIXED) */
     { "sun_distance", offsetof(GfxFxSettings, sun_distance), 100.0f },
     { "sun_soft", offsetof(GfxFxSettings, sun_soft), 0.0f },
     { "sun_face", offsetof(GfxFxSettings, sun_face), 0.0f },
@@ -298,7 +298,10 @@ static const struct
 
 /* the settings no menu sets any more: the environment and the defaults give them, the file not (a line
  * the old menus wrote would hold them where nothing can change them back) */
-static const char* const FX_FIXED[] = { "fx", "gameshadows", "filter", "lod", "rt" };
+/* The older effects on the game's own draws (their lighting, sun shadows, occlusion, haze, god rays and bloom) are
+ * gone from the menus: off whatever a file from before says, which the environment can still turn on to compare. */
+static const char* const FX_FIXED[] = { "fx", "gameshadows", "filter", "lod", "rt",
+    "light", "sun", "ao", "gi", "shadow", "rays", "bloom", "fog" };
 
 static int fx_fixed(const char* key)
 {
@@ -409,7 +412,7 @@ void fx_config(void)
 /* --- GPU time per pass ------------------------------------------------------------------------------------------- */
 static const char* const k_pass_name[GFX_NPASSES] = { "sun maps", "linz/zmip", "ao", "ao rays", "blur", "temporal", "gi",
     "bloom", "rays", "comp", "fxaa", "present", "world", "chars", "shadow zone", "shadow chars", "post bloom", "post dof",
-    "scene ao", "scene ao trace", "post shafts", "hdr", "lamps" };
+    "scene ao", "scene ao trace", "post shafts", "hdr", "lamps", "upscale" };
 static _Atomic uint64_t g_pass_ns[GFX_NPASSES], g_pass_gpu_ns, g_pass_frames;
 static int g_pass_asked;                          /* /fx prof turned it on */
 static uint64_t g_pass_since;                     /* the window's start */

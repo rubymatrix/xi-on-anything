@@ -4830,7 +4830,9 @@ static void water_scene(const GfxScene* s, const float* vinv, const FxU* u, id<M
  * it blends by its alpha, else only its edge softened */
 static int water_mode(const GfxDraw* d)
 {
-    if (!d->water || g_fxs.fx == 0.0f || g_fxs.water <= 0.0f || g_fx.wu_serial != g_serial || d->vs.rhw || d->vs.prog ||
+    /* the water's uniforms from this frame's scene, or the last frame's: the game draws its water before the world's
+     * end (gfx_scene_done, where water_scene makes them), so a frame's water takes the frame before's */
+    if (!d->water || g_fxs.fx == 0.0f || g_fxs.water <= 0.0f || !g_fx.wu_serial || g_fx.wu_serial + 1 < g_serial || d->vs.rhw || d->vs.prog ||
         d->fs.prog || !d->pipe.blend || g_rt_face || g_rt_level)
         return 0;
     if (d->pipe.src == 5 && d->pipe.dst == 6 && d->pipe.op == 1) /* SRCALPHA, INVSRCALPHA, ADD */
@@ -7073,7 +7075,7 @@ static const char POST_MSL[] =
     "  float3 dir = v / max(l, 1e-4);\n"
     "  float T = exp(-fog_tau(u, dir, d));\n"
     "  float g = u.sun.w, mu = dot(dir, u.sun.xyz);\n"
-    "  float mie = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  float mie = min(0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5), 1.0); /* (held to 1, as the shafts) */\n"
     "  float ray = 0.75 * (1.0 + mu * mu);\n" /* (Rayleigh: a little more toward and away from the sun than across) */
     "  float3 I = (u.airc.rgb * ray + u.sunc.rgb * mie) * (1.0 - T);\n"
     "  if (u.lt.z > 0.0 && u.p.z > 0.0) {\n" /* the lamps in this tile: their light scattered in the mist round them */
@@ -7172,7 +7174,8 @@ static const char POST_MSL[] =
     "  float j = fract(fract(52.9829189 * fract(dot(lp, float2(0.06711056, 0.00583715)))) + u.p.w);\n"
     "  int n = int(u.p.z);\n"
     "  float g = u.sunc.w, mu = dot(dir, u.sun.xyz);\n"
-    "  float ph = 0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5);\n"
+    "  // the forward lobe held to 1 (at g 0.6 it is 2.5 looking into the sun: the low sun washed the whole view out)\n"
+    "  float ph = min(0.25 * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5), 1.0);\n"
     "  float ray = 0.75 * (1.0 + mu * mu);\n"
     "  float T = 1.0, L = 0.0, ls = 0.0, lin = 0.0, llast = 1.0; float3 A = 0.0;\n"
     "  for (int i = 0; i < n; ++i) {\n"
@@ -7293,27 +7296,34 @@ static const char POST_MSL[] =
     "}\n"
     "// the tonemap, in place (the pixel as it is, read back): 0 neutral (clamped, today's image), 1 filmic (ACES fit\n"
     "// on the linear light, exposure, normalised to the white point), back to the display's encoding\n"
-    "struct TU { float4 k; }; // mode, exposure, white point, unused\n"
+    "// then the colour grade (fx_comp's without HDR), on the picture as it will be shown\n"
+    "struct TU { float4 k; float4 g; }; // mode, exposure, white point, knee; the grade: strength, saturation, contrast\n"
     "static float3 aces(float3 x) { return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14); }\n"
-    "fragment float4 hdr_tone(PV in [[stage_in]], constant TU& u [[buffer(0)]], float4 c [[color(0)]]) {\n"
-    "  float3 v = max(c.rgb, 0.0);\n"
-    "  if (u.k.x < 0.5) return float4(min(v, 1.0), c.a);\n"
-    "  if (u.k.x < 1.5) {\n"
+    "static float3 tone_grade(float3 v, float4 g) {\n"
+    "  float3 x = saturate(mix(float3(dot(v, float3(0.2126, 0.7152, 0.0722))), v, g.y));\n"
+    "  x = mix(x, x * x * (3.0 - 2.0 * x), g.z);\n"
+    "  return mix(v, x, g.x);\n"
+    "}\n"
+    "static float3 tone_map(float3 v, float4 k) {\n"
+    "  if (k.x < 0.5) return min(v, 1.0);\n"
+    "  if (k.x < 1.5) {\n"
     "    // 1: a shoulder - the image as it was below the knee (k.w), what is past it (highlights, glows, glints) rolled\n"
     "    // off toward white by its brightest channel, the hue kept; the exposure first\n"
-    "    v *= u.k.y;\n"
-    "    float m = max(v.r, max(v.g, v.b)), kn = u.k.w;\n"
+    "    v *= k.y;\n"
+    "    float m = max(v.r, max(v.g, v.b)), kn = k.w;\n"
     "    if (m > kn) {\n"
     "      float r = kn + (1.0 - kn) * (1.0 - exp(-(m - kn) / (1.0 - kn)));\n"
     "      float3 h = v * (r / m);\n"
-    "      v = mix(h, float3(r), saturate((m - 1.0) / (u.k.z - 1.0)) * 0.5); // the brightest toward white\n"
+    "      v = mix(h, float3(r), saturate((m - 1.0) / (k.z - 1.0)) * 0.5); // the brightest toward white\n"
     "    }\n"
-    "    return float4(saturate(v), c.a);\n"
+    "    return saturate(v);\n"
     "  }\n"
     "  // 2: ACES fit on the linear light, normalised to the white point\n"
-    "  float3 l = pow(v, 2.2) * u.k.y;\n"
-    "  float3 t = aces(l) / aces(float3(u.k.z));\n"
-    "  return float4(pow(saturate(t), 1.0 / 2.2), c.a);\n"
+    "  float3 t = aces(pow(v, 2.2) * k.y) / aces(float3(k.z));\n"
+    "  return pow(saturate(t), 1.0 / 2.2);\n"
+    "}\n"
+    "fragment float4 hdr_tone(PV in [[stage_in]], constant TU& u [[buffer(0)]], float4 c [[color(0)]]) {\n"
+    "  return float4(tone_grade(tone_map(max(c.rgb, 0.0), u.k), u.g), c.a);\n"
     "}\n"
     "// --- the lamps' glows (scene_lamp_glow): a soft sprite at each lamp, its own colour, hidden by what stands in front of\n"
     "// it (the scene's depth, softly), faded with distance; added to the scene before the bloom takes it\n"
@@ -7560,7 +7570,7 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
     /* strongest with the light low (long paths through the haze, the look of dawn and dusk), about a quarter of that
      * overhead: clear midday air shows little */
     float up = fmaxf(-u.sun[1], 0.0f), low = 1.0f - up;
-    float k = g_fxs.post_shafts * g_shd.u.info[2] * 1.5f * (0.25f + 0.75f * low * low);
+    float k = g_fxs.post_shafts * g_shd.u.info[2] * (0.35f + 0.65f * low * low); /* (up to 1: 1.5 was too much at dawn and dusk) */
     for (int c = 0; c < 3; ++c)
         u.sunc[c] = fmaxf(sc[c], 0.0f) * k;
     u.sunc[3] = fminf(fmaxf(g_fxs.shafts_g, 0.0f), 0.95f);
@@ -8070,7 +8080,10 @@ static void hdr_tone(GfxTex* color, const GfxScene* s)
         float vx = (float)s->vp[0], vy = (float)s->vp[1], vw = (float)s->vp[2], vh = (float)s->vp[3];
         if (vw < 16 || vh < 16 || vx + vw > ct.width || vy + vh > ct.height)
             vx = vy = 0, vw = (float)ct.width, vh = (float)ct.height;
-        float k[4] = { g_fxs.tonemap, fmaxf(g_fxs.exposure, 0.01f), fmaxf(g_fxs.tone_white, 1.01f), fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f) };
+        /* the grade with it, on the picture as shown (fx_comp leaves it to this with HDR: scene_fx) */
+        float g = g_fxs.fx != 0.0f ? g_fxs.grade : 0.0f;
+        float k[8] = { g_fxs.tonemap, fmaxf(g_fxs.exposure, 0.01f), fmaxf(g_fxs.tone_white, 1.01f),
+            fminf(fmaxf(g_fxs.tone_knee, 0.3f), 0.95f), g, g_fxs.sat, g_fxs.contrast, 0 };
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = ct;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -8079,7 +8092,7 @@ static void hdr_tone(GfxTex* color, const GfxScene* s)
         id<MTLRenderCommandEncoder> e = [cmd() renderCommandEncoderWithDescriptor:rp];
         [e setRenderPipelineState:g_hdr.tone];
         [e setViewport:(MTLViewport){ vx, vy, vw, vh, 0, 1 }];
-        [e setFragmentBytes:k length:sizeof k atIndex:0];
+        [e setFragmentBytes:k length:sizeof k atIndex:0]; /* (TU: k, g) */
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
         color->scene = 0, color->used = g_serial;
@@ -8431,6 +8444,12 @@ static void up_run(GfxTex* color, const GfxScene* s)
             depth = nil;
         if (!up_tex(color))
             return;
+        /* timed: the upscaler in a command buffer of its own, so its time is its own pass's (MetalFX's encoders take
+         * no timestamps, and the pass after it would count them: ts_frame_end). Not waited for: that drops the GPU's
+         * clock, so the next pass may still count a little of it. */
+        int timed = gfx_pass_timing_on();
+        if (timed && g_cmd)
+            commit_cmd(0);
         int temporal = g_up.mode == 2 && depth && s->proj[11] != 0.0f;
         /* the world's own viewport, within its target (FFXI draws it over all of it) */
         uint32_t cw = s->vp[2] && s->vp[0] + s->vp[2] <= ct.width ? s->vp[2] : (uint32_t)ct.width;
@@ -8542,6 +8561,14 @@ static void up_run(GfxTex* color, const GfxScene* s)
         color->used = g_serial;
         if (depth)
             up_depth(depth);
+        flush_pass();
+        if (timed && g_cmd)
+        {
+            [g_cmd addCompletedHandler:^(id<MTLCommandBuffer> d) {
+                gfx_pass_add(GFX_PASS_UPSCALE, (uint64_t)((d.GPUEndTime - d.GPUStartTime) * 1e9));
+            }];
+            commit_cmd(0);
+        }
         g_up.st_frames++;
     }
 }
@@ -8593,9 +8620,27 @@ static void up_post(GfxTex* color, const GfxScene* fs, const GfxScene* ls)
     id<MTLTexture> drawn = color->tex, dw = color->depth_world, dseen = color->depth_seen;
     color->tex = color->up, color->depth_world = zup, color->depth_seen = zup;
     g_world_drawn = drawn;
+    /* the lamps' tiles are the drawn size's pixels: binned again at this size for the shafts, the fog and the glows,
+     * the frame's own put back after (what is drawn after the scene reads them) */
+    int rebin = g_lamps.binned == g_serial;
+    id<MTLBuffer> lb = g_lamps.lb, tb = g_lamps.tb;
+    NSUInteger lo = g_lamps.lo, to = g_lamps.to;
+    float lu[12], lvp[16];
+    memcpy(lu, g_lamps.lu, sizeof lu), memcpy(lvp, g_lamps.vp, sizeof lvp);
+    if (rebin)
+    {
+        lamps_bin(us.view, us.proj, us.vp);
+        memcpy(g_lamps.lu + 6, lu + 6, 6 * sizeof *lu); /* (the rest of LU, set after the binning) */
+    }
     scene_fx_post(&us, color->tex, zup);
     post_effects(color, &us);
     hdr_tone(color, &us);
+    if (rebin)
+    {
+        g_lamps.lb = lb, g_lamps.tb = tb, g_lamps.lo = lo, g_lamps.to = to;
+        memcpy(g_lamps.lu, lu, sizeof lu), memcpy(g_lamps.vp, lvp, sizeof lvp);
+        g_lamps.binned = g_serial;
+    }
     g_world_drawn = nil;
     color->tex = drawn, color->depth_world = dw, color->depth_seen = dseen;
     color->used = g_serial;
@@ -8762,6 +8807,10 @@ static void scene_fx(GfxTex* color, const GfxScene* s, int defer)
                 { g_fxs.grade, g_fxs.sat, g_fxs.contrast, g_fxs.debug },
                 { hand, 0, 0, 0 },
             };
+            /* an HDR scene: the grade after its tonemap (hdr_tone), on the picture as shown, not on the light here (where
+             * the tonemap would squeeze it, and its clamp cut the highlights) */
+            if (g_hdr.t == color && ct.pixelFormat == MTLPixelFormatRGBA16Float)
+                u.grade[0] = 0.0f;
             u.aop[0] = g_fxs.ao_quality >= 1.5f ? 16.0f : g_fxs.ao_quality >= 0.5f ? 10.0f : 6.0f;
             u.aop[1] = gfx_contact_steps();
             u.smapn2[2] = g_fxs.sun_soft <= 0.0f ? 1.0f : 0.0f;
