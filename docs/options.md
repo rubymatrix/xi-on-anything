@@ -120,6 +120,7 @@ the Lighting and Atmosphere pages.
 | Clarity depth | | `water_clarity` | 3.0 |
 | Soft edge | | `water_soft` | 0.15 |
 | Ripple tilt / density | | `water_ripple`, `water_scale` | 0.25 / 0.6 |
+| Port Bastok's sea keeps its tint near the camera: its ripple layer drawn after the tint, as the PS2 does (after [portfix](https://github.com/voetre/portfix)) | Water › [Water] Layer Order | `fix_water_layers` | 1 PS2; 0 as the PC draws it (black close up) |
 
 ## 7. World detail and distance
 
@@ -143,6 +144,7 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+| Menu buttons without the PC's light rim on their top and left edges, as on the PS2 (after [portfix](https://github.com/voetre/portfix)) | Interface › [Menus: Buttons] Button Edges | | fx `fix_button_rims` | 1 PS2; 0 as the PC draws them |
 | Addon scale | Interface › [Addons] Addon Scale | | | 1 (0.5–3), apart from UI Scale; modern.cfg `addon_scale`. Addons draw, place and get the mouse in their own pixels, the back buffer's over this (Windower's UI resolution, Ashita's screen size); the overlay scales them up, ImGui's text made at that size |
 | Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
 
@@ -263,7 +265,7 @@ Config
     │   ├── [Bloom] ......... Strength, Effect Glow, Lamp Glow
     │   └── [Depth of Field]  Strength, Sharp Distance
     ├── Water
-    │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift
+    │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift, Layer Order
     ├── Legacy (the older effects, Renderer: Legacy)
     │   ├── [Lighting] ...... Modern Lighting, Bounce Light
     │   ├── [Shadows] ....... Sun Shadows, Shadow Casters, Shadow Edges, Shadow Detail, Indoor Shadows
@@ -273,6 +275,7 @@ Config
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
     │   ├── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   ├── [Menus: Buttons]  Button Edges
     │   ├── [Addons] ........ Addon Scale
     │   └── [Keyboard] ...... Command Key (macOS, iOS)
     ├── Gamepad (also the game's Gamepad buttons)

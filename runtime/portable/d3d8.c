@@ -106,6 +106,9 @@ static FILE* g_cap;
 static uint32_t g_cap_esp, g_cap_frame, g_cap_n;
 static uint32_t g_cap_at[32], g_cap_nat; /* <path>.at: draws after which the target is dumped */
 static void cap_present(void);
+static void water_flush(void); /* the PC port's drawing mistakes (fix_water_layers, fix_button_rims) */
+static void fixes_frame(void);
+static int g_btn_shadows; /* this frame's button shadows (button_body) */
 static void scene_present(void);
 
 /* --- formats ----------------------------------------------------------------------------------------- */
@@ -1311,6 +1314,9 @@ static void capture_frame(Obj* bb)
 static void IDirect3DDevice8_Present(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
+    fixes_frame();
+    g_btn_shadows = 0;
     cap_present();
     scene_present();
     ui_present();
@@ -1638,6 +1644,7 @@ static void IDirect3DDevice8_CreateImageSurface(Guest* g)
 static void IDirect3DDevice8_CopyRects(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
     Obj* s = obj(ARG(1));
     Obj* d = obj(ARG(4));
     if (!s || !d || s->format != d->format)
@@ -1699,6 +1706,7 @@ static void IDirect3DDevice8_CopyRects(Guest* g)
 static void IDirect3DDevice8_SetRenderTarget(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
     if (ARG(1))
     {
         bind(&g_dev.rt, ARG(1));
@@ -1737,6 +1745,7 @@ static void apply_targets(void);
 static void IDirect3DDevice8_Clear(Guest* g)
 {
     WORLD_FLUSH();
+    water_flush();
     apply_targets();
     uint32_t n = ARG(2) ? ARG(1) : 0, vp[6];
     memcpy(vp, g_dev.cur.vp, sizeof vp);
@@ -2089,12 +2098,132 @@ static void IDirect3DDevice8_GetCurrentTexturePalette(Guest* g)
 static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size, uint32_t up_data,
     uint32_t up_stride);
 
+/* --- the PC port's own drawing mistakes, drawn as the PS2 draws them ----------------------------------------------
+ * After portfix (github.com/voetre/portfix, MIT License, Copyright (c) 2026 voetre), which found and measured both.
+ * Each has a setting, on unless set to 0: fix_water_layers, fix_button_rims. They are read once a frame (fixes_frame),
+ * not at every draw.
+ *
+ * Water layers. Port Bastok's sea is three flat layers drawn in order: an opaque black one, the scrolling ripples added
+ * on top (SRCALPHA, ONE) with depth written, then a dark tint on the black layer's geometry, 0.023 under the ripples
+ * and tested LESSEQUAL. On the PS2 the tint shows; on the PC its depth fails against the ripples' wherever the
+ * difference is a step of the depth buffer or more, so near the camera only the black and faint ripples are left.
+ * The ripple draw is held back (the whole device state with it) and drawn after the next DrawPrimitive, the tint,
+ * with no depth write: black, tint, ripples on top. Anything else drawn first, a clear, a change of target or
+ * Present lets it go as it was meant to be drawn. (portfix also lifts every water layer: water_lift does that here.)
+ *
+ * Button rims. The title screen's and the config window's buttons are each two quads of one texture: a black copy a
+ * few pixels down and right, alpha blended, as a drop shadow, then the body added (SRCALPHA, ONE). Over the shadow the
+ * sum is the body's colour; along the body's top and left edges, past the shadow, it adds to what is behind and shows
+ * as a light, see-through rim. The PS2's buttons have none, nor does a disabled button (alpha blended). A body drawn
+ * added over its own shadow (same texture, size and uv, the shadow just down and right of it) is drawn alpha blended:
+ * where the shadow lies under it the result is the same. */
+static int g_fix_water = 1, g_fix_buttons = 1;
+
+static void fixes_frame(void)
+{
+    g_fix_water = gfx_fx_get("fix_water_layers") != 0.0f;
+    g_fix_buttons = gfx_fx_get("fix_button_rims") != 0.0f;
+}
+
+/* the held ripple draw: DrawPrimitive's arguments, the scene renderer's site for it, the device state it had */
+static struct
+{
+    int held;
+    uint32_t prim, start, count, zone;
+    State s;
+} g_water;
+
+/* the ripple layer: FVF XYZ|NORMAL|DIFFUSE|TEX1, unlit, added (SRCALPHA, ONE) with depth written, its texture
+ * coordinates scrolled (COUNT2), stage 0 MODULATE */
+static int water_ripple(const State* s)
+{
+    const uint32_t* rs = s->rs;
+    return s->vs == 0x152u && rs[14] == 1 && rs[27] == 1 && rs[19] == 5 && rs[20] == 2 && rs[137] == 0 &&
+        s->tss[0][24] == 2 && s->tss[0][1] == 4;
+}
+
+static void water_hold(uint32_t prim, uint32_t start, uint32_t count)
+{
+    g_water.held = 1, g_water.prim = prim, g_water.start = start, g_water.count = count, g_water.zone = g_draw_zone;
+    g_water.s = g_dev.cur;
+}
+
+/* the held ripple draw, drawn now in its own state with no depth write; the device's state is then put back */
+static void water_flush(void)
+{
+    if (!g_water.held)
+        return;
+    g_water.held = 0;
+    static State keep;
+    keep = g_dev.cur;
+    g_dev.cur = g_water.s;
+    g_dev.cur.rs[14] = 0; /* ZWRITEENABLE */
+    uint32_t zone = g_draw_zone;
+    g_draw_zone = g_water.zone;
+    draw(g_water.prim, g_water.count, g_water.start, 0, 0, 0, 0);
+    g_draw_zone = zone;
+    g_dev.cur = keep;
+}
+
+/* this frame's button shadows: black quads, alpha blended, for button_body to find a body's own */
+typedef struct BtnQuad
+{
+    uint32_t tex;
+    float x0, y0, x1, y1, u0, v0, u1, v1;
+} BtnQuad;
+static BtnQuad g_btn_shadow[64];
+
+/* 1 for a button's body drawn added over its own shadow: draw it alpha blended instead (portfix's ButtonDraw) */
+static int button_body(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride)
+{
+    const State* s = &g_dev.cur;
+    const uint32_t* rs = s->rs;
+    if (prim != 5 || count != 2 || stride != 28 || s->vs != 0x144u || !data || !s->tex[0] || rs[27] != 1 || rs[19] != 5 ||
+        (rs[20] != 2 && rs[20] != 6))
+        return 0;
+    BtnQuad q = { s->tex[0], 1e30f, 1e30f, -1e30f, -1e30f, 1e30f, 1e30f, -1e30f, -1e30f };
+    int black = 1;
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        uint32_t v = data + 28u * i, c = rd32(v + 16);
+        float x = u2f(rd32(v)), y = u2f(rd32(v + 4)), u = u2f(rd32(v + 20)), t = u2f(rd32(v + 24));
+        q.x0 = fminf(q.x0, x), q.x1 = fmaxf(q.x1, x), q.y0 = fminf(q.y0, y), q.y1 = fmaxf(q.y1, y);
+        q.u0 = fminf(q.u0, u), q.u1 = fmaxf(q.u1, u), q.v0 = fminf(q.v0, t), q.v1 = fmaxf(q.v1, t);
+        black = black && ((c >> 16) & 0xFF) <= 0x10 && ((c >> 8) & 0xFF) <= 0x10 && (c & 0xFF) <= 0x10;
+    }
+    if (rs[20] == 6) /* INVSRCALPHA: a shadow, if black */
+    {
+        if (black && g_btn_shadows < (int)(sizeof g_btn_shadow / sizeof g_btn_shadow[0]))
+            g_btn_shadow[g_btn_shadows++] = q;
+        return 0;
+    }
+    float w = q.x1 - q.x0, h = q.y1 - q.y0;
+    if (!(w > 0.0f) || !(h > 0.0f))
+        return 0;
+    /* the body may be a pixel or so shorter or narrower than its shadow (the config window's small buttons: 48x15
+     * over 48x16), from the same corner of the texture */
+    float crop = fmaxf(1.5f, h * 0.1f);
+    for (int i = 0; i < g_btn_shadows; ++i)
+    {
+        const BtnQuad* sh = &g_btn_shadow[i];
+        float dx = sh->x0 - q.x0, dy = sh->y0 - q.y0;
+        if (sh->tex == q.tex && fabsf(sh->x1 - sh->x0 - w) <= crop && fabsf(sh->y1 - sh->y0 - h) <= crop && dx > 0.0f &&
+            dy > 0.0f && dx <= h * 0.25f && dy <= h * 0.25f && fabsf(sh->u0 - q.u0) <= 1e-3f && fabsf(sh->v0 - q.v0) <= 1e-3f &&
+            fabsf(sh->u1 - q.u1) <= 0.05f && fabsf(sh->v1 - q.v1) <= 0.05f)
+            return 1;
+    }
+    return 0;
+}
+
 /* DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount) */
 static void IDirect3DDevice8_DrawPrimitive(Guest* g)
 {
     g_cap_esp = g->esp;
     world_draw_begin(g);
-    draw(ARG(1), ARG(3), ARG(2), 0, 0, 0, 0);
+    if (g_fix_water && water_ripple(&g_dev.cur))
+        water_flush(), water_hold(ARG(1), ARG(2), ARG(3));
+    else
+        draw(ARG(1), ARG(3), ARG(2), 0, 0, 0, 0), water_flush(); /* a held ripple layer over this one */
     g_draw_zone = 0;
     RET(D3D_OK, 4);
 }
@@ -2103,6 +2232,7 @@ static void IDirect3DDevice8_DrawPrimitive(Guest* g)
  * comes from the indices themselves, not minIndex and NumVertices */
 static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
 {
+    water_flush();
     g_cap_esp = g->esp;
     world_draw_begin(g);
     Obj* ib = obj(g_dev.cur.ib);
@@ -2238,6 +2368,7 @@ static uint32_t inset_quad(uint32_t data, const Obj* t)
 
 static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
 {
+    water_flush();
     g_cap_esp = g->esp;
     if (!(g_dev.cur.vs & 1) && (g_dev.cur.vs & 0xE) == 4 && ARG(3) && rd32(ARG(3) + 8) == 0x3f7ffffeu)
         g_probe_sky = 1; /* transformed vertices at the sky's depth */
@@ -2252,7 +2383,15 @@ static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
     }
     else if (t0 && ARG(1) == 5 && ARG(2) == 2 && ARG(4) == 28 && g_dev.cur.vs == 0x144)
         data = inset_quad(data, t0);
-    draw(ARG(1), ARG(2), 0, 0, 0, data, ARG(4));
+    if (g_fix_buttons && button_body(ARG(1), ARG(2), ARG(3), ARG(4)))
+    {
+        uint32_t dst = g_dev.cur.rs[20];
+        g_dev.cur.rs[20] = 6; /* DESTBLEND INVSRCALPHA */
+        draw(ARG(1), ARG(2), 0, 0, 0, data, ARG(4));
+        g_dev.cur.rs[20] = dst;
+    }
+    else
+        draw(ARG(1), ARG(2), 0, 0, 0, data, ARG(4));
     bind(&g_dev.cur.stream[0], 0);
     g_dev.cur.stride[0] = 0;
     RET(D3D_OK, 5);
@@ -2262,6 +2401,7 @@ static void IDirect3DDevice8_DrawPrimitiveUP(Guest* g)
  * IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride) */
 static void IDirect3DDevice8_DrawIndexedPrimitiveUP(Guest* g)
 {
+    water_flush();
     g_cap_esp = g->esp;
     draw(ARG(1), ARG(4), 0, ARG(5), ARG(6) == FMT_INDEX32 ? 4 : 2, ARG(7), ARG(8));
     bind(&g_dev.cur.stream[0], 0);

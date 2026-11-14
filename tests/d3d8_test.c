@@ -56,6 +56,7 @@ enum
     D_CopyRects = 28,
     D_SetRenderTarget = 31,
     D_GetRenderTarget = 32,
+    D_GetDepthStencilSurface = 33,
     D_BeginScene = 34,
     D_EndScene = 35,
     D_Clear = 36,
@@ -114,7 +115,7 @@ static uint32_t fbits(float f)
     return u;
 }
 
-static uint32_t g_dev, g_bb, g_out;
+static uint32_t g_dev, g_bb, g_ds, g_out; /* g_ds: the device's own depth surface */
 
 /* the back buffer's pixel through LockRect (A8R8G8B8 / X8R8G8B8 as D3D lays it out) */
 static uint32_t pixel(int x, int y)
@@ -391,6 +392,112 @@ static void test_state_blocks(void)
     call(g_dev, D_DeleteStateBlock, 1, block);
 }
 
+/* a 1x1 A8R8G8B8 texture of one colour, for the tests' quads to take their colour and alpha from */
+static uint32_t solid_texture(uint32_t argb)
+{
+    call(g_dev, D_CreateTexture, 7, 1, 1, 1, 0, 21 /* A8R8G8B8 */, 1 /* MANAGED */, g_out);
+    uint32_t tex = rd32(g_out), lr = galloc(8);
+    call(tex, T_LockRect, 4, 0, lr, 0, 0);
+    wr32(rd32(lr + 4), argb);
+    call(tex, T_UnlockRect, 1, 0);
+    return tex;
+}
+
+/* Port Bastok's sea (d3d8.c water_hold, after portfix): the scrolling ripple layer, added with depth written, then a
+ * tint 0.0004 behind it in depth with LESSEQUAL. As the PC draws them the tint fails against the ripples' depth and
+ * only the ripples show; fixed, the tint is drawn first and the ripples added over it. */
+static void test_water_layers(void)
+{
+    typedef struct { float x, y, z, nx, ny, nz; uint32_t c; float u, v; } WaterVert; /* FVF 0x152 */
+    call(g_dev, D_SetRenderTarget, 2, g_bb, g_ds); /* the depth the layers are tested against */
+    call(g_dev, D_SetRenderState, 2, 7, 1);    /* ZENABLE */
+    call(g_dev, D_SetRenderState, 2, 23, 4);   /* ZFUNC LESSEQUAL */
+    call(g_dev, D_SetRenderState, 2, 137, 0);  /* LIGHTING off */
+    call(g_dev, D_SetRenderState, 2, 22, 1);   /* CULL none */
+    clear(0xFF000000u);
+    uint32_t tex = solid_texture(0xFFFFFFFFu), pp = galloc(4);
+    call(g_dev, D_CreateVertexBuffer, 5, 8 * (uint32_t)sizeof(WaterVert), 0x8, 0x152, 1, g_out);
+    uint32_t vb = rd32(g_out);
+    call(vb, B_Lock, 4, 0, 0, pp, 0);
+    WaterVert v[8] = {
+        { -1, 1, 0.5f, 0, 1, 0, 0xFF400000u, 0, 0 }, { 1, 1, 0.5f, 0, 1, 0, 0xFF400000u, 1, 0 }, /* the ripples: red */
+        { -1, -1, 0.5f, 0, 1, 0, 0xFF400000u, 0, 1 }, { 1, -1, 0.5f, 0, 1, 0, 0xFF400000u, 1, 1 },
+        { -1, 1, 0.5004f, 0, 1, 0, 0xFF0000FFu, 0, 0 }, { 1, 1, 0.5004f, 0, 1, 0, 0xFF0000FFu, 1, 0 }, /* the tint: blue */
+        { -1, -1, 0.5004f, 0, 1, 0, 0xFF0000FFu, 0, 1 }, { 1, -1, 0.5004f, 0, 1, 0, 0xFF0000FFu, 1, 1 },
+    };
+    memcpy(GUEST_PTR(rd32(pp)), v, sizeof v);
+    call(vb, B_Unlock, 0);
+    call(g_dev, D_SetVertexShader, 1, 0x152);
+    call(g_dev, D_SetStreamSource, 3, 0, vb, (uint32_t)sizeof(WaterVert));
+    call(g_dev, D_SetTexture, 2, 0, tex);
+    call(g_dev, D_SetTextureStageState, 3, 0, 1, 4 /* COLOROP MODULATE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 3, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 4, 4 /* ALPHAOP MODULATE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 6, 0 /* DIFFUSE */);
+    call(g_dev, D_BeginScene, 0);
+    /* the ripples: added (SRCALPHA, ONE), depth written, texture coordinates scrolled (COUNT2) */
+    call(g_dev, D_SetRenderState, 2, 14, 1);
+    call(g_dev, D_SetRenderState, 2, 27, 1);
+    call(g_dev, D_SetRenderState, 2, 19, 5);
+    call(g_dev, D_SetRenderState, 2, 20, 2);
+    call(g_dev, D_SetTextureStageState, 3, 0, 24, 2);
+    call(g_dev, D_DrawPrimitive, 3, 5, 0, 2);
+    /* the tint: opaque, depth tested LESSEQUAL a little behind the ripples */
+    call(g_dev, D_SetRenderState, 2, 27, 0);
+    call(g_dev, D_SetTextureStageState, 3, 0, 24, 0);
+    call(g_dev, D_DrawPrimitive, 3, 5, 4, 2);
+    call(g_dev, D_EndScene, 0);
+    uint32_t p = pixel(16, 16);
+    CHECK(p == 0x4000FF, "water layers: the tint under the ripples: %06x (want 4000ff, 400000 as the PC draws them)", p);
+    call(g_dev, D_SetTextureStageState, 3, 0, 24, 0);
+    call(g_dev, D_SetRenderState, 2, 27, 0);
+    call(g_dev, D_SetStreamSource, 3, 0, 0, 0);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(vb, D_Release, 0);
+    call(tex, D_Release, 0);
+}
+
+/* A menu button (d3d8.c button_body, after portfix): a black copy of its sprite 2 pixels down and right, alpha
+ * blended, then the body added (SRCALPHA, ONE) over a grey background. Along the body's top-left edge, past the
+ * shadow, the PC adds it to the grey (a light rim); fixed, the body is alpha blended and that edge is its own colour. */
+static void test_button_rims(void)
+{
+    call(g_dev, D_SetRenderState, 2, 7, 0); /* ZENABLE off */
+    clear(0xFF404040u);
+    uint32_t tex = solid_texture(0xFF2050A0u);
+    call(g_dev, D_SetTexture, 2, 0, tex);
+    call(g_dev, D_SetTextureStageState, 3, 0, 1, 4 /* COLOROP MODULATE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 2, 2 /* TEXTURE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 3, 0 /* DIFFUSE */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 4, 2 /* ALPHAOP SELECTARG1 */);
+    call(g_dev, D_SetTextureStageState, 3, 0, 5, 2 /* TEXTURE */);
+    call(g_dev, D_SetVertexShader, 1, 0x144);
+    call(g_dev, D_SetRenderState, 2, 27, 1);
+    call(g_dev, D_SetRenderState, 2, 19, 5); /* SRCALPHA */
+    uint32_t v = galloc(4 * sizeof(UiVert));
+    call(g_dev, D_BeginScene, 0);
+    UiVert shadow[4] = { { 6, 6, 0.5f, 1, 0xFF000000u, 0, 0 }, { 26, 6, 0.5f, 1, 0xFF000000u, 1, 0 },
+                         { 6, 16, 0.5f, 1, 0xFF000000u, 0, 1 }, { 26, 16, 0.5f, 1, 0xFF000000u, 1, 1 } };
+    memcpy(GUEST_PTR(v), shadow, sizeof shadow);
+    call(g_dev, D_SetRenderState, 2, 20, 6); /* INVSRCALPHA */
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v, (uint32_t)sizeof(UiVert));
+    UiVert body[4] = { { 4, 4, 0.5f, 1, 0xFFFFFFFFu, 0, 0 }, { 24, 4, 0.5f, 1, 0xFFFFFFFFu, 1, 0 },
+                       { 4, 14, 0.5f, 1, 0xFFFFFFFFu, 0, 1 }, { 24, 14, 0.5f, 1, 0xFFFFFFFFu, 1, 1 } };
+    uint32_t v2 = galloc(4 * sizeof(UiVert));
+    memcpy(GUEST_PTR(v2), body, sizeof body);
+    call(g_dev, D_SetRenderState, 2, 20, 2); /* ONE */
+    call(g_dev, D_DrawPrimitiveUP, 4, 5, 2, v2, (uint32_t)sizeof(UiVert));
+    call(g_dev, D_EndScene, 0);
+    uint32_t edge = pixel(4, 4), inside = pixel(12, 10);
+    CHECK(edge == 0x2050A0 && inside == 0x2050A0, "button rims: edge %06x, inside %06x (want 2050a0 both; the PC's rim: 6090e0)",
+        edge, inside);
+    call(g_dev, D_SetRenderState, 2, 27, 0);
+    call(g_dev, D_SetTexture, 2, 0, 0);
+    call(tex, D_Release, 0);
+}
+
 int main(void)
 {
     if (!gwin_init())
@@ -419,6 +526,9 @@ int main(void)
         return 1;
     call(g_dev, D_GetBackBuffer, 3, 0, 0, g_out);
     g_bb = rd32(g_out);
+    call(g_dev, D_GetDepthStencilSurface, 1, g_out);
+    g_ds = rd32(g_out);
+    CHECK(g_ds != 0, "the device's depth surface");
 
     test_clear_and_lock();
     test_up_texture();
@@ -427,6 +537,8 @@ int main(void)
     test_copyrects();
     test_texture_pack();
     test_state_blocks();
+    test_water_layers();
+    test_button_rims();
     call(g_dev, D_Present, 4, 0, 0, 0, 0);
     printf(g_fails ? "d3d8_test: %d failed\n" : "d3d8_test: ok\n", g_fails);
     return g_fails != 0;

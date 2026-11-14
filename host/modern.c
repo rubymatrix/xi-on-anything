@@ -692,6 +692,8 @@ static const Row WATER_ROWS[] = {
     { "Sun Highlight", "water_spec", SLIDER, 0, { 0 }, { 0 }, 0, 4.0f, "The sun's glint on the water." },
     { "Foam", "water_foam", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Foam where the water meets the shore." },
     { "Surface Lift", "water_lift", SLIDER, 0, { 0 }, { 0 }, 0, 0.5f, "Raises the water over shallow ground it would sink into." },
+    { "Layer Order", "fix_water_layers", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "Port Bastok's sea keeps its blue near the camera, as on the PS2. PC: black close up, as the PC version draws it." },
 };
 
 /* the older effects on the game's own draws (Renderer: Legacy); the modern renderer turns their lighting off */
@@ -773,6 +775,9 @@ static const Row INTERFACE_ROWS[] = {
         "Job Points in the main menu's Status." },
     { "Alter Ego Points", "@hide6", TOGGLE, 2, { "Show", "Hide" }, { 1, 0 }, 0, 0,
         "Alter Ego Points in the main menu's Status." },
+    HEADER_ROW("Menus: Buttons"),
+    { "Button Edges", "fix_button_rims", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "The title and config buttons without the light, see-through rim on their top and left edges, as on the PS2." },
     HEADER_ROW("Addons"),
     { "Addon Scale", "@addon_scale", SLIDER, 0, { 0 }, { 0 }, 0.5f, 3.0f,
         "How large addons draw, apart from UI Scale. Their windows and text grow with it." },
