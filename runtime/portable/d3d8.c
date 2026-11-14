@@ -3429,6 +3429,8 @@ static struct
      * after the effects ran, and screen-space or undepth-tested draws onto the scene before them
      * (what the effects would shade) */
     uint32_t st_frames, st_why[4], st_cam[3], st_late, st_over, st_over_rhw, st_game_shadows;
+    GfxScene wcam;   /* the scene renderer's camera this scene (d3d8_world_scene): the stand-in when the game gave none */
+    GfxTex* wcam_rt; /* the target it drew into (NULL: none this scene) */
     /* the trace (scene_trace): what each of the last frames did with the world's scene */
     uint32_t frame, tr_late, tr_draws, tr_targets;
     char tr_why;
@@ -3570,6 +3572,8 @@ static void scene_forget(GfxTex* t)
         return;
     if (g_scene.rt == t)
         g_scene.rt = NULL, g_scene.draws = 0, g_scene.done = 0;
+    if (g_scene.wcam_rt == t)
+        g_scene.wcam_rt = NULL;
     if (g_scene.world == t)
         g_scene.world = NULL;
     for (int i = 0; i < 4; ++i)
@@ -3594,6 +3598,15 @@ static void scene_finish(const char* why)
     {
         g_scene.st_why[!strcmp(why, "sampled") || why[0] == 'e' ? 0 : why[0] == 'i' ? 1 : why[0] == 'p' ? 2 : 3]++;
         g_scene.st_cam[g_scene.cam_rank]++;
+    }
+    /* none from the game's own draws, but the scene renderer drew the world into this target: its camera */
+    if (g_scene.draws && !g_scene.done && !g_scene.cam_rank && g_scene.wcam_rt && g_scene.wcam_rt == g_scene.rt)
+    {
+        GfxScene* sc = &g_scene.s;
+        memcpy(sc->proj, g_scene.wcam.proj, 64), memcpy(sc->view, g_scene.wcam.view, 64), memcpy(sc->vp, g_scene.wcam.vp, sizeof sc->vp);
+        memcpy(sc->ambient, g_scene.wcam.ambient, 16), memcpy(sc->fogcolor, g_scene.wcam.fogcolor, 16);
+        memcpy(sc->fog, g_scene.wcam.fog, sizeof sc->fog);
+        g_scene.cam_rank = 1;
     }
     /* a camera from this scene's own draws (cam_rank), not one kept from an earlier scene: first person by day
      * finds none, and the effects ran on the last third-person view for as long as it lasted (#106) */
@@ -3686,7 +3699,7 @@ static void scene_note(GfxDraw* d)
     if (c != g_scene.rt) /* a new scene: the one before is done; the new one's camera and sun are its own */
     {
         scene_finish("switch");
-        g_scene.rt = c, g_scene.draws = 0, g_scene.done = 0, g_scene.cam_rank = 0, g_scene.sun_draw = 0;
+        g_scene.rt = c, g_scene.draws = 0, g_scene.done = 0, g_scene.cam_rank = 0, g_scene.sun_draw = 0, g_scene.wcam_rt = NULL;
     }
     if (g_scene.done) /* 3D again after the effects ran: drawn as it is */
     {
@@ -3815,6 +3828,7 @@ static void scene_present(void)
     }
     g_scene.done = 0;
     g_scene.cam_draw = g_scene.sun_draw = g_scene.cam_rank = 0;
+    g_scene.wcam_rt = NULL;
 }
 
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
@@ -4918,10 +4932,12 @@ GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size)
     return static_buffer(b);
 }
 
-/* The scene renderer drew the world into the current target with this camera (scene.c flush): a scene of its own for
- * the effects, as the game's fogged draws would have made it. With the zone and characters drawn by it, the game's own
- * 3D draws are what is left over (a few fogged objects), and none are in view when the camera looks up at the sky: the
- * scene never began, and the effects went off with the camera's angle. */
+/* The scene renderer drew the world into the current target with this camera (scene.c flush): the scene goes on (or
+ * begins) for the effects, and this camera is the scene's when the game's own draws gave none (scene_finish). With the
+ * zone and characters drawn by it, the game's own 3D draws are what is left over (a few fogged objects), and none are in
+ * view when the camera looks up at the sky: the scene never began, and the effects went off with the camera's angle.
+ * Only a stand-in: taken over the game's camera whenever this drew first, the effects' camera and fog changed with the
+ * order of the frame's draws, from frame to frame - a strobe. */
 void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t vp[6])
 {
     uint32_t face, level;
@@ -4943,23 +4959,20 @@ void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t
     if (c != g_scene.rt)
     {
         scene_finish("switch");
-        g_scene.rt = c, g_scene.draws = 0, g_scene.done = 0, g_scene.cam_rank = 0, g_scene.sun_draw = 0;
+        g_scene.rt = c, g_scene.draws = 0, g_scene.done = 0, g_scene.cam_rank = 0, g_scene.sun_draw = 0, g_scene.wcam_rt = NULL;
     }
     if (g_scene.done)
         return;
     g_scene.draws++;
-    if (g_scene.cam_rank < 2) /* the camera the world was drawn with, over any the game's unfogged draws gave */
-    {
-        const uint32_t* rs = g_dev.cur.rs;
-        GfxScene* sc = &g_scene.s;
-        g_scene.cam_rank = 2, g_scene.cam_draw = g_scene.draws;
-        memcpy(sc->proj, proj, 64);
-        memcpy(sc->view, view, 64);
-        memcpy(sc->vp, vp, sizeof sc->vp);
-        color4(sc->ambient, rs[139]);
-        color4(sc->fogcolor, rs[34]);
-        sc->fog[0] = u2f(rs[36]), sc->fog[1] = u2f(rs[37]), sc->fog[2] = rs[28] ? 1.0f : 0.0f;
-    }
+    const uint32_t* rs = g_dev.cur.rs;
+    GfxScene* w = &g_scene.wcam;
+    memcpy(w->proj, proj, 64);
+    memcpy(w->view, view, 64);
+    memcpy(w->vp, vp, sizeof w->vp);
+    color4(w->ambient, rs[139]);
+    color4(w->fogcolor, rs[34]);
+    w->fog[0] = u2f(rs[36]), w->fog[1] = u2f(rs[37]), w->fog[2] = rs[28] ? 1.0f : 0.0f;
+    g_scene.wcam_rt = c;
 }
 
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
