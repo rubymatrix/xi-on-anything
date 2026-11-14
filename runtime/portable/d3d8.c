@@ -4961,6 +4961,11 @@ void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t
         scene_finish("switch");
         g_scene.rt = c, g_scene.draws = 0, g_scene.done = 0, g_scene.cam_rank = 0, g_scene.sun_draw = 0, g_scene.wcam_rt = NULL;
     }
+    /* the scene ended before the world was drawn - an interface draw into the target came first, with no camera from
+     * the game's draws yet - so the effects didn't run this frame: the scene goes on with the world, and they run
+     * where it ends next (a frame without them, now and then, while the camera turns) */
+    if (g_scene.done && !g_scene.world_done)
+        g_scene.done = 0;
     if (g_scene.done)
         return;
     g_scene.draws++;
