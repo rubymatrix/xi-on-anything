@@ -46,6 +46,7 @@ the Lighting and Atmosphere pages.
 | Color grading | Graphics › [Color] Color Grading | `grade` | 1.0 (0–1) |
 | Saturation | Graphics › [Color] Saturation | `sat` | 1.25 (0.5–1.5) |
 | Contrast | Graphics › [Color] Contrast | `contrast` | 0.4 (0–0.5) |
+| Summons' halos (Carbuncle's) soft, as on the PS2: drawn from the full-size silhouette, not its 256×256 copy (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Summon Halos | `fix_summon_halos` | 1 PS2; 0 as the PC draws them (a thin stepped rim) |
 
 ## 3. Lighting and shadows
 
@@ -250,6 +251,7 @@ Config
     │   ├── [Upscaling] ..... Upscaling, Render Scale, Upscale Sharpening
     │   ├── [Color] ......... High Dynamic Range, Tone Mapping, Exposure, Color Grading, Saturation,
     │   │                     Contrast
+    │   ├── [PS2 Accuracy] .. Summon Halos
     │   └── [World Detail] .. Draw Distance, Character Distance
     ├── Shadows
     │   ├── [Sun and Moon] .. Shadows, Softness, Sun Size, Soft Quality, Detail

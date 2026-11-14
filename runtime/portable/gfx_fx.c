@@ -257,6 +257,8 @@ static const struct
      * along their top and left edges */
     { "fix_water_layers", offsetof(GfxFxSettings, fix_water_layers), 1.0f },
     { "fix_button_rims", offsetof(GfxFxSettings, fix_button_rims), 1.0f },
+    /* summons' halos drawn from the full-size silhouette with nudges scaled to the target: a soft halo, not a stepped rim */
+    { "fix_summon_halos", offsetof(GfxFxSettings, fix_summon_halos), 1.0f },
     /* the scene renderer's bounce light (gfx_gi_metal.inc): 0 off, else how much of it the zone and characters take;
      * needs scene 1 or 2 and ray queries */
     { "scene_gi", offsetof(GfxFxSettings, scene_gi), 0.0f },
