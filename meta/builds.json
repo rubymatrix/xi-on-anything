@@ -648,6 +648,13 @@
       "addresses": {
         "chars_ptr": "0x104dd500",
         "present_site": "0x100035cb",
+        "map_cull_ret1": "0x1017b00a",
+        "map_cull_ret2": "0x1017b28a",
+        "map_cull_ret3": "0x1017c679",
+        "map_cull_ret4": "0x1017c703",
+        "map_cull_ret5": "0x1018256f",
+        "map_cull_model1": "0x10181c0f",
+        "map_cull_model2": "0x10181edf",
         "scene_mgr": "0x105fd17c",
         "scene_dev": "0x104544bc",
         "scene_light_factor": "0x1000bd30",
@@ -684,6 +691,8 @@
         "water_model_loaded": "0x10175682",
         "lod_pick": "0x1017b2cc",
         "lod_pick2": "0x1017c74d",
+        "cull_test": "0x101802e0",
+        "cull_test2": "0x101807a0",
         "fx_draw": "0x10045e80",
         "frame_pace": "0x10012b38",
         "frame_ease": "0x1003d077",
@@ -871,6 +880,15 @@
         "quicksets_101a5ea0": {
           "0x101a5f12": "eb"
         },
+        "statustimers_10225860": {
+          "0x1022587b": "9090"
+        },
+        "statustimers_10225b20": {
+          "0x10225c66": "9090"
+        },
+        "statustimers_10226370": {
+          "0x1022638a": "31"
+        },
         "trimspells": {
           "0x101acd86": "00"
         }
@@ -942,6 +960,8 @@
         "0x100982fb",
         "0x1009f456",
         "0x100a2638",
+        "0x100a55ee",
+        "0x100a856d",
         "0x100ac352",
         "0x100aeab5",
         "0x100b0152",
