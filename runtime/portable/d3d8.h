@@ -49,6 +49,13 @@ void d3d8_set_texture_source(D3d8TextureSource fn);
 /* The game is loading one of its water models (host64's hook on the model loader): 1 before, 0 after.
  * The vertex buffers made meanwhile are the model's, and draws from them are drawn as water. */
 void d3d8_water_loading(int on);
+
+/* The PS2 fixes' settings as read this frame (fix_shine), for host/ps2fix.c's hooks into the game. */
+enum
+{
+    D3D8_FIX_SHINE = 1,
+};
+unsigned d3d8_fixes(void);
 /* How the game's occlusion probe is answered (no menu sets it now; FFXI_PROBE=gpu reads exactly): 0 fully visible,
  * 1 the newest copy the GPU has finished (Android only; elsewhere it reads as 0), 2 exactly, waiting
  * for the GPU. 0 until set. */
