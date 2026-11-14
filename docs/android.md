@@ -54,7 +54,8 @@ sign-in screen's server is used. The launcher copies the game there with
 launcher goes into the app's private files (`adb shell run-as`, its stdin, which needs
 the debuggable APK), never into shared storage: `host/signin.c` reads that
 `import.json` once at start, puts its passwords in the Keystore, removes it and
-signs in.
+fills in the sign-in screen. Phones never sign in by themselves: the player taps
+Sign in (an account that needs a one-time password gets its code field focused).
 
 ## Build on macOS or Linux
 
