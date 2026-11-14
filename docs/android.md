@@ -74,7 +74,10 @@ python3 tools/build_android_apk.py [--keystore your-key.p12 --key-alias xi]
 ```
 
 LuaJIT is built with the NDK's own `make`; its two host tools with `clang`
-(`XI_HOST_CC` names another compiler).
+(`XI_HOST_CC` names another compiler). On Windows, where MSVC's `cl` does not
+take LuaJIT's GCC-style flags, point it at llvm-mingw's clang, with forward
+slashes and no spaces in the path, for example
+`XI_HOST_CC=C:/llvm-mingw-20250114-ucrt-x86_64/bin/clang.exe`.
 
 `android_deps.py` downloads hash-pinned SDL3 3.4.16, glslang 16.5.0 and its
 SPIRV-Tools and SPIRV-Headers dependencies, and builds them for ARM64. Downloads

@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -32,7 +33,14 @@ JDK = Path(os.environ.get('JAVA_HOME', str(Path(shutil.which('javac') or '/missi
 
 
 def run(args):
-    subprocess.run(list(map(str, args)), check=True, cwd=ROOT)
+    args = list(map(str, args))
+    if sys.platform == 'win32' and not Path(args[0]).suffix:
+        # build-tools on Windows: d8 and apksigner are .bat, aapt and zipalign .exe
+        for ext in ('.exe', '.bat'):
+            if Path(args[0] + ext).exists():
+                args[0] += ext
+                break
+    subprocess.run(args, check=True, cwd=ROOT)
 
 
 def build_metadata(directory):
@@ -96,6 +104,8 @@ def main():
         run(
             [
                 JDK / 'bin/javac',
+                '-encoding',  # SDL's sources are UTF-8; javac's default is the system code page on Windows
+                'UTF-8',
                 '-source',
                 '8',
                 '-target',
