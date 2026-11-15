@@ -493,7 +493,7 @@ static uint32_t solid_texture(uint32_t argb)
 /* Port Bastok's sea (d3d8.c water_hold, after portfix): the scrolling ripple layer, added with depth written, then a
  * tint 0.0004 behind it in depth with LESSEQUAL. As the PC draws them the tint fails against the ripples' depth and
  * only the ripples show; fixed, the tint is drawn first and the ripples added over it. */
-static void test_water_layers(void)
+static void test_water_layers(int ps2)
 {
     typedef struct { float x, y, z, nx, ny, nz; uint32_t c; float u, v; } WaterVert; /* FVF 0x152 */
     call(g_dev, D_SetRenderTarget, 2, g_bb, g_ds); /* the depth the layers are tested against */
@@ -537,7 +537,10 @@ static void test_water_layers(void)
     call(g_dev, D_DrawPrimitive, 3, 5, 4, 2);
     call(g_dev, D_EndScene, 0);
     uint32_t p = pixel(16, 16);
-    CHECK(p == 0x4000FF, "water layers: the tint under the ripples: %06x (want 4000ff, 400000 as the PC draws them)", p);
+    if (ps2)
+        CHECK(p == 0x4000FF, "water layers: the tint under the ripples: %06x (want 4000ff, 400000 as the PC draws them)", p);
+    else
+        CHECK(p == 0x400000, "water layers, fix_ps2 0: the ripples alone: %06x (want 400000, as the PC draws them)", p);
     call(g_dev, D_SetTextureStageState, 3, 0, 24, 0);
     call(g_dev, D_SetRenderState, 2, 27, 0);
     call(g_dev, D_SetStreamSource, 3, 0, 0, 0);
@@ -892,12 +895,18 @@ int main(void)
     test_texture_pack();
     test_state_blocks();
     test_fade_scissor_up();
-    test_water_layers();
+    test_water_layers(1);
     test_button_rims();
     test_summon_halos();
     test_shine_sphere();
     test_shine_spot();
     test_disintegrate();
+    /* fix_ps2 0 (Config > Graphics > PS2 Accuracy: PC) turns every fix off from the next frame, its own setting on */
+    float ps2 = gfx_fx_get("fix_ps2");
+    gfx_fx_set("fix_ps2", 0.0f);
+    call(g_dev, D_Present, 4, 0, 0, 0, 0);
+    test_water_layers(0);
+    gfx_fx_set("fix_ps2", ps2);
     call(g_dev, D_Present, 4, 0, 0, 0, 0);
     printf(g_fails ? "d3d8_test: %d failed\n" : "d3d8_test: ok\n", g_fails);
     return g_fails != 0;

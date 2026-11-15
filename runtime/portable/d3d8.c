@@ -2173,9 +2173,9 @@ static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices
 
 /* --- the PC port's own drawing mistakes, drawn as the PS2 draws them ----------------------------------------------
  * After portfix (github.com/voetre/portfix, MIT License, Copyright (c) 2026 voetre), which found and measured both.
- * Each has a setting, on unless set to 0: fix_water_layers, fix_button_rims, fix_summon_halos, fix_shine,
- * fix_disintegrate. They are read once a frame (fixes_frame),
- * not at every draw.
+ * fix_ps2 (Config > Graphics > PS2 Accuracy) turns them all on or off; each also has its own setting, on unless set
+ * to 0: fix_water_layers, fix_button_rims, fix_summon_halos, fix_shine, fix_disintegrate. They are read once a frame
+ * (fixes_frame), not at every draw.
  *
  * Water layers. Port Bastok's sea is three flat layers drawn in order: an opaque black one, the scrolling ripples added
  * on top (SRCALPHA, ONE) with depth written, then a dark tint on the black layer's geometry, 0.023 under the ripples
@@ -2199,11 +2199,12 @@ static Obj* sub(uint32_t tex, uint32_t face, uint32_t level);
 
 static void fixes_frame(void)
 {
-    g_fix_water = gfx_fx_get("fix_water_layers") != 0.0f;
-    g_fix_buttons = gfx_fx_get("fix_button_rims") != 0.0f;
-    g_fix_halos = gfx_fx_get("fix_summon_halos") != 0.0f;
-    g_fix_shine = gfx_fx_get("fix_shine") != 0.0f;
-    g_fix_disint = gfx_fx_get("fix_disintegrate") != 0.0f;
+    int ps2 = gfx_fx_get("fix_ps2") != 0.0f;
+    g_fix_water = ps2 && gfx_fx_get("fix_water_layers") != 0.0f;
+    g_fix_buttons = ps2 && gfx_fx_get("fix_button_rims") != 0.0f;
+    g_fix_halos = ps2 && gfx_fx_get("fix_summon_halos") != 0.0f;
+    g_fix_shine = ps2 && gfx_fx_get("fix_shine") != 0.0f;
+    g_fix_disint = ps2 && gfx_fx_get("fix_disintegrate") != 0.0f;
     g_halo_max = gfx_fx_get("fix_halo_max");
 }
 

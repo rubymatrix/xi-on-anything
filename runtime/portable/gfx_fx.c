@@ -252,9 +252,10 @@ static const struct
     { "scene_sun_test_turn", offsetof(GfxFxSettings, scene_sun_test_turn), 0.0f },
     /* the game's water models raised this far (units) over the zone surfaces laid at their level (d3d8.c water_lift) */
     { "water_lift", offsetof(GfxFxSettings, water_lift), 0.15f },
-    /* the PC port's own drawing mistakes, drawn as the PS2 draws them (d3d8.c, after portfix): 0 leaves each as the PC
-     * draws it. Port Bastok's sea's tint under its ripples, not lost near the camera; menu buttons without the light rim
-     * along their top and left edges */
+    /* the PC port's own drawing mistakes, drawn as the PS2 draws them (d3d8.c, after portfix). fix_ps2 0 leaves all of
+     * them as the PC draws them; each of the others 0 leaves its own. Port Bastok's sea's tint under its ripples, not
+     * lost near the camera; menu buttons without the light rim along their top and left edges */
+    { "fix_ps2", offsetof(GfxFxSettings, fix_ps2), 1.0f },
     { "fix_water_layers", offsetof(GfxFxSettings, fix_water_layers), 1.0f },
     { "fix_button_rims", offsetof(GfxFxSettings, fix_button_rims), 1.0f },
     /* summons' halos drawn from the full-size silhouette with nudges scaled to the target: a soft halo, not a stepped rim */

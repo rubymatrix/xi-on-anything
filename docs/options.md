@@ -46,11 +46,11 @@ the Lighting and Atmosphere pages.
 | Color grading | Graphics › [Color] Color Grading | `grade` | 1.0 (0–1) |
 | Saturation | Graphics › [Color] Saturation | `sat` | 1.25 (0.5–1.5) |
 | Contrast | Graphics › [Color] Contrast | `contrast` | 0.4 (0–0.5) |
-| Shine as on the PS2: sphere-mapped metal at the PS2's mapping and strength, and the light's highlight on weapons and armour (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Shine | `fix_shine` | 1 PS2; 0 as the PC draws it (dull, half strength) |
-| Shine as on the PS2: sphere-mapped metal at the PS2's mapping and strength, the light's highlight on weapons and armour, and the shiny batches some weapon files lost drawn shiny again (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Shine | `fix_shine` | 1 PS2; 0 as the PC draws it (dull, half strength) |
-| Disintegrate as on the PS2: effects that break a model up (the Shadow Lord's change of form, Eald'Narche's, Kam'lanaut's, Selh'teus's) take it apart into tumbling pieces with smoke and a heat haze (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Disintegrate | `fix_disintegrate` | 1 PS2; 0 as the PC draws it (the model stays whole) |
-| Summons' halos (Carbuncle's) soft, as on the PS2: drawn from the full-size silhouette, not its 256×256 copy (after [portfix](https://github.com/voetre/portfix)) | Graphics › [PS2 Accuracy] Summon Halos | `fix_summon_halos` | 1 PS2; 0 as the PC draws them (a thin stepped rim) |
-| Summons' halos capped in reach: how far the halo's ghosts may sit from the model, in yalms, so a distant summon keeps its close-up outline (the PS2 doesn't cap it; portfix's `/portfix halomax`) | (fx.txt only) | `fix_halo_max` | 0 no cap, as on the PS2; portfix's `on` is 0.018 |
+| PS2 accuracy: what the PC version draws wrong drawn as the PS2 does (after [portfix](https://github.com/voetre/portfix)): shine, summons' halos, disintegrate, Port Bastok's sea and the menu buttons' rims, each below | Graphics › [Quality] PS2 Accuracy | `fix_ps2` | 1 PS2; 0 all of them as the PC draws them. Each one's own setting turns it alone off (0) while this is on |
+| Shine as on the PS2: sphere-mapped metal at the PS2's mapping and strength, the light's highlight on weapons and armour, and the shiny batches some weapon files lost drawn shiny again (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with PS2 Accuracy | `fix_shine` | 1 PS2; 0 as the PC draws it (dull, half strength) |
+| Disintegrate as on the PS2: effects that break a model up (the Shadow Lord's change of form, Eald'Narche's, Kam'lanaut's, Selh'teus's) take it apart into tumbling pieces with smoke and a heat haze (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with PS2 Accuracy | `fix_disintegrate` | 1 PS2; 0 as the PC draws it (the model stays whole) |
+| Summons' halos (Carbuncle's) soft, as on the PS2: drawn from the full-size silhouette, not its 256×256 copy (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with PS2 Accuracy | `fix_summon_halos` | 1 PS2; 0 as the PC draws them (a thin stepped rim) |
+| Summons' halos capped in reach: how far the halo's ghosts may sit from the model, in yalms, so a distant summon keeps its close-up outline (the PS2 doesn't cap it; portfix's `/portfix halomax`) | (fx.txt only), with the halos | `fix_halo_max` | 0 no cap, as on the PS2; portfix's `on` is 0.018 |
 
 ## 3. Lighting and shadows
 
@@ -126,7 +126,7 @@ the Lighting and Atmosphere pages.
 | Clarity depth | | `water_clarity` | 3.0 |
 | Soft edge | | `water_soft` | 0.15 |
 | Ripple tilt / density | | `water_ripple`, `water_scale` | 0.25 / 0.6 |
-| Port Bastok's sea keeps its tint near the camera: its ripple layer drawn after the tint, as the PS2 does (after [portfix](https://github.com/voetre/portfix)) | Water › [Water] Layer Order | `fix_water_layers` | 1 PS2; 0 as the PC draws it (black close up) |
+| Port Bastok's sea keeps its tint near the camera: its ripple layer drawn after the tint, as the PS2 does (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with Graphics › PS2 Accuracy | `fix_water_layers` | 1 PS2; 0 as the PC draws it (black close up) |
 
 ## 7. World detail and distance
 
@@ -150,7 +150,7 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
-| Menu buttons without the PC's light rim on their top and left edges, as on the PS2 (after [portfix](https://github.com/voetre/portfix)) | Interface › [Menus: Buttons] Button Edges | | fx `fix_button_rims` | 1 PS2; 0 as the PC draws them |
+| Menu buttons without the PC's light rim on their top and left edges, as on the PS2 (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with Graphics › PS2 Accuracy | | fx `fix_button_rims` | 1 PS2; 0 as the PC draws them |
 | Addon scale | Interface › [Addons] Addon Scale | | | 1 (0.5–3), apart from UI Scale; modern.cfg `addon_scale`. Addons draw, place and get the mouse in their own pixels, the back buffer's over this (Windower's UI resolution, Ashita's screen size); the overlay scales them up, ImGui's text made at that size |
 | Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
 
