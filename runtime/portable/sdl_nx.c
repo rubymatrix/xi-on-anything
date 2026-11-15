@@ -975,7 +975,8 @@ static void audio_thread(void* arg)
     }
 }
 
-/* the thread, once, for whichever client comes first; plat_thread_start puts it off the game's core */
+/* the thread, once, for whichever client needs it first (dsound's Resume, a voice's first sound);
+ * plat_thread_start puts it off the game's core */
 static int audio_start(void)
 {
     static int started;
@@ -1024,7 +1025,7 @@ bool SDL_PutAudioStreamData(SDL_AudioStream* s, const void* buf, int len)
         g_mix_frames += frames;
         return true;
     }
-    if (!s->voice)
+    if (!s->voice || !audio_start()) /* the thread from the first sound, not the device's opening (below) */
         return false;
     size_t n = (size_t)len / (2 * (size_t)s->channels);
     mutexLock(&g_voice_lock);
@@ -1063,10 +1064,12 @@ bool SDL_LoadWAV(const char* path, SDL_AudioSpec* spec, Uint8** buf, Uint32* len
 }
 
 /* --- the device's own streams (sewave.c): s16, mono or stereo, any rate -------------------------------- */
+/* The thread is not started here: the sign-in opens the device just after the render thread is made, and a
+ * thread made then can meet the start-up race (docs/switch.md "Open"): a black screen on the console. */
 SDL_AudioDeviceID SDL_OpenAudioDevice(SDL_AudioDeviceID dev, const SDL_AudioSpec* spec)
 {
     (void)dev, (void)spec;
-    return audio_start() ? 1 : 0;
+    return 1;
 }
 bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID dev, SDL_AudioSpec* spec, int* frames)
 {
