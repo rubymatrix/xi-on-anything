@@ -118,6 +118,7 @@ an AES-CMAC of both), under keys the security engine derives from the console's 
 (`splCryptoGenerateAesKek` with the device-unique option, then `splCryptoLoadAesKey` into a locked keyslot).
 The keys never leave the engine: the file is useless on a computer or another console. Where spl:mig won't
 answer (Ryubing), `keychain_available` is 0 and the sign-in says the password isn't remembered.
+Confirmed on a console (2026-11-16): saved at sign-in, filled in at the next start.
 
 ## No shader cache: switch-mesa has no disk cache
 
@@ -150,7 +151,6 @@ sources with `-fno-tree-pta`; the translated code keeps it.
 - **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
   the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
   failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
-- **Saved passwords** are built (above), not yet tried on a console.
 - The forwarder NSP (`build_switch.py nsp`), addons (`addons_none.c`), HD rumble, sleep and resume (the
   connections end).
 
