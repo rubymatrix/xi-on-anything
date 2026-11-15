@@ -8,7 +8,8 @@
         copy the .nro to sdmc:/switch/xi-on-anything/ and, with --game, the game beside it (only the
         files that changed since the last copy); write run.args from the options. <SD root> is the card
         in a reader, the console's SD mounted over USB (Hekate's UMS), or an emulator's virtual SD card
-        (--sd emu: the one of the emulator `run` uses).
+        (--sd emu: the one of the emulator `run` uses). --mtp [device] instead: the console over USB as an
+        MTP device (DBI's MTP responder), on Windows (tools/switch_mtp.ps1).
   python tools/build_switch.py run [file.nro]
         run an .nro in the emulator (switch_toolchain.emulator()): copies it to the emulator's SD card first
   python tools/build_switch.py deploy --ip <console IP> [file.nro]
@@ -260,7 +261,47 @@ def run_args(a):
     return lines
 
 
+def mtp_mirror(a, src, dest):
+    """src to dest (a path on the device's storage) over MTP (tools/switch_mtp.ps1)."""
+    run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ROOT / 'tools/switch_mtp.ps1',
+         '-Source', src, '-Dest', dest, '-Device', a.mtp, '-Storage', a.storage])
+
+
+def setup_mtp(a):
+    """setup over MTP: the app's files are staged in build/switch/sd, then everything is mirrored."""
+    if os.name != 'nt':
+        raise SystemExit('--mtp is for Windows; on Linux or macOS mount the card (or use Hekate UMS) and use --sd')
+    stage = OUT / 'sd' / APP_DIR
+    stage.mkdir(parents=True, exist_ok=True)
+    nro = Path(a.nro) if a.nro else OUT / 'xi-on-anything.nro'
+    if nro.exists():
+        shutil.copyfile(nro, stage / nro.name)
+    elif a.nro:
+        raise SystemExit(f'{nro}: no such file')
+    shutil.copyfile(ROOT / 'ffxi.reg', stage / 'ffxi.reg')
+    lines = run_args(a)
+    if lines or not (stage / 'run.args').exists():
+        (stage / 'run.args').write_text('\n'.join(lines) + ('\n' if lines else ''))
+        print('run.args:', ' '.join(lines) or '(empty: the sign-in screen asks)')
+    for extra in a.extra or []:
+        shutil.copyfile(extra, stage / Path(extra).name)
+    mtp_mirror(a, stage, APP_DIR)
+    if a.game:
+        game = Path(a.game)
+        if not (game / 'FFXiMain.dll').exists():
+            raise SystemExit(f'{game}: not a FINAL FANTASY XI folder (no FFXiMain.dll)')
+        for folder in [game] + [p for p in [game.parent / 'PlayOnlineViewer'] if p.is_dir()]:
+            mtp_mirror(a, folder, APP_DIR + '/SquareEnix/' + folder.name)
+    if a.dats:
+        mtp_mirror(a, Path(a.dats), APP_DIR + '/dats')
+    print('done:', f'{a.mtp}:/{APP_DIR}')
+
+
 def setup(a):
+    if a.mtp:
+        return setup_mtp(a)
+    if not a.sd:
+        raise SystemExit('setup needs --sd <the card\'s folder> (or emu), or --mtp <device> for a Switch over USB MTP')
     root = sd_root(a.sd)
     app = root / APP_DIR
     app.mkdir(parents=True, exist_ok=True)
@@ -332,7 +373,11 @@ def main():
     h = sub.add_parser('host')
     h.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
     s = sub.add_parser('setup')
-    s.add_argument('--sd', required=True, help="the SD card's root folder, or emu")
+    s.add_argument('--sd', help="the SD card's root folder, or emu")
+    s.add_argument('--mtp', nargs='?', const='Switch', help="the console over USB MTP (DBI's MTP responder), by its "
+                   "name in This PC (default Switch); Windows only")
+    s.add_argument('--storage', default='1: SD Card', help="--mtp: the device's storage (default '1: SD Card')")
+    s.add_argument('--extra', action='append', help='--mtp: another file to put beside the .nro (plat-test.nro)')
     s.add_argument('--nro')
     s.add_argument('--game', help='the FINAL FANTASY XI folder to copy')
     s.add_argument('--server', help='the LandSandBoat server, by name or IP')
