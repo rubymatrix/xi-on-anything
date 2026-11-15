@@ -15,6 +15,15 @@
 #include <pthread.h>
 #endif
 
+/* The back end can be called only from the render thread: WebGPU in the browser (the page gives it the
+ * canvas), and OpenGL, whose context is current there alone (gfx_gl.c). Its device is brought up there,
+ * and the calls that answer the game (reads, finish, failures) go over to it (call_wait) rather than
+ * running on the game's thread once it has caught up (drain). Elsewhere the back ends may be called from
+ * any thread. */
+#if defined(__EMSCRIPTEN__) || defined(GFX_GL)
+#define GFXQ_OWNED 1
+#endif
+
 #if defined(__APPLE__)
 /* gfx_metal.m's calls make autoreleased objects; a thread of our own drains them per batch */
 void* objc_autoreleasePoolPush(void);
@@ -296,11 +305,11 @@ static volatile uint32_t g_cur_op, g_ops_run; /* what the render thread is runni
 static void call_wait(GfxqCall* c);
 static void nop_call(GfxqCall* c) { gfxq_call_done(c); }
 
-/* everything recorded so far has run: the back end may be called from this thread (not in the
- * browser, where it only runs on the page's thread: there, calls go over with call_wait) */
+/* everything recorded so far has run: the back end may be called from this thread (not where it is the
+ * render thread's alone, GFXQ_OWNED: there, calls go over with call_wait) */
 static void drain(void)
 {
-#if defined(__EMSCRIPTEN__)
+#if defined(GFXQ_OWNED)
     if (g_threaded)
     {
         GfxqCall c = { nop_call };
@@ -661,6 +670,20 @@ int gfxq_init(void* sdl_window, int vsync)
     if (c.result)
         rt_log("[recomp] gfx: render thread on, drawing from its animation frames\n");
     return c.result;
+#elif defined(GFXQ_OWNED)
+    /* the thread first: the device (its context) is made there, and stays there */
+    if (!g_threaded)
+    {
+        const char* e = getenv("FFXI_RENDER_THREAD");
+        if (!(e && *e == '0') && plat_thread_start(render_thread, NULL))
+        {
+            g_threaded = 1;
+            rt_log("[recomp] gfx: render thread on, the device's (FFXI_RENDER_THREAD=0 draws on the game's threads)\n");
+        }
+    }
+    GfxqCall c = { init_call, { sdl_window }, { (uint32_t)vsync } };
+    call_wait(&c);
+    return c.result;
 #endif
     drain();
     if (!gfx_init(sdl_window, vsync))
@@ -764,7 +787,7 @@ static void read_call(GfxqCall* c)
 
 void gfxq_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch)
 {
-#if defined(__EMSCRIPTEN__)
+#if defined(GFXQ_OWNED)
     GfxqCall c = { read_call, { t, dst }, { face, level, pitch } };
     call_wait(&c);
     return;
@@ -943,7 +966,7 @@ static void finish_call(GfxqCall* c)
 
 void gfxq_finish(void)
 {
-#if defined(__EMSCRIPTEN__)
+#if defined(GFXQ_OWNED)
     GfxqCall c = { finish_call };
     call_wait(&c);
     return;
@@ -966,7 +989,7 @@ static void failures_call(GfxqCall* c)
 
 uint32_t gfxq_failures(void)
 {
-#if defined(__EMSCRIPTEN__)
+#if defined(GFXQ_OWNED)
     GfxqCall c = { failures_call };
     call_wait(&c);
     return (uint32_t)c.result;

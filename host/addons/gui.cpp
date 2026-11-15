@@ -25,7 +25,7 @@
 
 extern "C" {
 #include "d3d8.h"
-#include "gfx.h"
+#include "gfx_queue.h" /* gfx.h, through the render queue where the build has one (the OpenGL host's) */
 #include "host.h"
 #include "d3d_ffi.h"
 #include "plat.h"

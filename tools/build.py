@@ -426,9 +426,11 @@ def host64_gl(env):
     """host64 drawing with the OpenGL back end (gfx_gl.c) in place of Direct3D 12: build/host64-gl.exe."""
     objs = game_objects(env)
     sdl_inc, sdl_lib = sdl3()
-    objs += compile_stale(env, PORTABLE + HOST_BASE + GL_SOURCES, 'build\\host64-gl', sdl_inc + HOST_INCLUDES,
-                          CFLAGS64 + GL_CFLAGS)
-    objs += addon_objects(env, CFLAGS64, 'build\\host64-gl')
+    # the render queue: GL's context is its render thread's, and the game calls from several threads
+    queue = ['/DGFX_QUEUE']
+    objs += compile_stale(env, PORTABLE + HOST_BASE + GL_SOURCES + ['runtime\\portable\\gfx_queue.c'], 'build\\host64-gl',
+                          sdl_inc + HOST_INCLUDES, CFLAGS64 + GL_CFLAGS + queue)
+    objs += addon_objects(env, CFLAGS64 + queue, 'build\\host64-gl')
     libs = [lib for lib in HOST_LIBS if lib not in GFX_LIBS]
     objs.append(host_resources(env, 'build\\host64-gl'))
     run(['link', '/nologo', '/OUT:build\\host64-gl.exe', '/MAP:build\\host64-gl.map', '/MACHINE:X64', sdl_lib] + libs + objs, env)

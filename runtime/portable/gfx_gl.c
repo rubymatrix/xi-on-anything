@@ -3,8 +3,10 @@
  * The shaders are the generator's GL dialect (gfx_gl_generate). Modelled on gfx_webgpu.c, with
  * gfx_vulkan.c as the reference.
  *
- * Threads: none of its own. Every call comes from the thread that called gfx_init (the game's, which
- * also runs the sign-in screen), where the context is current.
+ * Threads: the context is current on one thread, the one that called gfx_init. The game makes buffers
+ * and reads its occlusion probes from threads of its own, so the game is built with the render queue
+ * (GFX_QUEUE, gfx_queue.c), whose render thread makes the device and makes every call (GFXQ_OWNED).
+ * gfx_test calls it directly, from one thread.
  *
  * What GL changes from WebGPU:
  *  - row 0 is D3D's top row in every texture and target: the vertex functions negate clip-space y
@@ -867,6 +869,13 @@ void gfx_buf_upload(GfxBuf* b, const void* data, uint32_t size)
         return;
     if (size > b->size)
         size = b->size;
+    if (getenv("FFXI_GL_DEBUG") && gl.IsBuffer && !gl.IsBuffer(b->name))
+    {
+        static int said;
+        if (said++ < 10)
+            LOG("[recomp] gfx: an upload to buffer %p, whose name %u is not a buffer: made on a thread without the "
+                "context?\n", (void*)b, b->name);
+    }
     gl.BindBuffer(GL_COPY_WRITE_BUFFER, b->name);
     if (size + 3 >= b->size)
         gl.BufferData(GL_COPY_WRITE_BUFFER, b->size, NULL, GL_DYNAMIC_DRAW);
@@ -1509,10 +1518,16 @@ static uint32_t read_rows(const GfxTex* t, uint32_t level, uint32_t* row)
     return t->block ? (lh + 3) / 4 : lh;
 }
 
-static void read_level(const GfxTex* t, uint32_t face, uint32_t level, void* out)
+static void read_level(GfxTex* t, uint32_t face, uint32_t level, void* out)
 {
-    st_texture(0, t->target, t->name);
     gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
+    if (t->use == GFX_USE_RT) /* a target: read through a framebuffer, the drivers' fast path */
+    {
+        st_read_fbo(fbo_for(t, face, level, NULL));
+        gl.ReadPixels(0, 0, (GLsizei)level_dim(t->w, level), (GLsizei)level_dim(t->h, level), t->ufmt, t->utype, out);
+        return;
+    }
+    st_texture(0, t->target, t->name);
     if (t->block)
         gl.GetCompressedTexImage(face_target(t, face), (GLint)level, out);
     else
@@ -1542,6 +1557,16 @@ void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t 
     read_level(t, face, level, tmp);
     unpack_rows(t, level, tmp, dst, pitch);
     free(tmp);
+}
+
+static int g_debug;
+/* FFXI_GL_DEBUG: the errors since the last check, and where */
+static void gl_check(const char* where)
+{
+    if (!g_debug)
+        return;
+    for (GLenum e; (e = gl.GetError()) != GL_NO_ERROR;)
+        LOG("[recomp] gfx: GL error 0x%x at %s\n", e, where);
 }
 
 static void async_free(GfxTex* t)
@@ -1577,6 +1602,7 @@ void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uin
         r->face = face, r->level = level, r->size = size;
         r->last = (uint8_t*)malloc(size);
         read_level(t, face, level, r->last); /* the first: now */
+        gl_check("async: the first read");
     }
     gl.BindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     for (int i = 0; i < 3; ++i)
@@ -1597,6 +1623,7 @@ void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uin
                 memcpy(r->last, m, size), r->have_serial = s->serial;
             gl.UnmapBuffer(GL_PIXEL_PACK_BUFFER);
             gl.BindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            gl_check("async: a copy mapped");
         }
     }
     unpack_rows(t, level, r->last, dst, pitch);
@@ -1613,7 +1640,9 @@ void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uin
         }
         else
             gl.BindBuffer(GL_PIXEL_PACK_BUFFER, s->pbo);
+        gl_check("async: the pack buffer");
         read_level(t, face, level, NULL);
+        gl_check("async: the copy queued");
         gl.BindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         s->fence = gl.FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         s->serial = ++r->serial;
@@ -1700,6 +1729,26 @@ static void make_statics(void)
         gfx_tex_upload(g_dummycube, f, 0, white, 4);
 }
 
+#if defined(_WIN32)
+static LONG CALLBACK dbg_crash(EXCEPTION_POINTERS* e)
+{
+    static int said;
+    if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && said++ < 3)
+    {
+        HMODULE m = NULL;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)e->ExceptionRecord->ExceptionAddress, &m);
+        char name[260] = "?";
+        if (m)
+            GetModuleFileNameA(m, name, sizeof name);
+        LOG("[dbg] access violation at %p = %s+0x%llx, %s %p\n", e->ExceptionRecord->ExceptionAddress, name,
+            (unsigned long long)((uintptr_t)e->ExceptionRecord->ExceptionAddress - (uintptr_t)m),
+            e->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading", (void*)e->ExceptionRecord->ExceptionInformation[1]);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 int gfx_init(void* sdl_window, int vsync)
 {
     if (g_up) /* a second device (the game's after the sign-in screen's, or a D3D Reset): the same one */
@@ -1714,6 +1763,7 @@ int gfx_init(void* sdl_window, int vsync)
     gfx_profiling = prof && prof[0] && prof[0] != '0';
     const char* dbg = getenv("FFXI_GL_DEBUG");
     int debug = dbg && dbg[0] && dbg[0] != '0';
+    g_debug = debug;
     if (!ctx_up(sdl_window, debug) || !gl_load())
         return 0;
     GLint major = 0, minor = 0;
@@ -1749,6 +1799,10 @@ int gfx_init(void* sdl_window, int vsync)
         gl.ClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
         g_clip01 = 1;
     }
+#if defined(_WIN32)
+    if (debug)
+        AddVectoredExceptionHandler(1, dbg_crash);
+#endif
     if (debug && gl.DebugMessageCallback)
     {
         gl.Enable(GL_DEBUG_OUTPUT);
@@ -1802,3 +1856,20 @@ void gfx_finish(void)
 }
 uint32_t gfx_failures(void) { return g_failures; }
 void gfx_set_sync_pipelines(int on) { (void)on; } /* programs are always built at their first draw */
+
+#if defined(GFX_QUEUE)
+#define GFX_QUEUE_IMPL /* the back end's own gfx_* names, not the queue's */
+#include "gfx_queue.h"
+/* the render queue's hooks (gfx_queue.h), on its render thread: the read and the device at once */
+void gfx_tex_read_then(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch, GfxqCall* call)
+{
+    gfx_tex_read(t, face, level, dst, pitch);
+    gfxq_call_done(call);
+}
+void gfx_init_then(void* sdl_window, int vsync, GfxqCall* call)
+{
+    gfxq_call_result(call, gfx_init(sdl_window, vsync));
+    gfxq_call_done(call);
+}
+void gfx_web_tick(void) {}
+#endif

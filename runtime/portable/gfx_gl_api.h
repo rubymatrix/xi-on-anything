@@ -342,7 +342,8 @@ enum
     X(DebugMessageCallback, void, (GLDEBUGPROC, const void*), 1)                                                      \
     X(GetProgramBinary, void, (GLuint, GLsizei, GLsizei*, GLenum*, void*), 1)                                         \
     X(ProgramBinary, void, (GLuint, GLenum, const void*, GLsizei), 1)                                                 \
-    X(ProgramParameteri, void, (GLuint, GLenum, GLint), 1)
+    X(ProgramParameteri, void, (GLuint, GLenum, GLint), 1)                                                         \
+    X(IsBuffer, GLboolean, (GLuint), 1)
 
 #define GL_DECLARE(name, ret, params, optional) typedef ret(GLAPI_CALL* PFN_gl##name) params;
 GL_FUNCS(GL_DECLARE)
