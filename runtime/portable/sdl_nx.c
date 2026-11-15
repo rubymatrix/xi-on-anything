@@ -941,8 +941,10 @@ static void audio_report(void)
     last = now, was = g_aud_blocks;
     uint32_t mix = __atomic_exchange_n(&g_aud_mix_max_us, 0, __ATOMIC_RELAXED);
     uint32_t gap = __atomic_exchange_n(&g_aud_gap_max_us, 0, __ATOMIC_RELAXED);
-    rt_log("[audio] blocks %u underruns %u mix max %u us gap max %u.%u ms%s\n", was, g_aud_under, mix, gap / 1000,
-        gap / 100 % 10, g_audout ? "" : " (no device: paced to the clock)");
+    uint32_t threads = 0, idle = 0;
+    plat_thread_counts(&threads, &idle);
+    rt_log("[audio] blocks %u underruns %u mix max %u us gap max %u.%u ms; threads %u (%u idle)%s\n", was, g_aud_under,
+        mix, gap / 1000, gap / 100 % 10, threads, idle, g_audout ? "" : " (no device: paced to the clock)");
 }
 
 static void audio_thread(void* arg)

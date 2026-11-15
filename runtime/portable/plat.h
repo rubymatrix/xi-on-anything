@@ -30,6 +30,9 @@ void plat_decommit(void* p, size_t size);
 /* Threads. */
 uint32_t plat_thread_id(void);
 int plat_thread_start(void (*fn)(void*), void* arg);
+#if defined(__SWITCH__)
+void plat_thread_counts(uint32_t* made, uint32_t* idle); /* the thread pool: threads made, those waiting for a job */
+#endif
 void plat_sleep_ms(uint32_t ms);
 void plat_yield(void);
 

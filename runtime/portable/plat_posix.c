@@ -300,56 +300,106 @@ static void* thread_entry(void* p)
 }
 
 #if defined(__SWITCH__)
-static volatile uint32_t g_started; /* plat_thread_start's hand-shake: the new thread has taken its arguments */
-static void thread_entry_nx(void* p)
+/* Threads that have finished their job wait here for the next one. FFXiMain starts a thread for every
+ * sound it plays (a hit, a footstep), so a thread per start that ends and is dropped would run out: a
+ * Horizon thread holds its 8 MB stack and its place in the process's thread limit until its handle is
+ * closed and the thread joined, and nobody joins a detached one. On the console 73 sounds in, CreateThread
+ * failed and every sound after it was lost. */
+typedef struct NxWorker
 {
-    ThreadStart s = *(ThreadStart*)p;
-    free(p);
-    __atomic_store_n(&g_started, 1, __ATOMIC_SEQ_CST);
-    svcSignalToAddress((void*)&g_started, SignalType_Signal, 0, -1);
-    s.fn(s.arg);
+    Thread t;
+    struct NxWorker* next;
+    void (*fn)(void*);
+    void* arg;
+    s32 prio;
+    CondVar cv;
+    volatile uint32_t started;
+} NxWorker;
+static Mutex g_pool_lock;
+static NxWorker* g_idle;
+static uint32_t g_workers, g_idle_n;
+
+static void worker_main(void* p)
+{
+    NxWorker* w = (NxWorker*)p;
+    __atomic_store_n(&w->started, 1, __ATOMIC_SEQ_CST);
+    svcSignalToAddress((void*)&w->started, SignalType_Signal, 0, -1);
+    for (;;)
+    {
+        w->fn(w->arg);
+        svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)w->prio); /* a job may have raised it (sdl_nx's audio) */
+        mutexLock(&g_pool_lock);
+        w->fn = NULL;
+        w->next = g_idle;
+        g_idle = w;
+        g_idle_n++;
+        while (!w->fn)
+            condvarWait(&w->cv, &g_pool_lock);
+        mutexUnlock(&g_pool_lock);
+    }
+}
+
+void plat_thread_counts(uint32_t* made, uint32_t* idle)
+{
+    mutexLock(&g_pool_lock);
+    *made = g_workers, *idle = g_idle_n;
+    mutexUnlock(&g_pool_lock);
 }
 #endif
 
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
-    ThreadStart* s = (ThreadStart*)malloc(sizeof *s);
-    if (!s)
-        return 0;
-    s->fn = fn;
-    s->arg = arg;
 #if defined(__SWITCH__)
+    mutexLock(&g_pool_lock);
+    NxWorker* w = g_idle;
+    if (w)
+    {
+        g_idle = w->next;
+        g_idle_n--;
+        w->fn = fn, w->arg = arg;
+        condvarWakeOne(&w->cv);
+        mutexUnlock(&g_pool_lock);
+        return 1;
+    }
     /* Horizon doesn't share a core between threads of one priority: a thread runs until it waits. The
      * application's main thread (the game's) has core 0; the threads made here take cores 1 and 2 in
      * turn - the first, the render thread (gfx_queue.c), core 1 - at the main thread's priority. libnx's
-     * pthread_create can't choose a core. */
-    static uint32_t next;
-    static Mutex start_lock; /* one start at a time: the hand-shake has one flag */
-    mutexLock(&start_lock);
-    __atomic_store_n(&g_started, 0, __ATOMIC_SEQ_CST);
-    int core = 1 + (int)(__atomic_fetch_add(&next, 1, __ATOMIC_SEQ_CST) % 2);
+     * pthread_create can't choose a core. A reused thread keeps its core. */
+    int core = 1 + (int)(g_workers % 2);
     s32 prio = 0x2C;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     /* the stack page-aligned and whole pages (libnx carves the TLS and reent out of its top) */
     const size_t stack_sz = 8u << 20; /* translated frames are large */
     void* stack = aligned_alloc(0x1000, stack_sz);
-    Thread* nt = (Thread*)malloc(sizeof *nt);
-    if (!stack || !nt || R_FAILED(threadCreate(nt, thread_entry_nx, s, stack, stack_sz, prio, core)) ||
-        R_FAILED(threadStart(nt)))
+    w = (NxWorker*)calloc(1, sizeof *w);
+    if (!stack || !w)
     {
         free(stack);
-        free(nt);
-        free(s);
-        mutexUnlock(&start_lock);
+        free(w);
+        mutexUnlock(&g_pool_lock);
         return 0;
     }
+    w->fn = fn, w->arg = arg, w->prio = prio;
+    condvarInit(&w->cv);
+    if (R_FAILED(threadCreate(&w->t, worker_main, w, stack, stack_sz, prio, core)) || R_FAILED(threadStart(&w->t)))
+    {
+        free(stack);
+        free(w);
+        mutexUnlock(&g_pool_lock);
+        return 0;
+    }
+    g_workers++;
+    mutexUnlock(&g_pool_lock);
     /* until it has started (as libnx's pthread_create waits) */
-    while (!__atomic_load_n(&g_started, __ATOMIC_SEQ_CST))
-        svcWaitForAddress((void*)&g_started, ArbitrationType_WaitIfEqual, 0, 1000000000ll);
-    mutexUnlock(&start_lock);
-    return 1; /* detached: its Thread and stack are never freed (a thread that ends leaves them: the sign-in's
-               * jobs, one a sign-in) */
+    while (!__atomic_load_n(&w->started, __ATOMIC_SEQ_CST))
+        svcWaitForAddress((void*)&w->started, ArbitrationType_WaitIfEqual, 0, 1000000000ll);
+    return 1; /* its Thread and stack are kept for the next start */
 #endif
+    ThreadStart* s = (ThreadStart*)malloc(sizeof *s);
+    if (!s)
+        return 0;
+    s->fn = fn;
+    s->arg = arg;
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);

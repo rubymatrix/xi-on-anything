@@ -45,6 +45,10 @@ out as debug strings (`svcOutputDebugString`, in Ryubing's log).
 Threads on the Switch: `plat_thread_start` puts them on cores 1 and 2 (the main thread, the game's, has
 core 0) at the main thread's priority. Horizon doesn't share a core between threads of one priority, so a
 thread that never waits - sdl_nx.c's audio thread did, with nothing mixed - keeps the others off its core.
+Finished threads are kept and reused (a pool in plat_posix.c): FFXiMain starts a thread for every sound
+it plays, and a Horizon thread that ends unjoined keeps its 8 MB stack and its place in the thread limit - on
+the console CreateThread failed 73 sounds in, and every effect after it was silent. The `[audio]` line
+counts the pool (`threads N (M idle)`).
 
 ## Audio
 
@@ -125,11 +129,9 @@ sources with `-fno-tree-pta`; the translated code keeps it.
 - **Graphics**: `gfx-test.nro` in Ryubing still fails its read-back checks (reads
   after a draw come back mostly zero there: the emulator's GPU-to-CPU sync, or ours - to be found); the scene
   effects, the scene renderer, water and sun shadows on GL; a program cache file. deko3d after it.
-- **Audio**: the sign-in's effects (the device's own streams, 2026-11-15) are built, not yet heard on a
-  console. In game some effects
-  (maybe the music) are missing on the console; the `[audio]`/`[dsound]` lines are there to tell underruns
-  (scheduling: every thread but the game's shares cores 1-2 at one priority, and `SetThreadPriority` is not
-  applied) from what dsound.c lacks.
+- **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
+  the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
+  failing (the thread pool above fixes that); not yet confirmed on the console.
 - The forwarder NSP (`build_switch.py nsp`), HD rumble, sleep and resume (the connections end).
 
 ## Testing in the emulator
