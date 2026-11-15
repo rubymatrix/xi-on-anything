@@ -15,11 +15,36 @@ together, what has been verified, and what is left.
 | `runtime/portable/tls_nx.c`, `switch/mbedtls_config.h` | mbedtls' clock and entropy | — |
 | `switch/app.json` | the application NPDM (for the forwarder) | hbloader's |
 | `tests/switch_plat_test.c` | the platform layer's self-test, as its own `.nro` | — |
+| `runtime/portable/gfx_gl.c`, `gfx_gl_api.h` | the graphics: OpenGL 4.3 core on Mesa's nouveau through EGL; also builds on the desktop (SDL3's GL context) to be tested there | `gfx_webgpu.c`, `gfx_vulkan.c` |
+| `tests/switch_gfx_test.c` | `tests/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
 
 The translation is the desktop one (`generated/all`, `generated/ffxi`): the generated C is portable, and
 the Switch adds no wraps or hooks. Compile flags: `-D__SWITCH__ -DRT_GUEST_WINDOW -DFFXI_SWITCH
 -DFFXI_GUEST_2GB`, libnx's `-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE`, GCC (devkitA64).
 The addon host is not built (`host/addons_none.c`), as in the browser build; Discord is off.
+
+## Graphics
+
+`gfx_gl.c` is gfx.h on OpenGL 4.3 core, its shaders the generator's GL dialect (`gfx_gl_generate`, gfx_msl.c):
+Vulkan's GLSL without descriptor sets, clip-space y negated (row 0 of every texture and target is D3D's top
+row, so nothing is flipped but the present) and z from glClipControl when the driver has it. The vertex
+streams are texture buffers read with `texelFetch`: Mesa compiles storage-buffer reads to the generic `LD`,
+which Ryubing's shader translator lacks. Every D3D8 format the game uses is a GL one (BGRA, the packed
+16-bit types, swizzles, S3TC), so nothing is converted on the CPU.
+
+GL's context is current on one thread, and the game makes buffers and reads its occlusion probes from
+threads of its own, so the game is built with the render queue (`GFX_QUEUE`, gfx_queue.c), which with
+`GFX_GL` brings the device up on its render thread and makes every call there (`GFXQ_OWNED`, as WebGPU's
+in the browser).
+
+It is built and tested on a desktop first: `tools/build.py gfxtest-gl` (tests/gfx_test.c, offscreen) and
+`tools/build.py host64-gl` (the game; `FFXI_GL_DEBUG=1` for the debug context and checks). On the Switch
+the surface is 1920x1080, cropped to the screen's size at each present; the log lines of the back end go
+out as debug strings (`svcOutputDebugString`, in Ryubing's log).
+
+Threads on the Switch: `plat_thread_start` puts them on cores 1 and 2 (the main thread, the game's, has
+core 0) at the main thread's priority. Horizon doesn't share a core between threads of one priority, so a
+thread that never waits - sdl_nx.c's audio thread did, with nothing mixed - keeps the others off its core.
 
 ## Guest memory
 
@@ -50,13 +75,33 @@ what Ryubing gives a bare `.nro`.
   game on the card, and stops at the sign-in screen, which needs a graphics back end to draw:
   `[signin] no window to draw in`.
 
+- The OpenGL back end (2026-11-15), on the desktop (RTX 4070, NVIDIA's GL 4.6): `gfxtest-gl` passes every
+  check (also with `FFXI_GL_CLIP=0` and `FFXI_GL_RING_MAP=0`, the fallbacks), including a new one of D3D's
+  winding that passes on Direct3D 12 too; `host64-gl` plays all 30 replay scenes (`tools/replay/default.txt`)
+  at the same frame rate as Direct3D 12, the captures alike but for camera and animation timing.
+- In Ryubing: the game brings the device up ("OpenGL 4.3 on NV120 (nouveau), S3TC, clip control, persistent
+  ring") and draws the sign-in screen at 60 fps, docked - but not on every start (below).
+
+## Open: a start-up race in Ryubing
+
+With the render thread, start-up in Ryubing reaches the sign-in screen in about one run in three. In the
+others, small blocks low in the C heap are zeroed moments after the render thread is made: the queue's
+first batch (its `cap` then 0, and the main thread spins in `rec` doubling it), and stdio's state (log lines
+lost). Anything that delays the main thread there hides it (a debug string, a 50 ms sleep); so far ruled
+out: the thread's stack mirror (it maps at 0x70da1000), its TLS page (0x8004400), the threads' handles
+(distinct), the start-up `free`, the DNS look-up, libnx's own stack allocation (a stack of our own changes
+nothing), the two threads' start-ups overlapping (`plat_thread_start` waits for the thread). Not yet tried:
+a real console (the kernel there may differ from Ryubing's), memory mode (heap vs physical), making the
+render thread before anything else at start, a watchpoint (Ryubing's GDB stub).
+
 ## Not yet
 
 - **Physical mode** has not run: Ryubing gives a bare `.nro` no system resource, and loads neither an
   ExeFS folder nor a bare PFS0 from its command line. A proper NSP (hacbrewpack, with the player's keys) is
   the way to test it there; on a console, hbloader's NPDM should give it.
-- **Graphics**: `gfx_null.c` for now. Next: a Mesa (nouveau) OpenGL 4.3 back end, `gfx_gl.c`, built and
-  checked on the desktop first against the replay scenes, then on EGL here. deko3d after it.
+- **Graphics**: the start-up race above; `gfx-test.nro` in Ryubing still fails its read-back checks (reads
+  after a draw come back mostly zero there: the emulator's GPU-to-CPU sync, or ours - to be found); the scene
+  effects, the scene renderer, water and sun shadows on GL; a program cache file. deko3d after it.
 - The forwarder NSP (`build_switch.py nsp`), audio on a console, HD rumble, sleep and resume (the
   connections end), the sign-in screen with the controller.
 
@@ -66,3 +111,7 @@ what Ryubing gives a bare `.nro`.
 portable Ryubing under `XI_EMU_DIR`, default `D:/Emulator/Ryubing`, or `XI_SWITCH_EMU`). The app's files
 are then in `<emulator>/portable/sdcard/switch/xi-on-anything/`, and the emulator's own log in
 `portable/Logs`. Turn off Ryubing's "expand DRAM" option so the memory matches a real 4 GB console.
+
+The back end's lines, and anything written with `svcOutputDebugString`, are in Ryubing's own log, as
+`KernelSvc OutputDebugString`. `build_switch.py gfx-test` builds the graphics test; run it as any `.nro`;
+it writes `gfx-test.log` beside it and ends green (every check passed) or red.
