@@ -89,8 +89,59 @@ function Mirror($localDir, $devFolder) {
         $secs = ((Get-Date) - $script:start).TotalSeconds
         '  {0} files checked, {1} sent ({2:N2} GB, {3:N1} MB/s)' -f $script:checked, $script:sent, ($script:bytes / 1GB), ($script:bytes / 1MB / [math]::Max($secs, 1))
     }
-    foreach ($d in Get-ChildItem -LiteralPath $localDir -Directory) {
+    # subfolders the card has none of yet: all of them in one Shell copy (it recurses on its own), waited
+    # for together; the walk below then finds them complete. Over MTP the time goes on each round trip, not
+    # on the bytes, so this is much faster than a folder at a time.
+    $subs = @(Get-ChildItem -LiteralPath $localDir -Directory)
+    $absent = @($subs | Where-Object { -not (Child $devFolder $_.Name) })
+    if ($absent.Count -gt 0) {
+        $n = 0; $size = 0
+        foreach ($d in $absent) {
+            foreach ($f in Get-ChildItem -LiteralPath $d.FullName -File -Recurse) { $n++; $size += $f.Length }
+            $devFolder.CopyHere($d.FullName, $FLAGS)
+        }
+        Wait-Tree $devFolder $absent $n $size
+        $script:sent += $n; $script:bytes += $size
+        $secs = ((Get-Date) - $script:start).TotalSeconds
+        '  {0} folders whole: {1} files sent ({2:N2} GB in all, {3:N1} MB/s)' -f $absent.Count, $script:sent, ($script:bytes / 1GB), ($script:bytes / 1MB / [math]::Max($secs, 1))
+    }
+    foreach ($d in $subs) {
         Mirror $d.FullName (Ensure-Folder $devFolder $d.Name)
+    }
+}
+
+# how many of the local tree's files are not on the device (by name and size)
+function Missing-In($localDir, $devFolder) {
+    $have = @{}; $dirs = @{}
+    foreach ($i in $devFolder.Items()) {
+        if ($i.IsFolder) { $dirs[$i.Name] = $i } else { $have[$i.Name] = [int64]$i.ExtendedProperty('System.Size') }
+    }
+    $missing = 0
+    foreach ($f in Get-ChildItem -LiteralPath $localDir -File) {
+        if (-not $have.ContainsKey($f.Name) -or $have[$f.Name] -ne $f.Length) { $missing++ }
+    }
+    foreach ($d in Get-ChildItem -LiteralPath $localDir -Directory) {
+        if ($dirs.ContainsKey($d.Name)) { $missing += Missing-In $d.FullName $dirs[$d.Name].GetFolder }
+        else { $missing += @(Get-ChildItem -LiteralPath $d.FullName -File -Recurse).Count }
+    }
+    return $missing
+}
+
+# waits until the whole folders copied in one go are on the device: checked every few seconds (a check
+# walks the trees over MTP), until nothing is missing, or nothing has arrived for five minutes
+function Wait-Tree($devFolder, $dirs, $n, $size) {
+    $last = -1; $since = Get-Date
+    while ($true) {
+        Start-Sleep -Seconds 5
+        $missing = 0
+        foreach ($d in $dirs) {
+            $c = Child $devFolder $d.Name
+            if ($c) { $missing += Missing-In $d.FullName $c.GetFolder }
+            else { $missing += @(Get-ChildItem -LiteralPath $d.FullName -File -Recurse).Count }
+        }
+        if ($missing -eq 0) { return }
+        if ($missing -ne $last) { $last = $missing; $since = Get-Date; '    {0} of {1} files still to arrive' -f $missing, $n }
+        if (((Get-Date) - $since).TotalMinutes -gt 5) { throw "the copy stopped with $missing files missing (run setup again to resume)" }
     }
 }
 
