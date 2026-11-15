@@ -151,10 +151,8 @@ sources with `-fno-tree-pta`; the translated code keeps it.
 - **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
   the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
   failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
-- **The forwarder NSP** (`build_switch.py nsp`, docs/platforms/switch.md): nx-hbloader v2.4.5 compiled with
-  its default `.nro` ours and an exit when the game returns (rather than loading hbmenu), `hbl.json` under
-  the id `0100f1e1a0000000`, packed by hacBrewPack with the player's keys. Packs (program, control and meta
-  NCAs, 167 KB); not yet run on a console. Ryubing can't run it without the system firmware installed.
+- A forwarder NSP (a HOME menu icon): tried 2026-11-16 (nx-hbloader set to our `.nro`, packed by
+  hacBrewPack) and dropped for now: it failed to start on the console.
 - Addons (`addons_none.c`), HD rumble, sleep and resume (the
   connections end).
 

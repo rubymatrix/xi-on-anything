@@ -120,6 +120,8 @@
 #include <SDL3/SDL.h>
 #include "display_fit.h"
 void touch_frame(int in_game); /* touch.c: the touch controls, each frame of the game */
+#elif defined(__SWITCH__)
+#include <SDL3/SDL.h> /* the chat line's keyboard */
 #endif
 #include "build.h" /* FFXI_VERSION */
 #if defined(FFXI_ANDROID_VULKAN)
@@ -1048,6 +1050,26 @@ static void chat_keyboard(void)
 }
 #endif
 
+#if defined(__SWITCH__)
+/* The Switch's keyboard when the chat line opens (sdl_nx.c: swkbd, over the game until the player is done):
+ * what is typed goes into the line, and Enter sends it. Once per opening: cancelled, the line stays open as
+ * it is, and the next opening brings the keyboard again. */
+static void chat_keyboard(void)
+{
+    static int typing;
+    int now = xi_chat_typing();
+    if (now == typing)
+        return;
+    typing = now;
+    if (!now)
+        return;
+    SDL_Window* win = (SDL_Window*)user32_sdl_window(d3d8_window());
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_StartTextInputWithProperties(win, p);
+    SDL_DestroyProperties(p);
+}
+#endif
+
 /* host/vicons.c reads the install through the DAT overlays, as the game would */
 static char g_vicons_game[1024];
 
@@ -1093,6 +1115,8 @@ static void present_hook(void)
     display_fit_frame();
     chat_keyboard();
     touch_frame(1);
+#elif defined(__SWITCH__)
+    chat_keyboard();
 #endif
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */

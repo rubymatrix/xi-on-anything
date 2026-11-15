@@ -28,6 +28,7 @@
 #include "nx_bridge.h"
 #include "plat.h"
 #include "runtime.h"
+#include "user32.h"
 
 typedef pthread_mutex_t Lock;
 #define LOCK_INIT PTHREAD_MUTEX_INITIALIZER
@@ -179,6 +180,10 @@ void nx_set_view_size(int w, int h)
     int was_w = g_view_w, was_h = g_view_h;
     __atomic_store_n(&g_view_w, w, __ATOMIC_SEQ_CST);
     __atomic_store_n(&g_view_h, h, __ATOMIC_SEQ_CST);
+    /* the game's client (1920x1080, the registry's) is presented over the whole screen: a touch, in the
+     * screen's units, is mapped to the client's pixels through it (else 1280x720 handheld touches landed at
+     * two thirds of the way, and the screen's foot was out of reach) */
+    user32_set_view(0, 0, (float)w, (float)h);
     if (g_have_window && (w != was_w || h != was_h))
     {
         SDL_Event e;
@@ -533,8 +538,6 @@ SDL_MouseButtonFlags SDL_GetRelativeMouseState(float* x, float* y)
         *y = 0;
     return 0;
 }
-bool SDL_WarpMouseGlobal(float x, float y) { (void)x, (void)y; return false; }
-void SDL_WarpMouseInWindow(SDL_Window* w, float x, float y) { (void)w, (void)x, (void)y; }
 bool SDL_SetWindowRelativeMouseMode(SDL_Window* w, bool on) { (void)w, (void)on; return true; }
 bool SDL_ShowCursor(void) { return true; }
 bool SDL_HideCursor(void) { return true; }
@@ -573,6 +576,20 @@ static void mouse_button(int button, int down)
     e.button.clicks = 1;
     e.button.x = x, e.button.y = y;
     push(&e);
+}
+
+/* The game putting the pointer somewhere (SetCursorPos: its menus put it on the item the D-pad selects): it
+ * moves there, as a desktop's does, and says so. As a stub the game read it back where the last touch left
+ * it, over another item, and the selection went back there: the D-pad couldn't move it. */
+bool SDL_WarpMouseGlobal(float x, float y)
+{
+    mouse_move(x, y);
+    return true;
+}
+void SDL_WarpMouseInWindow(SDL_Window* w, float x, float y)
+{
+    (void)w;
+    mouse_move(x, y);
 }
 
 /* --- the controller ------------------------------------------------------------------------------------ */
