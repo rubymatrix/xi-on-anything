@@ -49,6 +49,27 @@ void d3d8_set_texture_source(D3d8TextureSource fn);
 /* The game is loading one of its water models (host64's hook on the model loader): 1 before, 0 after.
  * The vertex buffers made meanwhile are the model's, and draws from them are drawn as water. */
 void d3d8_water_loading(int on);
+
+/* The PS2 fixes' settings as read this frame (fix_shine, fix_disintegrate), for host/ps2fix.c's hooks into the
+ * game. */
+enum
+{
+    D3D8_FIX_SHINE = 1,
+    D3D8_FIX_DISINTEGRATE = 2,
+    D3D8_FIX_HALO_MAX = 4, /* summon halos capped (fix_halo_max): d3d8_skinned_at wanted */
+};
+unsigned d3d8_fixes(void);
+/* the first bone of the part being skinned (host/ps2fix.c), in the world: where a summon's halo is, for its cap */
+void d3d8_skinned_at(const float at[3]);
+/* Disintegrate (host/ps2fix.c, d3d8.c): a sphere an effect's op 0x65 marked this frame for the actor whose bone palette
+ * is `bones`; the part just skinned (its palette, and its vertex buffers: positions, the mirrored half's positions,
+ * normals, the mirrored half's normals, 0 for none); and the smoke due now: how many (0-4) and where, each also a
+ * haze element. */
+void d3d8_disint_sphere(uint32_t bones, const float c[3], float r);
+void d3d8_disint_part(uint32_t palette, const uint32_t vb[4]);
+int d3d8_disint_smoke(float at[4][3]);
+/* 1 while the actor with this bone palette is breaking up: the scene renderer leaves its meshes to the game's draws */
+int d3d8_disint_capturing(uint32_t palette);
 /* How the game's occlusion probe is answered (no menu sets it now; FFXI_PROBE=gpu reads exactly): 0 fully visible,
  * 1 the newest copy the GPU has finished (Android only; elsewhere it reads as 0), 2 exactly, waiting
  * for the GPU. 0 until set. */
