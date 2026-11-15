@@ -66,6 +66,13 @@ def flags():
     ]
 
 
+# Ours, not the translation's: devkitA64's GCC 16.1 drops the stores into a calloc'd struct a function returns
+# beside another pointer (gfx_queue.c's batch_get: the first batch had cap 0 and p NULL, rec doubled 0 for
+# ever - the black screen at start, which any added code could hide). Its points-to analysis is the pass at
+# fault. The translated code works in guest memory, not on objects like these, and keeps it.
+OWN = ['-fno-tree-pta']
+
+
 def run(args, **kw):
     args = [str(a) for a in args]
     line = ' '.join(args)
@@ -79,7 +86,8 @@ def compile_one(job):
     obj.parent.mkdir(parents=True, exist_ok=True)
     cxx = s.suffix == '.cpp'
     compiler = tc.tool('g++' if cxx else 'gcc')
-    f = flags() + list(extra) + (['-std=gnu++17', '-fno-rtti'] if cxx else ['-std=gnu11'])
+    f = flags() + ([] if src.startswith('generated/') else OWN) + list(extra) + (
+        ['-std=gnu++17', '-fno-rtti'] if cxx else ['-std=gnu11'])
     key = hashlib.sha256(s.read_bytes() + json.dumps([compiler, f]).encode()).hexdigest()
     stamp, deps = obj.with_suffix('.stamp'), obj.with_suffix('.d')
     stale = not obj.exists() or not stamp.exists() or not deps.exists() or stamp.read_text() != key

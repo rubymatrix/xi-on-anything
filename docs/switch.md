@@ -106,30 +106,27 @@ what Ryubing gives a bare `.nro`.
   right, playable, battles with their menus. The two bugs it found are fixed (929143f). Sound is partly
   missing (some effects, maybe music): phase 4.
 
-## Open: a start-up race in Ryubing
+## Found: the black screen at start was a miscompile
 
-With the render thread, start-up in Ryubing reached the sign-in screen in about one run in three (and,
-later on 2026-11-15, in none of a dozen: the spin right after the DNS look-up, with or without a 50 ms sleep
-after the render thread starts). In the
-others, small blocks low in the C heap are zeroed moments after the render thread is made: the queue's
-first batch (its `cap` then 0, and the main thread spins in `rec` doubling it), and stdio's state (log lines
-lost). Anything that delays the main thread there hides it (a debug string, a 50 ms sleep); so far ruled
-out: the thread's stack mirror (it maps at 0x70da1000), its TLS page (0x8004400), the threads' handles
-(distinct), the start-up `free`, the DNS look-up, libnx's own stack allocation (a stack of our own changes
-nothing), the two threads' start-ups overlapping (`plat_thread_start` waits for the thread). Not yet tried:
-a real console (the kernel there may differ from Ryubing's), memory mode (heap vs physical), making the
-render thread before anything else at start, a watchpoint (Ryubing's GDB stub).
+The "start-up race" (a black screen, the main thread spinning in gfx_queue.c's `rec`, the log stopping after
+"render thread on") was not a race. devkitA64's GCC 16.1 compiled `batch_get` without its two stores after
+`calloc` (`cap`, and `p` from `malloc`): the first batch had `cap` 0 and `rec` doubled 0 for ever. Its points-to
+analysis is at fault (`-fno-tree-pta` keeps the stores; `-fno-builtin-malloc` does not). Builds with any extra
+code there (debug probes, a print) compiled differently and worked, which looked like timing. Found with
+Ryubing's GDB stub (`enable_gdb_stub` in its Config.json; `aarch64-none-elf-gdb`, `add-symbol-file <elf> -o
+<module base>` from `monitor get info`) and the object's disassembly. `build_switch.py` now compiles our own
+sources with `-fno-tree-pta`; the translated code keeps it.
 
 ## Not yet
 
 - **Physical mode** has not run: Ryubing gives a bare `.nro` no system resource, and loads neither an
   ExeFS folder nor a bare PFS0 from its command line. A proper NSP (hacbrewpack, with the player's keys) is
   the way to test it there; on a console, hbloader's NPDM should give it.
-- **Graphics**: the start-up race above; `gfx-test.nro` in Ryubing still fails its read-back checks (reads
+- **Graphics**: `gfx-test.nro` in Ryubing still fails its read-back checks (reads
   after a draw come back mostly zero there: the emulator's GPU-to-CPU sync, or ours - to be found); the scene
   effects, the scene renderer, water and sun shadows on GL; a program cache file. deko3d after it.
-- **Audio**: the sign-in's effects (the device's own streams, 2026-11-15) are built but not yet heard: the
-  start-up race below now stops every start in Ryubing (at the commit before them too). In game some effects
+- **Audio**: the sign-in's effects (the device's own streams, 2026-11-15) are built, not yet heard on a
+  console. In game some effects
   (maybe the music) are missing on the console; the `[audio]`/`[dsound]` lines are there to tell underruns
   (scheduling: every thread but the game's shares cores 1-2 at one priority, and `SetThreadPriority` is not
   applied) from what dsound.c lacks.
