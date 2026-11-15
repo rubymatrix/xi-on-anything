@@ -79,6 +79,31 @@ computer or another Switch.
 
 The log is `sdmc:/switch/xi-on-anything/host64.log`; `python tools/build_switch.py logs --sd <card>` prints it.
 
+## Optional: a HOME menu icon (forwarder NSP)
+
+A small installed title, **XI on Anything** with its icon on the HOME menu, that starts the `.nro` on the
+card as an application (full memory), so there is no game to hold R over. The `.nro` stays on the card:
+updates still replace only it.
+
+It's built on your PC from two open-source tools and your own console's keys:
+
+- [nx-hbloader](https://github.com/switchbrew/nx-hbloader) v2.4.5, the homebrew loader, set here to load
+  `sdmc:/switch/xi-on-anything/xi-on-anything.nro`: `git clone https://github.com/switchbrew/nx-hbloader`
+  into `D:\Dev\switch-tools\nx-hbloader` (or set `XI_HBLOADER`).
+- hacBrewPack 3.05, which packs the NSP. Its original repository is gone; mirrors with the original's last
+  commit (`745b16ec`) remain. Build it with msys2's MinGW (`pacman -S mingw-w64-x86_64-gcc make`, then
+  `make` in its folder, after copying `config.mk.template` to `config.mk`), in `D:\Dev\switch-tools\hacBrewPack`
+  (or set `XI_HACBREWPACK`).
+- Your console's `prod.keys` (Lockpick_RCM): `--keys`, or `XI_SWITCH_KEYS`, else the emulator's.
+
+```
+python tools/build_switch.py nsp
+```
+
+writes `build/switch/xi-on-anything-forwarder.nsp`. Install it with DBI, Tinfoil or Goldleaf. Like every
+homebrew NSP it isn't signed by Nintendo, so the console needs signature patches to install and start it.
+Keep the `.nsp` and your keys to yourself.
+
 ## Controls
 
 The controller works the way an Xbox controller does on the PC builds (the game's own gamepad support),

@@ -108,7 +108,7 @@ what Ryubing gives a bare `.nro`.
 - **On a console** (Mariko, Atmosphère, launched over a game with R): the sign-in screen with the controller and
   the system keyboard, sign-in to a LandSandBoat server, the game in the world (West Sarutabaruta), drawn
   right, playable, battles with their menus. The two bugs it found are fixed (929143f). Sound: the
-  sign-in's effects and the game's (5485963, the thread pool); the music not yet confirmed.
+  sign-in's effects, the game's (5485963, the thread pool) and the music.
 
 ## Saved passwords
 
@@ -151,7 +151,11 @@ sources with `-fno-tree-pta`; the translated code keeps it.
 - **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
   the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
   failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
-- The forwarder NSP (`build_switch.py nsp`), addons (`addons_none.c`), HD rumble, sleep and resume (the
+- **The forwarder NSP** (`build_switch.py nsp`, docs/platforms/switch.md): nx-hbloader v2.4.5 compiled with
+  its default `.nro` ours and an exit when the game returns (rather than loading hbmenu), `hbl.json` under
+  the id `0100f1e1a0000000`, packed by hacBrewPack with the player's keys. The ExeFS builds; not yet packed or
+  run.
+- Addons (`addons_none.c`), HD rumble, sleep and resume (the
   connections end).
 
 ## Testing in the emulator

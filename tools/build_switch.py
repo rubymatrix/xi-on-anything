@@ -77,7 +77,8 @@ def run(args, **kw):
     args = [str(a) for a in args]
     line = ' '.join(args)
     print('> ' + (line if len(line) < 200 else line[:200] + ' ...'), flush=True)
-    subprocess.run(args, cwd=ROOT, check=True, env=tc.env(), **kw)
+    kw.setdefault('cwd', ROOT)
+    subprocess.run(args, check=True, env=tc.env(), **kw)
 
 
 def compile_one(job):
@@ -405,6 +406,103 @@ def deploy(a):
     run([tc.dkp_tool('nxlink'), '-a', a.ip, '-p', APP_DIR + '/' + nro.name, nro])
 
 
+# --- the forwarder NSP ---------------------------------------------------------------------------------------
+# An installed title whose program is nx-hbloader set to load the .nro on the card: the game gets a HOME menu
+# icon and runs as an application (full memory) without a game held open with R, and the .nro on the card
+# stays what updates replace. Built from the player's own nx-hbloader and hacBrewPack checkouts, packed with
+# the player's own keys; nothing of it is in this repo.
+FORWARDER_ID = '0100f1e1a0000000'  # switch/app.json's program id
+NRO_PATH = 'sdmc:/' + APP_DIR + '/xi-on-anything.nro'
+
+
+def tool_dir(env, default):
+    p = Path(os.environ.get(env, default))
+    return p
+
+
+def forwarder_exefs(hbl, exefs):
+    """nx-hbloader's source, loading our .nro rather than hbmenu and ending the title when it returns, into
+    exefs/main (an NSO) and exefs/main.npdm (hbloader's own hbl.json under our id: the environment the game
+    has when started from the homebrew menu over a game)."""
+    src = (hbl / 'source/main.c').read_text()
+    patches = [
+        ('#define DEFAULT_NRO "sdmc:/hbmenu.nro"',
+         '#define DEFAULT_NRO "' + NRO_PATH + '"\nstatic bool g_forwarded; /* XI on Anything: its .nro has been loaded */'),
+        ("    if (g_nextNroPath[0] == '\\0')\n    {\n",
+         "    if (g_nextNroPath[0] == '\\0')\n    {\n"
+         "        if (g_forwarded) /* the game has returned without a next .nro: the title ends */\n"
+         "            svcExitProcess();\n"
+         "        g_forwarded = 1;\n"),
+    ]
+    for old, new in patches:
+        if src.count(old) != 1:
+            raise SystemExit(f'{hbl}: source/main.c is not the nx-hbloader this was written for (v2.4.5)')
+        src = src.replace(old, new)
+    work = OUT / 'nsp' / 'hbl'
+    work.mkdir(parents=True, exist_ok=True)
+    (work / 'main.c').write_text(src)
+    arch = ['-march=armv8-a', '-mtune=cortex-a57', '-mtp=soft', '-fPIE']
+    inc = ['-I' + str(tc.LIBNX / 'include'), '-D__SWITCH__', '-DVERSION="v2.4.5-xi-on-anything"']
+    run([tc.tool('gcc'), '-g', '-Wall', '-O2', '-ffunction-sections'] + arch + inc + ['-c', work / 'main.c', '-o', work / 'main.o'])
+    run([tc.tool('gcc'), '-g'] + arch + ['-c', hbl / 'source/trampoline.s', '-o', work / 'trampoline.o'])
+    elf = work / 'hbl.elf'
+    run([tc.tool('gcc'), '-specs=' + str(tc.LIBNX / 'switch.specs'), '-g'] + arch
+        + ['-Wl,-wrap,exit', work / 'main.o', work / 'trampoline.o', '-L' + str(tc.LIBNX / 'lib'), '-lnx', '-o', elf])
+    npdm = json.loads((hbl / 'hbl.json').read_text())
+    npdm['name'] = 'xi-on-anything'
+    for key in ('title_id', 'title_id_range_min', 'title_id_range_max', 'program_id', 'program_id_range_min',
+                'program_id_range_max'):
+        if key in npdm:
+            npdm[key] = '0x' + FORWARDER_ID
+    (work / 'forwarder.json').write_text(json.dumps(npdm, indent=4))
+    if exefs.exists():
+        shutil.rmtree(exefs)
+    exefs.mkdir(parents=True)
+    run([tc.dkp_tool('elf2nso'), elf, exefs / 'main'])
+    run([tc.dkp_tool('npdmtool'), work / 'forwarder.json', exefs / 'main.npdm'])
+
+
+def nsp(a):
+    hbl = Path(a.hbloader or tool_dir('XI_HBLOADER', 'D:/Dev/switch-tools/nx-hbloader'))
+    pack = Path(a.hacbrewpack or tool_dir('XI_HACBREWPACK', 'D:/Dev/switch-tools/hacBrewPack/hacbrewpack.exe'))
+    keys = a.keys or os.environ.get('XI_SWITCH_KEYS')
+    if not keys:
+        exe = tc.emulator()
+        keys = exe and str(exe.parent / 'portable/system/prod.keys')
+    if not (hbl / 'source/main.c').exists():
+        raise SystemExit(f'no nx-hbloader at {hbl}: git clone https://github.com/switchbrew/nx-hbloader '
+                         '(v2.4.5) there, or pass --hbloader / set XI_HBLOADER')
+    if not pack.exists():
+        raise SystemExit(f'no hacBrewPack at {pack}: build it (docs/platforms/switch.md), or pass --hacbrewpack / '
+                         'set XI_HACBREWPACK')
+    if not keys or not Path(keys).exists():
+        raise SystemExit('no prod.keys: pass --keys <your console\'s prod.keys> or set XI_SWITCH_KEYS')
+    stage = OUT / 'nsp'
+    exefs, control = stage / 'exefs', stage / 'control'
+    forwarder_exefs(hbl, exefs)
+    if control.exists():
+        shutil.rmtree(control)
+    control.mkdir(parents=True)
+    run([tc.dkp_tool('nacptool'), '--create', TITLE, AUTHOR, version(), control / 'control.nacp'])
+    shutil.copyfile(icon(), control / 'icon_AmericanEnglish.dat')
+    for d in ('out', 'nca', 'temp', 'backup'):
+        shutil.rmtree(stage / d, ignore_errors=True)
+    # hacBrewPack signs nothing with Nintendo's keys (none are anyone's to have): installing and starting the
+    # title needs signature patches on the console, as every homebrew NSP does. --keygeneration 1 keeps it
+    # startable on any firmware the player's keys cover.
+    run([pack, '-k', Path(keys).resolve(), '--exefsdir', exefs, '--controldir', control, '--noromfs', '--nologo',
+         '--titleid', FORWARDER_ID, '--titlename', TITLE, '--titlepublisher', AUTHOR, '--keygeneration', '1',
+         '--nspdir', stage / 'out', '--ncadir', stage / 'nca', '--tempdir', stage / 'temp',
+         '--backupdir', stage / 'backup'], cwd=stage)
+    built = sorted((stage / 'out').glob('*.nsp'))
+    if not built:
+        raise SystemExit('hacBrewPack made no .nsp')
+    out = OUT / 'xi-on-anything-forwarder.nsp'
+    shutil.copyfile(built[0], out)
+    print('built', out, f'({out.stat().st_size / 1e3:.0f} KB): install it with DBI, Tinfoil or Goldleaf; it starts',
+          NRO_PATH)
+
+
 def logs(a):
     app = sd_root(a.sd) / APP_DIR
     for name in ['plat-test.log', 'host64.log']:
@@ -441,8 +539,13 @@ def main():
     d.add_argument('nro', nargs='?')
     lg = sub.add_parser('logs')
     lg.add_argument('--sd', required=True)
+    n = sub.add_parser('nsp', help='a forwarder NSP: a HOME menu icon that starts the .nro on the card')
+    n.add_argument('--keys', help="your console's prod.keys (default XI_SWITCH_KEYS, else the emulator's)")
+    n.add_argument('--hbloader', help='an nx-hbloader v2.4.5 checkout (default XI_HBLOADER, else D:/Dev/switch-tools)')
+    n.add_argument('--hacbrewpack', help='hacbrewpack.exe (default XI_HACBREWPACK, else D:/Dev/switch-tools)')
     a = ap.parse_args()
-    {'plat-test': plat_test, 'gfx-test': gfx_test, 'host': host, 'setup': setup, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
+    {'plat-test': plat_test, 'gfx-test': gfx_test, 'host': host, 'setup': setup, 'run': emu_run, 'deploy': deploy, 'logs': logs,
+     'nsp': nsp}[a.target](a)
 
 
 if __name__ == '__main__':
