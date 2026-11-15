@@ -222,9 +222,8 @@ static void* gl_proc(const char* name) { return (void*)eglGetProcAddress(name); 
 static int ctx_up(void* win, int debug)
 {
     (void)win;
-    /* Mesa: no error checking in the driver (the debug context turns it back on) */
-    if (!debug)
-        setenv("MESA_NO_ERROR", "1", 0);
+    /* not MESA_NO_ERROR: a call Mesa would turn down then crashes it (a DXT upload did, on a console) */
+    (void)debug;
     g_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (g_dpy == EGL_NO_DISPLAY || !eglInitialize(g_dpy, NULL, NULL))
     {
@@ -429,11 +428,14 @@ static void st_unit(int u)
         gl.ActiveTexture(GL_TEXTURE0 + (GLenum)u), S.unit = u;
 }
 
+/* the texture bound on unit u, and u the active unit: uploads, reads and parameters act on the active unit's
+ * binding, so a binding already in place still makes its unit active (else an upload went to another unit's
+ * texture: DXT uploads failed on a console, a menu's texture was never rewritten) */
 static void st_texture(int u, GLenum target, GLuint name)
 {
+    st_unit(u);
     if (S.tex[u] == name && S.tex_target[u] == target)
         return;
-    st_unit(u);
     gl.BindTexture(target, name); /* a unit keeps one per target: a stage samples only its own kind */
     S.tex[u] = name, S.tex_target[u] = target;
 }
