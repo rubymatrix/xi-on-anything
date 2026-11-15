@@ -148,6 +148,26 @@ static void test_rhw_edges(void)
         "quad edges: %08x %08x %08x %08x", px(7, 8), px(24, 23), px(8, 7), px(8, 24));
 }
 
+/* D3D's front faces are clockwise on the screen: quad() winds so, so CULL_CCW (3, the default) keeps it and
+ * CULL_CW (2) drops it - a back end that flips y on the way to its own window must flip the facing too */
+static void test_cull(void)
+{
+    GfxDraw d;
+    UiVert v[4];
+    for (int cull = 2; cull <= 3; ++cull)
+    {
+        gfx_clear(0, NULL, 3, 0xFF000000u, 1.0f, 0, VP);
+        defaults(&d);
+        layout_ui(&d);
+        d.cull = (uint8_t)cull;
+        quad(v, 8, 8, 24, 24, 0xFF00FF00u, 0.5f);
+        draw_ui(&d, v);
+        readback();
+        uint32_t want = cull == 3 ? 0xFF00FF00u : 0xFF000000u;
+        CHECK(px(16, 16) == want, "cull %s: %08x, want %08x", cull == 3 ? "CCW keeps a clockwise quad" : "CW drops it", px(16, 16), want);
+    }
+}
+
 static void test_texture(void)
 {
     gfx_clear(0, NULL, 3, 0xFF000000u, 1.0f, 0, VP);
@@ -1380,8 +1400,8 @@ static void test_fx_settings(void)
 static void test_scene_effects(void)
 {
     test_large_target_mips();
-#ifdef FFXI_ANDROID_VULKAN
-    puts("gfx_test: skip the scene effects: no Modern FX on Android");
+#if defined(FFXI_ANDROID_VULKAN) || defined(GFX_GL)
+    puts("gfx_test: skip the scene effects: none on this back end");
     CHECK(gfx_failures() == 0, "back end: %u failures", gfx_failures());
 #else
     test_scene_ao(0);
@@ -1437,6 +1457,7 @@ int main(int argc, char** argv)
     test_fx_settings();
     test_clear();
     test_rhw_edges();
+    test_cull();
     test_texture();
     test_alpha();
     test_depth();

@@ -14,6 +14,8 @@
 
 #ifdef __APPLE__
 #define FX_MTIME(st) (st).st_mtimespec
+#elif defined(_MSC_VER) /* the UCRT's stat has whole seconds (gfx_gl.c's desktop test build) */
+#define FX_MTIME(st) ((struct timespec){ (st).st_mtime, 0 })
 #else
 #define FX_MTIME(st) (st).st_mtim
 #endif

@@ -8,7 +8,8 @@
  * defines MSL's type and function names (float4, saturate, ...), so the expressions are the same in
  * both; the dialects part only at signatures, the vertex function's outputs, vertex fetch, texture
  * sampling and vector compares. GLSL has no `in.` (a keyword): the fragment function's copy of its
- * inputs is `I`, and `in.` is rewritten to it at the end.
+ * inputs is `I`, and `in.` is rewritten to it at the end. OpenGL's GLSL (Sb.glsl 3, gfx_gl_generate,
+ * for gfx_gl.c) is Vulkan's with GL's few differences (gfx_msl.h).
  *
  * And as WGSL (Sb.glsl 2, gfx_wgsl_generate) for gfx_webgpu.c. WGSL's functions are written the MSL
  * way (an entry point that returns its outputs), its prelude names MSL's types (float4 is vec4f), and
@@ -113,7 +114,8 @@ static const char WGSL_PRELUDE[] =
     "fn xinf() -> f32 { var b = 0x7f800000u; return bitcast<f32>(b); }\n";
 
 #define WGSL(b) ((b)->glsl == 2)
-#define GLSL(b) ((b)->glsl == 1)
+#define GLSL(b) ((b)->glsl == 1 || (b)->glsl == 3) /* Vulkan's or OpenGL's */
+#define GL(b) ((b)->glsl == 3)
 
 /* The back end's water (GfxFsKey.water), after the game's own color and fog: the scene behind it
  * (wcol, a copy of the target made before the frame's first water draw) seen through the surface,
@@ -283,9 +285,10 @@ static void glsl_vout(Sb* b, const GfxVsKey* k)
 {
     sb_printf(b, "struct VOut {\n  vec4 pos;\n  float psize;\n");
     glsl_varyings(b, k, 0);
-    sb_printf(b, "};\n#ifdef GFX_VS\nlayout(location = 0) out VOutB {\n");
+    const char* loc = GL(b) ? "" : "layout(location = 0) "; /* GL 4.30: blocks match by name */
+    sb_printf(b, "};\n#ifdef GFX_VS\n%sout VOutB {\n", loc);
     glsl_varyings(b, k, 1);
-    sb_printf(b, "} vo;\n#else\nlayout(location = 0) in VOutB {\n");
+    sb_printf(b, "} vo;\n#else\n%sin VOutB {\n", loc);
     glsl_varyings(b, k, 1);
     sb_printf(b, "} vi;\n#endif\n");
 }
@@ -510,8 +513,8 @@ void gfx_msl_vs_params(Sb* b, const GfxVsKey* k)
  * vertex or index. Its vertex index from that, as the game's draw would have had it. */
 static void emit_rt_index(Sb* b)
 {
-    sb_printf(b, "  uint rt_t = %s / 3u, rt_k = %s - rt_t * 3u;\n", b->glsl ? "uint(gl_VertexIndex)" : "vid",
-        b->glsl ? "uint(gl_VertexIndex)" : "vid");
+    const char* vid = GL(b) ? "uint(gl_VertexID)" : b->glsl ? "uint(gl_VertexIndex)" : "vid";
+    sb_printf(b, "  uint rt_t = %s / 3u, rt_k = %s - rt_t * 3u;\n", vid, vid);
     sb_printf(b, "  uint rt_s = rtc.w + (rtc.z != 0u ? rt_t + ((rt_t & 1u) != 0u && rt_k < 2u ? 1u - rt_k : rt_k) : rt_t * 3u + rt_k);\n");
     if (b->glsl)
         sb_printf(b, "  uint rt_i = rtc.y == 2u ? (rti[rt_s >> 1] >> ((rt_s & 1u) * 16u)) & 0xFFFFu : rtc.y == 4u ? rti[rt_s] : rt_s;\n");
@@ -530,13 +533,16 @@ void gfx_msl_vs_return(Sb* b, const GfxVsKey* k)
          * its diffuse alpha (an alpha test's: the texture's alpha and the vertex's, as stage 0 combines them) */
         sb_printf(b, "  uint rt_o = (rtc.x + %s) * 2u;\n  rto[rt_o] = float4(o.pos.xyz / o.pos.w, 1.0);\n"
                      "  rto[rt_o + 1u] = float4(%s, o.d.a, 0.0);\n",
-            b->glsl ? "uint(gl_VertexIndex)" : "vid", k->ntex ? "o.t0.xy" : "0.0, 0.0");
+            GL(b) ? "uint(gl_VertexID)" : b->glsl ? "uint(gl_VertexIndex)" : "vid", k->ntex ? "o.t0.xy" : "0.0, 0.0");
         sb_printf(b, b->glsl ? "  gl_Position = float4(0, 0, 0, 1);\n  gl_PointSize = 1.0;\n}\n" : "}\n");
         return;
     }
     if (GLSL(b))
     {
-        sb_printf(b, "  gl_Position = o.pos;\n  gl_PointSize = o.psize;\n");
+        if (GL(b)) /* y negated: row 0 is D3D's top; z to -1..1 without glClipControl (gfx_gl_generate) */
+            sb_printf(b, "  gl_Position = float4(o.pos.x, -o.pos.y, gl_clip_z(o.pos), o.pos.w);\n  gl_PointSize = o.psize;\n");
+        else
+            sb_printf(b, "  gl_Position = o.pos;\n  gl_PointSize = o.psize;\n");
         glsl_copy_varyings(b, k, "vo", "o");
         sb_printf(b, "}\n");
         return;
@@ -558,7 +564,7 @@ static void emit_vs_signature(Sb* b, const GfxVsKey* k)
         if (k->shadow == 2)
             emit_rt_index(b);
         else
-            sb_printf(b, "  int vi = gl_VertexIndex + u.vofs.x;\n");
+            sb_printf(b, GL(b) ? "  int vi = gl_VertexID + u.vofs.x;\n" : "  int vi = gl_VertexIndex + u.vofs.x;\n");
         sb_printf(b, "  o.psize = 1.0;\n");
         return;
     }
@@ -1178,10 +1184,43 @@ fail:
     return NULL;
 }
 
+static char* glsl_generate(int dialect, const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens,
+    const uint32_t* ps_tokens);
+
 char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens)
 {
+    return glsl_generate(1, vk, fk, vs_tokens, ps_tokens);
+}
+
+/* OpenGL's: Vulkan's text, its layouts without descriptor sets (GL has none: the binding numbers are the
+ * same, in GL's separate name spaces), the clip-space z it ends with (gfx_msl_vs_return) */
+char* gfx_gl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens)
+{
+    char* s = glsl_generate(3, vk, fk, vs_tokens, ps_tokens);
+    if (!s)
+        return NULL;
+    static const char SET[] = "set = 0, ";
+    char *r = s, *w = s;
+    while (*r)
+    {
+        if (!strncmp(r, SET, sizeof SET - 1))
+            r += sizeof SET - 1;
+        else
+            *w++ = *r++;
+    }
+    *w = 0;
+    static const char CLIP[] = "#ifdef GFX_GL_CLIP01\n#define gl_clip_z(p) (p).z\n#else\n#define gl_clip_z(p) (2.0 * (p).z - (p).w)\n#endif\n";
+    Sb out = { 0 };
+    sb_printf(&out, "%s%s", CLIP, s);
+    free(s);
+    return out.s;
+}
+
+static char* glsl_generate(int dialect, const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens,
+    const uint32_t* ps_tokens)
+{
     Sb b = { 0 };
-    b.glsl = 1;
+    b.glsl = dialect;
     sb_printf(&b, "%s", GLSL_PRELUDE);
     emit_vout(&b, vk);
     sb_printf(&b, "#ifdef GFX_VS\n");

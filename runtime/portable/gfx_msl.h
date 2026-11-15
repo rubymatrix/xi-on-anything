@@ -11,10 +11,14 @@ typedef struct Sb
 {
     char* s;
     size_t len, cap;
-    int glsl; /* the dialect being written: 0 MSL, 1 Vulkan GLSL, 2 WGSL (WebGPU) */
+    int glsl; /* the dialect being written: 0 MSL, 1 Vulkan GLSL, 2 WGSL (WebGPU), 3 OpenGL GLSL */
 } Sb;
 
+#if defined(__GNUC__) || defined(__clang__)
 void sb_printf(Sb* b, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+#else
+void sb_printf(Sb* b, const char* fmt, ...);
+#endif
 
 /* The source of one library holding vs_main and fs_main for a key pair, or NULL when a shader
  * uses something the translator does not know (malloc'd; the caller frees). */
@@ -28,6 +32,14 @@ char* gfx_msl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* v
  *   copies of the color and depth targets; captured for ray tracing (GfxVsKey.shadow 2), 6 the corners
  *   written, 7 where and how (a uvec4), 19 the indices (storage buffers). */
 char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
+
+/* The same as GLSL 4.30 core for OpenGL (gfx_gl.c): Vulkan's text with GL's differences - no
+ * descriptor sets (the same binding numbers: uniform blocks, storage blocks and texture units are
+ * separate name spaces in GL), the interface block matched by name rather than location,
+ * gl_VertexID, and clip space turned into GL's: y negated, so that row 0 of every texture and target
+ * is D3D's top row, and z from D3D's 0..1 to GL's -1..1 unless the back end defines GFX_GL_CLIP01
+ * (glClipControl). No #version line; the back end adds it and GFX_VS or GFX_FS. */
+char* gfx_gl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
 
 /* The same as WGSL for WebGPU (gfx_webgpu.c): one module with vs_main and fs_main. Bindings, all
  * in group 0: 0 the uniforms, 1-4 the vertex streams (storage, read), 5 the shadow matrix, 8-15 the
