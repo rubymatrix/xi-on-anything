@@ -153,8 +153,8 @@ sources with `-fno-tree-pta`; the translated code keeps it.
   failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
 - **The forwarder NSP** (`build_switch.py nsp`, docs/platforms/switch.md): nx-hbloader v2.4.5 compiled with
   its default `.nro` ours and an exit when the game returns (rather than loading hbmenu), `hbl.json` under
-  the id `0100f1e1a0000000`, packed by hacBrewPack with the player's keys. The ExeFS builds; not yet packed or
-  run.
+  the id `0100f1e1a0000000`, packed by hacBrewPack with the player's keys. Packs (program, control and meta
+  NCAs, 167 KB); not yet run on a console. Ryubing can't run it without the system firmware installed.
 - Addons (`addons_none.c`), HD rumble, sleep and resume (the
   connections end).
 
