@@ -106,13 +106,9 @@ static void wrap_parse_input(Guest* g)
         rt_orig_parse_input(g);
         return;
     }
-    if (!strncmp(line, "/shutdown", 9) || !strncmp(line, "/logout", 7))
-    {
-        /* the game is going: addons save their settings in unload */
-        extern void addons_shutdown(void);
-        if (!strncmp(line, "/shutdown", 9))
-            addons_shutdown();
-    }
+    /* /shutdown doesn't unload the addons here: a player's shutdown counts down 30 seconds in game (and moving or
+     * healing cancels it), and the addons draw on through it. They unload when the game has ended (host64.c, after
+     * GameStart returns), as Ashita's do when the client exits. */
     if (xi_command(line, mode, injected))
     {
         rt_return(g, 0, 0);

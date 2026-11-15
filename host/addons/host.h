@@ -228,6 +228,9 @@ int xi_gui_wants_keyboard(void);
 int xi_gui_wants_mouse(void);
 /* Objects an addon owns (text objects, primitives, textures) freed when it unloads. */
 void xi_gui_free_owned(Addon* a);
+/* The addons are gone (addons_shutdown): the overlay draws nothing more. What it drew last frame (text objects, the
+ * addons' Direct3D draws, ImGui's) points at their freed textures, drawn white. */
+void xi_gui_stop(void);
 
 /* --- Lua (lua_xi.c) -------------------------------------------------------------------------- */
 
