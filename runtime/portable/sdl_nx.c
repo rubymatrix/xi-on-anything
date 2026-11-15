@@ -6,9 +6,9 @@
  * from host/switch_main.c). Input is read from HID on the game's thread, in SDL_PollEvent: the first
  * controller (or the handheld Joy-Con) is the SDL gamepad, the touch screen is the mouse. Text comes from
  * the system keyboard (swkbd), shown over a sign-in field with the field's text and handed back whole, as
- * the Xbox's keyboard does. Audio is a thread that pulls the mix every 10 ms, as SDL's device would -
- * dsound.c moves the DirectSound cursors, and signals the game's notification events, from that callback -
- * and hands it to audout. */
+ * the Xbox's keyboard does. Audio is a thread that makes a 10 ms block at a time for audout: dsound.c's
+ * callback (which moves the DirectSound cursors and signals the game's notification events) and the
+ * streams bound to the device (the sign-in screen's effects, sewave.c) mixed together. */
 #include <errno.h>
 #include <malloc.h>
 #include <pthread.h>
@@ -27,6 +27,7 @@
 
 #include "nx_bridge.h"
 #include "plat.h"
+#include "runtime.h"
 
 typedef pthread_mutex_t Lock;
 #define LOCK_INIT PTHREAD_MUTEX_INITIALIZER
@@ -650,8 +651,11 @@ static void gamepad_event(Uint32 type, int button, int down)
 
 static int g_touching;
 
+static void audio_report(void);
+
 static void poll_input(void)
 {
+    audio_report();
     if (!g_input_ready)
     {
         padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -792,24 +796,44 @@ void SDL_SetGamepadEventsEnabled(bool on) { (void)on; }
 void SDL_UpdateGamepads(void) { poll_input(); }
 
 /* --- audio ----------------------------------------------------------------------------------------- */
+/* One device: audout, 48 kHz stereo s16, fed in blocks of FRAMES by one thread. Two clients mix into each
+ * block: dsound.c's callback stream (SDL_OpenAudioDeviceStream, the game's DirectSound mix, 48 kHz stereo
+ * float) and the streams bound to the device (SDL_OpenAudioDevice + SDL_CreateAudioStream + SDL_BindAudioStream:
+ * sewave.c's voices, the sign-in screen's effects, s16 at the sound's own rate, resampled here). */
 #define FRAMES 480 /* 10 ms at 48 kHz: dsound.c's cursors move in steps this size */
+#define OUT_RATE 48000
 struct SDL_AudioStream
 {
+    /* the callback stream (g_stream) */
     SDL_AudioStreamCallback callback;
     void* user;
-    volatile int running;
+    /* a voice: its queued samples, interleaved, and the play position in them (frames, 32.32) */
+    int voice, channels;
+    uint32_t rate;
+    float gain;
+    int16_t* pcm;
+    size_t frames, cap;
+    uint64_t pos;
 };
 static SDL_AudioStream g_stream;
+static volatile int g_stream_on; /* dsound's callback is pulled (SDL_ResumeAudioStreamDevice) */
 
-/* audout: 48 kHz stereo s16. A few buffers of FRAMES each, refilled as the device hands them back. */
+#define AUD_VOICES 16
+static Mutex g_voice_lock;
+static SDL_AudioStream* g_voices[AUD_VOICES];
+
+/* audout: a few buffers of FRAMES each, refilled as the device hands them back */
 #define AUD_BUFS 4
 #define AUD_BYTES ((FRAMES * 2 * sizeof(int16_t) + 0xFFF) & ~(size_t)0xFFF)
 static int16_t* g_aud_mem[AUD_BUFS];
 static AudioOutBuffer g_aud_buf[AUD_BUFS];
 static int g_audout;
-static uint32_t g_aud_puts; /* blocks the device took (audout_put): the audio thread's pace */
-static float g_mix[FRAMES * 2];
-static int g_mix_frames;
+static float g_mix[FRAMES * 2]; /* the block being made */
+static int g_mix_frames;        /* of it, what dsound's callback has put */
+
+/* For the log (audio_report, on the main thread: stdio from other threads is not safe here). Underruns:
+ * blocks the device had nothing for, from the clock since the first block against the blocks put. */
+static volatile uint32_t g_aud_blocks, g_aud_under, g_aud_mix_max_us, g_aud_gap_max_us;
 
 static void audout_start(void)
 {
@@ -836,15 +860,13 @@ static void audout_start(void)
     g_audout = 1;
 }
 
-/* one mixed block to the device: waits for a buffer it has played */
-static void audout_put(const float* f)
+/* one block to the device: waits for a buffer it has played (the thread's pace). 0 if the wait failed */
+static int audout_put(const float* f)
 {
-    if (!g_audout)
-        return;
     AudioOutBuffer* done = NULL;
     u32 n = 0;
     if (R_FAILED(audoutWaitPlayFinish(&done, &n, UINT64_MAX)) || !done)
-        return;
+        return 0;
     int16_t* out = (int16_t*)done->buffer;
     for (int i = 0; i < FRAMES * 2; ++i)
     {
@@ -853,39 +875,117 @@ static void audout_put(const float* f)
     }
     done->data_size = FRAMES * 2 * sizeof(int16_t);
     audoutAppendAudioOutBuffer(done);
-    g_aud_puts++;
+    static uint64_t first, prev;
+    uint64_t now = now_ns();
+    if (!first)
+        first = prev = now;
+    uint32_t gap = (uint32_t)((now - prev) / 1000u), blocks = ++g_aud_blocks;
+    prev = now;
+    if (gap > g_aud_gap_max_us)
+        g_aud_gap_max_us = gap;
+    uint64_t due = (now - first) * OUT_RATE / 1000000000u / FRAMES; /* blocks the device has played */
+    if (due > (uint64_t)blocks + AUD_BUFS && due - blocks - AUD_BUFS > g_aud_under)
+        g_aud_under = (uint32_t)(due - blocks - AUD_BUFS);
+    return 1;
 }
 
-static void* audio_thread(void* arg)
+/* the bound voices into the block: linear resampling to the output rate, as dsound.c's mixer */
+static void mix_voices(float* out)
 {
-    SDL_AudioStream* s = (SDL_AudioStream*)arg;
+    mutexLock(&g_voice_lock);
+    for (int v = 0; v < AUD_VOICES; ++v)
+    {
+        SDL_AudioStream* s = g_voices[v];
+        if (!s || !s->frames)
+            continue;
+        uint64_t step = ((uint64_t)s->rate << 32) / OUT_RATE, end = (uint64_t)s->frames << 32;
+        int ch = s->channels;
+        for (int f = 0; f < FRAMES && s->pos < end; ++f, s->pos += step)
+        {
+            size_t i = (size_t)(s->pos >> 32), nx = i + 1 < s->frames ? i + 1 : i;
+            float t = (float)(uint32_t)s->pos / 4294967296.0f, g = s->gain / 32768.0f;
+            for (int c = 0; c < 2; ++c)
+            {
+                int k = c < ch ? c : 0;
+                float a = s->pcm[i * ch + k], b = s->pcm[nx * ch + k];
+                out[2 * f + c] += (a + (b - a) * t) * g;
+            }
+        }
+        if (s->pos >= end)
+            s->frames = 0, s->pos = 0;
+    }
+    mutexUnlock(&g_voice_lock);
+}
+
+static void audio_block(void)
+{
+    uint64_t t0 = now_ns();
+    memset(g_mix, 0, sizeof g_mix);
+    g_mix_frames = 0;
+    if (__atomic_load_n(&g_stream_on, __ATOMIC_ACQUIRE))
+        g_stream.callback(g_stream.user, &g_stream, FRAMES * 2 * (int)sizeof(float), FRAMES * 2 * (int)sizeof(float));
+    mix_voices(g_mix);
+    uint32_t us = (uint32_t)((now_ns() - t0) / 1000u);
+    if (us > g_aud_mix_max_us)
+        g_aud_mix_max_us = us;
+}
+
+/* every 10 s while the device runs: blocks put, underruns so far, the longest mix and gap since the last */
+static void audio_report(void)
+{
+    static uint64_t last;
+    static uint32_t was;
+    uint64_t now = now_ns();
+    if (now - last < 10000000000ull || g_aud_blocks == was)
+        return;
+    last = now, was = g_aud_blocks;
+    uint32_t mix = __atomic_exchange_n(&g_aud_mix_max_us, 0, __ATOMIC_RELAXED);
+    uint32_t gap = __atomic_exchange_n(&g_aud_gap_max_us, 0, __ATOMIC_RELAXED);
+    rt_log("[audio] blocks %u underruns %u mix max %u us gap max %u.%u ms%s\n", was, g_aud_under, mix, gap / 1000,
+        gap / 100 % 10, g_audout ? "" : " (no device: paced to the clock)");
+}
+
+static void audio_thread(void* arg)
+{
+    (void)arg;
+    /* one step above the game's threads (plat_thread_start gives the main thread's priority, and Horizon
+     * doesn't share a core between threads of one priority): a buffer coming back takes the core from a
+     * busy thread there. Its work, a block's mix, is small. */
+    s32 prio = 0;
+    if (R_SUCCEEDED(svcGetThreadPriority(&prio, CUR_THREAD_HANDLE)) && prio > 0x1C)
+        svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)(prio - 1));
     audout_start();
     uint64_t start = now_ns(), done = 0; /* without the device: paced to the clock */
-    while (s->running)
+    for (;;)
     {
         if (g_audout)
         {
-            /* the device's pace: one block per buffer it gives back. A pass that gave it none (nothing
-             * mixed, or the wait failed) sleeps: a thread that never waits keeps its core from the others
-             * of its priority (Horizon doesn't share a core between them) */
-            uint32_t puts = g_aud_puts;
-            s->callback(s->user, s, FRAMES * 2 * (int)sizeof(float), FRAMES * 2 * (int)sizeof(float));
-            if (g_aud_puts == puts)
-                svcSleepThread(2000000);
+            audio_block();
+            if (!audout_put(g_mix))
+                svcSleepThread(10000000); /* a failed wait: never spin */
             continue;
         }
-        uint64_t due = (now_ns() - start) * 48000 / 1000000000u;
+        uint64_t due = (now_ns() - start) * OUT_RATE / 1000000000u;
         while (done + FRAMES <= due)
         {
-            s->callback(s->user, s, FRAMES * 2 * (int)sizeof(float), FRAMES * 2 * (int)sizeof(float));
+            audio_block();
             done += FRAMES;
         }
         svcSleepThread(5000000);
     }
-    return NULL;
 }
 
-static void audio_thread_start(void* arg) { audio_thread(arg); }
+/* the thread, once, for whichever client comes first; plat_thread_start puts it off the game's core */
+static int audio_start(void)
+{
+    static int started;
+    static Mutex start_lock;
+    mutexLock(&start_lock);
+    if (!started)
+        started = plat_thread_start(audio_thread, NULL);
+    mutexUnlock(&start_lock);
+    return started;
+}
 
 SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID dev, const SDL_AudioSpec* spec, SDL_AudioStreamCallback callback,
     void* user)
@@ -898,66 +998,154 @@ SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID dev, const SDL_Audi
 
 bool SDL_ResumeAudioStreamDevice(SDL_AudioStream* s)
 {
-    if (!s || __atomic_exchange_n(&s->running, 1, __ATOMIC_SEQ_CST))
-        return true;
-    /* plat_thread_start: off the game's core (core 0), which a busy mixer would otherwise share */
-    if (!plat_thread_start(audio_thread_start, s))
-    {
-        s->running = 0;
+    if (s != &g_stream || !s->callback || !audio_start())
         return false;
-    }
+    __atomic_store_n(&g_stream_on, 1, __ATOMIC_RELEASE);
     return true;
 }
-bool SDL_PauseAudioStreamDevice(SDL_AudioStream* s) { (void)s; return true; }
+bool SDL_PauseAudioStreamDevice(SDL_AudioStream* s)
+{
+    if (s == &g_stream)
+        __atomic_store_n(&g_stream_on, 0, __ATOMIC_RELEASE);
+    return true;
+}
 
-/* the mix, as dsound.c hands it over: gathered into whole blocks for the device */
 bool SDL_PutAudioStreamData(SDL_AudioStream* s, const void* buf, int len)
 {
-    (void)s;
-    const float* f = (const float*)buf;
-    int frames = len / (int)(2 * sizeof(float));
-    while (frames > 0)
+    if (!s || !buf || len <= 0)
+        return false;
+    if (s == &g_stream)
     {
-        int take = FRAMES - g_mix_frames < frames ? FRAMES - g_mix_frames : frames;
-        memcpy(g_mix + g_mix_frames * 2, f, (size_t)take * 2 * sizeof(float));
-        g_mix_frames += take, f += take * 2, frames -= take;
-        if (g_mix_frames == FRAMES)
-        {
-            audout_put(g_mix);
-            g_mix_frames = 0;
-        }
+        /* dsound's mix, from its callback on the audio thread: into the block being made */
+        int frames = len / (int)(2 * sizeof(float));
+        if (frames > FRAMES - g_mix_frames)
+            frames = FRAMES - g_mix_frames;
+        memcpy(g_mix + g_mix_frames * 2, buf, (size_t)frames * 2 * sizeof(float));
+        g_mix_frames += frames;
+        return true;
     }
-    return true;
+    if (!s->voice)
+        return false;
+    size_t n = (size_t)len / (2 * (size_t)s->channels);
+    mutexLock(&g_voice_lock);
+    size_t used = (size_t)(s->pos >> 32); /* what has played goes first */
+    if (used >= s->frames)
+        s->frames = 0, s->pos = 0;
+    else if (used)
+    {
+        memmove(s->pcm, s->pcm + used * s->channels, (s->frames - used) * s->channels * sizeof *s->pcm);
+        s->frames -= used, s->pos -= (uint64_t)used << 32;
+    }
+    int ok = 1;
+    if (s->frames + n > s->cap)
+    {
+        size_t cap = s->frames + n;
+        int16_t* p = (int16_t*)realloc(s->pcm, cap * s->channels * sizeof *p);
+        if (p)
+            s->pcm = p, s->cap = cap;
+        else
+            ok = 0;
+    }
+    if (ok)
+    {
+        memcpy(s->pcm + s->frames * s->channels, buf, n * s->channels * sizeof *s->pcm);
+        s->frames += n;
+    }
+    mutexUnlock(&g_voice_lock);
+    return ok;
 }
 
-/* The addons' sounds and the sign-in screen's: no WAV loads and no second device, so none plays */
+/* The addons' sounds: no WAV loads (the addons are not built for the Switch) */
 bool SDL_LoadWAV(const char* path, SDL_AudioSpec* spec, Uint8** buf, Uint32* len)
 {
     (void)path, (void)spec, (void)buf, (void)len;
     return false;
 }
-int SDL_GetAudioStreamQueued(SDL_AudioStream* s) { (void)s; return 0; }
-bool SDL_FlushAudioStream(SDL_AudioStream* s) { (void)s; return true; }
-void SDL_DestroyAudioStream(SDL_AudioStream* s) { (void)s; }
+
+/* --- the device's own streams (sewave.c): s16, mono or stereo, any rate -------------------------------- */
 SDL_AudioDeviceID SDL_OpenAudioDevice(SDL_AudioDeviceID dev, const SDL_AudioSpec* spec)
 {
     (void)dev, (void)spec;
-    return 0;
+    return audio_start() ? 1 : 0;
 }
 bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID dev, SDL_AudioSpec* spec, int* frames)
 {
-    (void)dev, (void)spec, (void)frames;
-    return false;
+    (void)dev;
+    if (spec)
+        spec->format = SDL_AUDIO_F32, spec->channels = 2, spec->freq = OUT_RATE;
+    if (frames)
+        *frames = FRAMES;
+    return true;
 }
 SDL_AudioStream* SDL_CreateAudioStream(const SDL_AudioSpec* src, const SDL_AudioSpec* dst)
 {
-    (void)src, (void)dst;
-    return NULL;
+    (void)dst; /* always the device's */
+    if (!src || src->format != SDL_AUDIO_S16LE || src->channels < 1 || src->channels > 2 || src->freq <= 0 ||
+        src->freq > 200000)
+        return NULL;
+    SDL_AudioStream* s = (SDL_AudioStream*)calloc(1, sizeof *s);
+    if (s)
+        s->voice = 1, s->channels = src->channels, s->rate = (uint32_t)src->freq, s->gain = 1.0f;
+    return s;
 }
-bool SDL_BindAudioStream(SDL_AudioDeviceID dev, SDL_AudioStream* s) { (void)dev, (void)s; return false; }
-bool SDL_ClearAudioStream(SDL_AudioStream* s) { (void)s; return true; }
+bool SDL_BindAudioStream(SDL_AudioDeviceID dev, SDL_AudioStream* s)
+{
+    if (!dev || !s || !s->voice)
+        return false;
+    int ok = 0;
+    mutexLock(&g_voice_lock);
+    for (int v = 0; v < AUD_VOICES && !ok; ++v)
+        if (g_voices[v] == s)
+            ok = 1;
+    for (int v = 0; v < AUD_VOICES && !ok; ++v)
+        if (!g_voices[v])
+            g_voices[v] = s, ok = 1;
+    mutexUnlock(&g_voice_lock);
+    return ok;
+}
+bool SDL_ClearAudioStream(SDL_AudioStream* s)
+{
+    if (s && s->voice)
+    {
+        mutexLock(&g_voice_lock);
+        s->frames = 0, s->pos = 0;
+        mutexUnlock(&g_voice_lock);
+    }
+    return true;
+}
+bool SDL_SetAudioStreamGain(SDL_AudioStream* s, float gain)
+{
+    if (!s || !s->voice || gain < 0)
+        return false;
+    mutexLock(&g_voice_lock);
+    s->gain = gain;
+    mutexUnlock(&g_voice_lock);
+    return true;
+}
+int SDL_GetAudioStreamQueued(SDL_AudioStream* s)
+{
+    if (!s || !s->voice)
+        return 0;
+    mutexLock(&g_voice_lock);
+    size_t used = (size_t)(s->pos >> 32), left = used < s->frames ? s->frames - used : 0;
+    mutexUnlock(&g_voice_lock);
+    return (int)(left * 2 * (size_t)s->channels);
+}
+bool SDL_FlushAudioStream(SDL_AudioStream* s) { (void)s; return true; }
+void SDL_DestroyAudioStream(SDL_AudioStream* s)
+{
+    if (!s || !s->voice)
+        return;
+    mutexLock(&g_voice_lock);
+    for (int v = 0; v < AUD_VOICES; ++v)
+        if (g_voices[v] == s)
+            g_voices[v] = NULL;
+    mutexUnlock(&g_voice_lock);
+    free(s->pcm);
+    free(s);
+}
+/* the device stays: dsound's stream may still be on it, and the thread is cheap */
 void SDL_CloseAudioDevice(SDL_AudioDeviceID dev) { (void)dev; }
-bool SDL_SetAudioStreamGain(SDL_AudioStream* s, float gain) { (void)s, (void)gain; return true; }
 
 /* --- the rest host64 and its screens use ------------------------------------------------------------- */
 /* host64's own files (the sign-in's settings, saved logins, patch.ver for an install without one):

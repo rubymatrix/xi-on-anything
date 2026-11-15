@@ -579,6 +579,7 @@ static uint16_t scan_of_vk(uint32_t vk)
 }
 
 int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h);
+void (*user32_pump_hook)(void);
 void (*user32_quit_hook)(void);
 
 static uint32_t mouse_keys(SDL_MouseButtonFlags b)
@@ -687,6 +688,8 @@ static void pump(void)
 #if defined(__APPLE__) && TARGET_OS_OSX
     menu_keys(g_cmd_ctrl);
 #endif
+    if (user32_pump_hook)
+        user32_pump_hook();
     SDL_Event e;
     while (SDL_PollEvent(&e))
     {

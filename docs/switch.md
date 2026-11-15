@@ -46,6 +46,25 @@ Threads on the Switch: `plat_thread_start` puts them on cores 1 and 2 (the main 
 core 0) at the main thread's priority. Horizon doesn't share a core between threads of one priority, so a
 thread that never waits - sdl_nx.c's audio thread did, with nothing mixed - keeps the others off its core.
 
+## Audio
+
+One device, libnx's audout (48 kHz stereo s16, four 10 ms buffers), fed by one thread in sdl_nx.c. Each
+10 ms block mixes two clients: dsound.c's callback stream (`SDL_OpenAudioDeviceStream`, the game's
+DirectSound mix) and the streams bound to the device (`SDL_OpenAudioDevice` + `SDL_CreateAudioStream` +
+`SDL_BindAudioStream`, up to 16: host/sewave.c's voices, the sign-in screen's effects, s16 at the sound's
+own rate, resampled linearly). The thread waits on audout for every block, and runs one priority step above
+the game's threads, so a buffer coming back takes its core from a busy one.
+
+Two lines in host64.log, both written on the main thread (stdio from other threads isn't safe here):
+- `[audio] blocks N underruns N mix max N us gap max N ms`, every 10 s while the device runs. Underruns are
+  blocks the device had nothing for (the clock since the first block against the blocks put); the maxima are
+  since the line before.
+- `[dsound] ...`, every 10 s once the game has made DirectSound (user32's pump, `user32_pump_hook`): buffers
+  made, duplicated, refused (and the last refused format), live and peak, Play calls, the most playing at
+  once, failed Locks, notifications set and refused, interfaces asked for that dsound.c lacks (the IID's
+  first dword), and the guest's `SetThreadPriority` requests by level (not applied). On a desktop build:
+  `FFXI_AUDIO_STATS=1`.
+
 ## Guest memory
 
 The guest has a 2 GB window (`FFXI_GUEST_2GB`, gwin.c; the same as iOS), because Horizon has no
@@ -89,7 +108,9 @@ what Ryubing gives a bare `.nro`.
 
 ## Open: a start-up race in Ryubing
 
-With the render thread, start-up in Ryubing reaches the sign-in screen in about one run in three. In the
+With the render thread, start-up in Ryubing reached the sign-in screen in about one run in three (and,
+later on 2026-11-15, in none of a dozen: the spin right after the DNS look-up, with or without a 50 ms sleep
+after the render thread starts). In the
 others, small blocks low in the C heap are zeroed moments after the render thread is made: the queue's
 first batch (its `cap` then 0, and the main thread spins in `rec` doubling it), and stdio's state (log lines
 lost). Anything that delays the main thread there hides it (a debug string, a 50 ms sleep); so far ruled
@@ -107,8 +128,12 @@ render thread before anything else at start, a watchpoint (Ryubing's GDB stub).
 - **Graphics**: the start-up race above; `gfx-test.nro` in Ryubing still fails its read-back checks (reads
   after a draw come back mostly zero there: the emulator's GPU-to-CPU sync, or ours - to be found); the scene
   effects, the scene renderer, water and sun shadows on GL; a program cache file. deko3d after it.
-- The forwarder NSP (`build_switch.py nsp`), audio on a console, HD rumble, sleep and resume (the
-  connections end), the sign-in screen with the controller.
+- **Audio**: the sign-in's effects (the device's own streams, 2026-11-15) are built but not yet heard: the
+  start-up race below now stops every start in Ryubing (at the commit before them too). In game some effects
+  (maybe the music) are missing on the console; the `[audio]`/`[dsound]` lines are there to tell underruns
+  (scheduling: every thread but the game's shares cores 1-2 at one priority, and `SetThreadPriority` is not
+  applied) from what dsound.c lacks.
+- The forwarder NSP (`build_switch.py nsp`), HD rumble, sleep and resume (the connections end).
 
 ## Testing in the emulator
 

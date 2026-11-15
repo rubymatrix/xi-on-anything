@@ -9,6 +9,10 @@ void k32_init(const char* game_dir, const char* exe_path);
 void k32_add_module(const char* name, uint32_t base);
 /* Files, directories, synchronisation, threads, time (k32_io.c). */
 void k32_io_init(void);
+/* The guest's SetThreadPriority requests so far, by level: IDLE(-15), -2, -1, NORMAL(0), 1, 2,
+ * TIME_CRITICAL(15), other (for dsound_report's line; the levels are not applied) */
+#define K32_PRIO_LEVELS 8
+void k32_thread_priorities(uint32_t out[K32_PRIO_LEVELS]);
 void k32_misc_init(void); /* k32_misc.c */
 
 /* The registry (reg.c): .reg files in `reg export` format, loaded in order, then the overlay the

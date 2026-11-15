@@ -48,6 +48,8 @@ extern int (*user32_ui_hit)(float fx, float fy);
  * is for (points); returns 1 to keep a press, a wheel turn or typed text from the game (DirectInput
  * and the window messages alike). Releases and motion always reach the game. */
 extern int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h);
+/* Called on the window's thread each time it pumps (dsound.c's report) */
+extern void (*user32_pump_hook)(void);
 /* Set by the addon host: runs once when the player quits (the window closing), before the process
  * ends. */
 extern void (*user32_quit_hook)(void);
