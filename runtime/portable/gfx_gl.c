@@ -18,10 +18,16 @@
  *    X8, L8, A8 and A8L8, S3TC for DXT - nothing is converted on the CPU;
  *  - state is set per draw against a cache of what is set, with one program per key pair; there are
  *    triangle fans, clears of rectangles (the scissor), border colors and copies between textures;
- *  - the vertex streams are storage buffers the generated functions read (as WebGPU's), bound at an
- *    offset the alignment allows, the rest of it added to GfxU.offset; the frame's uniforms, vertices and
- *    indices go into one ring, mapped persistently (GL 4.4's buffer storage) when the driver has it, in
- *    segments reused once a fence says the GPU is done with them.
+ *  - the vertex streams are texture buffers of words the generated functions read (texelFetch: a texture
+ *    load, where Mesa makes storage buffers' reads generic loads, which Ryubing doesn't translate), each
+ *    over a whole buffer - a static one's, or the ring's - with the stream's place in it added to
+ *    GfxU.offset (as WebGPU binds its streams); the frame's uniforms, vertices and indices go into one
+ *    ring, mapped persistently (GL 4.4's buffer storage) when the driver has it, in segments reused once
+ *    a fence says the GPU is done with them.
+ *
+ * The Switch: the device is brought up on the default window through EGL (switch-mesa), its surface
+ * 1920x1080 and cropped to the screen's size at each present. Its log lines go out as debug strings
+ * (svcOutputDebugString): stdio from a thread other than the main one corrupted the main thread's there.
  *
  * Not yet: the scene effects (gfx_scene_done), the scene renderer, water, the sun's shadows, a
  * program cache file. */
@@ -73,7 +79,17 @@ enum
 
 static GlApi gl;
 
+#if defined(__SWITCH__)
+#define LOG(...)                                                                                                      \
+    do                                                                                                                \
+    {                                                                                                                 \
+        char log_[1024];                                                                                              \
+        int logn_ = snprintf(log_, sizeof log_, __VA_ARGS__);                                                         \
+        svcOutputDebugString(log_, (u64)(logn_ < (int)sizeof log_ ? logn_ : (int)sizeof log_ - 1));                   \
+    } while (0)
+#else
 #define LOG(...) (fprintf(stderr, __VA_ARGS__), fflush(stderr))
+#endif
 
 /* --- the frame profile (gfx_webgpu.c's) ------------------------------------------------------------------ */
 int gfx_profiling;
@@ -386,7 +402,7 @@ typedef struct GlState
     GLint sc[4], vp[4];
     float dr[2];
     GLuint program, draw_fbo, read_fbo, ebo;
-    BufBind ubo, ssbo[1 + GFX_NSTREAMS];
+    BufBind ubo;
     GLuint tex[16], samp[16];
     GLenum tex_target[16];
     int unit;
@@ -493,9 +509,6 @@ static void st_forget_buffer(GLuint b)
 {
     if (S.ubo.buf == b)
         memset(&S.ubo, 0xFF, sizeof S.ubo);
-    for (int i = 0; i <= GFX_NSTREAMS; ++i)
-        if (S.ssbo[i].buf == b)
-            memset(&S.ssbo[i], 0xFF, sizeof S.ssbo[i]);
     if (S.ebo == b)
         S.ebo = ~0u;
 }
@@ -508,7 +521,7 @@ static void st_forget_texture(GLuint t)
 }
 
 /* --- device limits and extensions --------------------------------------------------------------------------- */
-static GLint g_ubo_align = 256, g_ssbo_align = 256, g_ssbo_max = 1 << 24;
+static GLint g_ubo_align = 256;
 static int g_has_s3tc, g_has_mirror_once, g_clip01;
 static float g_max_aniso;
 
@@ -838,8 +851,26 @@ void gfx_tex_upload(GfxTex* t, uint32_t face, uint32_t level, const void* src, u
 struct GfxBuf
 {
     GLuint name;
+    GLuint tbo;    /* a texture buffer of its words, for the vertex functions (made at its first draw) */
     uint32_t size; /* as made: a multiple of 4 */
 };
+
+/* a texture buffer of 32-bit words over a whole buffer: a stream the generated functions read (texelFetch) */
+static GLuint words_texture(GLuint buf)
+{
+    GLuint t;
+    gl.GenTextures(1, &t);
+    st_texture(0, GL_TEXTURE_BUFFER, t);
+    gl.TexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, buf);
+    return t;
+}
+
+static GLuint buf_texture(GfxBuf* b)
+{
+    if (!b->tbo)
+        b->tbo = words_texture(b->name);
+    return b->tbo;
+}
 
 GfxBuf* gfx_buf_create(uint32_t size)
 {
@@ -858,6 +889,11 @@ void gfx_buf_destroy(GfxBuf* b)
     if (!b)
         return;
     st_forget_buffer(b->name);
+    if (b->tbo)
+    {
+        st_forget_texture(b->tbo);
+        gl.DeleteTextures(1, &b->tbo);
+    }
     gl.DeleteBuffers(1, &b->name);
     free(b);
 }
@@ -1296,7 +1332,7 @@ static int set_viewport(const uint32_t vp[6])
 }
 
 /* --- drawing --------------------------------------------------------------------------------------------- */
-static GLuint g_dummy_buf;
+static GLuint g_dummy_buf, g_dummy_tbo, g_ring_tbo;
 static GfxTex *g_dummy2d, *g_dummycube;
 
 static uint32_t vertex_count(uint32_t prim, uint32_t n)
@@ -1338,7 +1374,7 @@ void gfx_draw(const GfxDraw* d)
     uint32_t need = U_SIZE + (uint32_t)g_ubo_align;
     for (int s = 0; s < GFX_NSTREAMS; ++s)
         if (!d->buf[s] && d->data[s] && d->size[s])
-            need += d->size[s] + (uint32_t)g_ssbo_align;
+            need += d->size[s] + 16;
     if (d->indices && !d->ibuf)
         need += n * d->index_size + 16;
     if (!ring_reserve(need))
@@ -1360,8 +1396,8 @@ void gfx_draw(const GfxDraw* d)
     }
     if (!set_viewport(d->vp))
         return;
-    /* the streams: a static buffer bound from the alignment below its offset, the rest added to its
-     * registers' offsets; the draw's own vertices put in the ring */
+    /* the streams: texture buffers over whole buffers (a static one's, or the ring's for the draw's own
+     * vertices), the stream's place in it added to its registers' offsets */
     GfxU u;
     size_t un = offsetof(GfxU, light) + (size_t)d->vs.nlights * sizeof(GfxLight);
     if (d->vs.prog)
@@ -1371,33 +1407,17 @@ void gfx_draw(const GfxDraw* d)
     memcpy(&u, &d->u, un);
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
-        GLuint buf = g_dummy_buf;
-        GLintptr off = 0;
-        GLsizeiptr size = 256;
-        uint32_t extra = 0;
+        GLuint tex = g_dummy_tbo;
+        uint32_t at = 0;
         if (d->buf[s])
-        {
-            uint32_t at = d->buf_off[s];
-            off = (GLintptr)(at & ~((uint32_t)g_ssbo_align - 1));
-            extra = at - (uint32_t)off;
-            buf = d->buf[s]->name;
-            size = (GLsizeiptr)d->buf[s]->size - off;
-            if (size > g_ssbo_max)
-                size = g_ssbo_max;
-        }
+            tex = buf_texture(d->buf[s]), at = d->buf_off[s];
         else if (d->data[s] && d->size[s])
-        {
-            buf = g_ring;
-            off = (GLintptr)ring_put(d->data[s], d->size[s], (uint32_t)g_ssbo_align);
-            size = (GLsizeiptr)((d->size[s] + 3) & ~3u);
-        }
-        if (size <= 0)
-            buf = g_dummy_buf, off = 0, size = 256, extra = 0;
-        st_buffer(GL_SHADER_STORAGE_BUFFER, (GLuint)(1 + s), &S.ssbo[1 + s], buf, off, size);
-        if (extra)
+            tex = g_ring_tbo, at = ring_put(d->data[s], d->size[s], 16);
+        st_texture(1 + s, GL_TEXTURE_BUFFER, tex);
+        if (at)
             for (int r = 0; r < GFX_NREGS; ++r)
                 if (d->vs.el[r].used && d->vs.el[r].stream == s)
-                    u.offset[r] += (int32_t)extra;
+                    u.offset[r] += (int32_t)at;
     }
     /* the uniforms: the part the functions read (the rest of the block's room is left as it was) */
     uint32_t uoff = ring_put(NULL, U_SIZE, (uint32_t)g_ubo_align);
@@ -1720,7 +1740,9 @@ static void make_statics(void)
     gl.BindBuffer(GL_COPY_WRITE_BUFFER, g_dummy_buf);
     static const uint8_t zero[256];
     gl.BufferData(GL_COPY_WRITE_BUFFER, sizeof zero, zero, GL_STATIC_DRAW);
+    g_dummy_tbo = words_texture(g_dummy_buf);
     ring_make();
+    g_ring_tbo = words_texture(g_ring);
     uint32_t white[1] = { 0xFFFFFFFFu };
     g_dummy2d = gfx_tex_create(GFX_TEX_2D, F_A8R8G8B8, 1, 1, 1, GFX_USE_SAMPLE);
     gfx_tex_upload(g_dummy2d, 0, 0, white, 4);
@@ -1764,7 +1786,9 @@ int gfx_init(void* sdl_window, int vsync)
     const char* dbg = getenv("FFXI_GL_DEBUG");
     int debug = dbg && dbg[0] && dbg[0] != '0';
     g_debug = debug;
-    if (!ctx_up(sdl_window, debug) || !gl_load())
+    if (!ctx_up(sdl_window, debug))
+        return 0;
+    if (!gl_load())
         return 0;
     GLint major = 0, minor = 0;
     gl.GetIntegerv(GL_MAJOR_VERSION, &major);
@@ -1774,20 +1798,16 @@ int gfx_init(void* sdl_window, int vsync)
         LOG("[recomp] gfx: OpenGL %d.%d; 4.3 is needed\n", major, minor);
         return 0;
     }
-    GLint vsb = 0;
-    gl.GetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &vsb);
-    if (vsb < GFX_NSTREAMS)
+    GLint tbs = 0; /* the ring is one texture buffer of words */
+    gl.GetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &tbs);
+    if ((uint32_t)tbs < RING_SEG / 4 * RING_NSEG)
     {
-        LOG("[recomp] gfx: the vertex functions may read %d storage buffers; %d are needed\n", vsb, GFX_NSTREAMS);
+        LOG("[recomp] gfx: texture buffers of %d words; %u are needed\n", tbs, RING_SEG / 4 * RING_NSEG);
         return 0;
     }
     gl.GetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &g_ubo_align);
-    gl.GetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &g_ssbo_align);
-    gl.GetIntegerv(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &g_ssbo_max);
     if (g_ubo_align < 4)
         g_ubo_align = 4;
-    if (g_ssbo_align < 4)
-        g_ssbo_align = 4;
     g_has_s3tc = has_ext("GL_EXT_texture_compression_s3tc");
     g_has_mirror_once = major * 10 + minor >= 44 || has_ext("GL_ARB_texture_mirror_clamp_to_edge") ||
                         has_ext("GL_EXT_texture_mirror_clamp");

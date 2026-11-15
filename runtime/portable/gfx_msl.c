@@ -372,30 +372,30 @@ static void glsl_fetch(Sb* b, const GfxElem* e, int reg)
     int s = e->stream;
     switch (e->type)
     {
-    case GFX_FLOAT1: sb_printf(b, "  float4 v%d = float4(uintBitsToFloat(s%d.w[p%d]), 0, 0, 1);\n", reg, s, reg); break;
+    case GFX_FLOAT1: sb_printf(b, "  float4 v%d = float4(uintBitsToFloat(SW%d(p%d)), 0, 0, 1);\n", reg, s, reg); break;
     case GFX_FLOAT2:
-        sb_printf(b, "  float4 v%d = float4(uintBitsToFloat(uvec2(s%d.w[p%d], s%d.w[p%d + 1])), 0, 1);\n", reg, s, reg, s, reg);
+        sb_printf(b, "  float4 v%d = float4(uintBitsToFloat(uvec2(SW%d(p%d), SW%d(p%d + 1))), 0, 1);\n", reg, s, reg, s, reg);
         break;
     case GFX_FLOAT3:
-        sb_printf(b, "  float4 v%d = float4(uintBitsToFloat(uvec3(s%d.w[p%d], s%d.w[p%d + 1], s%d.w[p%d + 2])), 1);\n", reg, s, reg,
+        sb_printf(b, "  float4 v%d = float4(uintBitsToFloat(uvec3(SW%d(p%d), SW%d(p%d + 1), SW%d(p%d + 2))), 1);\n", reg, s, reg,
             s, reg, s, reg);
         break;
     case GFX_FLOAT4:
-        sb_printf(b, "  float4 v%d = uintBitsToFloat(uvec4(s%d.w[p%d], s%d.w[p%d + 1], s%d.w[p%d + 2], s%d.w[p%d + 3]));\n", reg, s,
+        sb_printf(b, "  float4 v%d = uintBitsToFloat(uvec4(SW%d(p%d), SW%d(p%d + 1), SW%d(p%d + 2), SW%d(p%d + 3)));\n", reg, s,
             reg, s, reg, s, reg, s, reg);
         break;
-    case GFX_D3DCOLOR: sb_printf(b, "  float4 v%d = unpackUnorm4x8(s%d.w[p%d]).zyxw;\n", reg, s, reg); break;
+    case GFX_D3DCOLOR: sb_printf(b, "  float4 v%d = unpackUnorm4x8(SW%d(p%d)).zyxw;\n", reg, s, reg); break;
     case GFX_UBYTE4:
-        sb_printf(b, "  uint w%d = s%d.w[p%d];\n  float4 v%d = float4(uvec4(w%d, w%d >> 8, w%d >> 16, w%d >> 24) & 0xFFu);\n", reg, s,
+        sb_printf(b, "  uint w%d = SW%d(p%d);\n  float4 v%d = float4(uvec4(w%d, w%d >> 8, w%d >> 16, w%d >> 24) & 0xFFu);\n", reg, s,
             reg, reg, reg, reg, reg, reg);
         break;
     case GFX_SHORT2:
-        sb_printf(b, "  int w%d = int(s%d.w[p%d]);\n  float4 v%d = float4(float((w%d << 16) >> 16), float(w%d >> 16), 0, 1);\n", reg,
+        sb_printf(b, "  int w%d = int(SW%d(p%d));\n  float4 v%d = float4(float((w%d << 16) >> 16), float(w%d >> 16), 0, 1);\n", reg,
             s, reg, reg, reg, reg);
         break;
     case GFX_SHORT4:
         sb_printf(b,
-            "  int w%d = int(s%d.w[p%d]), x%d = int(s%d.w[p%d + 1]);\n"
+            "  int w%d = int(SW%d(p%d)), x%d = int(SW%d(p%d + 1));\n"
             "  float4 v%d = float4(float((w%d << 16) >> 16), float(w%d >> 16), float((x%d << 16) >> 16), float(x%d >> 16));\n",
             reg, s, reg, reg, s, reg, reg, reg, reg, reg, reg);
         break;
@@ -1225,7 +1225,12 @@ static char* glsl_generate(int dialect, const GfxVsKey* vk, const GfxFsKey* fk, 
     emit_vout(&b, vk);
     sb_printf(&b, "#ifdef GFX_VS\n");
     for (int s = 0; s < GFX_NSTREAMS; ++s)
-        sb_printf(&b, "layout(std430, set = 0, binding = %d) readonly buffer SB%d { uint w[]; } s%d;\n", 1 + s, s, s);
+    {
+        if (dialect == 3) /* GL: texture buffers (texel loads; Ryubing has no generic loads, which Mesa makes of storage buffers) */
+            sb_printf(&b, "layout(binding = %d) uniform usamplerBuffer s%d;\n#define SW%d(i) texelFetch(s%d, i).x\n", 1 + s, s, s, s);
+        else
+            sb_printf(&b, "layout(std430, set = 0, binding = %d) readonly buffer SB%d { uint w[]; } s%d;\n#define SW%d(i) s%d.w[i]\n", 1 + s, s, s, s, s);
+    }
     if (vk->shadow)
         sb_printf(&b, "layout(std140, set = 0, binding = 5) uniform SMB { mat4 sm; };\n");
     if (vk->shadow == 2) /* (emit_rt_index) */

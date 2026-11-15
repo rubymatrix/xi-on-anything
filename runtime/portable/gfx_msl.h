@@ -34,8 +34,9 @@ char* gfx_msl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* v
 char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
 
 /* The same as GLSL 4.30 core for OpenGL (gfx_gl.c): Vulkan's text with GL's differences - no
- * descriptor sets (the same binding numbers: uniform blocks, storage blocks and texture units are
- * separate name spaces in GL), the interface block matched by name rather than location,
+ * descriptor sets (the same binding numbers: uniform blocks and texture units are separate name spaces
+ * in GL), the vertex streams as texture buffers of words (usamplerBuffer, texture units 1-4) rather than
+ * storage buffers, the interface block matched by name rather than location,
  * gl_VertexID, and clip space turned into GL's: y negated, so that row 0 of every texture and target
  * is D3D's top row, and z from D3D's 0..1 to GL's -1..1 unless the back end defines GFX_GL_CLIP01
  * (glClipControl). No #version line; the back end adds it and GFX_VS or GFX_FS. */

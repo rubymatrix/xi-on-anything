@@ -156,6 +156,9 @@ enum
 
     GL_TEXTURE_2D = 0x0DE1,
     GL_TEXTURE_CUBE_MAP = 0x8513,
+    GL_TEXTURE_BUFFER = 0x8C2A,
+    GL_MAX_TEXTURE_BUFFER_SIZE = 0x8C2B,
+    GL_R32UI = 0x8236,
     GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515,
     GL_TEXTURE0 = 0x84C0,
     GL_TEXTURE_MAG_FILTER = 0x2800,
@@ -287,6 +290,7 @@ enum
     X(TexSubImage2D, void, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*), 0)           \
     X(CompressedTexSubImage2D, void, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void*), 0) \
     X(TexParameteri, void, (GLenum, GLenum, GLint), 0)                                                                \
+    X(TexBuffer, void, (GLenum, GLenum, GLuint), 0)                                                                   \
     X(GetTexImage, void, (GLenum, GLint, GLenum, GLenum, void*), 0)                                                   \
     X(GetCompressedTexImage, void, (GLenum, GLint, void*), 0)                                                         \
     X(GenSamplers, void, (GLsizei, GLuint*), 0)                                                                       \
