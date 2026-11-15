@@ -250,29 +250,46 @@ def sd_root(value):
     return root
 
 
-def copy_tree(src, dst):
+def copy_tree(src, dst, workers=4):
     """src into dst, only files whose size or modification time differ: a copy that stopped part way, or
-    a game update, sends only what is missing or changed. Returns (files copied, bytes copied)."""
-    copied = size = 0
+    a game update, sends only what is missing or changed. Returns (files copied, bytes copied).
+
+    Written in place, a few at a time: on an SD card's FAT32 the time goes on each file's directory
+    updates, not its bytes (the game is 65k small files), and a file cut short still differs in size or
+    time from its source, so the next run sends it again."""
     files = [p for p in src.rglob('*') if p.is_file()]
-    t0 = time.time()
-    for i, p in enumerate(files, 1):
+    todo = []
+    made = set()
+    for p in files:
         out = dst / p.relative_to(src)
         st = p.stat()
-        if out.exists():
+        try:
             o = out.stat()
             if o.st_size == st.st_size and abs(o.st_mtime - st.st_mtime) < 2:  # FAT keeps 2 s
                 continue
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_name(out.name + '.part')
-        shutil.copyfile(p, tmp)
-        os.utime(tmp, (st.st_atime, st.st_mtime))
-        os.replace(tmp, out)
-        copied += 1
-        size += st.st_size
-        if copied % 500 == 0:
-            rate = size / max(time.time() - t0, 0.1) / 1e6
-            print(f'  {i}/{len(files)} files checked, {copied} copied ({size / 1e9:.2f} GB, {rate:.0f} MB/s)', flush=True)
+        except FileNotFoundError:
+            pass
+        if out.parent not in made:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            made.add(out.parent)
+        todo.append((p, out, st))
+    print(f'  {len(files)} files, {len(todo)} to copy', flush=True)
+
+    def one(job):
+        p, out, st = job
+        shutil.copyfile(p, out)
+        os.utime(out, (st.st_atime, st.st_mtime))
+        return st.st_size
+
+    copied = size = 0
+    t0 = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for n in ex.map(one, todo):
+            copied += 1
+            size += n
+            if copied % 1000 == 0:
+                rate = copied / max(time.time() - t0, 0.1)
+                print(f'  {copied}/{len(todo)} files copied ({size / 1e9:.2f} GB, {rate:.0f} files/s)', flush=True)
     return copied, size
 
 
