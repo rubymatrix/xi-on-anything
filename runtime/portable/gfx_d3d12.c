@@ -266,7 +266,8 @@ typedef struct FxSettings
         sun_face, sun_min, sun_direct, sun_casters, sun_near, temporal, debug, draw, draw_entities, fps, aa, ao_quality,
         sun_detail, sun_dusk, water, water_refract, water_clarity, water_soft, water_foam, water_foam_width, water_ripple,
         water_scale, water_reflect, water_spec, lod, gameshadows, moghouse, gi, gi_radius, gi_distance, rt, contact_steps,
-        upscale, upscale_scale, upscale_sharpen;
+        upscale, upscale_scale, upscale_sharpen, fix_ps2, fix_water_layers, fix_button_rims, fix_summon_halos, fix_shine,
+        fix_disintegrate, fix_halo_max;
 } FxSettings;
 static FxSettings g_fxs = { .fps = 1.0f };
 
@@ -2828,6 +2829,9 @@ static const struct
     /* not an effect: FSR 1 (gfx_fx.c's notes): the world drawn smaller (host64's upscale_background) and made up
      * to the screen through EASU and RCAS (fsr_srv); upscale_scale is read at start, by the host */
     FXS(upscale, 0.0f), FXS(upscale_scale, 0.67f), FXS(upscale_sharpen, 0.25f),
+    /* not effects: the PC port's drawing mistakes drawn as the PS2 draws them (d3d8.c, gfx_fx.c's notes) */
+    FXS(fix_ps2, 1.0f), FXS(fix_water_layers, 1.0f), FXS(fix_button_rims, 1.0f), FXS(fix_summon_halos, 1.0f),
+    FXS(fix_shine, 1.0f), FXS(fix_disintegrate, 1.0f), FXS(fix_halo_max, 0.0f),
 };
 #undef FXS
 
