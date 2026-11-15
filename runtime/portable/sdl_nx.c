@@ -4,13 +4,14 @@
  *
  * There is one window, the screen: 1280x720 handheld, 1920x1080 docked (nx_bridge.h's nx_set_view_size,
  * from host/switch_main.c). Input is read from HID on the game's thread, in SDL_PollEvent: the first
- * controller (or the handheld Joy-Con) is the SDL gamepad, the touch screen is the mouse. Text comes from
+ * controller (or the handheld Joy-Con) is the SDL gamepad, a tap on the touch screen a click. Text comes from
  * the system keyboard (swkbd), shown over a sign-in field with the field's text and handed back whole, as
  * the Xbox's keyboard does. Audio is a thread that makes a 10 ms block at a time for audout: dsound.c's
  * callback (which moves the DirectSound cursors and signals the game's notification events) and the
  * streams bound to the device (the sign-in screen's effects, sewave.c) mixed together. */
 #include <errno.h>
 #include <malloc.h>
+#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -666,7 +667,20 @@ static void gamepad_event(Uint32 type, int button, int down)
     push(&e);
 }
 
-static int g_touching;
+/* The touch screen as Android's (host/touch.c): a finger doesn't move the pointer; a quick tap (up within
+ * 250 ms, moved less than 16 of 1280) is a click where it lifted - the pointer there, the left button down
+ * and, 50 ms on, up (the game reads the mouse once a frame, and would miss both at once). The pointer then
+ * stays where the game puts it: the D-pad's menus move it onto the item they select (SDL_WarpMouse*). */
+static struct
+{
+    int down;
+    uint64_t t0;
+    float x0, y0, x, y;
+} g_tap;
+static uint64_t g_click_up_at;
+#define TAP_NS 250000000ull
+#define TAP_MOVE 16.0f
+#define CLICK_NS 50000000ull
 
 static void audio_report(void);
 
@@ -720,7 +734,13 @@ static void poll_input(void)
         if (changed >> i & 1u)
             gamepad_event((p.buttons >> i & 1u) ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP, i, p.buttons >> i & 1u);
 
-    /* the touch screen (handheld): the first finger is the mouse, its left button down while it touches */
+    /* the touch screen (handheld): a quick tap is a click (g_tap) */
+    uint64_t now = now_ns();
+    if (g_click_up_at && now >= g_click_up_at)
+    {
+        mouse_button(SDL_BUTTON_LEFT, 0);
+        g_click_up_at = 0;
+    }
     HidTouchScreenState ts;
     if (hidGetTouchScreenStates(&ts, 1))
     {
@@ -728,15 +748,21 @@ static void poll_input(void)
         {
             float x = (float)ts.touches[0].x * (float)g_view_w / 1280.0f;
             float y = (float)ts.touches[0].y * (float)g_view_h / 720.0f;
-            mouse_move(x, y);
-            if (!g_touching)
-                mouse_button(SDL_BUTTON_LEFT, 1);
-            g_touching = 1;
+            if (!g_tap.down)
+                g_tap.down = 1, g_tap.t0 = now, g_tap.x0 = x, g_tap.y0 = y;
+            g_tap.x = x, g_tap.y = y;
         }
-        else if (g_touching)
+        else if (g_tap.down)
         {
-            mouse_button(SDL_BUTTON_LEFT, 0);
-            g_touching = 0;
+            g_tap.down = 0;
+            float slop = TAP_MOVE * (float)g_view_w / 1280.0f;
+            if (now - g_tap.t0 < TAP_NS && fabsf(g_tap.x - g_tap.x0) < slop && fabsf(g_tap.y - g_tap.y0) < slop &&
+                !g_click_up_at)
+            {
+                mouse_move(g_tap.x, g_tap.y);
+                mouse_button(SDL_BUTTON_LEFT, 1);
+                g_click_up_at = now + CLICK_NS;
+            }
         }
     }
 }

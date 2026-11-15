@@ -78,3 +78,10 @@ computer or another Switch.
   sends the new `.nro` over the network (press Y in the homebrew menu first, to receive it).
 
 The log is `sdmc:/switch/xi-on-anything/host64.log`; `python tools/build_switch.py logs --sd <card>` prints it.
+
+## Controls
+
+The controller works the way an Xbox controller does on the PC builds (the game's own gamepad support),
+with A/B as chosen above. In handheld mode a quick tap on the touch screen is a click where you tap (as on
+Android); the D-pad and stick move through menus. Text fields (the sign-in) and the chat line open the
+Switch's keyboard.
