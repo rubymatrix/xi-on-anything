@@ -107,8 +107,26 @@ what Ryubing gives a bare `.nro`.
 
 - **On a console** (Mariko, Atmosphère, launched over a game with R): the sign-in screen with the controller and
   the system keyboard, sign-in to a LandSandBoat server, the game in the world (West Sarutabaruta), drawn
-  right, playable, battles with their menus. The two bugs it found are fixed (929143f). Sound is partly
-  missing (some effects, maybe music): phase 4.
+  right, playable, battles with their menus. The two bugs it found are fixed (929143f). Sound: the
+  sign-in's effects and the game's (5485963, the thread pool); the music not yet confirmed.
+
+## Saved passwords
+
+host/keychain.c's Switch store: no keychain here, so each remembered password is a file on the card
+(`data/keychain/<key>.bin`: a random counter, the password padded to 128 bytes and encrypted with AES-CTR,
+an AES-CMAC of both), under keys the security engine derives from the console's device key through spl:mig
+(`splCryptoGenerateAesKek` with the device-unique option, then `splCryptoLoadAesKey` into a locked keyslot).
+The keys never leave the engine: the file is useless on a computer or another console. Where spl:mig won't
+answer (Ryubing), `keychain_available` is 0 and the sign-in says the password isn't remembered.
+
+## No shader cache: switch-mesa has no disk cache
+
+A program cache file (GL program binaries) was written and dropped (2026-11-16): switch-mesa is built
+without Mesa's disk shader cache (`libEGL.a` has the `st_*_disk_cache` hooks but no `disk_cache_create`), and
+without it Mesa offers no program binary formats (`GL_NUM_PROGRAM_BINARY_FORMATS` 0 in Ryubing). On the
+desktop, NVIDIA's binaries loaded without error but drew some programs wrong (gfx_test's cull and depth
+checks). Each program compiles when first drawn; deko3d's precompiled shaders are the way past it, or a
+switch-mesa with its disk cache.
 
 ## Found: the black screen at start was a miscompile
 
@@ -128,11 +146,13 @@ sources with `-fno-tree-pta`; the translated code keeps it.
   the way to test it there; on a console, hbloader's NPDM should give it.
 - **Graphics**: `gfx-test.nro` in Ryubing still fails its read-back checks (reads
   after a draw come back mostly zero there: the emulator's GPU-to-CPU sync, or ours - to be found); the scene
-  effects, the scene renderer, water and sun shadows on GL; a program cache file. deko3d after it.
+  effects, the scene renderer, water and sun shadows on GL; no shader cache (above). deko3d after it.
 - **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
   the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
   failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
-- The forwarder NSP (`build_switch.py nsp`), HD rumble, sleep and resume (the connections end).
+- **Saved passwords** are built (above), not yet tried on a console.
+- The forwarder NSP (`build_switch.py nsp`), addons (`addons_none.c`), HD rumble, sleep and resume (the
+  connections end).
 
 ## Testing in the emulator
 

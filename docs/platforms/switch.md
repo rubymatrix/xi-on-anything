@@ -6,9 +6,11 @@ your own game files, and copied to the console's SD card with the game beside it
 Branch: `port/switch`. Developer notes are in [../switch.md](../switch.md).
 
 > [!IMPORTANT]
-> **Status**: in progress, not playable yet. The platform layer runs (its self-test passes in the
-> Ryubing emulator) and the game builds headless; there is no graphics back end yet (Mesa OpenGL is
-> next, then deko3d). Nothing has run on a console yet.
+> **Status**: experimental, playable on a console. The sign-in screen, the game in the world, battles
+> and menus run on a Switch (Atmosphère), drawn with Mesa's OpenGL, with sound (music not yet
+> confirmed). Not yet: the scene effects (Modern FX, water, sun shadows), addons, the forwarder, sleep
+> and resume, and a shader cache: each effect's shaders compile the first time it is seen, a short
+> hitch.
 
 ## What you need
 
@@ -63,7 +65,10 @@ to change them later; `--layout` becomes `--switch-layout` there):
 | `--dats <folder>` | A DAT overlay folder, copied to the card and passed as `--dats`. |
 | `--arg "<host options>"` | Any other [host option](../running.md#options), for example `--arg "--user me"`. |
 
-Don't put `--pass` in `run.args` unless the card stays with you: it is a plain text file.
+Don't put `--pass` in `run.args` unless the card stays with you: it is a plain text file. Use the sign-in
+screen's **Remember password** instead: the password is kept on the card encrypted with a key only your
+console has (`sdmc:/switch/xi-on-anything/data/keychain/`), so a copy of the card can't be read on a
+computer or another Switch.
 
 ## 3. Run
 

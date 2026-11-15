@@ -366,6 +366,183 @@ int keychain_available(void)
     return ok;
 }
 
+#elif defined(__SWITCH__)
+#include <fcntl.h>
+#include <stdlib.h>
+#include <switch.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* The Switch has no keychain, but its security engine has keys. Each password is a file on the SD card
+ * (data/keychain/), encrypted (AES-CTR) and signed (AES-CMAC) with keys the console derives from its own
+ * device key through spl:mig: the keys never leave the security engine, so a file copied to a computer
+ * or to another console can't be read or changed unseen. Where spl:mig isn't there to use (an emulator),
+ * there is no store and the player types the password, as before. The sign-in calls these from its own
+ * threads: no stdio here (on the Switch it is the main thread's). */
+#define KC_DIR "sdmc:/switch/xi-on-anything/data/keychain"
+#define KC_PLAIN 128 /* a length byte, the password and zeros: every file the same size */
+#define KC_MAGIC 0x314B4958u /* "XIK1" */
+
+/* the sources the engine's keys are derived from: fixed, so the same console derives the same keys */
+static const u8 KC_KEK[16] = { 'x', 'i', '-', 'o', 'n', '-', 'a', 'n', 'y', 't', 'h', 'i', 'n', 'g', ':', 'k' };
+static const u8 KC_ENC[16] = { 'k', 'e', 'y', 'c', 'h', 'a', 'i', 'n', ':', 'e', 'n', 'c', 'r', 'y', 'p', 't' };
+static const u8 KC_MAC[16] = { 'k', 'e', 'y', 'c', 'h', 'a', 'i', 'n', ':', 'c', 'm', 'a', 'c', ':', 'v', '1' };
+
+typedef struct KcFile
+{
+    u32 magic;
+    u8 ctr[16];
+    u8 ct[KC_PLAIN];
+    u8 mac[16]; /* CMAC of ctr and ct */
+} KcFile;
+
+static Mutex g_kc;
+
+/* out = CTR(in) under the console's encryption key; mac = CMAC(ctr || ct) under its signing key, ct
+ * being out when encrypting and in when decrypting */
+static int kc_engine(int encrypt, const u8 ctr[16], const u8* in, u8* out, u8 mac[16])
+{
+    if (R_FAILED(splCryptoInitialize()))
+        return 0;
+    /* the engine's buffers in pages of their own */
+    u8* buf = (u8*)aligned_alloc(0x1000, 0x1000);
+    u8 sealed[16];
+    u32 slot = 0;
+    int ok = 0, locked = 0;
+    if (!buf)
+        goto out;
+    if (R_FAILED(splCryptoGenerateAesKek(KC_KEK, 0, 1 /* device unique */, sealed)))
+        goto out;
+    if (R_FAILED(splCryptoLockAesEngine(&slot)))
+        goto out;
+    locked = 1;
+    u8 *src = buf, *dst = buf + 0x400, *signed_part = buf + 0x800;
+    memcpy(src, in, KC_PLAIN);
+    if (R_FAILED(splCryptoLoadAesKey(sealed, KC_ENC, slot)) || R_FAILED(splCryptoCryptAesCtr(src, dst, KC_PLAIN, slot, ctr)))
+        goto out;
+    memcpy(signed_part, ctr, 16);
+    memcpy(signed_part + 16, encrypt ? dst : src, KC_PLAIN);
+    if (R_FAILED(splCryptoLoadAesKey(sealed, KC_MAC, slot)) || R_FAILED(splCryptoComputeCmac(signed_part, 16 + KC_PLAIN, slot, mac)))
+        goto out;
+    memcpy(out, dst, KC_PLAIN);
+    ok = 1;
+out:
+    if (locked)
+        splCryptoUnlockAesEngine(slot);
+    if (buf)
+    {
+        memset(buf, 0, 0x1000);
+        free(buf);
+    }
+    splCryptoExit();
+    return ok;
+}
+
+/* KC_DIR/<key>, the key's characters other than letters, digits and . - _ @ as '_' */
+static void kc_path(const char* key, char* out, size_t n)
+{
+    size_t i = 0;
+    for (const char* s = KC_DIR "/"; *s && i + 1 < n; ++s)
+        out[i++] = *s;
+    for (const char* s = key; *s && i + 5 < n; ++s)
+    {
+        char c = *s;
+        int keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' ||
+                   c == '_' || c == '@';
+        out[i++] = keep ? c : '_';
+    }
+    memcpy(out + i, ".bin", 5);
+}
+
+int keychain_get(const char* key, char* out, size_t n)
+{
+    char path[512];
+    kc_path(key, path, sizeof path);
+    KcFile f;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t got = read(fd, &f, sizeof f);
+    close(fd);
+    if (got != (ssize_t)sizeof f || f.magic != KC_MAGIC)
+        return 0;
+    u8 plain[KC_PLAIN] = { 0 }, mac[16] = { 0 };
+    mutexLock(&g_kc);
+    int ok = kc_engine(0, f.ctr, f.ct, plain, mac);
+    mutexUnlock(&g_kc);
+    /* the signature compared in full, whatever differs first */
+    u8 diff = 0;
+    for (int i = 0; i < 16; ++i)
+        diff |= (u8)(mac[i] ^ f.mac[i]);
+    size_t len = plain[0];
+    ok = ok && !diff && len < KC_PLAIN && len < n;
+    if (ok)
+    {
+        memcpy(out, plain + 1, len);
+        out[len] = 0;
+    }
+    memset(plain, 0, sizeof plain);
+    return ok;
+}
+
+int keychain_set(const char* key, const char* password)
+{
+    size_t len = strlen(password);
+    if (len >= KC_PLAIN)
+        return 0;
+    u8 plain[KC_PLAIN];
+    memset(plain, 0, sizeof plain);
+    plain[0] = (u8)len;
+    memcpy(plain + 1, password, len);
+    KcFile f;
+    f.magic = KC_MAGIC;
+    randomGet(f.ctr, sizeof f.ctr);
+    mutexLock(&g_kc);
+    int ok = kc_engine(1, f.ctr, plain, f.ct, f.mac);
+    mutexUnlock(&g_kc);
+    memset(plain, 0, sizeof plain);
+    if (!ok)
+        return 0;
+    mkdir("sdmc:/switch/xi-on-anything/data", 0777);
+    mkdir(KC_DIR, 0777);
+    char path[512];
+    kc_path(key, path, sizeof path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return 0;
+    ok = write(fd, &f, sizeof f) == (ssize_t)sizeof f;
+    close(fd);
+    if (!ok)
+        unlink(path);
+    return ok;
+}
+
+void keychain_delete(const char* key)
+{
+    char path[512];
+    kc_path(key, path, sizeof path);
+    unlink(path);
+}
+
+/* the engine derives the console's key: asked once */
+int keychain_available(void)
+{
+    static int known = -1;
+    if (known < 0)
+    {
+        mutexLock(&g_kc);
+        u8 sealed[16];
+        known = R_SUCCEEDED(splCryptoInitialize()) ? 1 : 0;
+        if (known)
+        {
+            known = R_SUCCEEDED(splCryptoGenerateAesKek(KC_KEK, 0, 1, sealed));
+            splCryptoExit();
+        }
+        mutexUnlock(&g_kc);
+    }
+    return known;
+}
+
 #elif !defined(FFXI_UWP)
 
 int keychain_get(const char* key, char* out, size_t n)
