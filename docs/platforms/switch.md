@@ -1,9 +1,9 @@
-# Nintendo Switch (homebrew, in progress)
+# Nintendo Switch (homebrew, experimental)
 
 The recompiled game as a Switch homebrew app (`.nro`), built with devkitPro's libnx on your own PC from
 your own game files, and copied to the console's SD card with the game beside it.
 
-Branch: `port/switch`. Developer notes are in [../switch.md](../switch.md).
+Developer notes are in [../switch.md](../switch.md).
 
 > [!IMPORTANT]
 > **Status**: experimental, playable on a console. The sign-in screen, the game in the world, battles

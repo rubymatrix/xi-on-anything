@@ -103,7 +103,7 @@ what Ryubing gives a bare `.nro`.
   winding that passes on Direct3D 12 too; `host64-gl` plays all 30 replay scenes (`tools/replay/default.txt`)
   at the same frame rate as Direct3D 12, the captures alike but for camera and animation timing.
 - In Ryubing: the game brings the device up ("OpenGL 4.3 on NV120 (nouveau), S3TC, clip control, persistent
-  ring") and draws the sign-in screen at 60 fps, docked - but not on every start (below).
+  ring") and draws the sign-in screen at 60 fps, docked, on every start since the miscompile (below) was found.
 
 - **On a console** (Mariko, Atmosphère, launched over a game with R): the sign-in screen with the controller and
   the system keyboard, sign-in to a LandSandBoat server, the game in the world (West Sarutabaruta), drawn
