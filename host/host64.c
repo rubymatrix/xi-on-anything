@@ -1879,5 +1879,12 @@ int main(int argc, char** argv)
     int32_t code = gamecore_exit_code(&message);
     rt_log("[recomp] GameStart returned %08x; exit code %d%s%s\n", hr, code, message && *message ? ", message: " : "",
         message ? message : "");
+    /* the game has ended (its /shutdown, the window closing): every addon's unload, where they save their settings */
+    int held = gt_holds();
+    if (!held)
+        gt_lock();
+    addons_shutdown();
+    if (!held)
+        gt_unlock();
     return hr ? 1 : 0;
 }
