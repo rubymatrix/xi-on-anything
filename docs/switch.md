@@ -131,7 +131,7 @@ sources with `-fno-tree-pta`; the translated code keeps it.
   effects, the scene renderer, water and sun shadows on GL; a program cache file. deko3d after it.
 - **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
   the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
-  failing (the thread pool above fixes that); not yet confirmed on the console.
+  failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
 - The forwarder NSP (`build_switch.py nsp`), HD rumble, sleep and resume (the connections end).
 
 ## Testing in the emulator
