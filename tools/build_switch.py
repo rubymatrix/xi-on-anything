@@ -3,6 +3,9 @@
 
   python tools/build_switch.py plat-test
         the platform layer's self-test (tests/switch_plat_test.c) as build/switch/plat-test.nro
+  python tools/build_switch.py gfx-test
+        the graphics back end's test (tests/gfx_test.c on OpenGL, through EGL) as build/switch/gfx-test.nro:
+        its lines to gfx-test.log on the card, then green on the screen when every check passed, red when not
   python tools/build_switch.py setup --sd <SD root> [--nro file.nro] [--game "<FINAL FANTASY XI folder>"]
         [--server <name or IP>] [--fps-divisor N] [--dats <folder>] [--layout nintendo|xbox] [--arg ...]
         copy the .nro to sdmc:/switch/xi-on-anything/ and, with --game, the game beside it (only the
@@ -154,6 +157,17 @@ def plat_test(_a):
     return link_nro(objs, 'plat-test', ['-lnx', '-lm'], title='XI on Anything platform test')
 
 
+def gfx_test(_a):
+    """tests/gfx_test.c on the OpenGL back end, through EGL (tests/switch_gfx_test.c): build/switch/gfx-test.nro"""
+    tc.require()
+    OUT.mkdir(parents=True, exist_ok=True)
+    sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
+    objs = compile_many(GFX + ['runtime/portable/sdl_nx.c', 'runtime/portable/plat_posix.c', 'runtime/portable/gwin.c',
+                               'tests/switch_gfx_test.c'], 'gfx-test', sdl)
+    objs += compile_many(['tests/gfx_test.c'], 'gfx-test-main', sdl + ['-DGFX_GL', '-Dmain=gfx_test_main'])
+    return link_nro(objs, 'gfx-test', GFX_LIBS + ['-lnx', '-lm'], title='XI on Anything graphics test')
+
+
 # mbedtls' time and entropy from runtime/portable/tls_nx.c (switch/mbedtls_config.h), for it and its includers
 MBEDTLS_CONFIG = ['-I' + (ROOT / 'switch').as_posix(), '-DTF_PSA_CRYPTO_USER_CONFIG_FILE=<mbedtls_config.h>',
                   '-DMBEDTLS_USER_CONFIG_FILE=<mbedtls_config.h>']
@@ -176,8 +190,14 @@ def desktop_tools():
     return build, build_posix, thirdparty
 
 
+# the graphics: OpenGL 4.3 core (gfx_gl.c) on Mesa's nouveau, through EGL (switch-mesa, switch-libdrm_nouveau)
+GFX = ['runtime/portable/gfx_gl.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
+       'runtime/portable/gfx_fx.c']
+GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
+
+
 def host(a):
-    """The game, headless for now (gfx_null.c): build/switch/xi-on-anything.nro."""
+    """The game: build/switch/xi-on-anything.nro."""
     tc.require()
     OUT.mkdir(parents=True, exist_ok=True)
     build, bp, thirdparty = desktop_tools()
@@ -194,16 +214,19 @@ def host(a):
     tls = thirdparty.flags('mbedtls') + MBEDTLS_CONFIG
     # ours first: its errors show in seconds, the translation's compile takes a while
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
-    hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + [
-        'runtime/portable/gfx_null.c', 'runtime/portable/sdl_nx.c', 'runtime/portable/tls_nx.c', 'host/addons_none.c']
-    objs = compile_many(bp.PORTABLE + hosts, 'host', sdl + tls + ['-Dmain=xi_host_main'])
+    hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + GFX + [
+        'runtime/portable/sdl_nx.c', 'runtime/portable/tls_nx.c', 'host/addons_none.c']
+    # the render queue: GL's context is its render thread's, and the game calls from several threads
+    queue = ['-DGFX_GL', '-DGFX_QUEUE']
+    objs = compile_many(bp.PORTABLE + hosts + ['runtime/portable/gfx_queue.c'], 'host',
+                        sdl + tls + queue + ['-Dmain=xi_host_main'])
     objs += compile_many(['host/switch_main.c'], 'entry', sdl)
     # GCC's names for the generated C's warnings (GEN_WARNINGS is clang's)
     warn = ['-w']
     jobs = int(os.environ.get('XI_SWITCH_JOBS', '6'))
     objs += compile_many(bp.generated('all'), 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
     objs += compile_many(bp.generated('ffxi'), 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
-    return link_nro(objs, 'xi-on-anything', [thirdparty.archive('mbedtls'), '-lnx', '-lm'])
+    return link_nro(objs, 'xi-on-anything', [thirdparty.archive('mbedtls')] + GFX_LIBS + ['-lnx', '-lm'])
 
 
 # --- the SD card ---------------------------------------------------------------------------------------
@@ -370,6 +393,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = ap.add_subparsers(dest='target', required=True)
     sub.add_parser('plat-test')
+    sub.add_parser('gfx-test')
     h = sub.add_parser('host')
     h.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
     s = sub.add_parser('setup')
@@ -393,7 +417,7 @@ def main():
     lg = sub.add_parser('logs')
     lg.add_argument('--sd', required=True)
     a = ap.parse_args()
-    {'plat-test': plat_test, 'host': host, 'setup': setup, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
+    {'plat-test': plat_test, 'gfx-test': gfx_test, 'host': host, 'setup': setup, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
 
 
 if __name__ == '__main__':

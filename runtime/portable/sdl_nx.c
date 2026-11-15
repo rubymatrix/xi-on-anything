@@ -26,6 +26,7 @@
 #include <SDL3/SDL.h>
 
 #include "nx_bridge.h"
+#include "plat.h"
 
 typedef pthread_mutex_t Lock;
 #define LOCK_INIT PTHREAD_MUTEX_INITIALIZER
@@ -806,6 +807,7 @@ static SDL_AudioStream g_stream;
 static int16_t* g_aud_mem[AUD_BUFS];
 static AudioOutBuffer g_aud_buf[AUD_BUFS];
 static int g_audout;
+static uint32_t g_aud_puts; /* blocks the device took (audout_put): the audio thread's pace */
 static float g_mix[FRAMES * 2];
 static int g_mix_frames;
 
@@ -851,6 +853,7 @@ static void audout_put(const float* f)
     }
     done->data_size = FRAMES * 2 * sizeof(int16_t);
     audoutAppendAudioOutBuffer(done);
+    g_aud_puts++;
 }
 
 static void* audio_thread(void* arg)
@@ -862,8 +865,13 @@ static void* audio_thread(void* arg)
     {
         if (g_audout)
         {
-            /* the device's pace: one block per buffer it gives back */
+            /* the device's pace: one block per buffer it gives back. A pass that gave it none (nothing
+             * mixed, or the wait failed) sleeps: a thread that never waits keeps its core from the others
+             * of its priority (Horizon doesn't share a core between them) */
+            uint32_t puts = g_aud_puts;
             s->callback(s->user, s, FRAMES * 2 * (int)sizeof(float), FRAMES * 2 * (int)sizeof(float));
+            if (g_aud_puts == puts)
+                svcSleepThread(2000000);
             continue;
         }
         uint64_t due = (now_ns() - start) * 48000 / 1000000000u;
@@ -876,6 +884,8 @@ static void* audio_thread(void* arg)
     }
     return NULL;
 }
+
+static void audio_thread_start(void* arg) { audio_thread(arg); }
 
 SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID dev, const SDL_AudioSpec* spec, SDL_AudioStreamCallback callback,
     void* user)
@@ -890,13 +900,8 @@ bool SDL_ResumeAudioStreamDevice(SDL_AudioStream* s)
 {
     if (!s || __atomic_exchange_n(&s->running, 1, __ATOMIC_SEQ_CST))
         return true;
-    pthread_t t;
-    pthread_attr_t a;
-    pthread_attr_init(&a);
-    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-    int r = pthread_create(&t, &a, audio_thread, s);
-    pthread_attr_destroy(&a);
-    if (r)
+    /* plat_thread_start: off the game's core (core 0), which a busy mixer would otherwise share */
+    if (!plat_thread_start(audio_thread_start, s))
     {
         s->running = 0;
         return false;

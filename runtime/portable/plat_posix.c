@@ -299,6 +299,18 @@ static void* thread_entry(void* p)
     return NULL;
 }
 
+#if defined(__SWITCH__)
+static volatile uint32_t g_started; /* plat_thread_start's hand-shake: the new thread has taken its arguments */
+static void thread_entry_nx(void* p)
+{
+    ThreadStart s = *(ThreadStart*)p;
+    free(p);
+    __atomic_store_n(&g_started, 1, __ATOMIC_SEQ_CST);
+    svcSignalToAddress((void*)&g_started, SignalType_Signal, 0, -1);
+    s.fn(s.arg);
+}
+#endif
+
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
     ThreadStart* s = (ThreadStart*)malloc(sizeof *s);
@@ -306,6 +318,38 @@ int plat_thread_start(void (*fn)(void*), void* arg)
         return 0;
     s->fn = fn;
     s->arg = arg;
+#if defined(__SWITCH__)
+    /* Horizon doesn't share a core between threads of one priority: a thread runs until it waits. The
+     * application's main thread (the game's) has core 0; the threads made here take cores 1 and 2 in
+     * turn - the first, the render thread (gfx_queue.c), core 1 - at the main thread's priority. libnx's
+     * pthread_create can't choose a core. */
+    static uint32_t next;
+    static Mutex start_lock; /* one start at a time: the hand-shake has one flag */
+    mutexLock(&start_lock);
+    __atomic_store_n(&g_started, 0, __ATOMIC_SEQ_CST);
+    int core = 1 + (int)(__atomic_fetch_add(&next, 1, __ATOMIC_SEQ_CST) % 2);
+    s32 prio = 0x2C;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    /* the stack page-aligned and whole pages (libnx carves the TLS and reent out of its top) */
+    const size_t stack_sz = 8u << 20; /* translated frames are large */
+    void* stack = aligned_alloc(0x1000, stack_sz);
+    Thread* nt = (Thread*)malloc(sizeof *nt);
+    if (!stack || !nt || R_FAILED(threadCreate(nt, thread_entry_nx, s, stack, stack_sz, prio, core)) ||
+        R_FAILED(threadStart(nt)))
+    {
+        free(stack);
+        free(nt);
+        free(s);
+        mutexUnlock(&start_lock);
+        return 0;
+    }
+    /* until it has started (as libnx's pthread_create waits) */
+    while (!__atomic_load_n(&g_started, __ATOMIC_SEQ_CST))
+        svcWaitForAddress((void*)&g_started, ArbitrationType_WaitIfEqual, 0, 1000000000ll);
+    mutexUnlock(&start_lock);
+    return 1; /* detached: its Thread and stack are never freed (a thread that ends leaves them: the sign-in's
+               * jobs, one a sign-in) */
+#endif
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
