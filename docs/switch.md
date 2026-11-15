@@ -82,6 +82,11 @@ what Ryubing gives a bare `.nro`.
 - In Ryubing: the game brings the device up ("OpenGL 4.3 on NV120 (nouveau), S3TC, clip control, persistent
   ring") and draws the sign-in screen at 60 fps, docked - but not on every start (below).
 
+- **On a console** (Mariko, Atmosphère, launched over a game with R): the sign-in screen with the controller and
+  the system keyboard, sign-in to a LandSandBoat server, the game in the world (West Sarutabaruta), drawn
+  right, playable, battles with their menus. The two bugs it found are fixed (929143f). Sound is partly
+  missing (some effects, maybe music): phase 4.
+
 ## Open: a start-up race in Ryubing
 
 With the render thread, start-up in Ryubing reaches the sign-in screen in about one run in three. In the
