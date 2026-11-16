@@ -1069,6 +1069,28 @@ static void chat_keyboard(void)
     SDL_DestroyProperties(p);
 }
 
+/* The game drawn at the screen's size: 1280x720 in the hand (not 1920x1080 made smaller: less than half the
+ * pixels, for the battery and the frame rate), 1920x1080 on a TV, following a dock or undock as it happens.
+ * The menus keep the size they had at the start (the registry's, 960x540 at 2x), the same on either screen.
+ * FFXI_SWITCH_FIT=0 leaves the size to Config > Display. */
+static int g_switch_menu_w, g_switch_menu_h; /* at the start: the registry's 0037/0038 */
+static void switch_fit(void)
+{
+    static int on = -1, last_w, last_h;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_SWITCH_FIT");
+        on = !(e && *e == '0');
+    }
+    SDL_Window* win = on ? (SDL_Window*)user32_sdl_window(d3d8_window()) : NULL;
+    int w = 0, h = 0;
+    if (!win || !SDL_GetWindowSizeInPixels(win, &w, &h) || (w == last_w && h == last_h))
+        return;
+    last_w = w, last_h = h;
+    modern_window_size(w, h, g_switch_menu_w, g_switch_menu_h);
+    rt_log("[switch] the game at %dx%d (the screen's), menus %dx%d\n", w, h, g_switch_menu_w, g_switch_menu_h);
+}
+
 /* FFXI_FRAMELOG (run.args: --switch-env FFXI_FRAMELOG=1): the frames presented, every 5 seconds, with the
  * longest one (a hitch) */
 static void switch_fps(void)
@@ -1145,6 +1167,7 @@ static void present_hook(void)
     touch_frame(1);
 #elif defined(__SWITCH__)
     chat_keyboard();
+    switch_fit();
     switch_fps();
 #endif
 #if defined(__EMSCRIPTEN__)
@@ -1709,6 +1732,7 @@ int main(int argc, char** argv)
             reg_get_dword(KEY, names[i], &v[i]);
         rt_log("[switch] resolution: the game %ux%u, the world (background) %ux%u, the interface %ux%u\n", v[0], v[1], v[2],
             v[3], v[4], v[5]);
+        g_switch_menu_w = (int)v[4], g_switch_menu_h = (int)v[5]; /* switch_fit keeps them */
     }
 #endif
     {
