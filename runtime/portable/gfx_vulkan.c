@@ -9476,6 +9476,7 @@ static const char SHAFT_GLSL[] =
     "  vec4 fv;\n"
     "  vec4 wind;\n"
     "  vec4 lt;\n"
+    "  vec4 fs;   // x: how much of the air's sky light a sun shadow takes away (fog_shade)\n"
     "} u;\n"
     "layout(location = 0) in vec2 vuv;\n"
     "layout(location = 0) out vec4 oc;\n"
@@ -9542,7 +9543,7 @@ static const char SHAFT_GLSL[] =
     "    ls += lit, lin += inr, llast = lit;\n"
     "    float a = rho * seg;\n"
     "    L += T * a * lit;\n"
-    "    if (vol && !sky) A += T * a; // the air's own light: the sky's, unshadowed\n"
+    "    if (vol && !sky) A += T * a * (1.0 - u.fs.x * (1.0 - lit)); // the air's own light: the sky's, less in the sun's shadow\n"
     "    T *= exp(-a);\n"
     "  }\n"
     "  ot = sky ? 1.0 : T;\n"
@@ -9636,7 +9637,7 @@ typedef struct PostU
 typedef struct ShaftU
 {
     float ivp[16], pvp[16], m[4][16], cas[4][4], cam[4], sun[4], sunc[4], p[4], vp[4], lo[4], hist[4], pcam[4];
-    float airc[4], fv[4], wind[4], lt[4];
+    float airc[4], fv[4], wind[4], lt[4], fs[4];
 } ShaftU;
 
 /* the modern fog's uniforms: FU in FOG_GLSL */
@@ -9985,6 +9986,7 @@ static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float v
         double t = (double)gfx_now_ns() * 1e-9, dt = last_t > 0.0 ? fmin(t - last_t, 0.25) : 0.0;
         last_t = t, drift = fmod(drift + dt * fmaxf(g_fxs.fog_drift, 0.0f) * ws, 4096.0);
         u.wind[0] = (float)drift, u.wind[1] = 0.0f, u.wind[2] = (float)(drift * 0.6), u.wind[3] = 1.0f;
+        u.fs[0] = fminf(fmaxf(g_fxs.fog_shade, 0.0f), 1.0f) * fminf(fmaxf(g_shd.u.info[2], 0.0f), 1.0f); /* (as strong as the shadows) */
         fog_lamp_tiles(u.lt);
     }
     u.p[3] = (float)fmod((double)g_serial * 0.6180339887, 1.0);

@@ -7120,6 +7120,7 @@ static const char POST_MSL[] =
     "  float4 fv;\n"
     "  float4 wind;\n"
     "  float4 lt;\n"
+    "  float4 fs;     // x: how much of the air's sky light a sun shadow takes away (fog_shade)\n"
     "};\n"
     "struct SL { float4 pos, col, att, amb; };\n"
     "// low, smooth noise for the ground fog: value noise, two octaves, 0..1\n"
@@ -7196,7 +7197,7 @@ static const char POST_MSL[] =
     "    ls += lit, lin += inr, llast = lit;\n"
     "    float a = rho * seg;\n"
     "    L += T * a * lit;\n"
-    "    if (vol && !sky) A += T * a;\n" /* the air's own light: the sky's, unshadowed */
+    "    if (vol && !sky) A += T * a * (1.0 - u.fs.x * (1.0 - lit));\n" /* the air's own light: the sky's, less in the sun's shadow */
     "    T *= exp(-a);\n"
     "  }\n"
     "  SMO r; r.t = sky ? 1.0 : T;\n"
@@ -7368,7 +7369,7 @@ typedef struct PostU
 typedef struct ShaftU
 {
     float ivp[16], pvp[16], m[4][16], cas[4][4], cam[4], sun[4], sunc[4], p[4], vp[4], lo[4], hist[4], pcam[4];
-    float airc[4], fv[4], wind[4], lt[4];
+    float airc[4], fv[4], wind[4], lt[4], fs[4];
 } ShaftU;
 
 enum { POST_LEVELS = 6 };
@@ -7604,6 +7605,7 @@ static void post_shafts(GfxTex* color, const GfxScene* s, id<MTLTexture> depth, 
         double t = (double)gfx_now_ns() * 1e-9, dt = last_t > 0.0 ? fmin(t - last_t, 0.25) : 0.0;
         last_t = t, drift = fmod(drift + dt * fmaxf(g_fxs.fog_drift, 0.0f) * ws, 4096.0);
         u.wind[0] = (float)drift, u.wind[1] = 0.0f, u.wind[2] = (float)(drift * 0.6), u.wind[3] = 1.0f;
+        u.fs[0] = fminf(fmaxf(g_fxs.fog_shade, 0.0f), 1.0f) * fminf(fmaxf(g_shd.u.info[2], 0.0f), 1.0f); /* (as strong as the shadows) */
         if (g_fxs.scene_lamps > 0.0f && g_lamps.binned == g_serial && g_lamps.lb && g_lamps.tb)
             u.lt[0] = g_lamps.lu[0], u.lt[1] = g_lamps.lu[1], u.lt[2] = g_lamps.lu[4], u.lt[3] = g_lamps.lu[5];
     }
