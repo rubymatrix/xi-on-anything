@@ -412,6 +412,36 @@ def _turn(s, degrees):
     d[0x0B] = (d[0x0B] + round(degrees / 360 * 256)) & 255
 
 
+def vana_minute(game_time):
+    """The Vana'diel minute of the day (0-1439) of a zone-in's clock (+0x3C, Earth seconds; 25 Vana'diel
+    seconds to one)."""
+    return game_time * 25 // 60 % 1440
+
+
+def parse_hour(text):
+    """--hour's H or H:MM, as a minute of the day: a ValueError when it isn't one."""
+    try:
+        h, _, m = text.partition(':')
+        h, m = int(h), int(m or 0)
+    except ValueError:
+        raise ValueError(f'--hour {text}: H or H:MM') from None
+    if not (0 <= h < 24 and 0 <= m < 60):
+        raise ValueError(f'--hour {text}: 0:00 to 23:59')
+    return h * 60 + m
+
+
+def _hour(s, minute):
+    """The character arrives at this Vana'diel minute of the day: the zone-in's clock (+0x3C) moves back
+    to it, never forward, within the day (as !perftime does), so the moon's phase barely moves. The
+    client runs its clock, sun and sky from there. Returns the Earth seconds moved back."""
+    d = s.packets[0][1]
+    game_time = struct.unpack_from('<I', d, 0x3C)[0]
+    minutes = game_time * 25 // 60 - (vana_minute(game_time) - minute) % 1440  # since the epoch, that minute
+    at = -(-minutes * 60 // 25)  # its first Earth second
+    struct.pack_into('<I', d, 0x3C, at)
+    return game_time - at
+
+
 def _my_actions(s):
     """Only the character's own actions: everyone else's attacks, spells and abilities go."""
     before = len(s.packets)
@@ -678,6 +708,8 @@ def check(a):
         raise ValueError('--zone and --at go together')
     if a.at and len(a.at.split(',')) not in (3, 4):
         raise ValueError(f'--at {a.at}: x,y,z or x,y,z,rotation')
+    if a.hour is not None:
+        parse_hour(a.hour)
     if a.mob_spells_every <= 0:
         raise ValueError('--mob-spells-every: seconds, more than 0')
 
@@ -724,6 +756,9 @@ def transform(s, a, base):
                 names = sorted(SELF_SPELLS) if a.echo_spells == 'all' else a.echo_spells.split(',')
                 spells = [spell(n, SELF_SPELLS) for n in names]
             notes.append(f'{_echo(s, a.echo_spread, spells)} actions echoed' + (f' ({len(spells)} spells)' if spells else ''))
+    if a.hour is not None:
+        _hour(s, parse_hour(a.hour))
+        notes.append(f'arrives at {a.hour}')
     if a.weather:
         _weather(s, weather_id(a.weather))
         notes.append(f'weather {a.weather} from the zone-in')

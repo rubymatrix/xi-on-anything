@@ -32,7 +32,8 @@ are skipped, and paths are relative to the suite's folder. Scene flags: --label,
 else's actions), --hold (NPCs and mobs stay put), --clone N (mobs), --mob-spells with
 --mob-spells-every (the mobs cast spells at each other), --mob-name, --players N with --looks
 (geared characters around the zone-in), --echo with --echo-spread and --echo-spells (they repeat the
-character's actions on itself, with spells of their own), --weather (the zone's weather at the zone-in).
+character's actions on itself, with spells of their own), --hour (the Vana'diel time at the zone-in),
+--weather (the zone's weather at the zone-in).
 
 Events travel in-band as chat lines from "xireplay" ("begin|3|rain|weather|109",
 "mark|3|rain|start", "end|3|rain", "done|3", "home", "queue|rain,ice", "list|3|rain|weather",
@@ -96,6 +97,7 @@ def scene_flags():
     ap.add_argument('--mob-spells-every', type=float, default=5, help="with --mob-spells: seconds between a mob's casts")
     ap.add_argument('--zone', type=int, help='the scene plays in this zone instead, with nothing of the recorded one')
     ap.add_argument('--at', help='with --zone: where the character stands, x,y,z[,rotation]')
+    ap.add_argument('--hour', help="the Vana'diel time (H or H:MM) when the character arrives: the zone-in's clock moved back to it")
     ap.add_argument('--weather', help='the zone is in this weather (a name or id) when the character arrives')
     return ap
 
