@@ -9462,7 +9462,7 @@ static const char SHAFT_GLSL[] =
     "  mat4 m[4];   // the zone's shadow cascades (world to the light's clip space)\n"
     "  vec4 cas[4]; // their reach from the camera, texel, depth range, valid\n"
     "  vec4 cam;    // the camera, world; w: how far the rays go\n"
-    "  vec4 sun;    // toward the light, world; w: 1 when it shines\n"
+    "  vec4 sun;    // toward the light, world; w: the shadows' strength (0..1)\n"
     "  vec4 sunc;   // its colour times the shafts' strength; w: the phase's g\n"
     "  vec4 p;      // density at the camera's height, its falloff with height, steps, this frame's jitter\n"
     "  vec4 vp;     // the scene's viewport in its target\n"
@@ -9564,7 +9564,8 @@ static const char SHAFT_GLSL[] =
     "      float edge = clamp(1.0 - max(abs(d1 - dist), abs(d2 - dist)) / (0.05 * dist + 0.3), 0.0, 1.0); // (a silhouette's edge: no facing to trust)\n"
     "      float tm = u.fv.z * 0.12 * smoothstep(0.75, 0.95, up) * edge * smoothstep(0.3, 0.65, su_ground(P)) * (H / sl) * (1.0 - exp(-dist * sl / H));\n"
     "      float am = 1.0 - exp(-tm);\n"
-    "      o += (u.airc.rgb * ray + u.sunc.rgb * (ph * llast)) * (T * am);\n"
+    "      float sky_k = mix(1.0, 0.35 + 0.65 * llast, clamp(u.sun.w, 0.0, 1.0));\n"
+    "      o += (u.airc.rgb * (ray * sky_k) + u.sunc.rgb * (ph * llast)) * (T * am);\n"
     "      T *= 1.0 - am;\n"
     "      ot = T;\n"
     "    }\n"
@@ -9950,7 +9951,7 @@ static void post_shafts(GfxTex* color, const GfxScene* s, GfxTex* depth, float v
     fog_end = fminf(fmaxf(fog_end, 30.0f), 3000.0f);
     memcpy(u.cam, g_shd.u.cam, 12);
     u.cam[3] = fminf(fmaxf(g_fxs.shafts_dist, 10.0f), fog_end * 1.5f);
-    memcpy(u.sun, g_shd.u.dir, 12), u.sun[3] = 1.0f;
+    memcpy(u.sun, g_shd.u.dir, 12), u.sun[3] = fminf(fmaxf(g_shd.u.info[2], 0.0f), 1.0f); /* (the ground mist's shade) */
     /* the light: this frame's sun (or moon) colour, as strong as the shadows are drawn; strongest with the light low */
     float sc[3] = { 1.0f, 0.95f, 0.85f };
     if (s->sun_dir[3] != 0.0f)
