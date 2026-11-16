@@ -121,6 +121,14 @@ int main(int argc, char** argv)
             n -= 2;
             continue;
         }
+        /* an environment setting, NAME=VALUE (FFXI_FRAMELOG=1: the frame rate in host64.log each second) */
+        if (!strcmp(args[i], "--switch-env") && strchr(args[i + 1], '='))
+        {
+            putenv(args[i + 1]);
+            memmove(args + i, args + i + 2, (size_t)(n - i - 2) * sizeof *args);
+            n -= 2;
+            continue;
+        }
         ++i;
     }
 

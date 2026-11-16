@@ -1670,6 +1670,17 @@ int main(int argc, char** argv)
 #ifdef FFXI_MOBILE
     display_fit_start(g_signin_window); /* the game's size from the screen, whatever the file says */
     soft_keyboard_off();
+#elif defined(__SWITCH__)
+    {
+        /* the sizes the game draws at, from ffxi.reg and Config's saved settings (settings.reg) */
+        static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";
+        uint32_t v[6] = { 0 };
+        static const char* const names[6] = { "0001", "0002", "0003", "0004", "0037", "0038" };
+        for (int i = 0; i < 6; ++i)
+            reg_get_dword(KEY, names[i], &v[i]);
+        rt_log("[switch] resolution: the game %ux%u, the world (background) %ux%u, the interface %ux%u\n", v[0], v[1], v[2],
+            v[3], v[4], v[5]);
+    }
 #endif
     {
         /* The install folders are where the game is now, whatever the imported registry says (it
