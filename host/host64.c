@@ -1068,6 +1068,34 @@ static void chat_keyboard(void)
     SDL_StartTextInputWithProperties(win, p);
     SDL_DestroyProperties(p);
 }
+
+/* FFXI_FRAMELOG (run.args: --switch-env FFXI_FRAMELOG=1): the frames presented, every 5 seconds, with the
+ * longest one (a hitch) */
+static void switch_fps(void)
+{
+    static int on = -1;
+    static uint64_t since, last, longest;
+    static unsigned frames;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_FRAMELOG");
+        on = e && *e && *e != '0';
+    }
+    if (!on)
+        return;
+    uint64_t now = rt_monotonic_ns();
+    if (last && now - last > longest)
+        longest = now - last;
+    last = now;
+    if (!since)
+        since = now;
+    ++frames;
+    if (now - since >= 5000000000ull)
+    {
+        rt_log("[switch] %.1f fps, longest frame %.1f ms\n", frames * 1e9 / (double)(now - since), longest * 1e-6);
+        since = now, frames = 0, longest = 0;
+    }
+}
 #endif
 
 /* host/vicons.c reads the install through the DAT overlays, as the game would */
@@ -1117,6 +1145,7 @@ static void present_hook(void)
     touch_frame(1);
 #elif defined(__SWITCH__)
     chat_keyboard();
+    switch_fps();
 #endif
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */
