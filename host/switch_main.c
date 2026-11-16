@@ -125,6 +125,7 @@ int main(int argc, char** argv)
         if (!strcmp(args[i], "--switch-env") && strchr(args[i + 1], '='))
         {
             putenv(args[i + 1]);
+            fprintf(stderr, "[switch] set %s\n", args[i + 1]);
             memmove(args + i, args + i + 2, (size_t)(n - i - 2) * sizeof *args);
             n -= 2;
             continue;
