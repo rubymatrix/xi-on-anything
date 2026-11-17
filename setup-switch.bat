@@ -28,6 +28,18 @@ if not defined PY (
     goto end
 )
 
+rem No options (a double-click): the window, through pythonw so no console stays behind it. With
+rem options, or without tkinter: the console's questions.
+if "%~1"=="" (
+    %PY% -c "import tkinter" >nul 2>&1 && (
+        for /f "delims=" %%w in ('%PY% -c "import sys, os; print(os.path.join(os.path.dirname(sys.executable), 'pythonw.exe'))"') do (
+            if exist "%%w" (
+                start "" "%%w" tools\setup_switch_gui.py
+                exit /b 0
+            )
+        )
+    )
+)
 %PY% tools\setup_switch.py %*
 set STATUS=%ERRORLEVEL%
 

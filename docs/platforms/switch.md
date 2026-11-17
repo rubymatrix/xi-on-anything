@@ -39,6 +39,11 @@ With the SD card in the PC:
 - **Windows**: double-click `setup-switch.bat` in this folder.
 - **Linux, macOS**: `./setup-switch.sh`.
 
+A window opens: pick your game folder and the SD card with **Browse...** (a card with Atmosphère on it is
+listed by itself, and the server is filled in from your launcher), click **Install** beside *This PC* if it
+says something is missing, then **Build and install**. With options (below) or `--console`, or without a
+display or tkinter, it asks in the terminal instead.
+
 What's missing it offers to install, a yes each: Python (Windows, with winget), its `capstone` and
 `pefile` (pip), devkitPro (Windows: it downloads devkitPro's installer and opens it: keep `C:\devkitPro`
 and tick **Switch Development**; on Linux and macOS install [devkitPro's pacman](https://devkitpro.org/wiki/devkitPro_pacman)

@@ -474,6 +474,7 @@ def main():
     ap.add_argument('--arg', action='append', help='more host options for run.args, as one string (--arg "--cexi full")')
     ap.add_argument('--no-copy-game', action='store_true', help='leave the game on the card as it is')
     ap.add_argument('--check', action='store_true', help='check this PC and stop')
+    ap.add_argument('--console', action='store_true', help=argparse.SUPPRESS)  # (setup-switch's: not the window)
     a = ap.parse_args()
     saved = load_saved()
     log('=== setup_switch.py ' + ' '.join(sys.argv[1:]))
