@@ -239,6 +239,27 @@ static Sock* sock(uint32_t s)
 
 static uint32_t sock_id(const Sock* s) { return SOCK_BASE + 4u * (uint32_t)(s - g_socks); }
 
+/* A non-blocking connect still under way though select said the socket was ready: an emulator's
+ * sockets (Ryubing's) mark a connecting socket ready at once, and a read then fails with ENOTCONN (the
+ * lobby took it for a dead link). Connected is a peer and no error. The Switch's only: elsewhere ready
+ * means done. */
+static int still_connecting(const Sock* s)
+{
+#if defined(__SWITCH__)
+    if (!s->connecting)
+        return 0;
+    int err = 0;
+    socklen_t len = sizeof err;
+    struct sockaddr_in peer;
+    socklen_t pl = sizeof peer;
+    return getsockopt(s->h, SOL_SOCKET, SO_ERROR, (char*)&err, &len) == 0 && !err &&
+           getpeername(s->h, (struct sockaddr*)&peer, &pl) != 0;
+#else
+    (void)s;
+    return 0;
+#endif
+}
+
 static int set_nonblocking(host_sock h, int on)
 {
 #if defined(_WIN32)
@@ -836,7 +857,12 @@ static void sh_select(Guest* g)
             uint32_t gs = rd32(sets[k] + 4 + 4 * i);
             Sock* s = sock(gs);
             if (s && FD_ISSET(s->h, &hs[k]))
-                wr32(sets[k] + 4 + 4 * o++, gs);
+            {
+                if (still_connecting(s))
+                    r--; /* not ready yet, whatever select said */
+                else
+                    wr32(sets[k] + 4 + 4 * o++, gs);
+            }
         }
         wr32(sets[k], o);
     }
@@ -1059,6 +1085,8 @@ static void watcher(void* arg)
                 continue;
             uint32_t got = 0;
             uint32_t want = s->mask & s->enabled;
+            if (still_connecting(s))
+                continue; /* nothing to report before the connect is done */
             if (s->connecting && (FD_ISSET(s->h, &wr) || FD_ISSET(s->h, &ex)))
             {
                 int err = 0;
