@@ -88,7 +88,19 @@ def run(cmd, on_line=None, env=None):
 
 
 def interactive():
-    return sys.stdin.isatty()
+    """Whether a person can answer: stdin a terminal. (Windows' NUL device says it is one - the window runs this
+    with stdin NUL - so there a console's input mode is asked for, which NUL has not.)"""
+    if not sys.stdin or not sys.stdin.isatty():
+        return False
+    if sys.platform == 'win32':
+        import ctypes
+        import msvcrt
+        mode = ctypes.c_uint32()
+        try:
+            return bool(ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(sys.stdin.fileno()), ctypes.byref(mode)))
+        except OSError:
+            return False
+    return True
 
 
 def ask(question, default=''):
@@ -543,8 +555,8 @@ def main():
     else:
         note('the game is about 14 GB the first time; after that only what changed is copied')
     server_args(card, a)
+    drop_old_fps(card, fps_done)  # (first, so the run.args setup prints is the one left on the card)
     put_on_card(card, None if a.no_copy_game else game, a)
-    drop_old_fps(card, fps_done)
     save({'game': game, 'sd': card, 'server': a.server, 'layout': a.layout, 'fps_cleaned': fps_done})
 
     print('\nDone. On the Switch: hold R while starting any game to open the homebrew menu with full memory,\n'
