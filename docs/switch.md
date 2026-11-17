@@ -110,7 +110,8 @@ what Ryubing gives a bare `.nro`.
   right, playable, battles with their menus. The two bugs it found are fixed (929143f). Sound: the
   sign-in's effects, the game's (5485963, the thread pool) and the music.
 - In Ryubing 1.3.3 (Windows and macOS hosts, with guest Internet access on): sign-in, the lobby, and into
-  the world (Port Jeuno), after the lobby fixes below.
+  the world (Port Jeuno), after the lobby fixes below. Against a server across the internet
+  (2026-11-17): sign-in from `run.args`, the lobby, the character list and into the world.
 
 ## Found: the lobby in Ryubing
 
@@ -129,6 +130,13 @@ Three things stopped the lobby in the emulator, none of which a console shows:
   `Select` (`bsdSelect`, answered at once) with a zero timeout and sleeps between tries outside it, and
   `data_thread` peeks with `MSG_DONTWAIT` and sleeps 20 ms. `sh_socket` and its kind still hold the guest
   lock across service calls (to look at).
+- Against a remote server, two more. Ryubing ends a read under `SO_RCVTIMEO` after ~70 ms with
+  `ETIMEDOUT` (asked for 15 s), so the sign-in's TLS handshake failed (`-0x6800`): on the Switch,
+  `lsb_login.c` sets no timeout and `bio_recv` peeks with `MSG_DONTWAIT`, sleeping 20 ms, for up to
+  15 s. And its `Select` marks a socket whose non-blocking connect is still under way as ready, so
+  the lobby's first read got `ENOTCONN` and it took the link for dead: `ws2.c`'s `still_connecting()`
+  (a peer and no `SO_ERROR`) keeps such a socket out of the watcher's events and `select`'s sets.
+  A server on 127.0.0.1 hides both: it answers within 70 ms and connects at once.
 
 Found with Ryubing's GDB stub and `FFXI_NET_TRACE` / `FFXI_RECOMP_TRACE` set from `run.args`
 (`FFXI_NAME=value` lines). Ryubing also needs **Enable guest Internet access** (Settings > Network) or it
