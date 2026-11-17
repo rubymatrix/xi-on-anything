@@ -47,7 +47,8 @@ first) and devkitPro's Switch packages (with its pacman; `sudo` asks for your pa
 It asks for your `FINAL FANTASY XI` folder, the SD card (it finds a card with `atmosphere/` or `switch/`
 on it by itself) and the server's address: the name or IP your launcher signs in to, which it offers
 when it finds it near the game folder (an Ashita boot config's `--server`, VanaCore's `[server]`, a launch
-script's `--server`). Then it does every step below in order: it checks the PC, identifies your game version, prepares its code,
+script's `--server`); for a CatsEyeXI server it adds `--cexi full` to `run.args` (its own items, gear, spells
+and abilities) unless `run.args` sets `--cexi` already. Then it does every step below in order: it checks the PC, identifies your game version, prepares its code,
 finds its frame delta sites if this repository doesn't have them yet, builds the `.nro`, and copies the
 `.nro`, the game and the settings to the card. Then [run it](#3-run).
 

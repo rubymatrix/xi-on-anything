@@ -436,6 +436,21 @@ def drop_old_fps(card, done):
     done.append(str(root))
 
 
+def server_args(card, a):
+    """Host options a server needs that the player can't be expected to know: a CatsEyeXI server's own items,
+    gear, spells and abilities (--cexi full). Added only when neither --arg nor run.args has --cexi already."""
+    if not a.server or not re.search(r'(^|\.)catseyexi\.com$', a.server.split(':')[0], re.I):
+        return
+    if any('--cexi' in x for x in a.arg or []):
+        return
+    import build_switch
+    path = build_switch.sd_root(card) / build_switch.APP_DIR / 'run.args'
+    if path.exists() and '--cexi' in [l.strip() for l in path.read_text().splitlines()]:
+        return
+    a.arg = (a.arg or []) + ['--cexi full']
+    note("a CatsEyeXI server: adding --cexi full to run.args (its own items, gear, spells and abilities)")
+
+
 def put_on_card(card, game, a):
     import build_switch
     ns = argparse.Namespace(mtp=None, sd=card, nro=None, game=game, server=a.server or None, fps_divisor=None,
@@ -526,6 +541,7 @@ def main():
         note('leaving the game on the card as it is (--no-copy-game)')
     else:
         note('the game is about 14 GB the first time; after that only what changed is copied')
+    server_args(card, a)
     put_on_card(card, None if a.no_copy_game else game, a)
     drop_old_fps(card, fps_done)
     save({'game': game, 'sd': card, 'server': a.server, 'layout': a.layout, 'fps_cleaned': fps_done})
