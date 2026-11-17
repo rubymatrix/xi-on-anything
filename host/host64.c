@@ -1742,6 +1742,17 @@ int main(int argc, char** argv)
     {
         /* the sizes the game draws at, from ffxi.reg and Config's saved settings (settings.reg) */
         static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";
+        /* FFXI_SWITCH_BG=<w>[x<h>] (run.args): the world's background at that size for the session, below
+         * Config's smallest (2048), never saved: e.g. FFXI_SWITCH_BG=1280x720, the handheld's screen */
+        const char* bg = getenv("FFXI_SWITCH_BG");
+        if (bg && *bg)
+        {
+            unsigned bw = 0, bh = 0;
+            if (sscanf(bg, "%ux%u", &bw, &bh) < 2)
+                bh = bw;
+            if (bw >= 256 && bh >= 256 && bw <= 8192 && bh <= 8192)
+                reg_override_dword(KEY, "0003", bw & ~1u), reg_override_dword(KEY, "0004", bh & ~1u);
+        }
         uint32_t v[6] = { 0 };
         static const char* const names[6] = { "0001", "0002", "0003", "0004", "0037", "0038" };
         for (int i = 0; i < 6; ++i)
