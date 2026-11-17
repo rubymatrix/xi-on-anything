@@ -109,6 +109,30 @@ what Ryubing gives a bare `.nro`.
   the system keyboard, sign-in to a LandSandBoat server, the game in the world (West Sarutabaruta), drawn
   right, playable, battles with their menus. The two bugs it found are fixed (929143f). Sound: the
   sign-in's effects, the game's (5485963, the thread pool) and the music.
+- In Ryubing 1.3.3 (Windows and macOS hosts, with guest Internet access on): sign-in, the lobby, and into
+  the world (Port Jeuno), after the lobby fixes below.
+
+## Found: the lobby in Ryubing
+
+Three things stopped the lobby in the emulator, none of which a console shows:
+
+- `gethostname` on libnx gives the console's address as text, and the lobby looks it up with
+  `gethostbyname` before it connects. Ryubing's resolver fails on it. `ws2.c` now answers a dotted
+  address, and the machine's own name (127.0.0.1), when the lookup fails, as Winsock does.
+- Ryubing answers `ioctl(FIONREAD)` with `EOPNOTSUPP`; the lobby saw 0 bytes waiting for ever. On a
+  failure, `ws2.c` counts with `recv(MSG_PEEK | MSG_DONTWAIT)`.
+- The freeze: Ryubing serves the sockets (bsd) service on one thread, and its `Poll`, which libnx's
+  `select()` and `poll()` both use, sleeps 50 ms in the service whenever nothing is ready, timeout 0 or
+  not. With `ws2.c`'s watcher polling every 5 ms and `lsb_login.c`'s `data_thread` parked in a blocking
+  `recv`, the lobby's own `socket()`/`fcntl()`/`getsockopt()` waited seconds each, with the guest lock
+  held, and every guest thread stopped behind it. On the Switch, `host_select()` asks the service's
+  `Select` (`bsdSelect`, answered at once) with a zero timeout and sleeps between tries outside it, and
+  `data_thread` peeks with `MSG_DONTWAIT` and sleeps 20 ms. `sh_socket` and its kind still hold the guest
+  lock across service calls (to look at).
+
+Found with Ryubing's GDB stub and `FFXI_NET_TRACE` / `FFXI_RECOMP_TRACE` set from `run.args`
+(`FFXI_NAME=value` lines). Ryubing also needs **Enable guest Internet access** (Settings > Network) or it
+resolves nothing, even `127.0.0.1`.
 
 ## Saved passwords
 
@@ -137,7 +161,8 @@ The "start-up race" (a black screen, the main thread spinning in gfx_queue.c's `
 analysis is at fault (`-fno-tree-pta` keeps the stores; `-fno-builtin-malloc` does not). Builds with any extra
 code there (debug probes, a print) compiled differently and worked, which looked like timing. Found with
 Ryubing's GDB stub (`enable_gdb_stub` in its Config.json; `aarch64-none-elf-gdb`, `add-symbol-file <elf> -o
-<module base>` from `monitor get info`) and the object's disassembly. `build_switch.py` now compiles our own
+<module base>` from `monitor get info`; if its default port 55555 is taken, as it can be on macOS, Ryubing
+crashes at start with `Address already in use`: pick another) and the object's disassembly. `build_switch.py` now compiles our own
 sources with `-fno-tree-pta`; the translated code keeps it.
 
 ## Not yet
@@ -159,9 +184,17 @@ sources with `-fno-tree-pta`; the translated code keeps it.
 ## Testing in the emulator
 
 `build_switch.py run [file.nro]` copies the `.nro` to the emulator's virtual SD card and starts it (a
-portable Ryubing under `XI_EMU_DIR`, default `D:/Emulator/Ryubing`, or `XI_SWITCH_EMU`). The app's files
+portable Ryubing under `XI_EMU_DIR`, default `D:/Emulator/Ryubing`; on macOS `Ryujinx.app` in
+`/Applications` or `~/Applications`; or `XI_SWITCH_EMU`). The app's files
 are then in `<emulator>/portable/sdcard/switch/xi-on-anything/`, and the emulator's own log in
-`portable/Logs`. Turn off Ryubing's "expand DRAM" option so the memory matches a real 4 GB console.
+`portable/Logs`. Turn off Ryubing's "expand DRAM" option so the memory matches a real 4 GB console, and
+turn on "Enable guest Internet access" (Settings > Network), without which no name resolves.
+
+The display defaults are `switch/switch.reg`, loaded after the desktop `ffxi.reg` and before what the
+game saves (`settings.reg`, the overlay): the desktop file's 3440x1440 window and 6880x2880 background
+drew the lobby 21:9 squeezed into 16:9, and the game saves its whole registry on the first run, so a bad
+default stays. Config > Modern's Display page reads and writes `data/settings.reg` (loaded last), as on
+the desktop with the sign-in screen.
 
 The back end's lines, and anything written with `svcOutputDebugString`, are in Ryubing's own log, as
 `KernelSvc OutputDebugString`. `build_switch.py gfx-test` builds the graphics test; run it as any `.nro`;

@@ -25,7 +25,10 @@ Developer notes are in [../switch.md](../switch.md).
   homebrew menu has too little memory for the game.
 - To run without a console: [Ryubing](https://git.ryujinx.app/projects/Ryubing/releases) with your own
   console's `prod.keys` (dumped with Lockpick_RCM) in its `system` folder. Its portable mode (a
-  `portable` folder beside `Ryujinx.exe`) keeps its data and virtual SD card beside it.
+  `portable` folder beside `Ryujinx.exe`) keeps its data and virtual SD card beside it. Turn on
+  **Settings > Network > Enable guest Internet access**: without it Ryubing's resolver refuses every name,
+  even `127.0.0.1`, and the host exits with `--server: cannot resolve`. On macOS, `build_switch.py` finds
+  `Ryujinx.app` in `/Applications` or `~/Applications` and its card in `~/Library/Application Support/Ryujinx`.
 
 ## 1. Build
 
@@ -52,7 +55,10 @@ python tools/build_switch.py setup --sd E:\ --game "<your FINAL FANTASY XI folde
 - the game to `sdmc:/switch/xi-on-anything/SquareEnix/FINAL FANTASY XI` (and the viewer folder beside it,
   if your install has one): about 14 GB the first time. Run it again after a game update, or if a copy
   stopped part way: only files whose size or date differ are copied.
-- `ffxi.reg`, and `run.args` with the options you gave
+- `ffxi.reg`, and `switch.reg` over it: the Switch's defaults (a 1920x1080 window and background,
+  windowed, menus at 960x540 so the UI is twice its size, readable on a TV and in handheld). What you
+  change in game is saved to `settings.reg` beside them and wins over both.
+- `run.args` with the options you gave
 
 `setup`'s options, which it writes to `run.args` (one host argument per line; edit the file on the card
 to change them later; `--layout` becomes `--switch-layout` there):
@@ -69,6 +75,9 @@ Don't put `--pass` in `run.args` unless the card stays with you: it is a plain t
 screen's **Remember password** instead: the password is kept on the card encrypted with a key only your
 console has (`sdmc:/switch/xi-on-anything/data/keychain/`), so a copy of the card can't be read on a
 computer or another Switch.
+
+A line `FFXI_NAME=value` in `run.args` sets that environment variable instead of passing an argument
+(there is no shell on the Switch), for example `FFXI_NET_TRACE=1` to log the network.
 
 ## 3. Run
 
