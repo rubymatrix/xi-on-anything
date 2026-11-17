@@ -137,6 +137,41 @@ static void clock_end(void)
     }
 }
 
+/* FFXI_PROFILE: the CPU's, GPU's and memory's clocks every 10 s (what the system, sys-clk or Horizon OC set
+ * them to: a GPU held low shows as Present's wait in the profile) */
+static void clock_report(uint64_t now)
+{
+    static int state; /* 0 not tried, 1 open, -1 not available */
+    static ClkrstSession s[3];
+    static uint64_t at;
+    if (state < 0 || (state && now - at < 10000000000ull))
+        return;
+    at = now;
+    if (!state)
+    {
+        const char* e = getenv("FFXI_PROFILE");
+        static const PcvModuleId ids[3] = { PcvModuleId_CpuBus, PcvModuleId_GPU, PcvModuleId_EMC };
+        state = -1;
+        if (!(e && *e && *e != '0') || R_FAILED(clkrstInitialize()))
+            return;
+        for (int i = 0; i < 3; ++i)
+            if (R_FAILED(clkrstOpenSession(&s[i], ids[i], 3)))
+            {
+                while (i--)
+                    clkrstCloseSession(&s[i]);
+                clkrstExit();
+                fprintf(stderr, "[switch] clocks: not readable\n");
+                return;
+            }
+        state = 1;
+    }
+    u32 hz[3] = { 0 };
+    for (int i = 0; i < 3; ++i)
+        clkrstGetClockRate(&s[i], &hz[i]);
+    fprintf(stderr, "[switch] clocks: CPU %u MHz, GPU %u MHz, memory %u MHz (%s)\n", hz[0] / 1000000u, hz[1] / 1000000u,
+        hz[2] / 1000000u, appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld");
+}
+
 /* each frame, from host64.c's present hook (the game's thread) */
 void switch_clock_frame(void)
 {
@@ -146,6 +181,7 @@ void switch_clock_frame(void)
     uint64_t now = armTicksToNs(armGetSystemTick());
     g_last_present_ns = now;
     g_presents++;
+    clock_report(now);
     if (g_boost_turns != said_turns)
     {
         said_turns = g_boost_turns;
