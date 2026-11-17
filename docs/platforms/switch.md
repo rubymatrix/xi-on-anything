@@ -44,6 +44,8 @@ listed by itself, and the server is filled in from your launcher), click **Insta
 says something is missing, then **Build and install**. With options (below) or `--console`, or without a
 display or tkinter, it asks in the terminal instead.
 
+<img src="../../screenshots/switch_setup.png" alt="The Switch setup window: the game folder, the SD card and the server filled in, building" width="560">
+
 What's missing it offers to install, a yes each: Python (Windows, with winget), its `capstone` and
 `pefile` (pip), devkitPro (Windows: it downloads devkitPro's installer and opens it: keep `C:\devkitPro`
 and tick **Switch Development**; on Linux and macOS install [devkitPro's pacman](https://devkitpro.org/wiki/devkitPro_pacman)
