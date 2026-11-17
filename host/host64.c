@@ -1103,6 +1103,10 @@ static void switch_fps(void)
         const char* e = getenv("FFXI_FRAMELOG");
         on = e && *e && *e != '0';
     }
+    extern int gfx_gl_prof_take(char* out, size_t n); /* gfx_gl.c: its FFXI_PROFILE line, from the render thread */
+    char line[512];
+    if (gfx_gl_prof_take(line, sizeof line))
+        rt_log("%s", line);
     if (!on)
         return;
     uint64_t now = rt_monotonic_ns();

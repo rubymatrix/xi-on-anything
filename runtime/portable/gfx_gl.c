@@ -124,6 +124,34 @@ void gfx_prof_skip(int reason)
 }
 void gfx_prof_shim(uint64_t ns) { g_prof.shim_ns += ns; } /* one thread: the game's, which presents */
 
+#if defined(__SWITCH__)
+/* The render thread's stdio would break the main thread's (docs/switch.md): the profile's line is handed to
+ * the game's thread, which logs it (gfx_gl_prof_take, from host64.c). One at a time: a line not yet taken
+ * keeps its place. */
+static char g_prof_line[512];
+static uint32_t g_prof_ready;
+#define PROF_LOG(...)                                                                                                 \
+    do                                                                                                                \
+    {                                                                                                                 \
+        if (!__atomic_load_n(&g_prof_ready, __ATOMIC_ACQUIRE))                                                        \
+        {                                                                                                             \
+            snprintf(g_prof_line, sizeof g_prof_line, __VA_ARGS__);                                                   \
+            __atomic_store_n(&g_prof_ready, 1, __ATOMIC_RELEASE);                                                     \
+        }                                                                                                             \
+    } while (0)
+
+int gfx_gl_prof_take(char* out, size_t n)
+{
+    if (!__atomic_load_n(&g_prof_ready, __ATOMIC_ACQUIRE))
+        return 0;
+    snprintf(out, n, "%s", g_prof_line);
+    __atomic_store_n(&g_prof_ready, 0, __ATOMIC_RELEASE);
+    return 1;
+}
+#else
+#define PROF_LOG LOG
+#endif
+
 static void prof_frame(uint64_t present_start)
 {
     uint64_t now = gfx_now_ns();
@@ -135,7 +163,7 @@ static void prof_frame(uint64_t present_start)
         return;
     double f = (double)g_prof.frames, ms = 1e-6 / f;
     double frame = (double)(now - g_prof.since_ns) * ms;
-    LOG("[gfx] %.1f fps: frame %.2f ms = game %.2f + d3d %.2f (gl %.2f) + present %.2f | %.0f draws, %.0f skipped, %.0f KB up, "
+    PROF_LOG("[gfx] %.1f fps: frame %.2f ms = game %.2f + d3d %.2f (gl %.2f) + present %.2f | %.0f draws, %.0f skipped, %.0f KB up, "
         "%.0f new programs\n",
         f / ((double)(now - g_prof.since_ns) * 1e-9), frame, frame - (double)(g_prof.front_ns + g_prof.present_ns) * ms,
         (double)g_prof.front_ns * ms, (double)g_prof.render_ns * ms, (double)g_prof.present_ns * ms, (double)g_prof.draws / f,
