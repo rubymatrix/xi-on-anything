@@ -81,6 +81,11 @@ def emulator():
     env = os.environ.get('XI_SWITCH_EMU')
     if env:
         return Path(env)
+    if sys.platform == 'darwin':  # Ryubing's macOS app
+        for app in (Path('/Applications/Ryujinx.app'), Path.home() / 'Applications/Ryujinx.app'):
+            exe = app / 'Contents/MacOS/Ryujinx'
+            if exe.exists():
+                return exe
     base = Path(os.environ.get('XI_EMU_DIR', 'D:/Emulator/Ryubing'))
     if base.is_dir():
         for d in sorted((d for d in base.iterdir() if d.is_dir()), reverse=True):
@@ -97,4 +102,6 @@ def emulator_sd(exe):
         return portable / 'sdcard'
     if sys.platform == 'win32':
         return Path(os.environ.get('APPDATA', '')) / 'Ryujinx/sdcard'
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library/Application Support/Ryujinx/sdcard'
     return Path.home() / '.config/Ryujinx/sdcard'

@@ -1717,6 +1717,16 @@ int main(int argc, char** argv)
         rt_log("[recomp] game hosts -> %u.%u.%u.%u\n", game_server >> 24, (game_server >> 16) & 255,
             (game_server >> 8) & 255, game_server & 255);
     }
+    /* no sign-in screen and no --reg-final (the Switch, signed in from run.args): the display settings
+     * still have the file the sign-in screen keeps, <data dir>/settings.reg, loaded last when it is
+     * there; Config > Modern's Display page reads and writes it */
+    static char display_reg[1100];
+    if (!nfinals && data_dir)
+    {
+        snprintf(display_reg, sizeof display_reg, "%s%csettings.reg", data_dir, plat_path_sep);
+        if (!overlay || strcmp(overlay, display_reg))
+            finals[nfinals++] = display_reg;
+    }
     reg_init(regs, nregs, overlay);
     for (unsigned i = 0; i < nfinals; ++i)
         reg_load_final(finals[i]);

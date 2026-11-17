@@ -120,7 +120,7 @@ def build(name, progress=None):
     os.makedirs(objdir, exist_ok=True)
     jobs = []
     for n, g in enumerate(m['groups']):
-        base = (CC + PIE + ['-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' and 'emcc' not in CC[0] else [])
+        base = (CC + PIE + ['-O2', '-DNDEBUG', '-w'] + (['-mmacosx-version-min=' + MIN_MACOS] if sys.platform == 'darwin' and 'emcc' not in CC[0] and 'none-elf' not in CC[0] else [])
                 + shlex.split(os.environ.get('XI_TP_CFLAGS', ''))
                 + g['flags']
                 + ['-I' + os.path.join(lib, d) for d in g['include']]

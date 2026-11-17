@@ -48,7 +48,14 @@ static int read_args(const char* path, char** out, int room)
     {
         size_t len = strcspn(line, "\r\n");
         line[len] = 0;
-        if (len)
+        if (!strncmp(line, "FFXI_", 5) && strchr(line, '='))
+        {
+            /* FFXI_NAME=value: an environment variable (there is no shell to set one) */
+            char* eq = strchr(line, '=');
+            *eq = 0;
+            setenv(line, eq + 1, 1);
+        }
+        else if (len)
             out[n++] = strdup(line);
     }
     fclose(f);
@@ -91,7 +98,12 @@ int main(int argc, char** argv)
     mkdir("sdmc:/switch", 0777);
     mkdir(APP_DIR, 0777);
     chdir(APP_DIR);
-    if (freopen(APP_DIR "/host64.log", "w", stderr))
+    /* emptied, then both streams opened to append: with stderr at its own offset ("w"), its lines and
+     * stdout's (OutputDebugString) wrote over each other */
+    FILE* empty = fopen(APP_DIR "/host64.log", "w");
+    if (empty)
+        fclose(empty);
+    if (freopen(APP_DIR "/host64.log", "a", stderr))
         setvbuf(stderr, NULL, _IOLBF, 0);
     if (freopen(APP_DIR "/host64.log", "a", stdout))
         setvbuf(stdout, NULL, _IOLBF, 0);
@@ -147,6 +159,14 @@ int main(int argc, char** argv)
     {
         args[n++] = "--reg";
         args[n++] = reg;
+        /* the Switch's defaults over the desktop's (switch/switch.reg: the screen's size, windowed), still
+         * under what the player saves (the overlay) */
+        static char sw_reg[] = APP_DIR "/switch.reg";
+        if (stat(sw_reg, &st) == 0)
+        {
+            args[n++] = "--reg";
+            args[n++] = sw_reg;
+        }
     }
     if (!has_arg(n, args, "--reg-overlay"))
     {

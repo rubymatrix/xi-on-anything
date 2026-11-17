@@ -938,19 +938,24 @@ static const char* cfg_value(const char* path, const char* key, char* buf, size_
     return found;
 }
 
-/* a DWORD of the settings file ("name"=dword:hex), or dflt */
+/* a DWORD of the settings file ("name"=dword:hex); else what the game runs with (the registry as
+ * loaded: the file may not exist yet, or lack it); else dflt */
 static int settings_dword(const char* name, int dflt)
 {
-    FILE* f = g_settings_reg[0] ? fopen(g_settings_reg, "r") : NULL;
-    if (!f)
-        return dflt;
     char line[256], want[16];
     snprintf(want, sizeof want, "\"%s\"=dword:", name);
-    int v = dflt;
-    while (fgets(line, sizeof line, f))
-        if (!strncmp(line, want, strlen(want)))
-            v = (int)strtoul(line + strlen(want), NULL, 16);
-    fclose(f);
+    int v = dflt, found = 0;
+    FILE* f = g_settings_reg[0] ? fopen(g_settings_reg, "r") : NULL;
+    if (f)
+    {
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, want, strlen(want)))
+                v = (int)strtoul(line + strlen(want), NULL, 16), found = 1;
+        fclose(f);
+    }
+    uint32_t r;
+    if (!found && reg_get_dword("HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI", name, &r))
+        v = (int)r;
     return v;
 }
 
