@@ -67,7 +67,7 @@ to change them later; `--layout` becomes `--switch-layout` there):
 | --- | --- |
 | `--server <name or IP>` | The LandSandBoat server. Without it, the sign-in screen asks. |
 | `--layout nintendo\|xbox` | `nintendo` (the default): A confirms and B cancels, as everywhere on the Switch. `xbox`: by position, B (the bottom button) confirms. |
-| `--fps-divisor 1\|2` | 30 fps as shipped (2, the default on the Switch) or 60 (1). See [Performance](#performance) before choosing 60. |
+| `--fps-divisor 0\|1\|2` | Uncapped (0), 60 fps (1) or 30 (2). Without it: uncapped if your game version has frame delta sites, else 30. See [Performance](#performance). |
 | `--dats <folder>` | A DAT overlay folder, copied to the card and passed as `--dats`. |
 | `--arg "<host options>"` | Any other [host option](../running.md#options), for example `--arg "--user me"`. |
 
@@ -91,11 +91,17 @@ The log is `sdmc:/switch/xi-on-anything/host64.log`; `python tools/build_switch.
 ## Performance
 
 By default the game is drawn at the screen's size (1280x720 in the hand, 1920x1080 on a TV), the world too,
-and the CPU runs at its top speed (1785 MHz) while a zone loads. It runs at 30 fps, which it holds. At 60
-(`--fps-divisor 1`) a console at stock clocks draws around 35-40 frames a second in the world, and the game's
-world runs that much slower (its time is counted in frames: animations look like slow motion) unless your game
-version has frame delta sites (`tools/frame_sites.py`; the log says at the start). These lines in `run.args`
-change it:
+and the CPU runs at its top speed (1785 MHz) while a zone loads. The frame rate:
+
+- If your game version has frame delta sites (`tools/frame_sites.py`; the log says `[switch] frame rate: ...` at
+  the start), it runs uncapped: as many frames as the console draws, up to the screen's 60 (about 35-60 in the
+  world at stock clocks), with the world at its real speed whatever the rate.
+- Without them it runs at 30 fps, which it holds. At 60 (`--fps-divisor 1`) a console at stock clocks draws
+  around 35-40 frames a second in the world, and the world runs that much slower: its time is counted in
+  frames, so animations look like slow motion.
+
+`--fps-divisor 2` in `run.args` keeps 30 either way (less battery, an even pace). These lines in `run.args`
+change the rest:
 
 | Line | What it does |
 | --- | --- |

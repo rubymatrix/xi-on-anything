@@ -433,7 +433,8 @@ def main():
     s.add_argument('--nro')
     s.add_argument('--game', help='the FINAL FANTASY XI folder to copy')
     s.add_argument('--server', help='the LandSandBoat server, by name or IP')
-    s.add_argument('--fps-divisor', type=int, choices=[0, 1, 2])
+    s.add_argument('--fps-divisor', type=int, choices=[0, 1, 2],
+                   help='0 uncapped, 1 60 fps, 2 30 fps (default: uncapped if the build has frame delta sites, else 30)')
     s.add_argument('--dats', help='a DAT overlay folder to copy (--dats)')
     s.add_argument('--layout', choices=['nintendo', 'xbox'], help='A/B as on the Switch, or swapped as on Xbox')
     s.add_argument('--arg', action='append', help='more host options, as one string')

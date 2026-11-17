@@ -15,6 +15,7 @@
 
 #include <switch.h>
 
+#include "frame.h"
 #include "nx_bridge.h"
 
 int xi_host_main(int argc, char** argv);
@@ -315,13 +316,16 @@ int main(int argc, char** argv)
         ++i;
     }
 
-    /* 30 fps unless run.args says otherwise: the console holds it, and at 60 a build without frame delta sites
-     * (tools/frame_sites.py) runs slow when the frames don't come 60 a second - the world's time is counted in
-     * frames (docs/switch.md, Performance) */
+    /* Unless run.args says otherwise: uncapped when this build has frame delta sites (tools/frame_sites.py),
+     * so the world keeps the wall clock's speed at whatever rate the console draws (the screen's 60 at most),
+     * else 30, which the console holds: at 60 without the sites the world runs slow when the frames don't come
+     * 60 a second - its time is counted in frames (docs/switch.md, Performance) */
     if (!has_arg(n, args, "--fps-divisor") && !has_arg(n, args, "--fps-limit"))
     {
         args[n++] = "--fps-divisor";
-        args[n++] = "2";
+        args[n++] = frame_supported() ? "0" : "2";
+        fprintf(stderr, "[switch] frame rate: %s (run.args has no --fps-divisor)\n",
+            frame_supported() ? "uncapped, this build has frame delta sites" : "30 fps, this build has no frame delta sites");
     }
 
     static char game[] = APP_DIR "/SquareEnix/FINAL FANTASY XI";
