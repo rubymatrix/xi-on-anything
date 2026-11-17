@@ -139,20 +139,117 @@ def check_pc(fix):
                                                          capture_output=True).returncode]
     if missing:
         problems.append(f"Python's {', '.join(missing)}: `{Path(sys.executable).name} -m pip install {' '.join(missing)}`")
-    import switch_toolchain as tc
-    if not tc.DKP:
-        problems.append('devkitPro: not found. Install it (https://devkitpro.org/wiki/Getting_Started), then in its '
-                        f'msys2 shell `pacman -S {DKP_PACKAGES}`. Set DEVKITPRO if it is not in C:\\devkitPro, '
-                        'C:\\msys64 or D:\\msys64 (or /opt/devkitpro).')
-    else:
-        want = {'switch-dev': tc.LIBNX / 'lib/libnx.a', 'switch-mesa': tc.PORTLIBS / 'lib/libEGL.a',
-                'switch-libdrm_nouveau': tc.PORTLIBS / 'lib/libdrm_nouveau.a', 'switch-glad': tc.PORTLIBS / 'include/glad'}
-        absent = [pkg for pkg, path in want.items() if not path.exists()]
-        if absent:
-            problems.append(f"devkitPro ({tc.DKP}) lacks {', '.join(absent)}: in its msys2 shell `pacman -S {' '.join(absent)}`")
-        else:
-            note(f'devkitPro: {tc.DKP}')
+    problems += check_devkitpro(fix)
     return problems
+
+
+# devkitPro: the compiler (devkitA64) and the Switch's libraries, installed with devkitPro's pacman
+
+def toolchain():
+    """switch_toolchain, looked at afresh (after an install it finds what it did not before)."""
+    import importlib
+    import switch_toolchain as tc
+    return importlib.reload(tc)
+
+
+def absent_packages(tc):
+    if not tc.DKP:
+        return DKP_PACKAGES.split()
+    want = {'switch-dev': tc.LIBNX / 'lib/libnx.a', 'switch-mesa': tc.PORTLIBS / 'lib/libEGL.a',
+            'switch-libdrm_nouveau': tc.PORTLIBS / 'lib/libdrm_nouveau.a', 'switch-glad': tc.PORTLIBS / 'include/glad'}
+    return [pkg for pkg, path in want.items() if not path.exists()]
+
+
+def find_pacman(tc):
+    """The command that runs devkitPro's pacman ([...], then the packages), or None: on Windows the msys2 it
+    lives in (devkitPro's installer's C:\\devkitPro\\msys2, or a plain msys2 with devkitPro's repositories),
+    elsewhere dkp-pacman (Linux's devkitPro pacman) or devkitPro's own pacman, through sudo."""
+    if sys.platform == 'win32':
+        roots = []
+        if tc.DKP:  # an msys2's /opt/devkitpro, or devkitPro's installer's root
+            roots += [tc.DKP.parent.parent] if tc.DKP.parent.name == 'opt' else [tc.DKP / 'msys2']
+        roots += [Path('C:/devkitPro/msys2')] + tc._msys_roots()
+        for r in roots:
+            bash = r / 'usr/bin/bash.exe'
+            if bash.exists() and (r / 'usr/bin/pacman.exe').exists():
+                return [str(bash), '-lc']
+        return None
+    import shutil
+    for pm in ['dkp-pacman', '/opt/devkitpro/pacman/bin/pacman']:
+        if shutil.which(pm) or Path(pm).exists():
+            return ['sudo', pm]
+    return None
+
+
+def pacman_install(cmd, packages):
+    if cmd[-1] == '-lc':  # msys2's bash: the whole command one string
+        full = cmd + ['pacman -S --needed --noconfirm ' + ' '.join(packages)]
+    else:
+        full = cmd + ['-S', '--needed', '--noconfirm'] + packages
+    print('  > ' + ' '.join(full), flush=True)
+    log('> ' + ' '.join(full))
+    # on the terminal, not through the log: sudo asks for the password, and pacman shows its downloads
+    if subprocess.run(full).returncode:
+        raise Failure('pacman could not install ' + ' '.join(packages) + '. Run it again, or install them by hand '
+                      '(docs/platforms/switch.md, Manual steps).')
+
+
+INSTALLER_API = 'https://api.github.com/repos/devkitPro/installer/releases/latest'
+
+
+def get_installer():
+    """devkitPro's Windows installer (devkitProUpdater), downloaded to build/switch: its path."""
+    import urllib.request
+    req = urllib.request.Request(INSTALLER_API, headers={'User-Agent': 'xi-on-anything-setup'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        release = json.load(r)
+    asset = next(a for a in release['assets'] if a['name'].lower().endswith('.exe'))
+    out = OUT / asset['name']
+    if not out.exists():
+        note(f"downloading {asset['name']} from github.com/devkitPro/installer")
+        OUT.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(asset['browser_download_url'], out)
+    return out
+
+
+def check_devkitpro(fix):
+    tc = toolchain()
+    absent = absent_packages(tc)
+    if not absent:
+        note(f'devkitPro: {tc.DKP}')
+        return []
+    pacman = find_pacman(tc)
+    if fix and not pacman and sys.platform == 'win32' and interactive() and yes(
+            'devkitPro (the Switch compiler) is not installed. Download its installer and open it now?'):
+        try:
+            exe = get_installer()
+        except Exception as e:  # noqa: BLE001 - offline, GitHub's limit: say so, and how to get it by hand
+            raise Failure(f'Could not download the installer ({e}). Get it from '
+                          'https://github.com/devkitPro/installer/releases and run it.')
+        note('In the installer: keep the default folder (C:\\devkitPro), and tick "Switch Development"')
+        note('when it asks which parts to install. It downloads for a while; then come back here.')
+        subprocess.Popen([str(exe)])
+        ask('Press Enter when the installer has finished')
+        tc = toolchain()
+        absent, pacman = absent_packages(tc), find_pacman(tc)
+        if not absent:
+            note(f'devkitPro: {tc.DKP}')
+            return []
+    if fix and pacman and yes(f"devkitPro needs {', '.join(absent)}. Install {'it' if len(absent) == 1 else 'them'} now?"):
+        pacman_install(pacman, absent)
+        tc = toolchain()
+        absent = absent_packages(tc)
+        if not absent:
+            note(f'devkitPro: {tc.DKP}')
+            return []
+    if not pacman:
+        where = ('run this setup again (it downloads the installer), or get it from '
+                 'https://github.com/devkitPro/installer/releases' if sys.platform == 'win32'
+                 else 'see https://devkitpro.org/wiki/devkitPro_pacman for this system')
+        return [f'devkitPro (the Switch compiler): not installed. Install it: {where}. '
+                f'Then this setup installs the packages it needs ({DKP_PACKAGES}).']
+    return [f"devkitPro's {', '.join(absent)}: run this setup again and answer yes to install "
+            f"{'it' if len(absent) == 1 else 'them'}, or by hand: pacman -S {' '.join(absent)}"]
 
 
 # ---- 2. the game ----------------------------------------------------------------------------------

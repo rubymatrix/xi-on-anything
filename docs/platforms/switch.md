@@ -14,7 +14,9 @@ Developer notes are in [../switch.md](../switch.md).
 
 ## What you need
 
-- A Windows, Linux or macOS PC with [devkitPro](https://devkitpro.org/wiki/Getting_Started) and these
+- A Windows, Linux or macOS PC. The [Quick start](#quick-start)'s setup installs what follows when it is
+  missing (on Windows: Python with winget, devkitPro with its own installer, then the packages; on Linux and
+  macOS the packages, once devkitPro's pacman is in). By hand: [devkitPro](https://devkitpro.org/wiki/Getting_Started) and these
   packages: `pacman -S switch-dev switch-mesa switch-libdrm_nouveau switch-glad`. On Windows, devkitPro's
   msys2 or your own msys2 with devkitPro's pacman repositories both work; set `DEVKITPRO` (or `XI_MSYS2`)
   if it is not in `C:\devkitPro`, `C:\msys64` or `D:\msys64`.
@@ -32,14 +34,18 @@ Developer notes are in [../switch.md](../switch.md).
 
 ## Quick start
 
-With devkitPro and Python installed ([What you need](#what-you-need)) and the SD card in the PC:
+With the SD card in the PC:
 
 - **Windows**: double-click `setup-switch.bat` in this folder.
 - **Linux, macOS**: `./setup-switch.sh`.
 
+What's missing it offers to install, a yes each: Python (Windows, with winget), its `capstone` and
+`pefile` (pip), devkitPro (Windows: it downloads devkitPro's installer and opens it: keep `C:\devkitPro`
+and tick **Switch Development**; on Linux and macOS install [devkitPro's pacman](https://devkitpro.org/wiki/devkitPro_pacman)
+first) and devkitPro's Switch packages (with its pacman; `sudo` asks for your password on Linux and macOS).
+
 It asks for your `FINAL FANTASY XI` folder, the SD card (it finds a card with `atmosphere/` or `switch/`
-on it by itself) and the server, then does every step below in order: it checks the PC (and names
-anything missing, with the command to install it), identifies your game version, prepares its code,
+on it by itself) and the server, then does every step below in order: it checks the PC, identifies your game version, prepares its code,
 finds its frame delta sites if this repository doesn't have them yet, builds the `.nro`, and copies the
 `.nro`, the game and the settings to the card. Then [run it](#3-run).
 
