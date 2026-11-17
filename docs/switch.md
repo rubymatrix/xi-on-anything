@@ -173,6 +173,25 @@ Ryubing's GDB stub (`enable_gdb_stub` in its Config.json; `aarch64-none-elf-gdb`
 crashes at start with `Address already in use`: pick another) and the object's disassembly. `build_switch.py` now compiles our own
 sources with `-fno-tree-pta`; the translated code keeps it.
 
+## Performance (measured 2026-11-17, handheld, branch switch/perf)
+
+`FFXI_PROFILE=1` splits each frame (gfx_gl.c's line, handed to the game's thread to log; gfx_queue.c's render
+thread line; the API time). What it showed, in the world (about 1,200 draws a frame):
+
+- **The game's thread** (the recompiled game, plus ~4 ms of d3d8 recording) is 26 ms a frame at 1020 MHz: 38 fps
+  at best. At 1785 MHz (`FFXI_SWITCH_CPU`) it is 10-13 ms.
+- **The render thread** is ~19 ms (GL ~15 of it), in parallel: not the limit at 1020 MHz, so deko3d would not
+  have helped then.
+- **The GPU** is the limit once the CPU is faster: a 2048x2048 background (Config's smallest) is 4.5 times the
+  handheld's pixels, and the swap waited 11 ms a frame (27 at stock clocks). At 1280x720 it waited 0.9 ms:
+  32 -> 41 fps at 1224/614 MHz. So the background follows the screen by default (host64.c, `FFXI_SWITCH_BG`).
+- **Zone changes** were 3.3-3.7 s. The CPU boost while loading (switch_main.c: a watcher turns on
+  `appletSetCpuBoostMode(FastLoad)` when no frame has come for 300 ms, off after 5 frames, as FastLoad also
+  holds the GPU at 76 MHz) makes them 2.5-2.7 s.
+- **Files**: an open was 6.7 ms (stat for the case, stat again, open, fstat: each a trip to the SD card). The
+  case match is skipped on the Switch (FAT finds any case), CreateFileA stats only for the dispositions that
+  report it, and read-only `.DAT`s are kept open once closed (k32_io.c, 32 at most): 2.5 ms an open.
+
 ## Not yet
 
 - **Physical mode** has not run: Ryubing gives a bare `.nro` no system resource, and loads neither an

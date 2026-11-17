@@ -88,6 +88,24 @@ A line `FFXI_NAME=value` in `run.args` sets that environment variable instead of
 
 The log is `sdmc:/switch/xi-on-anything/host64.log`; `python tools/build_switch.py logs --sd <card>` prints it.
 
+## Performance
+
+By default the game is drawn at the screen's size (1280x720 in the hand, 1920x1080 on a TV), the world too,
+and the CPU runs at its top speed (1785 MHz) while a zone loads. At 30 fps (`--fps-divisor 2`) it mostly holds
+30; at 60 it runs as fast as the console allows. These lines in `run.args` change it:
+
+| Line | What it does |
+| --- | --- |
+| `FFXI_SWITCH_BG=1920x1080` | The world drawn at another size, read at the start (`FFXI_SWITCH_BG=config`: Config › Display's, 2048 and up, which a stock GPU can't draw at 60). |
+| `FFXI_SWITCH_CPU=1785` | The CPU held at that speed the whole session: more frames, less battery, a warmer console. Put back when the game ends. |
+| `FFXI_SWITCH_LOADBOOST=0` | No CPU boost while a zone loads. |
+| `FFXI_SWITCH_FIT=0` | The game's size from Config › Display, not the screen's. |
+| `FFXI_FRAMELOG=1` | The frame rate in the log every 5 seconds. |
+| `FFXI_PROFILE=1` | Where each frame's time goes, and the clocks, in the log. |
+
+With an overclocking tool (sys-clk, Horizon OC), let one thing set the clocks: drop `FFXI_SWITCH_CPU` and add
+`FFXI_SWITCH_LOADBOOST=0`.
+
 ## Controls
 
 The controller works the way an Xbox controller does on the PC builds (the game's own gamepad support),

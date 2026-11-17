@@ -1742,23 +1742,39 @@ int main(int argc, char** argv)
     {
         /* the sizes the game draws at, from ffxi.reg and Config's saved settings (settings.reg) */
         static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";
-        /* FFXI_SWITCH_BG=<w>[x<h>] (run.args): the world's background at that size for the session, below
-         * Config's smallest (2048), never saved: e.g. FFXI_SWITCH_BG=1280x720, the handheld's screen */
-        const char* bg = getenv("FFXI_SWITCH_BG");
-        if (bg && *bg)
-        {
-            unsigned bw = 0, bh = 0;
-            if (sscanf(bg, "%ux%u", &bw, &bh) < 2)
-                bh = bw;
-            if (bw >= 256 && bh >= 256 && bw <= 8192 && bh <= 8192)
-                reg_override_dword(KEY, "0003", bw & ~1u), reg_override_dword(KEY, "0004", bh & ~1u);
-        }
+        /* The world's background (the game draws its 3D into it, then makes it the screen's size): the
+         * screen's size by default, 1280x720 started handheld and 1920x1080 docked, read once at the start
+         * (a dock or undock keeps it until the next). Config's smallest is 2048x2048, 4.5 times the handheld's
+         * pixels: the stock GPU's whole frame at 60 fps (docs/switch.md). Never saved.
+         * FFXI_SWITCH_BG=<w>[x<h>] (run.args) another size; FFXI_SWITCH_BG=config Config's own. */
         uint32_t v[6] = { 0 };
         static const char* const names[6] = { "0001", "0002", "0003", "0004", "0037", "0038" };
         for (int i = 0; i < 6; ++i)
             reg_get_dword(KEY, names[i], &v[i]);
-        rt_log("[switch] resolution: the game %ux%u, the world (background) %ux%u, the interface %ux%u\n", v[0], v[1], v[2],
-            v[3], v[4], v[5]);
+        const char* bg = getenv("FFXI_SWITCH_BG");
+        unsigned bw = 0, bh = 0;
+        const char* why = "Config's";
+        if (bg && *bg && strcmp(bg, "config"))
+        {
+            if (sscanf(bg, "%ux%u", &bw, &bh) < 2)
+                bh = bw;
+            why = "FFXI_SWITCH_BG";
+        }
+        else if (!bg || !*bg)
+        {
+            int sw = 0, sh = 0; /* sdl_nx.c: the screen, whatever the window */
+            SDL_GetWindowSizeInPixels(NULL, &sw, &sh);
+            bw = (unsigned)sw, bh = (unsigned)sh, why = "the screen's";
+        }
+        if (bw >= 256 && bh >= 256 && bw <= 8192 && bh <= 8192)
+        {
+            v[2] = bw & ~1u, v[3] = bh & ~1u;
+            reg_override_dword(KEY, "0003", v[2]), reg_override_dword(KEY, "0004", v[3]);
+        }
+        else
+            why = "Config's";
+        rt_log("[switch] resolution: the game %ux%u, the world (background) %ux%u (%s), the interface %ux%u\n", v[0], v[1],
+            v[2], v[3], why, v[4], v[5]);
         g_switch_menu_w = (int)v[4], g_switch_menu_h = (int)v[5]; /* switch_fit keeps them */
     }
 #endif
