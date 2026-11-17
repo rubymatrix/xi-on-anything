@@ -10,6 +10,9 @@
   python tools/build.py host64-headless
                                    the same host with no graphics (gfx_null.c), for measuring the
                                    game's CPU time alone: build/host64-headless.exe
+  python tools/build.py host64-gl  host64 on the OpenGL 4.3 back end (the Switch's), for testing it here:
+                                   build/host64-gl.exe
+  python tools/build.py gfxtest-gl tests/gfx_test.c on the OpenGL back end (no scene effects)
   python tools/build.py uwp-lib    host64 as a library for the UWP app (xbox/): build/uwp/ffxi_uwp.lib
   python tools/build.py gfxtest    the Direct3D 12 back end and the D3D8 front end, offscreen, without
                                    the game (tests/gfx_test.c, tests/d3d8_test.c); needs no prepare
@@ -242,6 +245,11 @@ def rt_shaders(env):
                 if name in files:
                     os.remove(os.path.join(d, name))
 GFX_LIBS = ['d3d12.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dxguid.lib']
+# the OpenGL 4.3 back end (the Switch's, docs/switch.md), built here to be tested without one: SDL3's GL
+# context, its functions loaded through SDL (no GL library to link); gfx_fx.c wants C11 atomics
+GL_SOURCES = ['runtime\\portable\\gfx_gl.c', 'runtime\\portable\\gfx_msl.c', 'runtime\\portable\\gfx_msl_shaders.c',
+              'runtime\\portable\\gfx_fx.c']
+GL_CFLAGS = ['/experimental:c11atomics', '/DGFX_GL']
 HOST_BASE = ['runtime\\portable\\user32.c', 'runtime\\portable\\d3d8.c', 'runtime\\portable\\dsound.c',
              'runtime\\portable\\input.c', 'runtime\\portable\\dinput.c', 'runtime\\portable\\ws2.c', 'host\\host64.c',
              'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\cexi.c', 'host\\discord.c', 'host\\frame.c', 'host\\scene.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c', 'host\\vicons.c',
@@ -414,6 +422,23 @@ def host64(env):
     print('built build\\host64.exe; run: build\\host64.exe --game "%s" ...' % BUILD['game'])
 
 
+def host64_gl(env):
+    """host64 drawing with the OpenGL back end (gfx_gl.c) in place of Direct3D 12: build/host64-gl.exe."""
+    objs = game_objects(env)
+    sdl_inc, sdl_lib = sdl3()
+    # the render queue: GL's context is its render thread's, and the game calls from several threads
+    queue = ['/DGFX_QUEUE']
+    objs += compile_stale(env, PORTABLE + HOST_BASE + GL_SOURCES + ['runtime\\portable\\gfx_queue.c'], 'build\\host64-gl',
+                          sdl_inc + HOST_INCLUDES, CFLAGS64 + GL_CFLAGS + queue)
+    objs += addon_objects(env, CFLAGS64 + queue, 'build\\host64-gl')
+    libs = [lib for lib in HOST_LIBS if lib not in GFX_LIBS]
+    objs.append(host_resources(env, 'build\\host64-gl'))
+    run(['link', '/nologo', '/OUT:build\\host64-gl.exe', '/MAP:build\\host64-gl.map', '/MACHINE:X64', sdl_lib] + libs + objs, env)
+    shutil.copy(os.path.join(SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, 'build'))
+    buildinfo.stamp(os.path.join(ROOT, 'build', 'runtime.json'))
+    print('built build\\host64-gl.exe; run: build\\host64-gl.exe --game "%s" ...' % BUILD['game'])
+
+
 def host64_headless(env):
     """host64 with the null graphics back end: nothing drawn, the frame profile kept (FFXI_PROFILE=1)."""
     objs = game_objects(env)
@@ -468,14 +493,25 @@ def gfxtest(env):
     run(['build\\d3d8_test.exe'], env)
 
 
+def gfxtest_gl(env):
+    """gfx_test on the OpenGL back end (offscreen, in a hidden window's context): the scene effects' checks
+    are left out, as the back end has none yet."""
+    sdl_inc, sdl_lib = sdl3()
+    objs = compile_stale(env, GL_SOURCES + ['tests\\gfx_test.c'], 'build\\gfxtest-gl', sdl_inc, CFLAGS64 + GL_CFLAGS)
+    run(['link', '/nologo', '/OUT:build\\gfx_test_gl.exe', '/MACHINE:X64', sdl_lib] + objs, env)
+    shutil.copy(os.path.join(SDL3, 'lib', 'x64', 'SDL3.dll'), os.path.join(ROOT, 'build'))
+    run(['build\\gfx_test_gl.exe'] + sys.argv[2:], env)
+
+
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else 'difftest'
-    targets = {'difftest': difftest, 'host': host, 'boot64': boot64, 'host64': host64,
-               'host64-headless': host64_headless, 'uwp-lib': uwp_lib, 'gfxtest': gfxtest}
+    targets = {'difftest': difftest, 'host': host, 'boot64': boot64, 'host64': host64, 'host64-gl': host64_gl,
+               'host64-headless': host64_headless, 'uwp-lib': uwp_lib, 'gfxtest': gfxtest, 'gfxtest-gl': gfxtest_gl}
     if what not in targets:
         raise SystemExit('targets: ' + ', '.join(targets))
-    env = msvc_env('x64' if what in ('boot64', 'host64', 'host64-headless', 'uwp-lib', 'gfxtest') else 'x86')
-    if what != 'gfxtest':  # the others translate the game: they need the build prepare.py chose
+    env = msvc_env('x64' if what in ('boot64', 'host64', 'host64-gl', 'host64-headless', 'uwp-lib', 'gfxtest',
+                                     'gfxtest-gl') else 'x86')
+    if what not in ('gfxtest', 'gfxtest-gl'):  # the others translate the game: they need the build prepare.py chose
         if BUILD is None:
             buildinfo.current()  # exits: run tools/prepare.py first
         write_build_h()

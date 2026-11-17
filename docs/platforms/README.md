@@ -19,6 +19,7 @@ platform needs the same two things from you:
 | Xbox One / Series | Experimental | Developer Mode, sideloaded | [xbox-one.md](xbox-one.md) |
 | PS4 | Experimental | Jailbroken console, fake PKG | [ps4.md](ps4.md) |
 | Android (ARM64) | Experimental | Debug APK | [../android.md](../android.md) |
+| Nintendo Switch | Experimental | Homebrew `.nro`, built on your PC | [switch.md](switch.md) |
 
 ## Where each port's code is
 

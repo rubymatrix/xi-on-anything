@@ -13,14 +13,18 @@
  * is shared with that thread under one mutex. */
 #include <SDL3/SDL.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "dsound.h"
 #include "gthread.h"
 #include "gwin.h"
+#include "k32.h"
 #include "kobj.h"
+#include "plat.h"
 #include "thunk.h"
+#include "user32.h"
 
 #define DS_OK 0u
 #define DSERR_INVALIDPARAM 0x80070057u
@@ -77,6 +81,7 @@ static uint32_t g_ds;      /* the IDirectSound8 object */
 static int32_t g_ds_refs;
 static uint32_t g_vtbl_ds, g_vtbl_buf, g_vtbl_notify;
 static float g_master = 1.0f;
+static DsStats g_st;
 
 static const uint8_t IID_IUnknown[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46 };
 static const uint8_t IID_IDirectSoundBuffer[16] = { 0x85, 0xFA, 0x9A, 0x27, 0x81, 0x49, 0xCE, 0x11,
@@ -112,7 +117,10 @@ static void notify_crossed(Buf* b, uint32_t from, uint32_t to, int wrapped)
     {
         uint32_t o = b->notify_off[i];
         if (o != DSBPN_OFFSETSTOP && (wrapped ? (o >= from || o < to) : (o >= from && o < to)))
+        {
             k_event_set(b->notify_ev[i], 1);
+            g_st.notifies++;
+        }
     }
 }
 
@@ -120,7 +128,10 @@ static void notify_stop(Buf* b)
 {
     for (uint32_t i = 0; i < b->nnotify; ++i)
         if (b->notify_off[i] == DSBPN_OFFSETSTOP)
+        {
             k_event_set(b->notify_ev[i], 1);
+            g_st.notifies++;
+        }
 }
 
 static float sample(const uint8_t* m, const Buf* b, uint32_t frame, int ch)
@@ -132,11 +143,13 @@ static float sample(const uint8_t* m, const Buf* b, uint32_t frame, int ch)
 static void mix(float* out, int frames)
 {
     memset(out, 0, sizeof(float) * 2 * (size_t)frames);
+    unsigned playing = 0;
     for (int i = 0; i < MAX_BUFS; ++i)
     {
         Buf* b = &g_bufs[i];
         if (!b->used || b->primary || !b->playing || !b->data || !b->data->mem)
             continue;
+        playing++;
         const uint8_t* m = GUEST_PTR(b->data->mem);
         uint32_t nframes = b->data->size / b->block;
         if (!nframes)
@@ -171,6 +184,8 @@ static void mix(float* out, int frames)
         if (b->playing)
             notify_crossed(b, start, cursor_bytes(b), wrapped);
     }
+    if (playing > g_st.peak_playing)
+        g_st.peak_playing = playing;
     for (int f = 0; f < 2 * frames; ++f)
     {
         float v = out[f] * g_master;
@@ -237,6 +252,7 @@ static void buf_free(Buf* b)
     if (b->notify_guest)
         gheap_free(b->notify_guest);
     memset(b, 0, sizeof *b);
+    g_st.live--;
 }
 
 static Buf* buf_new(void)
@@ -249,6 +265,8 @@ static Buf* buf_new(void)
             b->used = 1;
             b->refs = 1;
             b->guest = com_new(g_vtbl_buf, (uint32_t)i);
+            if (++g_st.live > g_st.peak_live)
+                g_st.peak_live = g_st.live;
             return b;
         }
     return NULL;
@@ -290,6 +308,7 @@ static void DS_CreateSoundBuffer(Guest* g)
     Buf* b = buf_new();
     if (!b)
     {
+        g_st.failed++;
         SDL_UnlockMutex(g_mix);
         RET(DSERR_OUTOFMEMORY, 4);
     }
@@ -301,6 +320,12 @@ static void DS_CreateSoundBuffer(Guest* g)
     }
     else if (!read_format(wfx, b) || bytes < 4 || bytes > 0x0FFFFFFFu)
     {
+        g_st.failed++;
+        g_st.fail_flags = flags;
+        g_st.fail_tag = wfx ? rd16(wfx) : 0xFFFFu;
+        g_st.fail_ch = wfx ? rd16(wfx + 2) : 0;
+        g_st.fail_bits = wfx ? rd16(wfx + 14) : 0;
+        g_st.fail_rate = wfx ? rd32(wfx + 4) : bytes;
         buf_free(b);
         SDL_UnlockMutex(g_mix);
         RET(bytes < 4 ? DSERR_INVALIDPARAM : DSERR_BADFORMAT, 4);
@@ -316,6 +341,7 @@ static void DS_CreateSoundBuffer(Guest* g)
     }
     update_gain(b);
     wr32(ARG(2), b->guest);
+    g_st.made++;
     SDL_UnlockMutex(g_mix);
     RET(DS_OK, 4);
 }
@@ -349,6 +375,7 @@ static void DS_DuplicateSoundBuffer(Guest* g)
     b->volume = src->volume, b->pan = src->pan;
     update_gain(b);
     wr32(ARG(2), b->guest);
+    g_st.dups++;
     SDL_UnlockMutex(g_mix);
     RET(DS_OK, 3);
 }
@@ -382,7 +409,11 @@ static void DSB_QueryInterface(Guest* g)
     }
     wr32(ARG(2), out);
     if (!out)
+    {
+        g_st.qi_missed++;
+        g_st.qi_last = ARG(1) ? rd32(ARG(1)) : 0;
         RET(E_NOINTERFACE, 3);
+    }
     b->refs++;
     RET(DS_OK, 3);
 }
@@ -499,7 +530,10 @@ static void DSB_Lock(Guest* g)
 {
     Buf* b = buf(ARG(0));
     if (!b || b->primary || !b->data)
+    {
+        g_st.lock_failed++;
         RET(DSERR_INVALIDCALL, 8);
+    }
     uint32_t size = b->data->size, off = ARG(1), n = ARG(2), flags = ARG(7);
     if (flags & DSBLOCK_FROMWRITECURSOR)
     {
@@ -512,7 +546,10 @@ static void DSB_Lock(Guest* g)
     if (flags & DSBLOCK_ENTIREBUFFER)
         n = size;
     if (off >= size || n > size || !n)
+    {
+        g_st.lock_failed++;
         RET(DSERR_INVALIDPARAM, 8);
+    }
     uint32_t first = n < size - off ? n : size - off;
     wr32(ARG(3), b->data->mem + off);
     wr32(ARG(4), first);
@@ -532,6 +569,7 @@ static void DSB_Play(Guest* g)
     {
         b->playing = 1;
         b->looping = (ARG(3) & DSBPLAY_LOOPING) != 0;
+        g_st.plays++;
     }
     SDL_UnlockMutex(g_mix);
     RET(b ? DS_OK : DSERR_INVALIDPARAM, 4);
@@ -632,6 +670,7 @@ static void DSN_SetNotificationPositions(Guest* g)
     Buf* b = buf(ARG(0));
     if (!b || b->playing || n > MAX_NOTIFY)
     {
+        g_st.notify_refused++;
         SDL_UnlockMutex(g_mix);
         RET(b && b->playing ? DSERR_INVALIDCALL : DSERR_INVALIDPARAM, 3);
     }
@@ -729,8 +768,49 @@ static uint32_t make_vtbl(const char* iface, const char* const* names)
     return v;
 }
 
+void dsound_stats(DsStats* out)
+{
+    SDL_LockMutex(g_mix);
+    *out = g_st;
+    SDL_UnlockMutex(g_mix);
+}
+
+void dsound_report(void)
+{
+#if !defined(__SWITCH__)
+    static int on = -1;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_AUDIO_STATS");
+        on = e && *e && *e != '0';
+    }
+    if (!on)
+        return;
+#endif
+    static uint64_t last;
+    static DsStats was;
+    uint64_t now = rt_monotonic_ns();
+    if (!g_mix || now - last < 10000000000ull)
+        return;
+    last = now;
+    DsStats s;
+    dsound_stats(&s);
+    uint32_t prio[K32_PRIO_LEVELS];
+    k32_thread_priorities(prio);
+    if (!memcmp(&s, &was, sizeof s) && !s.live)
+        return;
+    was = s;
+    rt_log("[dsound] buffers made %u dup %u failed %u live %u peak %u; plays %u peak playing %u; lock failed %u;"
+           " notifies %u refused %u; QI missed %u (last %08x); last refused tag %u ch %u bits %u rate %u flags %x;"
+           " SetThreadPriority idle/-2/-1/0/1/2/crit/other %u/%u/%u/%u/%u/%u/%u/%u\n",
+        s.made, s.dups, s.failed, s.live, s.peak_live, s.plays, s.peak_playing, s.lock_failed, s.notifies,
+        s.notify_refused, s.qi_missed, s.qi_last, s.fail_tag, s.fail_ch, s.fail_bits, s.fail_rate, s.fail_flags,
+        prio[0], prio[1], prio[2], prio[3], prio[4], prio[5], prio[6], prio[7]);
+}
+
 void dsound_init(void)
 {
+    user32_pump_hook = dsound_report;
     thunk_register(DSOUND);
 }
 

@@ -1726,6 +1726,12 @@ static void hover(Ui* u, int i, int o)
  * keyboard makes */
 static void start_typing(SDL_Window* win)
 {
+#ifdef __SWITCH__
+    /* the Switch's keyboard is a library applet that takes the screen until it is done (sdl_nx.c): it comes
+     * over a field when the player picks one (screen_keyboard), never at the start, before a frame is drawn */
+    SDL_StartTextInput(win);
+    return;
+#endif
     SDL_PropertiesID tp = SDL_CreateProperties();
     SDL_SetNumberProperty(tp, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
     SDL_SetBooleanProperty(tp, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);

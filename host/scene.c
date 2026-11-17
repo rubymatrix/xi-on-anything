@@ -1376,6 +1376,14 @@ static void fx_draw(Guest* g)
     ++g_count.fx_calls;
 }
 #endif
+#else
+/* a build with host64's level-of-detail hook but not the rest of the scene renderer's addresses (2025-12-26's):
+ * the game draws its zone */
+uint32_t scene_zone_pick(uint32_t inst, uint32_t model, uint32_t lights, int moving)
+{
+    (void)inst, (void)lights, (void)moving;
+    return model;
+}
 #endif /* HAVE_SCENE */
 
 void scene_setup(void)

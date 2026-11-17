@@ -40,6 +40,7 @@ sign-in screen's Settings.
 | **Xbox One / Series** | 🧪 Experimental | Developer Mode, sideloaded | [Xbox](docs/platforms/xbox-one.md) |
 | **Android**, ARM64 | 🧪 Experimental (tested on a Pixel Fold) | Debug APK | [Android](docs/android.md) |
 | **PS4** | 🧪 Experimental | Jailbroken console, fake PKG (branch `port/ps4`) | [PS4](docs/platforms/ps4.md) |
+| **Nintendo Switch** | 🧪 Experimental | Homebrew `.nro` built on your PC, for a console that runs Atmosphère | [Switch](docs/platforms/switch.md) |
 
 Every platform needs your own copy of the game (a `FINAL FANTASY XI` folder of a
 [supported build](docs/new-client-version.md#supported-builds), with `FFXiMain.dll` and `ROM` in it)
@@ -99,7 +100,7 @@ and a LandSandBoat server to sign in to. What every platform has in common is in
 | [Options catalog](docs/options.md) | Every setting, in game and out |
 | [Addons](docs/addons.md) | Ashita and Windower Lua addons |
 | [Client versions](docs/new-client-version.md) | The supported builds, and adding a new one |
-| [iPhone and iPad notes](docs/ios.md), [Web](docs/web.md), [Xbox](xbox/README.md), [Android](docs/android.md) | Each port's developer notes |
+| [iPhone and iPad notes](docs/ios.md), [Web](docs/web.md), [Xbox](xbox/README.md), [Android](docs/android.md), [Switch](docs/switch.md) | Each port's developer notes |
 | [Replay scenes](tools/replay/README.md) | Recorded scenes for performance tests |
 | [Repository layout](docs/layout.md) | What lives where |
 

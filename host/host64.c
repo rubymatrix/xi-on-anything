@@ -120,6 +120,8 @@
 #include <SDL3/SDL.h>
 #include "display_fit.h"
 void touch_frame(int in_game); /* touch.c: the touch controls, each frame of the game */
+#elif defined(__SWITCH__)
+#include <SDL3/SDL.h> /* the chat line's keyboard */
 #endif
 #include "build.h" /* FFXI_VERSION */
 #if defined(FFXI_ANDROID_VULKAN)
@@ -1048,6 +1050,26 @@ static void chat_keyboard(void)
 }
 #endif
 
+#if defined(__SWITCH__)
+/* The Switch's keyboard when the chat line opens (sdl_nx.c: swkbd, over the game until the player is done):
+ * what is typed goes into the line, and Enter sends it. Once per opening: cancelled, the line stays open as
+ * it is, and the next opening brings the keyboard again. */
+static void chat_keyboard(void)
+{
+    static int typing;
+    int now = xi_chat_typing();
+    if (now == typing)
+        return;
+    typing = now;
+    if (!now)
+        return;
+    SDL_Window* win = (SDL_Window*)user32_sdl_window(d3d8_window());
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_StartTextInputWithProperties(win, p);
+    SDL_DestroyProperties(p);
+}
+#endif
+
 /* host/vicons.c reads the install through the DAT overlays, as the game would */
 static char g_vicons_game[1024];
 
@@ -1093,6 +1115,8 @@ static void present_hook(void)
     display_fit_frame();
     chat_keyboard();
     touch_frame(1);
+#elif defined(__SWITCH__)
+    chat_keyboard();
 #endif
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */
@@ -1636,6 +1660,16 @@ int main(int argc, char** argv)
         gamecore_set_lobby(game_server);
         rt_log("[recomp] game hosts -> %u.%u.%u.%u\n", game_server >> 24, (game_server >> 16) & 255,
             (game_server >> 8) & 255, game_server & 255);
+    }
+    /* no sign-in screen and no --reg-final (the Switch, signed in from run.args): the display settings
+     * still have the file the sign-in screen keeps, <data dir>/settings.reg, loaded last when it is
+     * there; Config > Modern's Display page reads and writes it */
+    static char display_reg[1100];
+    if (!nfinals && data_dir)
+    {
+        snprintf(display_reg, sizeof display_reg, "%s%csettings.reg", data_dir, plat_path_sep);
+        if (!overlay || strcmp(overlay, display_reg))
+            finals[nfinals++] = display_reg;
     }
     reg_init(regs, nregs, overlay);
     for (unsigned i = 0; i < nfinals; ++i)

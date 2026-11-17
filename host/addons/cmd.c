@@ -19,7 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "gfx.h"
+#include "gfx_queue.h" /* gfx.h, through the render queue where the build has one (the OpenGL host's) */
 #include "host.h"
 #include "plat.h"
 

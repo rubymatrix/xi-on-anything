@@ -341,7 +341,7 @@ int gfx_msl_ps1(Sb* b, const GfxFsKey* k, const uint32_t* t)
             break;
         case 64: sb_printf(b, "  t%u = float4(saturate(in.t%u.xyz), 1.0);\n", n, n); break; /* texcoord */
         case 65: /* texkill */
-            sb_printf(b, b->glsl == 1 ? "  if (any(lessThan(in.t%u.xyz, float3(0.0)))) discard_fragment();\n"
+            sb_printf(b, b->glsl == 1 || b->glsl == 3 ? "  if (any(lessThan(in.t%u.xyz, float3(0.0)))) discard_fragment();\n"
                                  : "  if (any(in.t%u.xyz < 0.0)) discard_fragment();\n", n);
             break;
         default:

@@ -727,7 +727,19 @@ static void sh_GetExitCodeThread(Guest* g)
     RET(1, 2);
 }
 
-static void sh_SetThreadPriority(Guest* g) { RET(1, 2); }
+static uint32_t g_prio_req[K32_PRIO_LEVELS];
+static void sh_SetThreadPriority(Guest* g)
+{
+    int32_t p = (int32_t)ARG(1);
+    int i = p == -15 ? 0 : p >= -2 && p <= 2 ? 3 + p : p == 15 ? 6 : 7;
+    plat_atomic_add32(&g_prio_req[i], 1);
+    RET(1, 2);
+}
+void k32_thread_priorities(uint32_t out[K32_PRIO_LEVELS])
+{
+    for (int i = 0; i < K32_PRIO_LEVELS; ++i)
+        out[i] = g_prio_req[i];
+}
 static void sh_GetThreadPriority(Guest* g) { RET(0, 1); }
 static void sh_SetPriorityClass(Guest* g) { RET(1, 2); }
 static void sh_GetPriorityClass(Guest* g) { RET(0x20, 1); } /* NORMAL_PRIORITY_CLASS */

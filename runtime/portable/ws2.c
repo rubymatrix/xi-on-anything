@@ -18,6 +18,7 @@ typedef SOCKET host_sock;
 #define host_close closesocket
 static int host_errno(void) { return WSAGetLastError(); }
 #else
+#include <arpa/inet.h> /* ntohl and friends: the Switch's newlib has them only here */
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -48,6 +49,80 @@ static int host_errno(void) { return errno; }
 #include "plat.h"
 #include "thunk.h"
 #include "ws2.h"
+
+#if defined(__SWITCH__)
+#include <stdint.h>
+#include <sys/iosupport.h>
+/* libnx's: the sockets service's own Select, on its descriptors (services/bsd.h, not included for its
+ * type names) */
+int bsdSelect(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struct timeval* timeout);
+
+/* the service's descriptor behind one of libnx's (its socket device keeps it as the handle's int) */
+static int nx_bsd_fd(int fd)
+{
+    __handle* h = __get_handle(fd);
+    return h && h->fileStruct ? *(int*)h->fileStruct : -1;
+}
+
+/* select() as the sockets service's Select, asked without waiting, the wait slept here. libnx makes
+ * select() and poll() its Poll, which an emulator (Ryubing) answers by sleeping 50 ms in the service
+ * whenever nothing is ready, timeout 0 or not: a watcher asking every few ms kept the service asleep
+ * and the game's own calls (the lobby's) waited seconds each. Its Select asks the host at once. */
+static int host_select(int nfds, fd_set* rd, fd_set* wr, fd_set* ex, struct timeval* t)
+{
+    fd_set* sets[3] = { rd, wr, ex };
+    fd_set in[3];
+    for (int k = 0; k < 3; ++k)
+    {
+        FD_ZERO(&in[k]);
+        if (sets[k])
+            in[k] = *sets[k];
+    }
+    uint64_t end = t ? rt_monotonic_ns() + (uint64_t)t->tv_sec * 1000000000ull + (uint64_t)t->tv_usec * 1000ull : UINT64_MAX;
+    for (;;)
+    {
+        fd_set b[3];
+        int bmax = -1;
+        for (int k = 0; k < 3; ++k)
+            FD_ZERO(&b[k]);
+        for (int fd = 0; fd < nfds && fd < FD_SETSIZE; ++fd)
+            for (int k = 0; k < 3; ++k)
+                if (FD_ISSET(fd, &in[k]))
+                {
+                    int bf = nx_bsd_fd(fd);
+                    if (bf < 0 || bf >= FD_SETSIZE)
+                    {
+                        errno = EBADF;
+                        return -1;
+                    }
+                    FD_SET(bf, &b[k]);
+                    if (bf > bmax)
+                        bmax = bf;
+                }
+        struct timeval zero = { 0, 0 };
+        int r = bmax < 0 ? 0 : bsdSelect(bmax + 1, &b[0], &b[1], &b[2], &zero);
+        if (r < 0)
+            return r;
+        if (r > 0 || rt_monotonic_ns() >= end)
+        {
+            int n = 0;
+            for (int k = 0; k < 3; ++k)
+            {
+                if (!sets[k])
+                    continue;
+                FD_ZERO(sets[k]);
+                for (int fd = 0; fd < nfds && fd < FD_SETSIZE; ++fd)
+                    if (FD_ISSET(fd, &in[k]) && FD_ISSET(nx_bsd_fd(fd), &b[k]))
+                        FD_SET(fd, sets[k]), n++;
+            }
+            return n;
+        }
+        plat_sleep_ms(5);
+    }
+}
+#else
+#define host_select select
+#endif
 
 #define WSAEINTR 10004u
 #define WSAEBADF 10009u
@@ -138,7 +213,9 @@ static uint32_t wsa_error(int e)
     case ENOBUFS: return WSAENOBUFS;
     case EISCONN: return WSAEISCONN;
     case ENOTCONN: return WSAENOTCONN;
+#if defined(ESHUTDOWN) /* not in the Switch's newlib */
     case ESHUTDOWN: return WSAESHUTDOWN;
+#endif
     case ETIMEDOUT: return WSAETIMEDOUT;
     case ECONNREFUSED: return WSAECONNREFUSED;
     case EHOSTUNREACH: return WSAEHOSTUNREACH;
@@ -161,6 +238,27 @@ static Sock* sock(uint32_t s)
 }
 
 static uint32_t sock_id(const Sock* s) { return SOCK_BASE + 4u * (uint32_t)(s - g_socks); }
+
+/* A non-blocking connect still under way though select said the socket was ready: an emulator's
+ * sockets (Ryubing's) mark a connecting socket ready at once, and a read then fails with ENOTCONN (the
+ * lobby took it for a dead link). Connected is a peer and no error. The Switch's only: elsewhere ready
+ * means done. */
+static int still_connecting(const Sock* s)
+{
+#if defined(__SWITCH__)
+    if (!s->connecting)
+        return 0;
+    int err = 0;
+    socklen_t len = sizeof err;
+    struct sockaddr_in peer;
+    socklen_t pl = sizeof peer;
+    return getsockopt(s->h, SOL_SOCKET, SO_ERROR, (char*)&err, &len) == 0 && !err &&
+           getpeername(s->h, (struct sockaddr*)&peer, &pl) != 0;
+#else
+    (void)s;
+    return 0;
+#endif
+}
 
 static int set_nonblocking(host_sock h, int on)
 {
@@ -600,7 +698,14 @@ static void sh_ioctlsocket(Guest* g)
         ioctlsocket(s->h, FIONREAD, &n);
 #else
         int n = 0;
-        ioctl(s->h, FIONREAD, &n);
+        if (ioctl(s->h, FIONREAD, &n) != 0)
+        {
+            /* no FIONREAD (Ryubing's sockets): what a look without taking says is there; 0 left the lobby
+             * waiting for replies that had come */
+            static char peek[0x10000];
+            long k = (long)recv(s->h, peek, sizeof peek, MSG_PEEK | MSG_DONTWAIT);
+            n = k > 0 ? (int)k : 0;
+        }
 #endif
         wr32(ARG(2), (uint32_t)n);
         RET(0, 3);
@@ -733,7 +838,7 @@ static void sh_select(Guest* g)
         r = 0;
     }
     else
-        r = select((int)maxfd + 1, &hs[0], &hs[1], &hs[2], tv ? &t : NULL);
+        r = host_select((int)maxfd + 1, &hs[0], &hs[1], &hs[2], tv ? &t : NULL);
     int e = host_errno();
     gt_lock();
     if (r < 0)
@@ -752,7 +857,12 @@ static void sh_select(Guest* g)
             uint32_t gs = rd32(sets[k] + 4 + 4 * i);
             Sock* s = sock(gs);
             if (s && FD_ISSET(s->h, &hs[k]))
-                wr32(sets[k] + 4 + 4 * o++, gs);
+            {
+                if (still_connecting(s))
+                    r--; /* not ready yet, whatever select said */
+                else
+                    wr32(sets[k] + 4 + 4 * o++, gs);
+            }
         }
         wr32(sets[k], o);
     }
@@ -850,8 +960,27 @@ static void sh_gethostbyname(Guest* g)
         gt_lock();
         if (r != 0 || !res)
         {
-            gt_set_error(WSAHOST_NOT_FOUND);
-            RET(0, 1);
+            /* Winsock answers a dotted address and the machine's own name without DNS; some resolvers do
+             * neither (the Switch's under Ryubing, where gethostname gives the console's address as text,
+             * and the lobby looks it up before it connects) */
+            char self[256];
+            struct in_addr lit;
+            int is_self = gethostname(self, sizeof self) == 0 && !strcmp(self, name);
+            if (inet_pton(AF_INET, name, &lit) != 1 && !is_self)
+            {
+                gt_set_error(WSAHOST_NOT_FOUND);
+                RET(0, 1);
+            }
+            if (inet_pton(AF_INET, name, &lit) != 1)
+                lit.s_addr = htonl(0x7F000001u);
+            memset(&fixed, 0, sizeof fixed);
+            memset(&fixed_addr, 0, sizeof fixed_addr);
+            fixed_addr.sin_family = AF_INET;
+            fixed_addr.sin_addr = lit;
+            fixed.ai_family = AF_INET;
+            fixed.ai_addr = (struct sockaddr*)&fixed_addr;
+            res = &fixed;
+            from_dns = 0;
         }
     }
     if (!g_hostent)
@@ -946,7 +1075,7 @@ static void watcher(void* arg)
             continue;
         }
         struct timeval t = { 0, 5000 };
-        if (select((int)maxfd + 1, &rd, &wr, &ex, &t) <= 0)
+        if (host_select((int)maxfd + 1, &rd, &wr, &ex, &t) <= 0)
             continue;
         lock();
         for (int i = 0; i < MAX_SOCKS; ++i)
@@ -956,6 +1085,8 @@ static void watcher(void* arg)
                 continue;
             uint32_t got = 0;
             uint32_t want = s->mask & s->enabled;
+            if (still_connecting(s))
+                continue; /* nothing to report before the connect is done */
             if (s->connecting && (FD_ISSET(s->h, &wr) || FD_ISSET(s->h, &ex)))
             {
                 int err = 0;

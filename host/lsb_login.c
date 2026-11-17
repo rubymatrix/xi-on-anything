@@ -54,7 +54,11 @@ typedef SOCKET sock_t;
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#if !defined(__SWITCH__) /* the Switch: no terminal (read_secret) */
 #include <termios.h>
+#else
+#include <errno.h> /* data_thread's wait */
+#endif
 #include <unistd.h>
 typedef int sock_t;
 #define SOCK_BAD (-1)
@@ -112,6 +116,7 @@ static sock_t tcp_connect(uint32_t server, uint16_t port, int timeout_ms, char* 
         snprintf(err, errn, "no socket");
         return SOCK_BAD;
     }
+#if !defined(__SWITCH__) /* the Switch: bio_recv waits by itself (an emulator's, Ryubing's, cut the read at ~70 ms) */
     if (timeout_ms)
     {
 #if defined(_WIN32)
@@ -122,6 +127,9 @@ static sock_t tcp_connect(uint32_t server, uint16_t port, int timeout_ms, char* 
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
     }
+#else
+    (void)timeout_ms;
+#endif
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
@@ -382,6 +390,21 @@ static int bio_send(void* ctx, const unsigned char* buf, size_t len)
 
 static int bio_recv(void* ctx, unsigned char* buf, size_t len)
 {
+#if defined(__SWITCH__)
+    /* TIMEOUT_MS by looking without taking, slept between: an emulator's sockets (Ryubing's) end a
+     * read under SO_RCVTIMEO after ~70 ms with ETIMEDOUT, too soon for a server across the internet,
+     * and a blocking recv parked in its one-thread service holds up every other socket call */
+    for (int waited = 0;; waited += 20)
+    {
+        char peek;
+        long k = (long)recv(*(sock_t*)ctx, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (k >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+            break;
+        if (waited >= TIMEOUT_MS)
+            return MBEDTLS_ERR_SSL_TIMEOUT;
+        usleep(20000);
+    }
+#endif
     long n = (long)recv(*(sock_t*)ctx, (char*)buf, (int)len, 0);
     return n < 0 ? MBEDTLS_ERR_SSL_TIMEOUT : n == 0 ? MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY : (int)n;
 }
@@ -614,6 +637,19 @@ static void data_thread(void* arg)
     uint8_t in[4096], out[28];
     for (;;)
     {
+#if defined(__SWITCH__)
+        /* looks without taking or waiting, and sleeps between: an emulator's sockets service (Ryubing's)
+         * answers one request at a time, a recv parked in it held up every other socket call (the lobby's,
+         * with the guest lock held: the game froze), and its poll sleeps 50 ms in it when nothing is there */
+        for (;;)
+        {
+            char peek;
+            long k = (long)recv(d->s, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (k >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+                break;
+            usleep(20000);
+        }
+#endif
         long n = (long)recv(d->s, (char*)in, (int)sizeof in, 0);
         if (n <= 0)
         {
@@ -667,7 +703,7 @@ int net_resolve_ipv4(const char* name, uint32_t* out)
 
 int read_secret(const char* prompt, char* out, size_t n)
 {
-#if defined(FFXI_UWP)
+#if defined(FFXI_UWP) || defined(__SWITCH__)
     (void)prompt, (void)out, (void)n;
     return 0; /* no terminal: the app asks */
 #elif defined(_WIN32)

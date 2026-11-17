@@ -15,8 +15,9 @@ unsigned char* rt_guest_base;
 #define HIGH_RESERVED 0xFFF00000u  /* never handed out: the thunk range and the top */
 /* The window's size. iOS: the 2 GB of a 32-bit process (all the game asks for: GetSystemInfo says
  * 0x7FFEFFFF, k32_misc.c), as an app may reserve without the Extended Virtual Addressing entitlement;
- * nothing is handed out above it. The thunks above (thunk.h) are call targets, never memory. */
-#if defined(FFXI_IOS)
+ * nothing is handed out above it. The thunks above (thunk.h) are call targets, never memory.
+ * FFXI_GUEST_2GB: the same window elsewhere (the Switch, where every committed page is physical memory). */
+#if defined(FFXI_IOS) || defined(FFXI_GUEST_2GB)
 #define WINDOW 0x80000000ull
 #else
 #define WINDOW 0x100000000ull
