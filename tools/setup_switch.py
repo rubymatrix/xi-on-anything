@@ -378,6 +378,24 @@ def find_card(given, saved):
         default = ''
 
 
+def drop_old_fps(card, done):
+    """An --fps-divisor line in run.args from before the default was chosen for the player (the old setup wrote
+    `--fps-divisor 2`): taken out, so the default (uncapped with frame delta sites, else 30) applies. Once a card:
+    done (setup.json's list) remembers it, so a line put back by hand afterwards stays."""
+    import build_switch
+    root = build_switch.sd_root(card)
+    if str(root) in done:
+        return
+    path = root / build_switch.APP_DIR / 'run.args'
+    if path.exists():
+        old = path.read_text().splitlines()
+        new = build_switch.merge_args(old, ['--fps-divisor'])[:-1]  # (merge_args drops it with its value)
+        if new != [l.strip() for l in old if l.strip()]:
+            path.write_text('\n'.join(new) + ('\n' if new else ''))
+            note('took the old --fps-divisor line out of run.args: the default is better (uncapped with frame delta sites)')
+    done.append(str(root))
+
+
 def put_on_card(card, game, a):
     import build_switch
     ns = argparse.Namespace(mtp=None, sd=card, nro=None, game=game, server=a.server or None, fps_divisor=None,
@@ -426,7 +444,8 @@ def main():
         a.server = ask('The server (its name or IP; blank: the sign-in screen asks)', saved.get('server', ''))
     a.layout = a.layout or saved.get('layout')
     a.dats = user_path(a.dats) if a.dats else None
-    save({'game': game, 'sd': card, 'server': a.server, 'layout': a.layout})
+    fps_done = saved.get('fps_cleaned', [])
+    save({'game': game, 'sd': card, 'server': a.server, 'layout': a.layout, 'fps_cleaned': fps_done})
 
     step(2)
     if prepared(label, game):
@@ -459,6 +478,8 @@ def main():
     else:
         note('the game is about 14 GB the first time; after that only what changed is copied')
     put_on_card(card, None if a.no_copy_game else game, a)
+    drop_old_fps(card, fps_done)
+    save({'game': game, 'sd': card, 'server': a.server, 'layout': a.layout, 'fps_cleaned': fps_done})
 
     print('\nDone. On the Switch: hold R while starting any game to open the homebrew menu with full memory,\n'
           'then pick XI on Anything. Its log is sdmc:/switch/xi-on-anything/host64.log.\n'
