@@ -115,7 +115,7 @@ to change them later; `--layout` becomes `--switch-layout` there):
 | --- | --- |
 | `--server <name or IP>` | The LandSandBoat server. Without it, the sign-in screen asks. |
 | `--layout nintendo\|xbox` | `nintendo` (the default): A confirms and B cancels, as everywhere on the Switch. `xbox`: by position, B (the bottom button) confirms. |
-| `--fps-divisor 0\|1\|2` | Uncapped (0), 60 fps (1) or 30 (2). Without it: uncapped if your game version has frame delta sites, else 30. See [Performance](#performance). |
+| `--fps-divisor 0\|1\|2` | Leave it out: the default is the best there is (uncapped with frame delta sites, else 30). 1 (60 fps) or 2 (30) turn the frame delta sites off: see [Performance](#performance). |
 | `--dats <folder>` | A DAT overlay folder, copied to the card and passed as `--dats`. |
 | `--arg "<host options>"` | Any other [host option](../running.md#options), for example `--arg "--user me"`. |
 
@@ -148,7 +148,8 @@ and the CPU runs at its top speed (1785 MHz) while a zone loads. The frame rate:
   around 35-40 frames a second in the world, and the world runs that much slower: its time is counted in
   frames, so animations look like slow motion.
 
-`--fps-divisor 2` in `run.args` keeps 30 either way (less battery, an even pace). These lines in `run.args`
+Leave `--fps-divisor` out of `run.args`. `--fps-divisor 2` holds 30 fps and saves some battery, but it turns the
+frame delta sites off: the world runs at the game's own pacing, slow when the console dips under 30. These lines in `run.args`
 change the rest:
 
 | Line | What it does |
