@@ -174,7 +174,88 @@ static void sh_GlobalMemoryStatus(Guest* g)
 #define FILE_ATTRIBUTE_DIRECTORY 0x10u
 #define FILE_ATTRIBUTE_ARCHIVE 0x20u
 
+#if defined(__SWITCH__)
+/* The game's DATs kept open once closed (the Switch: an open is 6.7 ms of trips to the SD card, a close
+ * 1.8 ms, and a zone change opens a hundred, many of them again): a read-only open of a .DAT that was
+ * opened before gets the same file back, at its start. Only the DATs (the game never writes them), only
+ * read-only opens; a parked one is closed when the game opens its path to write, deletes or moves it. The
+ * table is the guest lock's, as every shim is. */
+#define DAT_KEEP 32
+typedef struct
+{
+    PlatFile* f;
+    char* path;
+    int parked;
+    uint64_t used;
+} DatKept;
+static DatKept g_dat[DAT_KEEP];
+static uint64_t g_dat_clock;
+
+static int is_dat(const char* host)
+{
+    size_t n = strlen(host);
+    return n > 4 && host[n - 4] == '.' && (host[n - 3] | 32) == 'd' && (host[n - 2] | 32) == 'a' && (host[n - 1] | 32) == 't';
+}
+
+static PlatFile* dat_take(const char* host)
+{
+    for (int i = 0; i < DAT_KEEP; ++i)
+        if (g_dat[i].f && g_dat[i].parked && !strcmp(g_dat[i].path, host))
+        {
+            if (plat_file_seek(g_dat[i].f, 0, 0) != 0)
+                return NULL;
+            g_dat[i].parked = 0, g_dat[i].used = ++g_dat_clock;
+            return g_dat[i].f;
+        }
+    return NULL;
+}
+
+/* a file just opened, kept when it is closed: in a free slot, else in place of the least used parked one */
+static void dat_keep(PlatFile* f, const char* host)
+{
+    int slot = -1;
+    for (int i = 0; i < DAT_KEEP && slot < 0; ++i)
+        if (!g_dat[i].f)
+            slot = i;
+    for (int i = 0; i < DAT_KEEP && slot < 0; ++i)
+        if (g_dat[i].parked && (slot < 0 || g_dat[i].used < g_dat[slot].used))
+            slot = i;
+    if (slot < 0)
+        return; /* all in use: this one closes as any file does */
+    if (g_dat[slot].f)
+    {
+        plat_file_close(g_dat[slot].f);
+        free(g_dat[slot].path);
+    }
+    char* p = strdup(host);
+    g_dat[slot] = (DatKept){ p ? f : NULL, p, 0, ++g_dat_clock };
+}
+
+/* the game about to change the file at host: its parked copy goes */
+static void dat_forget(const char* host)
+{
+    for (int i = 0; i < DAT_KEEP; ++i)
+        if (g_dat[i].f && g_dat[i].parked && !strcmp(g_dat[i].path, host))
+        {
+            plat_file_close(g_dat[i].f);
+            free(g_dat[i].path);
+            g_dat[i] = (DatKept){ 0 };
+        }
+}
+
+static void file_close(void* f)
+{
+    for (int i = 0; i < DAT_KEEP; ++i)
+        if (g_dat[i].f == f)
+        {
+            g_dat[i].parked = 1;
+            return;
+        }
+    plat_file_close((PlatFile*)f);
+}
+#else
 static void file_close(void* f) { plat_file_close((PlatFile*)f); }
+#endif
 
 /* FFXI_RECOMP_TRACE=1: the guest path of every file open or search that fails */
 static void trace_miss(const char* api, const char* path)
@@ -198,9 +279,24 @@ static void sh_CreateFileA(Guest* g)
         trace_miss("CreateFileA", ARGS(0));
         RET(INVALID_HANDLE, 7);
     }
-    PlatStat st;
-    int existed = plat_stat(host, &st);
     int flags = ((access & GENERIC_READ) || !(access & GENERIC_WRITE) ? PLAT_READ : 0) | ((access & GENERIC_WRITE) ? PLAT_WRITE : 0);
+#if defined(__SWITCH__)
+    int keep = flags == PLAT_READ && disp == 3 && is_dat(host); /* read-only, OPEN_EXISTING */
+    if (keep)
+    {
+        PlatFile* kept = dat_take(host);
+        if (kept)
+        {
+            gt_set_error(0);
+            RET(k_new(K_FILE, kept, file_close), 7);
+        }
+    }
+    else
+        dat_forget(host);
+#endif
+    /* whether it was there: only CREATE_ALWAYS and OPEN_ALWAYS say (a trip to the disk saved otherwise) */
+    PlatStat st;
+    int existed = (disp == 2 || disp == 4) && plat_stat(host, &st);
     switch (disp)
     {
     case 1: flags |= PLAT_CREATE | PLAT_EXCL; break;     /* CREATE_NEW */
@@ -217,8 +313,12 @@ static void sh_CreateFileA(Guest* g)
         trace_miss("CreateFileA", ARGS(0));
         RET(INVALID_HANDLE, 7);
     }
+#if defined(__SWITCH__)
+    if (keep)
+        dat_keep(f, host);
+#endif
     uint32_t h = k_new(K_FILE, f, file_close);
-    gt_set_error((disp == 2 || disp == 4) && existed ? ERROR_ALREADY_EXISTS : 0);
+    gt_set_error(existed ? ERROR_ALREADY_EXISTS : 0);
     RET(h, 7);
 }
 
@@ -344,6 +444,9 @@ static void sh_DeleteFileA(Guest* g)
     char host[1400];
     if (!host_of(ARG(0), host, sizeof host))
         RET(0, 1);
+#if defined(__SWITCH__)
+    dat_forget(host);
+#endif
     if (!plat_unlink(host))
     {
         fail_plat();
@@ -383,6 +486,9 @@ static void sh_MoveFileA(Guest* g)
     char a[1400], b[1400];
     if (!host_of(ARG(0), a, sizeof a) || !host_of(ARG(1), b, sizeof b))
         RET(0, 2);
+#if defined(__SWITCH__)
+    dat_forget(a), dat_forget(b);
+#endif
     if (!plat_rename(a, b))
     {
         fail_plat();
