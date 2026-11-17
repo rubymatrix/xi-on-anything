@@ -56,6 +56,8 @@ typedef SOCKET sock_t;
 #include <sys/time.h>
 #if !defined(__SWITCH__) /* the Switch: no terminal (read_secret) */
 #include <termios.h>
+#else
+#include <errno.h> /* data_thread's wait */
 #endif
 #include <unistd.h>
 typedef int sock_t;
@@ -616,6 +618,19 @@ static void data_thread(void* arg)
     uint8_t in[4096], out[28];
     for (;;)
     {
+#if defined(__SWITCH__)
+        /* looks without taking or waiting, and sleeps between: an emulator's sockets service (Ryubing's)
+         * answers one request at a time, a recv parked in it held up every other socket call (the lobby's,
+         * with the guest lock held: the game froze), and its poll sleeps 50 ms in it when nothing is there */
+        for (;;)
+        {
+            char peek;
+            long k = (long)recv(d->s, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (k >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+                break;
+            usleep(20000);
+        }
+#endif
         long n = (long)recv(d->s, (char*)in, (int)sizeof in, 0);
         if (n <= 0)
         {

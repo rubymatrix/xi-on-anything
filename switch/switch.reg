@@ -1,0 +1,15 @@
+REGEDIT4
+
+; The Switch's defaults over ffxi.reg (loaded after it, before the settings the player saves): the screen's
+; 1920x1080, windowed (one screen, no mode change), and a background the size of the screen rather than the
+; desktop's 6880x2880, which a 4 GB console has no memory to spare for. Handheld, sdl_nx.c scales the
+; 1920x1080 client to the 1280x720 screen. The menus at 960x540, twice their size on the 1920x1080 client:
+; at 1x they are too small to read on a TV across the room and on the handheld's screen.
+[HKEY_LOCAL_MACHINE\SOFTWARE\PlayOnlineUS\SquareEnix\FinalFantasyXI]
+"0037"=dword:000003c0
+"0038"=dword:0000021c
+"0001"=dword:00000780
+"0002"=dword:00000438
+"0003"=dword:00000780
+"0004"=dword:00000438
+"0034"=dword:00000001

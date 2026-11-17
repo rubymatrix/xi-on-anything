@@ -50,6 +50,80 @@ static int host_errno(void) { return errno; }
 #include "thunk.h"
 #include "ws2.h"
 
+#if defined(__SWITCH__)
+#include <stdint.h>
+#include <sys/iosupport.h>
+/* libnx's: the sockets service's own Select, on its descriptors (services/bsd.h, not included for its
+ * type names) */
+int bsdSelect(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struct timeval* timeout);
+
+/* the service's descriptor behind one of libnx's (its socket device keeps it as the handle's int) */
+static int nx_bsd_fd(int fd)
+{
+    __handle* h = __get_handle(fd);
+    return h && h->fileStruct ? *(int*)h->fileStruct : -1;
+}
+
+/* select() as the sockets service's Select, asked without waiting, the wait slept here. libnx makes
+ * select() and poll() its Poll, which an emulator (Ryubing) answers by sleeping 50 ms in the service
+ * whenever nothing is ready, timeout 0 or not: a watcher asking every few ms kept the service asleep
+ * and the game's own calls (the lobby's) waited seconds each. Its Select asks the host at once. */
+static int host_select(int nfds, fd_set* rd, fd_set* wr, fd_set* ex, struct timeval* t)
+{
+    fd_set* sets[3] = { rd, wr, ex };
+    fd_set in[3];
+    for (int k = 0; k < 3; ++k)
+    {
+        FD_ZERO(&in[k]);
+        if (sets[k])
+            in[k] = *sets[k];
+    }
+    uint64_t end = t ? rt_monotonic_ns() + (uint64_t)t->tv_sec * 1000000000ull + (uint64_t)t->tv_usec * 1000ull : UINT64_MAX;
+    for (;;)
+    {
+        fd_set b[3];
+        int bmax = -1;
+        for (int k = 0; k < 3; ++k)
+            FD_ZERO(&b[k]);
+        for (int fd = 0; fd < nfds && fd < FD_SETSIZE; ++fd)
+            for (int k = 0; k < 3; ++k)
+                if (FD_ISSET(fd, &in[k]))
+                {
+                    int bf = nx_bsd_fd(fd);
+                    if (bf < 0 || bf >= FD_SETSIZE)
+                    {
+                        errno = EBADF;
+                        return -1;
+                    }
+                    FD_SET(bf, &b[k]);
+                    if (bf > bmax)
+                        bmax = bf;
+                }
+        struct timeval zero = { 0, 0 };
+        int r = bmax < 0 ? 0 : bsdSelect(bmax + 1, &b[0], &b[1], &b[2], &zero);
+        if (r < 0)
+            return r;
+        if (r > 0 || rt_monotonic_ns() >= end)
+        {
+            int n = 0;
+            for (int k = 0; k < 3; ++k)
+            {
+                if (!sets[k])
+                    continue;
+                FD_ZERO(sets[k]);
+                for (int fd = 0; fd < nfds && fd < FD_SETSIZE; ++fd)
+                    if (FD_ISSET(fd, &in[k]) && FD_ISSET(nx_bsd_fd(fd), &b[k]))
+                        FD_SET(fd, sets[k]), n++;
+            }
+            return n;
+        }
+        plat_sleep_ms(5);
+    }
+}
+#else
+#define host_select select
+#endif
+
 #define WSAEINTR 10004u
 #define WSAEBADF 10009u
 #define WSAEACCES 10013u
@@ -603,7 +677,14 @@ static void sh_ioctlsocket(Guest* g)
         ioctlsocket(s->h, FIONREAD, &n);
 #else
         int n = 0;
-        ioctl(s->h, FIONREAD, &n);
+        if (ioctl(s->h, FIONREAD, &n) != 0)
+        {
+            /* no FIONREAD (Ryubing's sockets): what a look without taking says is there; 0 left the lobby
+             * waiting for replies that had come */
+            static char peek[0x10000];
+            long k = (long)recv(s->h, peek, sizeof peek, MSG_PEEK | MSG_DONTWAIT);
+            n = k > 0 ? (int)k : 0;
+        }
 #endif
         wr32(ARG(2), (uint32_t)n);
         RET(0, 3);
@@ -736,7 +817,7 @@ static void sh_select(Guest* g)
         r = 0;
     }
     else
-        r = select((int)maxfd + 1, &hs[0], &hs[1], &hs[2], tv ? &t : NULL);
+        r = host_select((int)maxfd + 1, &hs[0], &hs[1], &hs[2], tv ? &t : NULL);
     int e = host_errno();
     gt_lock();
     if (r < 0)
@@ -853,8 +934,27 @@ static void sh_gethostbyname(Guest* g)
         gt_lock();
         if (r != 0 || !res)
         {
-            gt_set_error(WSAHOST_NOT_FOUND);
-            RET(0, 1);
+            /* Winsock answers a dotted address and the machine's own name without DNS; some resolvers do
+             * neither (the Switch's under Ryubing, where gethostname gives the console's address as text,
+             * and the lobby looks it up before it connects) */
+            char self[256];
+            struct in_addr lit;
+            int is_self = gethostname(self, sizeof self) == 0 && !strcmp(self, name);
+            if (inet_pton(AF_INET, name, &lit) != 1 && !is_self)
+            {
+                gt_set_error(WSAHOST_NOT_FOUND);
+                RET(0, 1);
+            }
+            if (inet_pton(AF_INET, name, &lit) != 1)
+                lit.s_addr = htonl(0x7F000001u);
+            memset(&fixed, 0, sizeof fixed);
+            memset(&fixed_addr, 0, sizeof fixed_addr);
+            fixed_addr.sin_family = AF_INET;
+            fixed_addr.sin_addr = lit;
+            fixed.ai_family = AF_INET;
+            fixed.ai_addr = (struct sockaddr*)&fixed_addr;
+            res = &fixed;
+            from_dns = 0;
         }
     }
     if (!g_hostent)
@@ -949,7 +1049,7 @@ static void watcher(void* arg)
             continue;
         }
         struct timeval t = { 0, 5000 };
-        if (select((int)maxfd + 1, &rd, &wr, &ex, &t) <= 0)
+        if (host_select((int)maxfd + 1, &rd, &wr, &ex, &t) <= 0)
             continue;
         lock();
         for (int i = 0; i < MAX_SOCKS; ++i)
