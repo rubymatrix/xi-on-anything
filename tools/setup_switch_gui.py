@@ -154,6 +154,12 @@ class App:
         self.background(self._check_pc)
 
     def _check_pc(self):
+        try:
+            self.__check_pc()
+        except Exception as e:  # noqa: BLE001 - said on the window, not a "checking..." that never ends
+            self.post(self.pc.configure, {'text': f'could not check: {e}', 'foreground': '#b91c1c'})
+
+    def __check_pc(self):
         problems = []
         if sys.version_info < (3, 12):
             problems.append('Python 3.12 or newer (this is %d.%d)' % sys.version_info[:2])
