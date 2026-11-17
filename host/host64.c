@@ -1173,6 +1173,8 @@ static void present_hook(void)
     chat_keyboard();
     switch_fit();
     switch_fps();
+    extern void switch_clock_frame(void); /* switch_main.c: the loading boost, the CPU's clock */
+    switch_clock_frame();
 #endif
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */

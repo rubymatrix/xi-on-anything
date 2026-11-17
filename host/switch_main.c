@@ -36,6 +36,133 @@ static const SocketInitConfig SOCKETS = {
     .bsd_service_type = BsdServiceType_Auto,
 };
 
+/* --- the CPU's clock -----------------------------------------------------------------------------------
+ * The game's own thread is what limits the frame rate (26 ms a frame at the 1020 MHz games run at;
+ * docs/switch.md). Two ways past it, both undone when the app ends:
+ *   - a zone change (no frame for 300 ms: a watcher thread, as the load is one long frame) turns on the
+ *     system's boost for loading (appletSetCpuBoostMode FastLoad: the CPU at 1785 MHz, the GPU at its least),
+ *     off again after 5 frames (the GPU's least must not last into play); FFXI_SWITCH_LOADBOOST=0 leaves it off
+ *   - FFXI_SWITCH_CPU=<MHz> (run.args, e.g. FFXI_SWITCH_CPU=1785) holds the CPU at that clock through clkrst
+ *     (sys-clk's way; Atmosphère's homebrew loader has the permission), set again every few seconds as the
+ *     system's performance modes (dock, sleep) put theirs back. More frames, less battery, a warmer console. */
+static int g_clk_mhz;
+static ClkrstSession g_clk;
+static int g_clk_open;
+static u32 g_clk_was;
+
+static void clock_start(void)
+{
+    const char* e = getenv("FFXI_SWITCH_CPU");
+    g_clk_mhz = e ? atoi(e) : 0;
+    if (g_clk_mhz <= 0)
+        return;
+    Result rc = clkrstInitialize();
+    if (R_SUCCEEDED(rc))
+        rc = clkrstOpenSession(&g_clk, PcvModuleId_CpuBus, 3);
+    if (R_FAILED(rc))
+    {
+        fprintf(stderr, "[switch] FFXI_SWITCH_CPU: no clock control (clkrst 0x%x); the CPU stays at the system's\n", rc);
+        g_clk_mhz = 0;
+        return;
+    }
+    g_clk_open = 1;
+    clkrstGetClockRate(&g_clk, &g_clk_was);
+    rc = clkrstSetClockRate(&g_clk, (u32)g_clk_mhz * 1000000u);
+    u32 now = 0;
+    clkrstGetClockRate(&g_clk, &now);
+    fprintf(stderr, "[switch] CPU clock: %u MHz, was %u MHz (set: 0x%x)\n", now / 1000000u, g_clk_was / 1000000u, rc);
+}
+
+/* the loading boost's watcher: it logs nothing (another thread's stdio breaks the main thread's); the game's
+ * thread logs its turns (switch_clock_frame) */
+static Thread g_watch;
+static volatile int g_watch_run, g_boost_on;
+static volatile uint64_t g_last_present_ns;
+static volatile uint32_t g_presents, g_boost_turns, g_boost_failed;
+
+static void boost_watch(void* arg)
+{
+    (void)arg;
+    uint32_t at = 0;
+    while (g_watch_run)
+    {
+        svcSleepThread(50000000ll);
+        uint64_t last = g_last_present_ns, now = armTicksToNs(armGetSystemTick());
+        if (!last)
+            continue; /* the game not drawing yet: the sign-in screen's own frames aren't counted */
+        if (!g_boost_on && now - last > 300000000ull)
+        {
+            if (R_FAILED(appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad)))
+            {
+                g_boost_failed = 1;
+                return;
+            }
+            g_boost_on = 1, at = g_presents, g_boost_turns++;
+        }
+        else if (g_boost_on && g_presents - at >= 5)
+        {
+            appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+            g_boost_on = 0, g_boost_turns++;
+        }
+    }
+}
+
+static void boost_start(void)
+{
+    const char* e = getenv("FFXI_SWITCH_LOADBOOST");
+    if ((e && *e == '0') || g_clk_mhz >= 1785) /* a CPU held at 1785 has nothing to gain */
+        return;
+    g_watch_run = 1;
+    if (R_FAILED(threadCreate(&g_watch, boost_watch, NULL, NULL, 0x4000, 0x2C, -2)) || R_FAILED(threadStart(&g_watch)))
+        g_watch_run = 0;
+}
+
+static void clock_end(void)
+{
+    if (g_watch_run)
+    {
+        g_watch_run = 0;
+        threadWaitForExit(&g_watch);
+        threadClose(&g_watch);
+    }
+    if (g_boost_on)
+        appletSetCpuBoostMode(ApmCpuBoostMode_Normal), g_boost_on = 0;
+    if (g_clk_open)
+    {
+        if (g_clk_was)
+            clkrstSetClockRate(&g_clk, g_clk_was);
+        clkrstCloseSession(&g_clk);
+        clkrstExit();
+        g_clk_open = 0;
+    }
+}
+
+/* each frame, from host64.c's present hook (the game's thread) */
+void switch_clock_frame(void)
+{
+    static uint64_t checked;
+    static uint32_t said_turns;
+    static int said_failed;
+    uint64_t now = armTicksToNs(armGetSystemTick());
+    g_last_present_ns = now;
+    g_presents++;
+    if (g_boost_turns != said_turns)
+    {
+        said_turns = g_boost_turns;
+        fprintf(stderr, "[switch] loading boost %s (%u turns)\n", g_boost_on ? "on" : "off", said_turns);
+    }
+    if (g_boost_failed && !said_failed)
+        said_failed = 1, fprintf(stderr, "[switch] loading boost unavailable\n");
+    if (g_clk_open && now - checked > 3000000000ull)
+    {
+        /* the system's performance modes (dock, sleep) put their clock back */
+        checked = now;
+        u32 hz = 0;
+        if (R_SUCCEEDED(clkrstGetClockRate(&g_clk, &hz)) && hz / 1000000u != (u32)g_clk_mhz)
+            clkrstSetClockRate(&g_clk, (u32)g_clk_mhz * 1000000u);
+    }
+}
+
 /* run.args: one literal argument per line (no shell expansion), as on Android and iOS. */
 static int read_args(const char* path, char** out, int room)
 {
@@ -196,7 +323,11 @@ int main(int argc, char** argv)
     for (int i = 1; i < n; ++i)
         fprintf(stderr, " %s", i > 1 && (!strcmp(args[i - 1], "--pass") || !strcmp(args[i - 1], "--otp")) ? "(hidden)" : args[i]);
     fprintf(stderr, "\n");
+    clock_start();
+    boost_start();
+    atexit(clock_end); /* the game may end with exit() too */
     int ret = xi_host_main(n, args);
+    clock_end();
     fprintf(stderr, "[switch] host exit %d\n", ret);
     appletUnhook(&g_hook);
     socketExit();
