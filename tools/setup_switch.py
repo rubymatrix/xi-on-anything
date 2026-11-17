@@ -21,6 +21,7 @@ The manual steps are in docs/platforms/switch.md.
 import argparse
 import json
 import os
+import re
 import string
 import subprocess
 import sys
@@ -294,6 +295,45 @@ def identify(folder):
     return label
 
 
+SERVER_ARG = re.compile(r'--server[ =]+"?([A-Za-z0-9][A-Za-z0-9.\-]*(?::\d+)?)')
+SERVER_KEY = re.compile(r'server\s*=\s*"?([A-Za-z0-9][A-Za-z0-9.\-]*(?::\d+)?)', re.I)
+
+
+def read_config(path):
+    """A text file in whichever encoding it has (VanaCore's ini is UTF-16)."""
+    raw = path.read_bytes()[:1 << 20]
+    if raw[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        return raw.decode('utf-16', errors='replace')
+    return raw.decode('utf-8-sig', errors='replace')
+
+
+def server_hints(game):
+    """[(server, file it was found in)], newest file first: the server the player's launcher already uses, from
+    the folders around the game - Ashita's boot configs ([ashita.boot] command = --server <name>), VanaCore's
+    ini ([server] server=<name>) and launch scripts (--server <name>). Comment lines and examples are skipped."""
+    dirs = [Path(game)] + list(Path(game).parents)[:3]
+    patterns = ['config/boot/*.ini', '*/config/boot/*.ini', 'vanacore.ini', '*/vanacore.ini', '*.bat', '*.cmd']
+    files = {f for d in dirs for p in patterns for f in d.glob(p) if f.is_file() and 'example' not in f.name.lower()}
+    found = []
+    for f in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True):
+        try:
+            text = read_config(f)
+        except OSError:
+            continue
+        section = ''
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line[0] in ';#' or line.lower().startswith(('rem ', '::')):
+                continue
+            if line.startswith('['):
+                section = line.lower()
+                continue
+            m = SERVER_ARG.search(line) or (SERVER_KEY.match(line) if section == '[server]' else None)
+            if m and m.group(1) not in (s for s, _ in found):
+                found.append((m.group(1), f))
+    return found
+
+
 # ---- 3. prepare, 4. frame sites ---------------------------------------------------------------------
 
 def prepared(label, game):
@@ -441,7 +481,16 @@ def main():
     # the questions up front, so the long steps run without waiting on the player
     card = find_card(a.sd, saved)
     if a.server is None:
-        a.server = ask('The server (its name or IP; blank: the sign-in screen asks)', saved.get('server', ''))
+        default = saved.get('server', '') if saved.get('game') == game else ''
+        if not default:
+            hints = server_hints(game)
+            if hints:
+                default = hints[0][0]
+                note(f'your launcher uses the server {default} ({hints[0][1]})')
+                for other, where in hints[1:]:
+                    note(f'  (also {other}, in {where})')
+        a.server = ask("The server's address, as your launcher uses it (a name like play.example.com, or an IP;\n"
+                       '  blank: the sign-in screen asks)', default)
     a.layout = a.layout or saved.get('layout')
     a.dats = user_path(a.dats) if a.dats else None
     fps_done = saved.get('fps_cleaned', [])
