@@ -315,6 +315,15 @@ int main(int argc, char** argv)
         ++i;
     }
 
+    /* 30 fps unless run.args says otherwise: the console holds it, and at 60 a build without frame delta sites
+     * (tools/frame_sites.py) runs slow when the frames don't come 60 a second - the world's time is counted in
+     * frames (docs/switch.md, Performance) */
+    if (!has_arg(n, args, "--fps-divisor") && !has_arg(n, args, "--fps-limit"))
+    {
+        args[n++] = "--fps-divisor";
+        args[n++] = "2";
+    }
+
     static char game[] = APP_DIR "/SquareEnix/FINAL FANTASY XI";
     if (!has_arg(n, args, "--game") && is_dir(game))
     {

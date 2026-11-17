@@ -188,6 +188,9 @@ thread line; the API time). What it showed, in the world (about 1,200 draws a fr
 - **Zone changes** were 3.3-3.7 s. The CPU boost while loading (switch_main.c: a watcher turns on
   `appletSetCpuBoostMode(FastLoad)` when no frame has come for 300 ms, off after 5 frames, as FastLoad also
   holds the GPU at 76 MHz) makes them 2.5-2.7 s.
+- **30 fps by default** (switch_main.c adds `--fps-divisor 2` when run.args has none): at 60 the world ran
+  visibly slow on a console, as the game counts its time in frames and build 2025-12-26 has no frame delta
+  sites to give it the real time; 30 holds, so its time is right.
 - **Files**: an open was 6.7 ms (stat for the case, stat again, open, fstat: each a trip to the SD card). The
   case match is skipped on the Switch (FAT finds any case), CreateFileA stats only for the dispositions that
   report it, and read-only `.DAT`s are kept open once closed (k32_io.c, 32 at most): 2.5 ms an open.

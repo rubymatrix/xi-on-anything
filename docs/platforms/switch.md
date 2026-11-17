@@ -67,7 +67,7 @@ to change them later; `--layout` becomes `--switch-layout` there):
 | --- | --- |
 | `--server <name or IP>` | The LandSandBoat server. Without it, the sign-in screen asks. |
 | `--layout nintendo\|xbox` | `nintendo` (the default): A confirms and B cancels, as everywhere on the Switch. `xbox`: by position, B (the bottom button) confirms. |
-| `--fps-divisor 1\|2` | 60 fps (1) or 30 fps as shipped (2). 30 is easier on the console. |
+| `--fps-divisor 1\|2` | 30 fps as shipped (2, the default on the Switch) or 60 (1). See [Performance](#performance) before choosing 60. |
 | `--dats <folder>` | A DAT overlay folder, copied to the card and passed as `--dats`. |
 | `--arg "<host options>"` | Any other [host option](../running.md#options), for example `--arg "--user me"`. |
 
@@ -91,8 +91,11 @@ The log is `sdmc:/switch/xi-on-anything/host64.log`; `python tools/build_switch.
 ## Performance
 
 By default the game is drawn at the screen's size (1280x720 in the hand, 1920x1080 on a TV), the world too,
-and the CPU runs at its top speed (1785 MHz) while a zone loads. At 30 fps (`--fps-divisor 2`) it mostly holds
-30; at 60 it runs as fast as the console allows. These lines in `run.args` change it:
+and the CPU runs at its top speed (1785 MHz) while a zone loads. It runs at 30 fps, which it holds. At 60
+(`--fps-divisor 1`) a console at stock clocks draws around 35-40 frames a second in the world, and the game's
+world runs that much slower (its time is counted in frames: animations look like slow motion) unless your game
+version has frame delta sites (`tools/frame_sites.py`; the log says at the start). These lines in `run.args`
+change it:
 
 | Line | What it does |
 | --- | --- |
