@@ -54,6 +54,7 @@ static int read_args(const char* path, char** out, int room)
             char* eq = strchr(line, '=');
             *eq = 0;
             setenv(line, eq + 1, 1);
+            fprintf(stderr, "[switch] set %s=%s\n", line, eq + 1);
         }
         else if (len)
             out[n++] = strdup(line);
@@ -124,22 +125,28 @@ int main(int argc, char** argv)
     n += read_args(APP_DIR "/run.args", args + n, MAX_ARGS - 12 - n);
 
     /* the Switch's own options, out of the command line */
-    for (int i = 1; i + 1 < n;)
+    for (int i = 1; i < n;)
     {
-        if (!strcmp(args[i], "--switch-layout"))
+        if (!strcmp(args[i], "--switch-layout") && i + 1 < n)
         {
             nx_set_layout(!strcmp(args[i + 1], "xbox"));
             memmove(args + i, args + i + 2, (size_t)(n - i - 2) * sizeof *args);
             n -= 2;
             continue;
         }
-        /* an environment setting, NAME=VALUE (FFXI_FRAMELOG=1: the frame rate in host64.log each second) */
-        if (!strcmp(args[i], "--switch-env") && strchr(args[i + 1], '='))
+        /* an environment setting, NAME=VALUE (FFXI_FRAMELOG=1: the frame rate in host64.log each second). A
+         * line FFXI_NAME=value alone does the same (read_args); a --switch-env left without its setting (its
+         * FFXI_ line taken by read_args) is dropped, not handed to host64, which stops at an unknown option */
+        if (!strcmp(args[i], "--switch-env"))
         {
-            putenv(args[i + 1]);
-            fprintf(stderr, "[switch] set %s\n", args[i + 1]);
-            memmove(args + i, args + i + 2, (size_t)(n - i - 2) * sizeof *args);
-            n -= 2;
+            int has = i + 1 < n && strchr(args[i + 1], '=') && args[i + 1][0] != '-';
+            if (has)
+            {
+                putenv(args[i + 1]);
+                fprintf(stderr, "[switch] set %s\n", args[i + 1]);
+            }
+            memmove(args + i, args + i + 1 + has, (size_t)(n - i - 1 - has) * sizeof *args);
+            n -= 1 + has;
             continue;
         }
         ++i;
