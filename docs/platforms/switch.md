@@ -30,19 +30,60 @@ Developer notes are in [../switch.md](../switch.md).
   even `127.0.0.1`, and the host exits with `--server: cannot resolve`. On macOS, `build_switch.py` finds
   `Ryujinx.app` in `/Applications` or `~/Applications` and its card in `~/Library/Application Support/Ryujinx`.
 
-## 1. Build
+## Quick start
+
+With devkitPro and Python installed ([What you need](#what-you-need)) and the SD card in the PC:
+
+- **Windows**: double-click `setup-switch.bat` in this folder.
+- **Linux, macOS**: `./setup-switch.sh`.
+
+It asks for your `FINAL FANTASY XI` folder, the SD card (it finds a card with `atmosphere/` or `switch/`
+on it by itself) and the server, then does every step below in order: it checks the PC (and names
+anything missing, with the command to install it), identifies your game version, prepares its code,
+finds its frame delta sites if this repository doesn't have them yet, builds the `.nro`, and copies the
+`.nro`, the game and the settings to the card. Then [run it](#3-run).
+
+The options answer the questions instead, for a script or a second run:
+
+```
+python tools/setup_switch.py --game "<your FINAL FANTASY XI folder>" --sd E:\ --server <server name or IP>
+```
+
+`--layout xbox`, `--dats <folder>` and `--arg "<host options>"` are as in [step 2](#2-put-it-on-the-sd-card);
+`--check` checks the PC and stops; `--no-copy-game` leaves the game on the card as it is. The answers are
+remembered (`build/switch/setup.json`), and what each step printed is in `build/switch/setup.log`.
+
+**Updating**: after a game update, or a pull of this repository, run it again. Each step skips what is
+already done: the build compiles only what changed and the copy sends only files that differ. With only
+the `.nro` new, `--no-copy-game` (or `build_switch.py deploy`, [step 3](#3-run)) is quicker.
+
+A game version this repository doesn't know stops it at the start, with its `FFXiMain.dll`'s SHA-256: it
+needs its own metadata first ([new-client-version.md](../new-client-version.md)).
+
+## Manual steps
+
+What `setup-switch` does, one command at a time.
+
+### 1. Build
 
 ```
 python tools/prepare.py --game "<your FINAL FANTASY XI folder>"
+python tools/frame_sites.py
 python tools/build_switch.py host
 ```
+
+`prepare.py` identifies your game version and unpacks its code into `generated/`. `frame_sites.py` is only
+needed when `meta/builds.json` has no frame delta sites for your version (no `frame_int_sites` in its entry;
+a build without them logs `has no frame delta sites` at the start): it finds them and adds them to
+`meta/builds.json`. With them the Switch runs uncapped with the world at its real speed; without them, at
+30 fps ([Performance](#performance)). If it can't find them it says so and changes nothing: skip it.
 
 `host` translates the game (the desktop translation, `generated/all`, shared with the PC builds) and
 writes `build/switch/xi-on-anything.nro`. The first build compiles about 6 million lines of generated C
 and takes a while; later builds compile only what changed. `XI_SWITCH_JOBS` (default 6) is how many
 generated files compile at once; lower it if the PC runs out of memory.
 
-## 2. Put it on the SD card
+### 2. Put it on the SD card
 
 ```
 python tools/build_switch.py setup --sd E:\ --game "<your FINAL FANTASY XI folder>" --server <server name or IP>
@@ -58,7 +99,8 @@ python tools/build_switch.py setup --sd E:\ --game "<your FINAL FANTASY XI folde
 - `ffxi.reg`, and `switch.reg` over it: the Switch's defaults (a 1920x1080 window and background,
   windowed, menus at 960x540 so the UI is twice its size, readable on a TV and in handheld). What you
   change in game is saved to `settings.reg` beside them and wins over both.
-- `run.args` with the options you gave
+- `run.args` with the options you gave: an option given replaces its line there, and every other line
+  (yours, added by hand) is kept
 
 `setup`'s options, which it writes to `run.args` (one host argument per line; edit the file on the card
 to change them later; `--layout` becomes `--switch-layout` there):
@@ -79,7 +121,7 @@ computer or another Switch.
 A line `FFXI_NAME=value` in `run.args` sets that environment variable instead of passing an argument
 (there is no shell on the Switch), for example `FFXI_NET_TRACE=1` to log the network.
 
-## 3. Run
+### 3. Run
 
 - **Console**: hold R while starting any game, then pick **XI on Anything** in the homebrew menu.
 - **Emulator**: `python tools/build_switch.py run` copies the `.nro` to the emulator's card and starts it.

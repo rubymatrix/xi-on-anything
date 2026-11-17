@@ -115,10 +115,13 @@ def compile_many(srcs, group, extra=(), workers=None):
     jobs = [(s, OUT / 'obj' / group / (s.replace('/', '_') + '.o'), extra) for s in srcs]
     print(f'{group}: {len(jobs)} files (compiling the ones changed since the last build)', flush=True)
     errors = []
+    progress = os.environ.get('XI_SWITCH_PROGRESS') == '1'  # tools/setup_switch.py's progress bar
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers or os.cpu_count() or 4) as ex:
-        for name, err in ex.map(compile_one, jobs):
+        for i, (name, err) in enumerate(ex.map(compile_one, jobs), 1):
             if err:
                 errors.append((name, err))
+            if progress:
+                print(f'@progress {group} {i} {len(jobs)}', flush=True)
     if errors:
         for name, err in errors:
             print(name + '\n' + err[-6000:], file=sys.stderr)
@@ -251,16 +254,11 @@ def sd_root(value):
     return root
 
 
-def copy_tree(src, dst, workers=4):
-    """src into dst, only files whose size or modification time differ: a copy that stopped part way, or
-    a game update, sends only what is missing or changed. Returns (files copied, bytes copied).
-
-    Written in place, a few at a time: on an SD card's FAT32 the time goes on each file's directory
-    updates, not its bytes (the game is 65k small files), and a file cut short still differs in size or
-    time from its source, so the next run sends it again."""
+def pending(src, dst):
+    """(every file under src, [(file, its copy under dst, its stat)] for those copy_tree would copy: missing,
+    or a different size or time) and how many more bytes dst's disk needs for them."""
     files = [p for p in src.rglob('*') if p.is_file()]
-    todo = []
-    made = set()
+    todo, more = [], 0
     for p in files:
         out = dst / p.relative_to(src)
         st = p.stat()
@@ -268,12 +266,26 @@ def copy_tree(src, dst, workers=4):
             o = out.stat()
             if o.st_size == st.st_size and abs(o.st_mtime - st.st_mtime) < 2:  # FAT keeps 2 s
                 continue
+            more += max(st.st_size - o.st_size, 0)
         except FileNotFoundError:
-            pass
+            more += st.st_size
+        todo.append((p, out, st))
+    return files, todo, more
+
+
+def copy_tree(src, dst, workers=4):
+    """src into dst, only files whose size or modification time differ: a copy that stopped part way, or
+    a game update, sends only what is missing or changed. Returns (files copied, bytes copied).
+
+    Written in place, a few at a time: on an SD card's FAT32 the time goes on each file's directory
+    updates, not its bytes (the game is 65k small files), and a file cut short still differs in size or
+    time from its source, so the next run sends it again."""
+    files, todo, _ = pending(src, dst)
+    made = set()
+    for _, out, _ in todo:
         if out.parent not in made:
             out.parent.mkdir(parents=True, exist_ok=True)
             made.add(out.parent)
-        todo.append((p, out, st))
     print(f'  {len(files)} files, {len(todo)} to copy', flush=True)
 
     def one(job):
@@ -308,6 +320,24 @@ def run_args(a):
     for extra in a.arg or []:
         lines += shlex.split(extra)
     return lines
+
+
+def merge_args(old, new):
+    """run.args already on the card with the new options over it: an option given now replaces its line
+    and value there; every other line (--user, --cexi, FFXI_ settings: the player's own) is kept."""
+    given = {x for x in new if x.startswith('--')}
+    kept, i = [], 0
+    while i < len(old):
+        line = old[i].strip()
+        if line in given:
+            # the option, and its value when it has one (the next line, not itself an option or a setting)
+            nxt = old[i + 1].strip() if i + 1 < len(old) else ''
+            i += 2 if nxt and not nxt.startswith('--') and not nxt.startswith('FFXI_') else 1
+            continue
+        if line:
+            kept.append(line)
+        i += 1
+    return kept + new
 
 
 def mtp_mirror(a, src, dest):
@@ -369,7 +399,15 @@ def setup(a):
             raise SystemExit(f'{game}: not a FINAL FANTASY XI folder (no FFXiMain.dll)')
         # the layout the game expects: SquareEnix/FINAL FANTASY XI, the viewer folder beside it
         dest = app / 'SquareEnix'
-        for folder in [game] + [p for p in [game.parent / 'PlayOnlineViewer'] if p.is_dir()]:
+        folders = [game] + [p for p in [game.parent / 'PlayOnlineViewer'] if p.is_dir()]
+        print('checking what to copy...', flush=True)
+        # (a cluster's slack a file: the game is 65k small files on FAT32/exFAT's 32-128 KB clusters)
+        more = sum(m + len(t) * 64 * 1024 for _, t, m in (pending(f, dest / f.name) for f in folders))
+        free = shutil.disk_usage(app).free
+        if more > free:
+            raise SystemExit(f'the card needs about {more / 1e9:.1f} GB more for the game and has {free / 1e9:.1f} GB '
+                             'free: free some space, or use a bigger card')
+        for folder in folders:
             print(f'copying {folder} -> {dest / folder.name} (only what changed)', flush=True)
             n, size = copy_tree(folder, dest / folder.name)
             print(f'  {n} files copied, {size / 1e9:.2f} GB')
@@ -378,10 +416,12 @@ def setup(a):
         print(f'DAT overlay: {n} files copied, {size / 1e6:.0f} MB')
     shutil.copyfile(ROOT / 'ffxi.reg', app / 'ffxi.reg')
     shutil.copyfile(ROOT / 'switch/switch.reg', app / 'switch.reg')  # the Switch's defaults over it
-    lines = run_args(a)
-    if lines or not (app / 'run.args').exists():
-        (app / 'run.args').write_text('\n'.join(lines) + ('\n' if lines else ''))
-        print('run.args:', ' '.join(lines) or '(empty: the sign-in screen asks)')
+    path = app / 'run.args'
+    old = path.read_text().splitlines() if path.exists() else []
+    lines = merge_args(old, run_args(a))
+    if lines != old or not path.exists():
+        path.write_text('\n'.join(lines) + ('\n' if lines else ''))
+    print('run.args:', ' '.join(lines) or '(empty: the sign-in screen asks)')
     print('done:', app)
 
 

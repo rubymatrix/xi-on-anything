@@ -1,0 +1,379 @@
+"""Build XI on Anything for the Nintendo Switch and put it on an SD card, start to finish.
+setup-switch.bat (Windows) and setup-switch.sh (Linux, macOS) run it.
+
+  python tools/setup_switch.py [--game <FINAL FANTASY XI folder>] [--sd <SD card's root>|emu]
+                               [--server <name or IP>] [--layout nintendo|xbox] [--dats <folder>]
+                               [--arg "<host options>"] [--no-copy-game] [--check]
+
+It checks this PC (Python's two packages, devkitPro's), identifies the game's version (meta/builds.json),
+prepares its code (tools/prepare.py), finds its frame delta sites when meta/builds.json has none
+(tools/frame_sites.py: without them the Switch runs at 30 fps, with them uncapped), builds the .nro
+(tools/build_switch.py host) and copies the .nro, the game and the settings to the card
+(tools/build_switch.py setup). Each step is skipped when it is already done, so run it again after a
+game update or a pull: it does only what changed.
+
+On a terminal it asks for what the options don't give, starting from the last answers
+(build/switch/setup.json). --no-copy-game leaves the game on the card as it is (after a rebuild: the
+.nro and the settings only). --check checks this PC and stops. Everything the steps print goes to
+build/switch/setup.log. run.args on the card keeps its other lines: only the options given replace theirs.
+The manual steps are in docs/platforms/switch.md.
+"""
+import argparse
+import json
+import os
+import string
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+import buildinfo  # noqa: E402
+
+OUT = Path(os.environ.get('XI_SWITCH_BUILD_DIR', str(ROOT / 'build/switch'))).resolve()
+LOG = OUT / 'setup.log'
+SAVED = OUT / 'setup.json'
+CALLER_DIR = os.getcwd()
+PACKAGES = ['capstone', 'pefile']
+DKP_PACKAGES = 'switch-dev switch-mesa switch-libdrm_nouveau switch-glad'
+STEPS = ['Checking this PC', 'Finding the game', "Preparing the game's code", 'Frame delta sites',
+         'Building the app', 'Putting it on the SD card']
+
+
+# ---- output -------------------------------------------------------------------------------------
+
+def step(n):
+    print('\n[%d/%d] %s' % (n + 1, len(STEPS), STEPS[n]), flush=True)
+
+
+def note(text):
+    print('  ' + text, flush=True)
+
+
+def progress(fraction, detail=''):
+    width = 30
+    fill = int(fraction * width)
+    sys.stdout.write('\r  [%s%s] %3d%%  %s' % ('#' * fill, '.' * (width - fill), fraction * 100, detail[:40].ljust(40)))
+    sys.stdout.flush()
+
+
+class Failure(Exception):
+    pass
+
+
+def log(text):
+    OUT.mkdir(parents=True, exist_ok=True)
+    with open(LOG, 'a', encoding='utf-8') as f:
+        f.write(text if text.endswith('\n') else text + '\n')
+
+
+def run(cmd, on_line=None, env=None):
+    """cmd with its output in the log; on_line(line) sees each line. Raises Failure with the last lines."""
+    cmd = [str(c) for c in cmd]
+    log('> ' + ' '.join(cmd))
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         errors='replace', env=env)
+    tail = []
+    for line in p.stdout:
+        log(line)
+        if not line.startswith('@progress'):
+            tail = (tail + [line.rstrip()])[-15:]
+        if on_line:
+            on_line(line)
+    if p.wait():
+        raise Failure('%s failed. The last lines were:\n%s\n(everything is in %s)'
+                      % (' '.join(Path(c).name for c in cmd[1:3]), '\n'.join('    ' + t for t in tail), LOG))
+
+
+def interactive():
+    return sys.stdin.isatty()
+
+
+def ask(question, default=''):
+    """The player's answer, or default (blank, or not on a terminal)."""
+    if not interactive():
+        return default
+    shown = f' [{default}]' if default else ''
+    try:
+        answer = input(f'  {question}{shown}: ').strip().strip('"')
+    except EOFError:
+        return default
+    return answer or default
+
+
+def yes(question, default=True):
+    answer = ask(question + (' (Y/n)' if default else ' (y/N)')).lower()
+    return default if not answer else answer.startswith('y')
+
+
+def user_path(p):
+    return os.path.abspath(os.path.join(CALLER_DIR, os.path.expanduser(p)))
+
+
+def load_saved():
+    try:
+        return json.loads(SAVED.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save(answers):
+    OUT.mkdir(parents=True, exist_ok=True)
+    SAVED.write_text(json.dumps(answers, indent=2) + '\n')
+
+
+# ---- 1. this PC -----------------------------------------------------------------------------------
+
+def check_pc(fix):
+    """[problems]: each a line saying what is missing and how to get it. fix: offer to pip install."""
+    problems = []
+    if sys.version_info < (3, 12):
+        problems.append('Python %d.%d: 3.12 or newer is needed (https://www.python.org/downloads/; on Windows run '
+                        'this with `py -3.12`)' % sys.version_info[:2])
+    missing = [p for p in PACKAGES if subprocess.run([sys.executable, '-c', 'import ' + p], capture_output=True).returncode]
+    if missing and fix and yes(f"Python's {' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} missing. "
+                               'Install with pip now?'):
+        run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '-q'] + missing)
+        missing = [p for p in PACKAGES if subprocess.run([sys.executable, '-c', 'import ' + p],
+                                                         capture_output=True).returncode]
+    if missing:
+        problems.append(f"Python's {', '.join(missing)}: `{Path(sys.executable).name} -m pip install {' '.join(missing)}`")
+    import switch_toolchain as tc
+    if not tc.DKP:
+        problems.append('devkitPro: not found. Install it (https://devkitpro.org/wiki/Getting_Started), then in its '
+                        f'msys2 shell `pacman -S {DKP_PACKAGES}`. Set DEVKITPRO if it is not in C:\\devkitPro, '
+                        'C:\\msys64 or D:\\msys64 (or /opt/devkitpro).')
+    else:
+        want = {'switch-dev': tc.LIBNX / 'lib/libnx.a', 'switch-mesa': tc.PORTLIBS / 'lib/libEGL.a',
+                'switch-libdrm_nouveau': tc.PORTLIBS / 'lib/libdrm_nouveau.a', 'switch-glad': tc.PORTLIBS / 'include/glad'}
+        absent = [pkg for pkg, path in want.items() if not path.exists()]
+        if absent:
+            problems.append(f"devkitPro ({tc.DKP}) lacks {', '.join(absent)}: in its msys2 shell `pacman -S {' '.join(absent)}`")
+        else:
+            note(f'devkitPro: {tc.DKP}')
+    return problems
+
+
+# ---- 2. the game ----------------------------------------------------------------------------------
+
+def is_game(folder):
+    return all((Path(folder) / n).exists() for n in ('FFXiMain.dll', 'FFXi.dll', 'ROM'))
+
+
+def registry_game():
+    if sys.platform != 'win32':
+        return None
+    try:
+        import prepare
+        return prepare.registry_game()
+    except (SystemExit, OSError, ImportError):
+        return None
+
+
+def find_game(given, saved):
+    default = given or saved.get('game') or registry_game() or ''
+    while True:
+        folder = user_path(given) if given else ask('The FINAL FANTASY XI folder (the one with FFXiMain.dll in it)', default)
+        if not folder:
+            raise Failure('No game folder: give it with --game "<FINAL FANTASY XI folder>"')
+        folder = os.path.normpath(user_path(folder))
+        if is_game(folder):
+            return folder
+        msg = f'{folder} is not a FINAL FANTASY XI folder (it needs FFXiMain.dll, FFXi.dll and ROM)'
+        if given or not interactive():
+            raise Failure(msg)
+        note(msg)
+        default = ''
+
+
+def identify(folder):
+    digest = buildinfo.sha256(os.path.join(folder, 'FFXiMain.dll'))
+    label = buildinfo.match(digest)
+    if label is None:
+        raise Failure(f'This game version is not one XI on Anything knows yet (FFXiMain.dll SHA-256 {digest}).\n'
+                      '  It needs its own metadata first: see docs/new-client-version.md, or report the SHA-256 '
+                      'to the project.')
+    return label
+
+
+# ---- 3. prepare, 4. frame sites ---------------------------------------------------------------------
+
+def prepared(label, game):
+    chosen = buildinfo.current(required=False)
+    return (chosen and chosen['build'] == label and os.path.normcase(os.path.normpath(chosen['game'])) == os.path.normcase(game)
+            and (ROOT / 'generated/FFXiMain.unpacked.dll').exists())
+
+
+def has_frame_sites(label):
+    return bool(buildinfo.known()[label].get('frame_int_sites'))
+
+
+# ---- 5. build -----------------------------------------------------------------------------------
+
+def build():
+    names = {'host': 'our code', 'entry': 'our code', 'all': "the game's code", 'ffxi': "the game's code (FFXi.dll)"}
+    state = {'bar': False}
+
+    def on_line(line):
+        if line.startswith('@progress'):
+            _, group, i, n = line.split()
+            state['bar'] = True
+            progress(int(i) / int(n), f'{names.get(group, group)}: {i}/{n}')
+            if i == n:
+                sys.stdout.write('\n')
+                state['bar'] = False
+        elif line.startswith('game build '):
+            note("translating the game's code (a few minutes)")
+        elif line.startswith('built '):
+            note(line.strip())
+
+    env = dict(os.environ, XI_SWITCH_PROGRESS='1', PYTHONUNBUFFERED='1')
+    try:
+        run([sys.executable, HERE / 'build_switch.py', 'host'], on_line, env)
+    finally:
+        if state['bar']:
+            sys.stdout.write('\n')
+
+
+# ---- 6. the SD card -------------------------------------------------------------------------------
+
+def card_candidates():
+    """Mounted folders that look like a Switch's SD card (atmosphere/ or switch/ at the root)."""
+    if sys.platform == 'win32':
+        roots = [Path(f'{d}:/') for d in string.ascii_uppercase if d not in 'AC' and os.path.exists(f'{d}:/')]
+    else:
+        roots = []
+        for base in ['/Volumes', '/media', '/run/media', '/mnt']:
+            b = Path(base)
+            if not b.is_dir():
+                continue
+            for d in b.iterdir():
+                roots += [d] + ([s for s in d.iterdir() if s.is_dir()] if base != '/Volumes' and d.is_dir() else [])
+    found = []
+    for r in roots:
+        try:
+            if (r / 'atmosphere').is_dir() or (r / 'switch').is_dir():
+                found.append(str(r))
+        except OSError:
+            continue
+    return found
+
+
+def find_card(given, saved):
+    if given:
+        return given if given == 'emu' else user_path(given)
+    found = card_candidates()
+    default = found[0] if len(found) == 1 else saved.get('sd', '')
+    if len(found) > 1:
+        note('These look like Switch SD cards: ' + ', '.join(found))
+    elif found:
+        note(f'Found a Switch SD card at {found[0]}')
+    while True:
+        card = ask("The SD card's folder (its root, e.g. E:\\), or emu for the emulator's", default)
+        if not card:
+            raise Failure("No SD card: put it in the PC (or the console's over USB with Hekate's UMS) and give it with --sd")
+        if card == 'emu' or Path(user_path(card)).is_dir():
+            return card if card == 'emu' else user_path(card)
+        note(f'{card}: not a folder (is the card in?)')
+        if not interactive():
+            raise Failure(f'{card}: not a folder (is the card in?)')
+        default = ''
+
+
+def put_on_card(card, game, a):
+    import build_switch
+    ns = argparse.Namespace(mtp=None, sd=card, nro=None, game=game, server=a.server or None, fps_divisor=None,
+                            dats=a.dats, layout=a.layout, arg=a.arg)
+    try:
+        build_switch.setup(ns)
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            raise Failure(str(e.code))
+
+
+# ---- the whole -----------------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('--game', help='the FINAL FANTASY XI folder')
+    ap.add_argument('--sd', help="the SD card's root folder, or emu (the emulator's virtual card)")
+    ap.add_argument('--server', help='the LandSandBoat server, by name or IP (without it the sign-in screen asks)')
+    ap.add_argument('--layout', choices=['nintendo', 'xbox'], help='A/B as on the Switch (default), or swapped as on Xbox')
+    ap.add_argument('--dats', help='a DAT overlay folder to copy')
+    ap.add_argument('--arg', action='append', help='more host options for run.args, as one string (--arg "--cexi full")')
+    ap.add_argument('--no-copy-game', action='store_true', help='leave the game on the card as it is')
+    ap.add_argument('--check', action='store_true', help='check this PC and stop')
+    a = ap.parse_args()
+    saved = load_saved()
+    log('=== setup_switch.py ' + ' '.join(sys.argv[1:]))
+
+    step(0)
+    problems = check_pc(fix=not a.check)
+    for p in problems:
+        note('missing: ' + p)
+    if problems:
+        raise Failure('Install what is missing above, then run this again.')
+    note('this PC has everything the build needs')
+    if a.check:
+        return
+
+    step(1)
+    game = find_game(a.game, saved)
+    label = identify(game)
+    note(f'{game}: game version {label}')
+
+    # the questions up front, so the long steps run without waiting on the player
+    card = find_card(a.sd, saved)
+    if a.server is None:
+        a.server = ask('The server (its name or IP; blank: the sign-in screen asks)', saved.get('server', ''))
+    a.layout = a.layout or saved.get('layout')
+    a.dats = user_path(a.dats) if a.dats else None
+    save({'game': game, 'sd': card, 'server': a.server, 'layout': a.layout})
+
+    step(2)
+    if prepared(label, game):
+        note('already prepared')
+    else:
+        run([sys.executable, HERE / 'prepare.py', '--game', game])
+        note('done')
+
+    step(3)
+    if has_frame_sites(label):
+        note(f'meta/builds.json has them for {label}: the Switch runs uncapped, the world at its real speed')
+    else:
+        note(f'finding them in {label} (tools/frame_sites.py)')
+        try:
+            run([sys.executable, HERE / 'frame_sites.py'])
+            note('found and recorded in meta/builds.json: the Switch runs uncapped. (Worth sending upstream:\n'
+                 '  a pull request with meta/builds.json gives every player of this version the same.)')
+        except Failure as e:
+            note('not found, so the Switch keeps 30 fps (it plays fine). Details in ' + str(LOG))
+            log(str(e))
+
+    step(4)
+    note('The first build compiles about 6 million lines of C and takes a while (an hour or more on some PCs);\n'
+         '  later builds compile only what changed.')
+    build()
+
+    step(5)
+    if a.no_copy_game:
+        note('leaving the game on the card as it is (--no-copy-game)')
+    else:
+        note('the game is about 14 GB the first time; after that only what changed is copied')
+    put_on_card(card, None if a.no_copy_game else game, a)
+
+    print('\nDone. On the Switch: hold R while starting any game to open the homebrew menu with full memory,\n'
+          'then pick XI on Anything. Its log is sdmc:/switch/xi-on-anything/host64.log.\n'
+          'After a game update or a new version of this repository, run this again: it does only what changed.')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Failure as e:
+        print('\n' + str(e), file=sys.stderr)
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        print('\nStopped. Run it again to carry on from where it was.', file=sys.stderr)
+        raise SystemExit(130)
