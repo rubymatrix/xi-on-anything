@@ -163,6 +163,24 @@ desktop, NVIDIA's binaries loaded without error but drew some programs wrong (gf
 checks). Each program compiles when first drawn; deko3d's precompiled shaders are the way past it, or a
 switch-mesa with its disk cache.
 
+## Mesa 26: mesa-switch, with the disk cache (branch switch/mesa-cache)
+
+[mesa-switch](https://github.com/danfromtico/mesa-switch) (Mesa 26.2.4; Cemu-nx, PPSSPP-nx and dolphin-nx
+use it) has a Horizon GPU backend over libnx, Gallium NVC0 for GL, no libdrm_nouveau, and Mesa's disk cache
+on the Switch (`MESA_SHADER_CACHE_DIR`, else `$HOME/.mesa`, else `sdmc:/.mesa`). Built from source, GL only
+(no Rust), with its `build-opengl.sh` in MSYS2's own shell (`MSYSTEM=MSYS`; `pacman -S meson bison flex
+python-mako python-packaging python-yaml switch-zlib switch-libexpat`) and its MSYS2 cross file with the
+programs as MSYS paths (`/d/msys64/...`: MSYS's Meson reads `D:/...` as relative) and `C:/msys64` changed
+to where MSYS2 is. `XI_SWITCH_MESA=<DESTDIR>/opt/devkitpro/portlibs/switch` builds against it
+(`build_switch.py`: gfx_gl.c with its headers, its libraries ahead of portlibs'); the `.nro` is 46.5 MB
+(34.5 with switch-mesa). `switch_main.c` puts the cache in `sdmc:/switch/xi-on-anything/shader-cache`.
+
+- Ryubing: no display (the backend's first GPU mapping fails, `VA bind ... 0x195c`).
+- On a console (2026-11-18, 512x448, a 512 background, uncapped): the sign-in and the world as before, 44-54
+  fps. The first start wrote 436 KB of cache (`foz_cache.foz`, Fossilize's single file); a second start in
+  the same places added 24 KB, its first seconds' longest frame 165 ms (2468 the first time), the worst hitch
+  outside a zone load 223 ms (572), zone loads unchanged (~2.5 s: the game's files, not shaders).
+
 ## Found: the black screen at start was a miscompile
 
 The "start-up race" (a black screen, the main thread spinning in gfx_queue.c's `rec`, the log stopping after
