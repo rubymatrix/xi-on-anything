@@ -20,6 +20,10 @@ import capstone
 from capstone import x86_const as X
 
 import flags_across_calls
+import x87_slots
+
+# XI_X87_SLOTS=0: every function keeps x87_locals' rotating stack (to compare against recomp/x87_slots.py's)
+X87_SLOTS = __import__('os').environ.get('XI_X87_SLOTS', '1') != '0'
 
 R32 = ('eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi')
 R16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
@@ -267,20 +271,55 @@ class FunctionTranslator:
 
     # ------------------------------------------------------------------ translation
 
-    def translate(self):
+    def emit(self):
+        """each instruction's statements: [(ins, statements, whether it falls through)]"""
         self.decode()
-        body = []
-        prev_falls_to = None
-        for k, ins in enumerate(self.insns):
-            if prev_falls_to is not None and prev_falls_to != ins.address:
-                body.append('    ' + self.goto(prev_falls_to, None))
-            body.append(('L_%08x:' % ins.address, ins))
+        emitted = []
+        for ins in self.insns:
             try:
                 stmts, falls = self.one(ins)
             except Unsupported as e:
                 text = '%s %s' % (ins.mnemonic, ins.op_str)
                 self.unimpl.append((ins.address, ins.mnemonic, str(e)))
                 stmts, falls = ['RT_UNIMPL(%s, "%s");' % (hexu(ins.address), text.replace('"', "'"))], False
+            emitted.append((ins, stmts, falls))
+        return emitted
+
+    def x87_effect(self, target):
+        """what the function at target does to the x87 stack's depth (x87_slots.net_effect), None if unknown"""
+        cache = self.ctx.__dict__.setdefault('x87_effects', {})
+        if target not in cache:
+            cache[target] = None
+            if target in self.ctx.functions:
+                saved = set(self.ctx.referenced)
+                t = FunctionTranslator(self.ctx, target, self.ctx.functions[target])
+                em = t.emit()
+                self.ctx.referenced = saved
+                cache[target] = x87_slots.net_effect(
+                    target, t.insns, {i.address: st for i, st, _ in em}, {i.address: f for i, _, f in em},
+                    lambda ins: [x for x in t.jump_targets(ins) if x in t.addrs], self.ctx.prefix)
+        return cache[target]
+
+    def translate(self):
+        emitted = self.emit()
+        # the x87 stack in fixed locals by its depth, where the function allows it (recomp/x87_slots.py); else
+        # x87_locals' rotating ones, below
+        plan = None
+        if self.uses_x87 and X87_SLOTS and not any(i.address in self.ctx.hooks for i in self.insns):
+            plan = x87_slots.plan(self.entry, self.insns, {i.address: s for i, s, _ in emitted},
+                                  {i.address: f for i, _, f in emitted},
+                                  lambda ins: [t for t in self.jump_targets(ins) if t in self.addrs], self.ctx.prefix,
+                                  self.x87_effect)
+        body = []
+        prev_falls_to = None
+        prev = None
+        for ins, stmts, falls in emitted:
+            if prev_falls_to is not None and prev_falls_to != ins.address:
+                line = '    ' + self.goto(prev_falls_to, None)
+                body.append(plan.tail(prev.address, line) if plan else line)
+            body.append(('L_%08x:' % ins.address, ins))
+            if plan:
+                stmts = plan.rewrite(ins.address, stmts)
             hook = self.ctx.hooks.get(ins.address)
             if hook:
                 # A host hook point (recomp.py --hooks): the host sees and may change the guest's
@@ -294,10 +333,14 @@ class FunctionTranslator:
                     body.append('        ' + s)
                 body.append('    }')
             prev_falls_to = ins.address + ins.size if falls else None
+            prev = ins
         if prev_falls_to is not None:
-            body.append('    ' + self.goto(prev_falls_to, None))
+            line = '    ' + self.goto(prev_falls_to, None)
+            body.append(plan.tail(prev.address, line) if plan else line)
 
         out = ['void %s%08x(Guest* g)' % (self.ctx.prefix, self.entry), '{', '    REGS_DECL;', '    REGS_LOAD;']
+        if plan:
+            out[2:4] = ['    REGS_DECL; X87S_DECL;', '    REGS_LOAD; X87S_LOAD;']
         if self.insns and self.insns[0].address != self.entry:
             out.append('    goto L_%08x;' % self.entry)
             self.labels.add(self.entry)
@@ -309,6 +352,9 @@ class FunctionTranslator:
             else:
                 out.append(item)
         out.append('}')
+        if plan:
+            self.used_x87_slots = True
+            return out
         return x87_locals(out) if self.uses_x87 else out
 
     def one(self, ins):

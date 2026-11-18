@@ -174,6 +174,24 @@ void rt_log(const char* fmt, ...)
     }
 }
 
+/* A call in a function with its x87 stack in fixed locals (recomp/x87_slots.py) came back with the top where the
+ * translation didn't expect it: it took the callee for one returning a float when it doesn't, or the other way. Logged
+ * for the first 16 addresses; the function goes on (its x87 values may be wrong from here). */
+void rt_x87_off(Guest* g, uint32_t at)
+{
+    static uint32_t said[16];
+    static unsigned n;
+    for (unsigned i = 0; i < n; ++i)
+        if (said[i] == at)
+            return;
+    if (n < 16)
+    {
+        said[n++] = at;
+        rt_log("[recomp] x87: the call at %08x left the stack's top at %u, not where its translation expects\n", at,
+            (unsigned)g->top);
+    }
+}
+
 void rt_fatal(Guest* g, uint32_t addr, const char* what)
 {
     rt_log("\n[recomp] FATAL at %08x: %s\n", addr, what);

@@ -284,6 +284,22 @@ RT_INLINE int64_t fist64(Guest* g, double x) { return fist64_cw(g->fcw, x); }
         x87_s4 = x87_s5, x87_s5 = x87_s6, x87_s6 = x87_s7, x87_s7 = x87_t,                       \
         x87_top = (x87_top + 1) & 7u, x87_t)
 
+/* x87 in fixed locals by depth (recomp/x87_slots.py): x87_r<k> is the value k pushes deep from the function's entry,
+ * x87_t0 the top at its entry, x87_cw the control word. A call gives the callee the top and the control word and
+ * reads back ST0 when it returned a float; RT_X87_CHECK then checks the top it left is the one the translation
+ * expects (rt_x87_off logs it, once an address). */
+#define X87S_DECL                                                                                \
+    double x87_r0, x87_r1, x87_r2, x87_r3, x87_r4, x87_r5, x87_r6, x87_r7;                       \
+    unsigned x87_t0, x87_cw
+#define X87S_LOAD x87_t0 = g->top & 7u; x87_cw = g->fcw
+void rt_x87_off(Guest* g, uint32_t at);
+#define RT_X87_CHECK(ok, at)                                                                     \
+    do                                                                                           \
+    {                                                                                            \
+        if (!(ok))                                                                               \
+            rt_x87_off(g, (at));                                                                 \
+    } while (0)
+
 /* FXAM: C3 C2 C0 = 001 NaN, 010 normal, 011 infinity, 100 zero, 110 denormal; C1 = sign. */
 RT_INLINE void fxam(Guest* g)
 {
