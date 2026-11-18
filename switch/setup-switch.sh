@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build XI on Anything for the Nintendo Switch and put it on an SD card: ./setup-switch.sh opens the setup's
+# Build XI on Anything for the Nintendo Switch and put it on an SD card: switch/setup-switch.sh opens the setup's
 # window (with a display and tkinter); with tools/setup_switch.py's options (--game, --sd, --server; --help),
 # or --console, it asks in the terminal instead.
 # Needs Python 3.12+ and devkitPro (docs/platforms/switch.md, Quick start).
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
 
 for py in python3.14 python3.13 python3.12 python3; do
     if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null; then

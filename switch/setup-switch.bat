@@ -3,7 +3,7 @@ rem Build XI on Anything for the Nintendo Switch and put it on an SD card: doubl
 rem or run it from a terminal with tools\setup_switch.py's options (--game, --sd, --server; --help).
 rem Needs Python 3.12+ and devkitPro (docs\platforms\switch.md, Quick start).
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set PY=
 py -3.12 -c "" >nul 2>&1 && set PY=py -3.12

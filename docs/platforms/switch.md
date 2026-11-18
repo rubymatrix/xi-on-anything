@@ -36,8 +36,8 @@ Developer notes are in [../switch.md](../switch.md).
 
 With the SD card in the PC:
 
-- **Windows**: double-click `setup-switch.bat` in this folder.
-- **Linux, macOS**: `./setup-switch.sh`.
+- **Windows**: double-click `setup-switch.bat` in the `switch` folder.
+- **Linux, macOS**: `./switch/setup-switch.sh`.
 
 A window opens: pick your game folder and the SD card with **Browse...** (a card with Atmosphère on it is
 listed by itself, and the server is filled in from your launcher), click **Install** beside *This PC* if it

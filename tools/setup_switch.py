@@ -1,5 +1,5 @@
 """Build XI on Anything for the Nintendo Switch and put it on an SD card, start to finish.
-setup-switch.bat (Windows) and setup-switch.sh (Linux, macOS) run it.
+switch/setup-switch.bat (Windows) and switch/setup-switch.sh (Linux, macOS) run it.
 
   python tools/setup_switch.py [--game <FINAL FANTASY XI folder>] [--sd <SD card's root>|emu]
                                [--server <name or IP>] [--layout nintendo|xbox] [--dats <folder>]
