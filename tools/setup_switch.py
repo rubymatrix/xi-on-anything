@@ -3,7 +3,7 @@ switch/setup-switch.bat (Windows) and switch/setup-switch.sh (Linux, macOS) run 
 
   python tools/setup_switch.py [--game <FINAL FANTASY XI folder>] [--sd <SD card's root>|emu]
                                [--server <name or IP>] [--layout nintendo|xbox] [--dats <folder>]
-                               [--arg "<host options>"] [--no-copy-game] [--check]
+                               [--arg "<host options>"] [--no-copy-game] [--no-icon] [--check]
 
 It checks this PC (Python's two packages, devkitPro's), identifies the game's version (meta/builds.json),
 prepares its code (tools/prepare.py), finds its frame delta sites when meta/builds.json has none
@@ -16,6 +16,11 @@ On a terminal it asks for what the options don't give, starting from the last an
 (build/switch/setup.json). --no-copy-game leaves the game on the card as it is (after a rebuild: the
 .nro and the settings only). --check checks this PC and stops. Everything the steps print goes to
 build/switch/setup.log. run.args on the card keeps its other lines: only the options given replace theirs.
+
+The home screen icon (a forwarder) is made on the console, which installs it with its own keys: this puts
+Sphaira (github.com/ITotalJustice/sphaira, a homebrew menu that makes forwarders) on the card when the card
+has none, checks for signature patches (a forwarder is an unsigned title) and says the one step left on the
+console. --no-icon leaves that out.
 The manual steps are in docs/platforms/switch.md.
 """
 import argparse
@@ -466,6 +471,80 @@ def server_args(card, a):
     note("a CatsEyeXI server: adding --cexi full to run.args (its own items, gear, spells and abilities)")
 
 
+SPHAIRA_API = 'https://api.github.com/repos/ITotalJustice/sphaira/releases/latest'
+SPHAIRA_NRO = 'switch/sphaira/sphaira.nro'  # (where its release zip puts it)
+
+
+def find_sphaira(root):
+    """A Sphaira already on the card (the player's, any version), or None."""
+    sw = root / 'switch'
+    hits = list(sw.glob('sphaira.nro')) + list(sw.glob('*/sphaira.nro')) if sw.is_dir() else []
+    return hits[0] if hits else None
+
+
+def get_sphaira():
+    """Sphaira's latest release, downloaded to build/switch once: (its .nro's bytes, its version)."""
+    import urllib.request
+    import zipfile
+    req = urllib.request.Request(SPHAIRA_API, headers={'User-Agent': 'xi-on-anything-setup'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        release = json.load(r)
+    asset = next(x for x in release['assets'] if x['name'].lower() == 'sphaira.zip')
+    out = OUT / ('sphaira-' + re.sub(r'[^\w.-]', '_', release['tag_name']) + '.zip')
+    if not out.exists():
+        note(f"downloading Sphaira {release['tag_name']} from github.com/ITotalJustice/sphaira")
+        OUT.mkdir(parents=True, exist_ok=True)
+        part = out.with_suffix('.part')
+        urllib.request.urlretrieve(asset['browser_download_url'], part)
+        part.replace(out)
+    with zipfile.ZipFile(out) as z:
+        return z.read(SPHAIRA_NRO), release['tag_name']
+
+
+def has_sigpatches(root):
+    """Whether the card looks to have signature patches, without which the console won't start a forwarder:
+    sys-patch (patches as the system runs), or patch files for Atmosphère (exefs_patches, kip_patches) or
+    Hekate (bootloader/patches.ini)."""
+    if (root / 'atmosphere/contents/420000000000000B').is_dir():
+        return True
+    for d in ('atmosphere/exefs_patches', 'atmosphere/kip_patches'):
+        base = root / d
+        if base.is_dir() and any(f.is_file() for f in base.rglob('*.ips')):
+            return True
+    return (root / 'bootloader/patches.ini').is_file()
+
+
+def put_icon_tools(card):
+    """Sphaira on the card for the home screen icon, and a word on signature patches. Never stops the setup:
+    the game plays without the icon."""
+    import build_switch
+    if card == 'emu':
+        return
+    root = build_switch.sd_root(card)
+    have = find_sphaira(root)
+    if have:
+        note(f'Sphaira is on the card already ({have.relative_to(root).as_posix()}): kept as it is')
+    else:
+        try:
+            nro, tag = get_sphaira()
+            dst = root / SPHAIRA_NRO
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(nro)
+            note(f'put Sphaira {tag} on the card ({SPHAIRA_NRO}): it makes the home screen icon')
+        except Exception as e:  # (no network, GitHub's rate limit: the rest of the setup is done)
+            log(f'Sphaira: {e!r}')
+            note('could not download Sphaira, for the home screen icon (the game is installed). Put\n'
+                 f'  sphaira.nro from github.com/ITotalJustice/sphaira/releases in {SPHAIRA_NRO} on the card.')
+            return
+    if not has_sigpatches(root):
+        note('no signature patches found on the card: the console may refuse to start the home screen icon\n'
+             '  without them (sys-patch is the usual one). Holding R over a game works either way.')
+
+
+ICON_STEPS = ('For a home screen icon: start Sphaira from the homebrew menu, highlight XI on Anything,\n'
+              'open its menu and pick Install Forwarder.')
+
+
 def put_on_card(card, game, a):
     import build_switch
     ns = argparse.Namespace(mtp=None, sd=card, nro=None, game=game, server=a.server or None, fps_divisor=None,
@@ -488,6 +567,7 @@ def main():
     ap.add_argument('--dats', help='a DAT overlay folder to copy')
     ap.add_argument('--arg', action='append', help='more host options for run.args, as one string (--arg "--cexi full")')
     ap.add_argument('--no-copy-game', action='store_true', help='leave the game on the card as it is')
+    ap.add_argument('--no-icon', action='store_true', help="don't put Sphaira (for a home screen icon) on the card")
     ap.add_argument('--check', action='store_true', help='check this PC and stop')
     ap.add_argument('--console', action='store_true', help=argparse.SUPPRESS)  # (setup-switch's: not the window)
     a = ap.parse_args()
@@ -560,11 +640,15 @@ def main():
     server_args(card, a)
     drop_old_fps(card, fps_done)  # (first, so the run.args setup prints is the one left on the card)
     put_on_card(card, None if a.no_copy_game else game, a)
+    if not a.no_icon:
+        put_icon_tools(card)
     save({'game': game, 'sd': card, 'server': a.server, 'layout': a.layout, 'fps_cleaned': fps_done})
 
     print('\nDone. On the Switch: hold R while starting any game to open the homebrew menu with full memory,\n'
           'then pick XI on Anything. Its log is sdmc:/switch/xi-on-anything/host64.log.\n'
           'After a game update or a new version of this repository, run this again: it does only what changed.')
+    if not a.no_icon and card != 'emu':
+        print(ICON_STEPS)
 
 
 if __name__ == '__main__':

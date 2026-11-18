@@ -99,18 +99,21 @@ class App:
         self.copy_game = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm, text='Copy the game to the card (about 14 GB the first time, then only what changed)',
                         variable=self.copy_game).grid(row=9, column=1, columnspan=2, sticky='w', padx=10)
+        self.icon = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frm, text='Home screen icon: put Sphaira on the card, which makes it on the Switch',
+                        variable=self.icon).grid(row=10, column=1, columnspan=2, sticky='w', padx=10)
 
         # go
         self.go = ttk.Button(frm, text='Build and install', command=self.start)
-        self.go.grid(row=10, column=0, columnspan=3, sticky='ew', pady=(12, 4), padx=10, ipady=6)
+        self.go.grid(row=11, column=0, columnspan=3, sticky='ew', pady=(12, 4), padx=10, ipady=6)
         self.step = ttk.Label(frm, text='')
-        self.step.grid(row=11, column=0, columnspan=3, sticky='w', padx=10)
+        self.step.grid(row=12, column=0, columnspan=3, sticky='w', padx=10)
         self.bar = ttk.Progressbar(frm, maximum=100)
-        self.bar.grid(row=12, column=0, columnspan=3, sticky='ew', padx=10, pady=4)
+        self.bar.grid(row=13, column=0, columnspan=3, sticky='ew', padx=10, pady=4)
 
         logf = ttk.Frame(frm)
-        logf.grid(row=13, column=0, columnspan=3, sticky='nsew', padx=10, pady=(4, 0))
-        frm.rowconfigure(13, weight=1)
+        logf.grid(row=14, column=0, columnspan=3, sticky='nsew', padx=10, pady=(4, 0))
+        frm.rowconfigure(14, weight=1)
         self.log = tk.Text(logf, height=10, wrap='word', state='disabled', font=('Consolas', 9) if os.name == 'nt' else None)
         sb = ttk.Scrollbar(logf, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
@@ -304,6 +307,9 @@ class App:
                '--layout', self.layout.get()]
         if not self.copy_game.get():
             cmd.append('--no-copy-game')
+        if not self.icon.get():
+            cmd.append('--no-icon')
+        self.icon_wanted = self.icon.get() and card != 'emu'
         self.busy = True
         self.go.configure(state='disabled', text='Working... (the first build takes a long time)')
         self.bar.configure(value=0)
@@ -341,9 +347,11 @@ class App:
         else:
             self.bar.configure(value=100)
             self.step.configure(text='Done')
+            icon = ('\n\n' + ss.ICON_STEPS.replace('\n', ' ') + ' Then XI on Anything starts from its own icon.'
+                    if getattr(self, 'icon_wanted', False) else '')
             messagebox.showinfo(TITLE, 'Done.\n\nOn the Switch: hold R while starting any game to open the homebrew menu '
-                                'with full memory, then pick XI on Anything.\n\nAfter a game update, open this again and '
-                                'click "Build and install": it does only what changed.')
+                                'with full memory, then pick XI on Anything.' + icon + '\n\nAfter a game update, open '
+                                'this again and click "Build and install": it does only what changed.')
 
 
 def main():

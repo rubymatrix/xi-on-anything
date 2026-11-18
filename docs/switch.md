@@ -209,8 +209,11 @@ thread line; the API time). What it showed, in the world (about 1,200 draws a fr
 - **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
   the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
   failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
-- A forwarder NSP (a HOME menu icon): tried 2026-11-16 (nx-hbloader set to our `.nro`, packed by
-  hacBrewPack) and dropped for now: it failed to start on the console.
+- A forwarder NSP (a HOME menu icon) built on the PC: tried 2026-11-16 (nx-hbloader set to our `.nro`,
+  packed by hacBrewPack with the emulator's keys) and dropped: it failed to start on the console (no error
+  code seen), and every player would need their own keys and tools. The setup now puts Sphaira on the card
+  instead, which makes the forwarder on the console with its own keys (the player guide's *Home screen
+  icon*); not yet confirmed on a console.
 - Addons (`addons_none.c`), HD rumble, sleep and resume (the
   connections end).
 

@@ -8,9 +8,8 @@ Developer notes are in [../switch.md](../switch.md).
 > [!IMPORTANT]
 > **Status**: experimental, playable on a console. The sign-in screen, the game in the world, battles
 > and menus run on a Switch (Atmosphère), drawn with Mesa's OpenGL, with sound (music not yet
-> confirmed). Not yet: the scene effects (Modern FX, water, sun shadows), addons, the forwarder, sleep
-> and resume, and a shader cache: each effect's shaders compile the first time it is seen, a short
-> hitch.
+> confirmed). Not yet: the scene effects (Modern FX, water, sun shadows), addons, sleep and resume,
+> and a shader cache: each effect's shaders compile the first time it is seen, a short hitch.
 
 ## What you need
 
@@ -57,7 +56,8 @@ when it finds it near the game folder (an Ashita boot config's `--server`, VanaC
 script's `--server`); for a CatsEyeXI server it adds `--cexi full` to `run.args` (its own items, gear, spells
 and abilities) unless `run.args` sets `--cexi` already. Then it does every step below in order: it checks the PC, identifies your game version, prepares its code,
 finds its frame delta sites if this repository doesn't have them yet, builds the `.nro`, and copies the
-`.nro`, the game and the settings to the card. Then [run it](#3-run).
+`.nro`, the game and the settings to the card, and Sphaira for a
+[home screen icon](#home-screen-icon). Then [run it](#3-run).
 
 The options answer the questions instead, for a script or a second run:
 
@@ -66,7 +66,8 @@ python tools/setup_switch.py --game "<your FINAL FANTASY XI folder>" --sd E:\ --
 ```
 
 `--layout xbox`, `--dats <folder>` and `--arg "<host options>"` are as in [step 2](#2-put-it-on-the-sd-card);
-`--check` checks the PC and stops; `--no-copy-game` leaves the game on the card as it is. The answers are
+`--check` checks the PC and stops; `--no-copy-game` leaves the game on the card as it is; `--no-icon` (or
+unticking **Home screen icon**) leaves Sphaira off the card. The answers are
 remembered (`build/switch/setup.json`), and what each step printed is in `build/switch/setup.log`.
 
 **Updating**: after a game update, or a pull of this repository, run it again. Each step skips what is
@@ -150,6 +151,22 @@ A line `FFXI_NAME=value` in `run.args` sets that environment variable instead of
   sends the new `.nro` over the network (press Y in the homebrew menu first, to receive it).
 
 The log is `sdmc:/switch/xi-on-anything/host64.log`; `python tools/build_switch.py logs --sd <card>` prints it.
+
+### Home screen icon
+
+A forwarder: an icon on the HOME menu that starts the `.nro` on the card with full memory, so you don't
+have to hold R over a game. It is an installed title, which only the console can install with its own
+keys, so it is made on the Switch, by [Sphaira](https://github.com/ITotalJustice/sphaira) (a homebrew
+menu). The setup puts Sphaira's latest release in `sdmc:/switch/sphaira/` unless the card has a Sphaira
+already; by hand, copy `switch/sphaira/sphaira.nro` from its release zip there. Then, on the Switch:
+
+1. Hold R while starting any game, and start **Sphaira** from the homebrew menu.
+2. Highlight **XI on Anything**, open its menu and pick **Install Forwarder**.
+3. Start XI on Anything from its new icon on the HOME menu.
+
+A forwarder is an unsigned title: the console starts it only with signature patches (sys-patch is the
+usual one), and the setup says when it finds none on the card. The icon starts whatever `.nro` is on the
+card, so updates need nothing more. Not yet confirmed on a console; holding R over a game works either way.
 
 ## Performance
 
