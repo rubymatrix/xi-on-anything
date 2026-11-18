@@ -177,7 +177,7 @@ def icon():
     return own if own.exists() else tc.LIBNX / 'default_icon.jpg'
 
 
-def link_nro(objs, name, libs, title=TITLE):
+def link_nro(objs, name, libs, title=TITLE, icon_file=None):
     """objs into build/switch/<name>.elf, then .nro with its NACP (title, author, version) and icon."""
     elf, nacp, nro = OUT / (name + '.elf'), OUT / (name + '.nacp'), OUT / (name + '.nro')
     rsp = OUT / (name + '.rsp')  # the object list in a response file: Windows' command line is short
@@ -188,7 +188,7 @@ def link_nro(objs, name, libs, title=TITLE):
         + ['-L' + str(tc.PORTLIBS / 'lib'), '-L' + str(tc.LIBNX / 'lib')] + libs + ['-o', elf]
     )
     run([tc.dkp_tool('nacptool'), '--create', title, AUTHOR, version(), nacp])
-    run([tc.dkp_tool('elf2nro'), elf, nro, '--nacp=' + str(nacp), '--icon=' + str(icon())])
+    run([tc.dkp_tool('elf2nro'), elf, nro, '--nacp=' + str(nacp), '--icon=' + str(icon_file or icon())])
     print('built', nro, f'({nro.stat().st_size / 1e6:.1f} MB)')
     return nro
 
@@ -213,7 +213,7 @@ def settings(_a):
     tc.require()
     OUT.mkdir(parents=True, exist_ok=True)
     objs = compile_many(['host/switch_settings.c'], 'settings')
-    return link_nro(objs, SETTINGS, ['-lnx', '-lm'], title=TITLE + ' Settings')
+    return link_nro(objs, SETTINGS, ['-lnx', '-lm'], title=TITLE + ' Settings', icon_file=ROOT / 'switch/icon_settings.jpg')
 
 
 def gfx_test(_a):
