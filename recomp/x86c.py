@@ -19,6 +19,8 @@ import re
 import capstone
 from capstone import x86_const as X
 
+import flags_across_calls
+
 R32 = ('eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi')
 R16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
 R8L = {'al': 'eax', 'cl': 'ecx', 'dl': 'edx', 'bl': 'ebx'}
@@ -247,9 +249,21 @@ class FunctionTranslator:
 
     def call(self, target, ret_addr):
         self.ctx.referenced.add(target)
-        # a call passes no flags either way (guest.h, REGS_STORE_CALL): only a tail jump (goto above) keeps them
+        # the arithmetic flags go in only to a function that reads them at entry, and come back only where the code
+        # after the call may read them (guest.h, REGS_STORE_CALL; recomp/flags_across_calls.py); returns store them
+        # all, a tail jump (goto above) too
+        store = 'REGS_STORE;' if target in self.flag_entry() else 'REGS_STORE_CALL;'
         return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
-                'REGS_STORE_CALL; %s%08x(g); REGS_LOAD_CALL;' % (self.ctx.prefix, target)]
+                '%s %s%08x(g); %s' % (store, self.ctx.prefix, target, self.load_after(ret_addr))]
+
+    def flag_entry(self):
+        if getattr(self.ctx, 'flag_entry', None) is None:
+            self.ctx.flag_entry = flags_across_calls.entry_readers(self.ctx)
+        return self.ctx.flag_entry
+
+    def load_after(self, ret_addr):
+        clean = flags_across_calls.scan(self.ctx, ret_addr) == flags_across_calls.CLEAN
+        return 'REGS_LOAD_CALL;' if clean else 'REGS_LOAD;'
 
     # ------------------------------------------------------------------ translation
 
@@ -519,11 +533,12 @@ class FunctionTranslator:
                 if tgt in self.ctx.entries:
                     return self.call(tgt, nxt), True
                 return ['RT_BADJUMP(%s);' % hexu(tgt)], False
-            return pro + ['{ uint32_t t = %s; esp -= 4; wr32(esp, %s + RD); REGS_STORE_CALL; rt_call_indirect(g, t); REGS_LOAD_CALL; }'
-                          % (self.rd(ins, t, 32), hexu(nxt))], True
+            # (the flags go in: some of the functions that read them at entry are called through pointers)
+            return pro + ['{ uint32_t t = %s; esp -= 4; wr32(esp, %s + RD); REGS_STORE; rt_call_indirect(g, t); %s }'
+                          % (self.rd(ins, t, 32), hexu(nxt), self.load_after(nxt))], True
         if mn == 'ret':
             n = ops[0].imm if ops else 0
-            return ['esp += %d; REGS_STORE_CALL; return;' % (4 + n)], False
+            return ['esp += %d; REGS_STORE; return;' % (4 + n)], False
 
         raise Unsupported(mn)
 
