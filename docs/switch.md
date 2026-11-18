@@ -198,6 +198,16 @@ thread line; the API time). What it showed, in the world (about 1,200 draws a fr
   case match is skipped on the Switch (FAT finds any case), CreateFileA stats only for the dispositions that
   report it, and read-only `.DAT`s are kept open once closed (k32_io.c, 32 at most): 2.5 ms an open.
 
+## Back to the sign-in screen
+
+When the game ends by itself (a lost connection, its logout), `switch_main.c` restarts the application
+(`appletRestartProgram`) if it is the forwarder (the running application's NACP name is the `.nro`'s):
+the forwarder's hbloader then loads the `.nro` at the sign-in screen again. Not by loading the `.nro` again
+in the same process (`envSetNextLoad`): the game's threads (plat_posix.c's pool, the render thread) outlive
+`GameStart` and only the process's end stops them. Not after a close from HOME (`nx_exit_requested`),
+nor when the sign-in screen is left without a game (`xi_host_game_started`, host64.c), nor over a game held
+with R (a restart there starts that game). `FFXI_SWITCH_RELOGIN=0` turns it off. Not yet tried on a console.
+
 ## Not yet
 
 - **Physical mode** has not run: Ryubing gives a bare `.nro` no system resource, and loads neither an

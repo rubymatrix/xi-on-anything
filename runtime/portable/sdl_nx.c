@@ -613,6 +613,9 @@ static int g_input_ready, g_layout_xbox;
 
 void nx_set_layout(int xbox) { g_layout_xbox = xbox; }
 
+static int closing; /* the system asked the game to close (appletMainLoop, below) */
+int nx_exit_requested(void) { return closing; }
+
 /* The game's confirm is SDL's south button (Xbox A, the bottom one). Nintendo's layout: A, the right
  * one, confirms and B cancels, as everywhere on the Switch. Xbox's: by position, B (bottom) confirms. */
 static uint32_t map_buttons(uint64_t b)
@@ -695,7 +698,6 @@ static void poll_input(void)
         g_input_ready = 1;
     }
     /* the system's messages: docked or not (switch_main.c's hook), focus, and the player closing the game */
-    static int closing;
     if (!appletMainLoop() && !closing)
     {
         closing = 1;

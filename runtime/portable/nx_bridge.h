@@ -8,3 +8,6 @@ void nx_set_view_size(int w, int h);
 
 /* The face buttons: 0 Nintendo's (A confirms, B cancels), 1 Xbox's by position (B, the bottom one, confirms). */
 void nx_set_layout(int xbox);
+
+/* Whether the system has asked the game to close (the player closed it from the HOME menu). */
+int nx_exit_requested(void);

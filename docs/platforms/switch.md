@@ -168,6 +168,11 @@ A forwarder is an unsigned title: the console starts it only with signature patc
 usual one), and the setup says when it finds none on the card. The icon starts whatever `.nro` is on the
 card, so updates need nothing more. Confirmed on a console (2026-11-18); holding R over a game works too.
 
+Started from the icon, the game goes back to the sign-in screen when it ends by itself (a lost
+connection, its own logout): the app restarts, and **Remember password** signs you in again. Started
+with R held over a game it closes instead, as a restart there would start that game. Close it from the
+HOME menu, or with B on the sign-in screen. `FFXI_SWITCH_RELOGIN=0` in `run.args` turns the restart off.
+
 ## Performance
 
 By default the game is drawn at the screen's size (1280x720 in the hand, 1920x1080 on a TV), the world too,

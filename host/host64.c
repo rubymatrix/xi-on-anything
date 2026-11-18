@@ -1254,6 +1254,10 @@ static void log_flusher(void* unused)
 }
 #endif
 
+/* 1 once the game has started (IFFXiEntry::GameStart): what ends after it is a game, not the sign-in
+ * screen (switch_main.c goes back to the sign-in screen then) */
+int xi_host_game_started;
+
 int main(int argc, char** argv)
 {
 #if defined(_WIN32) && !defined(_MSC_VER)
@@ -1981,6 +1985,7 @@ int main(int argc, char** argv)
             sampler_start(getenv("FFXI_SAMPLE")) ? "on" : "cannot write it");
 #endif
     uint32_t start[2] = { gamecore_object(), out };
+    xi_host_game_started = 1;
     hr = com_call(entry, 3, 2, start);
     const char* message = NULL;
     int32_t code = gamecore_exit_code(&message);

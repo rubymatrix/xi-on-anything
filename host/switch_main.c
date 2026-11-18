@@ -19,9 +19,62 @@
 #include "nx_bridge.h"
 
 int xi_host_main(int argc, char** argv);
+extern int xi_host_game_started; /* host64.c */
 
 #define APP_DIR "sdmc:/switch/xi-on-anything"
 #define MAX_ARGS 64
+
+/* --- back to the sign-in screen ------------------------------------------------------------------------
+ * The game ends by itself after a lost connection (and its own logout): on a PC the launcher is still
+ * there, here the app would close. Started from its HOME menu icon (a forwarder: an installed application
+ * whose hbloader loads this .nro), it restarts instead (appletRestartProgram): a new process, which the
+ * forwarder starts at the sign-in screen again (Remember password signs in again in a press). A new
+ * process, not this .nro loaded again by hbloader (envSetNextLoad): the game's threads (the thread pool,
+ * the render thread) outlive its end, and nothing stops them but the process's end. Started with R held
+ * over a game, a restart would start that game, so the app closes as before. Not when the player closed
+ * the app (HOME), nor when the sign-in screen was left without a game (B); FFXI_SWITCH_RELOGIN=0
+ * (run.args) turns it off. Run when main returns and when the game calls exit(). */
+#define TITLE "XI on Anything" /* the .nro's name (tools/build_switch.py), which a forwarder made of it has */
+
+/* whether this process is the forwarder: the running application's name is this .nro's */
+static int is_forwarder(void)
+{
+    u64 id = 0;
+    if (appletGetAppletType() != AppletType_Application
+        || R_FAILED(svcGetInfo(&id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0)) || R_FAILED(nsInitialize()))
+        return 0;
+    int yes = 0;
+    u64 size = 0;
+    NsApplicationControlData* d = (NsApplicationControlData*)malloc(sizeof *d);
+    if (d && R_SUCCEEDED(nsGetApplicationControlData(NsApplicationControlSource_Storage, id, d, sizeof *d, &size)))
+        for (int i = 0; i < 16 && !yes; ++i)
+            yes = !strcmp(d->nacp.lang[i].name, TITLE);
+    free(d);
+    nsExit();
+    return yes;
+}
+
+static void back_to_signin(void)
+{
+    static int done;
+    if (done)
+        return;
+    done = 1;
+    const char* off = getenv("FFXI_SWITCH_RELOGIN");
+    if (!xi_host_game_started || nx_exit_requested() || (off && !strcmp(off, "0")))
+        return;
+    if (!is_forwarder())
+    {
+        fprintf(stderr, "[switch] the game ended (started over a game, not from its HOME menu icon: it closes)\n");
+        return;
+    }
+    Result rc = appletRestartProgram(NULL, 0);
+    if (R_SUCCEEDED(rc))
+        fprintf(stderr, "[switch] the game ended: restarting, back to the sign-in screen\n");
+    else
+        fprintf(stderr, "[switch] the game ended; could not restart: 0x%x\n", rc);
+    fflush(stderr);
+}
 
 /* The sockets' buffers: the game keeps a few TCP connections (lobby, map, sign-in) and one UDP socket;
  * libnx's defaults are for a couple of small transfers. */
@@ -375,9 +428,11 @@ int main(int argc, char** argv)
     clock_start();
     boost_start();
     atexit(clock_end); /* the game may end with exit() too */
+    atexit(back_to_signin);
     int ret = xi_host_main(n, args);
     clock_end();
     fprintf(stderr, "[switch] host exit %d\n", ret);
+    back_to_signin();
     appletUnhook(&g_hook);
     socketExit();
     fflush(NULL);
