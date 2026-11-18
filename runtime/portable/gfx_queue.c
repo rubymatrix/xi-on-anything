@@ -245,11 +245,21 @@ static Batch* batch_get(void)
 static void batch_flush(void);
 static int g_batching; /* a batch's draw being recorded (batch_flush): not a reason to flush it */
 
+/* the targets last recorded (gfxq_set_targets), while only draws have been recorded after them */
+static struct
+{
+    GfxTex *color, *depth;
+    uint32_t face, level;
+} g_targets;
+static int g_targets_valid;
+
 /* room for a command with body bytes after the header; returns the body */
 static void* rec(uint32_t op, size_t body)
 {
     if (!g_batching)
         batch_flush();
+    if (op != OP_DRAW && op != OP_SET_TARGETS)
+        g_targets_valid = 0; /* (a present, copy, clear or call may have bound others in the back end) */
     if (!g_cur)
         g_cur = batch_get();
     size_t size = ALIGN16(sizeof(Cmd) + body);
@@ -838,7 +848,14 @@ void gfxq_copy(GfxTex* src, uint32_t sface, uint32_t slevel, uint32_t sx, uint32
 
 void gfxq_set_targets(GfxTex* color, uint32_t face, uint32_t level, GfxTex* depth)
 {
+    /* d3d8.c sets the targets before every draw: the same ones again, with only draws recorded since (draws don't
+     * change them), need no command - which would also end a batch (above) at every draw */
+    if (g_targets_valid && g_targets.color == color && g_targets.depth == depth && g_targets.face == face &&
+        g_targets.level == level)
+        return;
     uint8_t* p = (uint8_t*)rec(OP_SET_TARGETS, 2 * sizeof(void*) + 8);
+    g_targets.color = color, g_targets.depth = depth, g_targets.face = face, g_targets.level = level;
+    g_targets_valid = 1;
     ((GfxTex**)p)[0] = color, ((GfxTex**)p)[1] = depth;
     uint32_t* fl = (uint32_t*)(p + 2 * sizeof(void*));
     fl[0] = face, fl[1] = level;
