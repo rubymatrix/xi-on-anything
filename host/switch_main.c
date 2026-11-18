@@ -417,6 +417,11 @@ int main(int argc, char** argv)
     }
     /* no Discord to talk to; the scene effects and the frame-rate gauge off by default, as on iOS
      * (Config > Modern still turns them on) */
+    /* Mesa's disk shader cache (a Mesa with one: XI_SWITCH_MESA's, docs/switch.md), the game's own folder
+     * rather than sdmc:/.mesa, the other homebrew's; a program compiled once is read back at the next start */
+    static char cache[] = APP_DIR "/shader-cache";
+    mkdir(cache, 0777);
+    setenv("MESA_SHADER_CACHE_DIR", cache, 0);
     setenv("FFXI_DISCORD", "0", 0);
     setenv("FFXI_FX", "0", 0);
     setenv("FFXI_FPS", "0", 0);

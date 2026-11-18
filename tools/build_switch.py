@@ -111,6 +111,8 @@ def compile_one(job):
     compiler = tc.tool('g++' if cxx else 'gcc')
     f = flags() + ([] if src.startswith('generated/') else OWN) + list(extra) + (
         ['-std=gnu++17', '-fno-rtti'] if cxx else ['-std=gnu11'])
+    if MESA and src in MESA_INCLUDERS:  # its EGL and GL headers ahead of switch-mesa's in portlibs
+        f = ['-I' + str(MESA / 'include')] + f
     key = hashlib.sha256(s.read_bytes() + json.dumps([compiler, f]).encode()).hexdigest()
     stamp, deps = obj.with_suffix('.stamp'), obj.with_suffix('.d')
     stale = not obj.exists() or not stamp.exists() or not deps.exists() or stamp.read_text() != key
@@ -185,7 +187,8 @@ def link_nro(objs, name, libs, title=TITLE, icon_file=None):
     run(
         [tc.tool('g++'), '-specs=' + str(tc.LIBNX / 'switch.specs'), '-g'] + ARCH
         + ['-Wl,-Map,' + str(OUT / (name + '.map')), '@' + str(rsp)]
-        + ['-L' + str(tc.PORTLIBS / 'lib'), '-L' + str(tc.LIBNX / 'lib')] + libs + ['-o', elf]
+        + (['-L' + str(MESA / 'lib')] if MESA else []) + ['-L' + str(tc.PORTLIBS / 'lib'), '-L' + str(tc.LIBNX / 'lib')] + libs
+        + ['-o', elf]
     )
     run([tc.dkp_tool('nacptool'), '--create', title, AUTHOR, version(), nacp])
     run([tc.dkp_tool('elf2nro'), elf, nro, '--nacp=' + str(nacp), '--icon=' + str(icon_file or icon())])
@@ -253,6 +256,16 @@ def desktop_tools():
 GFX = ['runtime/portable/gfx_gl.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
        'runtime/portable/gfx_fx.c']
 GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
+# XI_SWITCH_MESA=<prefix>: a newer Mesa instead, mesa-switch's (github.com/danfromtico/mesa-switch, Mesa 26 with
+# a Horizon backend over libnx and the disk shader cache; docs/switch.md, Mesa 26): its build-opengl.sh's
+# staged portlibs folder, <DESTDIR>/opt/devkitpro/portlibs/switch. Only gfx_gl.c includes EGL and GL, so only it
+# is compiled again; the link takes its libraries (egl.pc's, with no libdrm_nouveau).
+MESA = Path(os.environ['XI_SWITCH_MESA']) if os.environ.get('XI_SWITCH_MESA') else None
+MESA_INCLUDERS = {'runtime/portable/gfx_gl.c'}
+if MESA:
+    if not (MESA / 'lib/libEGL.a').exists():
+        raise SystemExit(f'XI_SWITCH_MESA={MESA}: no lib/libEGL.a there (the staged portlibs/switch folder)')
+    GFX_LIBS = ['-lEGL', '-lglapi', '-lz', '-lexpat', '-lstdc++']  # (link_nro: its lib folder first)
 
 
 def host(a):
