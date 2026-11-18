@@ -223,6 +223,7 @@ static uint32_t g_presents_sent;
 
 /* profile (FFXI_PROFILE): the game thread's waits on the render thread, the render thread's work */
 static uint64_t g_wait_pace_ns, g_wait_sync_ns, g_bytes, g_since_ns;
+static uint64_t g_batched_in, g_batched_out; /* FFXI_PROFILE: draws that went into batches of two or more, and those batches */
 static uint32_t g_syncs, g_frames;
 static volatile uint64_t g_render_busy_ns;
 
@@ -241,9 +242,14 @@ static Batch* batch_get(void)
     return b;
 }
 
+static void batch_flush(void);
+static int g_batching; /* a batch's draw being recorded (batch_flush): not a reason to flush it */
+
 /* room for a command with body bytes after the header; returns the body */
 static void* rec(uint32_t op, size_t body)
 {
+    if (!g_batching)
+        batch_flush();
     if (!g_cur)
         g_cur = batch_get();
     size_t size = ALIGN16(sizeof(Cmd) + body);
@@ -852,10 +858,160 @@ void gfxq_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t 
     done();
 }
 
+static void record_draw(const GfxDraw* d);
+
+/* --- batching: consecutive draws from the game's own memory (DrawPrimitiveUP) with the same state -------------
+ * FFXI draws its interface and text as hundreds of small quads a frame (600 DrawPrimitiveUP calls at 22,000 a
+ * second, 82% of them with the same state as the one before: docs/switch.md). Such a draw is held here instead
+ * of recorded: the next one with the same state - all but its vertices and primitive count - adds its vertices
+ * to it, strips and fans made a triangle list with 16-bit indices, and the batch is recorded as one draw when
+ * anything else is (rec), so nothing is reordered. Only stream 0 in memory, no indices, from vertex 0, a
+ * triangle primitive. FFXI_BATCH=0 records every draw as it comes (the default off except on the Switch). */
+#define BATCH_VERTS 65535u
+static struct
+{
+    int on;               /* -1 not read yet */
+    int active;
+    GfxDraw d;            /* the first draw's state */
+    size_t need;          /* its uniforms' bytes (u_need) */
+    uint8_t* v;           /* the vertices so far */
+    size_t v_cap, v_n;    /* bytes */
+    uint16_t* idx;
+    size_t i_cap, i_n;    /* indices */
+    uint32_t verts, stride, draws;
+} g_batch = { -1 };
+
+static int batch_on(void)
+{
+    if (g_batch.on < 0)
+    {
+        const char* e = getenv("FFXI_BATCH");
+#if defined(__SWITCH__)
+        g_batch.on = !(e && *e == '0');
+#else
+        g_batch.on = e && *e == '1';
+#endif
+    }
+    return g_batch.on;
+}
+
+/* a draw a batch can take: its vertices in memory in stream 0 alone, no indices, a triangle primitive */
+static int batchable(const GfxDraw* d)
+{
+    if (!d->data[0] || d->buf[0] || d->indices || d->ibuf || d->vertex_start || d->u.stride[0] <= 0)
+        return 0;
+    if (d->prim != GFX_TRIANGLELIST && d->prim != GFX_TRIANGLESTRIP && d->prim != GFX_TRIANGLEFAN)
+        return 0;
+    for (int s = 1; s < GFX_NSTREAMS; ++s)
+        if (d->data[s] || d->buf[s])
+            return 0;
+    uint32_t n = vertex_count(d->prim, d->count);
+    return n && n <= BATCH_VERTS && (size_t)n * (uint32_t)d->u.stride[0] <= d->size[0];
+}
+
+/* the same state as the batch's: keys, the uniforms the back ends read, textures, samplers, viewport, scissor */
+static int same_state(const GfxDraw* a, const GfxDraw* b, size_t need)
+{
+    return !memcmp(a, b, offsetof(GfxDraw, u)) && !memcmp(&a->u, &b->u, need) &&
+           !memcmp(&a->tex, &b->tex, offsetof(GfxDraw, data) - offsetof(GfxDraw, tex));
+}
+
+static void* grow(void* p, size_t* cap, size_t want)
+{
+    if (want <= *cap)
+        return p;
+    size_t c = *cap ? *cap : 4096;
+    while (c < want)
+        c *= 2;
+    void* q = realloc(p, c);
+    if (!q)
+    {
+        fprintf(stderr, "gfx queue: out of memory for a %zu-byte batch\n", c);
+        abort();
+    }
+    *cap = c;
+    return q;
+}
+
+/* d's vertices and its triangles' indices onto the batch */
+static void batch_add(const GfxDraw* d)
+{
+    uint32_t n = vertex_count(d->prim, d->count), stride = (uint32_t)d->u.stride[0], b = g_batch.verts;
+    g_batch.v = (uint8_t*)grow(g_batch.v, &g_batch.v_cap, g_batch.v_n + (size_t)n * stride);
+    memcpy(g_batch.v + g_batch.v_n, d->data[0], (size_t)n * stride);
+    g_batch.v_n += (size_t)n * stride;
+    g_batch.idx = (uint16_t*)grow(g_batch.idx, &g_batch.i_cap, (g_batch.i_n + (size_t)d->count * 3) * 2) ;
+    uint16_t* o = g_batch.idx + g_batch.i_n;
+    for (uint32_t t = 0; t < d->count; ++t, o += 3)
+    {
+        if (d->prim == GFX_TRIANGLELIST)
+            o[0] = (uint16_t)(b + 3 * t), o[1] = (uint16_t)(b + 3 * t + 1), o[2] = (uint16_t)(b + 3 * t + 2);
+        else if (d->prim == GFX_TRIANGLEFAN)
+            o[0] = (uint16_t)b, o[1] = (uint16_t)(b + t + 1), o[2] = (uint16_t)(b + t + 2);
+        else if (t & 1) /* a strip's odd triangle: its first two swapped, so every one keeps the strip's winding */
+            o[0] = (uint16_t)(b + t + 1), o[1] = (uint16_t)(b + t), o[2] = (uint16_t)(b + t + 2);
+        else
+            o[0] = (uint16_t)(b + t), o[1] = (uint16_t)(b + t + 1), o[2] = (uint16_t)(b + t + 2);
+    }
+    g_batch.i_n += (size_t)d->count * 3;
+    g_batch.verts += n;
+    g_batch.draws++;
+}
+
+/* the batch as one draw: a single draw as it came, more as a triangle list over the vertices gathered */
+static void batch_flush(void)
+{
+    if (!g_batch.active)
+        return;
+    g_batch.active = 0;
+    GfxDraw d = g_batch.d;
+    d.data[0] = g_batch.v; /* the copy, the game's own may have changed */
+    d.size[0] = (uint32_t)g_batch.v_n;
+    if (g_batch.draws > 1)
+    {
+        g_batched_in += g_batch.draws, g_batched_out++;
+        d.prim = GFX_TRIANGLELIST;
+        d.count = (uint32_t)(g_batch.i_n / 3);
+        d.data[0] = g_batch.v;
+        d.size[0] = (uint32_t)g_batch.v_n;
+        d.indices = g_batch.idx;
+        d.index_size = 2;
+    }
+    g_batching = 1;
+    record_draw(&d);
+    g_batching = 0;
+}
+
 void gfxq_draw(const GfxDraw* d)
 {
     if (!d->count)
         return;
+    if (!batch_on() || !batchable(d))
+    {
+        batch_flush();
+        record_draw(d);
+        return;
+    }
+    uint32_t n = vertex_count(d->prim, d->count);
+    if (g_batch.active && (uint32_t)d->u.stride[0] == g_batch.stride && g_batch.verts + n <= BATCH_VERTS &&
+        same_state(d, &g_batch.d, g_batch.need))
+    {
+        batch_add(d);
+        return;
+    }
+    batch_flush();
+    /* a new batch, its vertices copied now: they are the game's memory, which it may write again as soon as the
+     * call returns (DrawPrimitiveUP's) */
+    g_batch.d = *d;
+    g_batch.need = u_need(d);
+    g_batch.stride = (uint32_t)d->u.stride[0];
+    g_batch.v_n = g_batch.i_n = 0, g_batch.verts = 0, g_batch.draws = 0;
+    batch_add(d);
+    g_batch.active = 1;
+}
+
+static void record_draw(const GfxDraw* d)
+{
     size_t need = u_need(d), tail = sizeof(GfxDraw) - offsetof(GfxDraw, tex);
     size_t data_bytes[GFX_NSTREAMS] = { 0 }, idx_bytes = 0;
     size_t off = ALIGN16(sizeof(DrawRec) + need);
@@ -927,9 +1083,11 @@ static void profile_line(void)
     double ms = 1e-6 / g_frames;
     fprintf(stderr,
         "[gfx]   render thread: busy %.2f ms/frame; the game waited %.2f ms/frame for it (%.2f pacing, %.2f in %u syncs), "
-        "%.0f KB recorded/frame\n",
+        "%.0f KB recorded/frame; %.0f draws/frame batched into %.0f\n",
         (double)g_render_busy_ns * ms, (double)(g_wait_pace_ns + g_wait_sync_ns) * ms, (double)g_wait_pace_ns * ms,
-        (double)g_wait_sync_ns * ms, g_syncs, (double)g_bytes / g_frames / 1024.0);
+        (double)g_wait_sync_ns * ms, g_syncs, (double)g_bytes / g_frames / 1024.0, (double)g_batched_in / g_frames,
+        (double)g_batched_out / g_frames);
+    g_batched_in = g_batched_out = 0;
     g_render_busy_ns = g_wait_pace_ns = g_wait_sync_ns = g_bytes = 0;
     g_syncs = g_frames = 0;
     g_since_ns = now;
