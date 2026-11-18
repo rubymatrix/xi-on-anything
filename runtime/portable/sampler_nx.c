@@ -4,7 +4,7 @@
  * Every millisecond a thread of its own pauses the game thread (svcSetThreadActivity), reads its registers
  * (svcGetThreadContext3) and lets it run again. A sample is its pc, its lr (the caller, for a function that
  * hasn't saved it yet) and the return addresses of the frame records x29 chains through the stack (as far as
- * functions keep frame pointers), relative to the .nro's base (__start__); one outside the image (libnx's
+ * functions keep frame pointers), relative to the .nro's base (_start, at its offset 0; __start__ is an absolute 0, not moved with the image); one outside the image (libnx's
  * syscalls, the kernel) is 0xFFFFFFFF. tools/sample_report.py resolves them against `aarch64-none-elf-nm` of the
  * .elf (--base 0).
  *
@@ -26,7 +26,7 @@
 #define OUTSIDE 0xFFFFFFFFu
 #define BUF_WORDS (256 * 1024) /* 1 MB: a second of samples is ~100 KB */
 
-extern char __start__[]; /* the .nro's first byte (libnx's link script) */
+extern void _start(void); /* libnx's entry, the .nro's first byte: its runtime address is the image's base */
 extern char __end__[];
 
 static Handle g_game;
@@ -39,7 +39,7 @@ static uint64_t g_stack_lo, g_stack_hi; /* the game thread's stack: where frame 
 
 static uint32_t rva(uint64_t a)
 {
-    uint64_t base = (uint64_t)(uintptr_t)__start__, end = (uint64_t)(uintptr_t)__end__;
+    uint64_t base = (uint64_t)(uintptr_t)&_start, end = (uint64_t)(uintptr_t)__end__;
     return a >= base && a < end ? (uint32_t)(a - base) : OUTSIDE;
 }
 
