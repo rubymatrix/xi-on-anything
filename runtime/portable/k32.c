@@ -639,11 +639,29 @@ static void sh_GetSystemTimeAsFileTime(Guest* g)
     RET(0, 1);
 }
 
+/* FFXI_SLEEP1_US: Sleep(1) as that many microseconds instead (an experiment). The game thread waits for its worker
+ * threads by polling each and sleeping 1 ms between polls (0x100394b0), so a worker done sooner still costs the
+ * whole millisecond or more. */
+static uint32_t sleep1_us(void)
+{
+    static int32_t us = -1;
+    if (us < 0)
+    {
+        const char* e = getenv("FFXI_SLEEP1_US");
+        us = e ? atoi(e) : 0;
+        if (us < 0)
+            us = 0;
+    }
+    return (uint32_t)us;
+}
+
 static void sh_Sleep(Guest* g)
 {
     uint32_t ms = ARG(0);
     gt_unlock();
-    if (ms)
+    if (ms == 1 && sleep1_us())
+        plat_sleep_us(sleep1_us());
+    else if (ms)
         plat_sleep_ms(ms);
     else
         plat_yield();

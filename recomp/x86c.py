@@ -14,6 +14,7 @@ Model (see runtime/guest.h):
 Anything not handled becomes RT_UNIMPL(addr, "text"), which traps at run time; the recompiler
 counts them so coverage can be measured over the whole binary.
 """
+import os
 import re
 
 import capstone
@@ -66,6 +67,22 @@ def x87_locals(lines):
         s = s.replace('fstsw(g)', 'fstsw_top(g, x87_top)').replace('g->fcw', 'x87_cw')
         out.append(s)
     return out
+
+
+# MSVC's _ftol (ST0 to the int64 in edx:eax, truncated), recognized by its bytes: push ebp; mov ebp, esp;
+# add esp, -0xc; wait; fnstcw [ebp-2]; wait; mov ax, [ebp-2]; or ah, 0xc; mov [ebp-4], ax; fldcw [ebp-4];
+# fistp qword [ebp-0xc]; fldcw [ebp-2]; mov eax, [ebp-0xc]; mov edx, [ebp-8]; leave; ret. FFXiMain calls it at
+# 961 places, and as a translated function each call stored and reloaded every register and the x87 stack
+# around a dozen instructions (1.5% of the game thread on the Switch). A call to it is translated inline: the
+# same result and flags (those of its `or ah, 0xc`), the control word unchanged; what it leaves below esp (its
+# frame and the return address) is not written.
+FTOL_BYTES = bytes.fromhex('558bec83c4f49bd97dfe9b668b45fe80cc0c668945fcd96dfcdf7df4d96dfe8b45f48b55f8c9c3')
+FTOL_INLINE = os.environ.get('XI_FTOL_INLINE', '1') != '0'
+
+
+def ftol_inline():
+    return ['{ int64_t v = fist64_cw(g->fcw | 0xC00u, fpop(g)); eax = (uint32_t)v; edx = (uint32_t)((uint64_t)v >> 32); }',
+            '{ uint8_t r = (uint8_t)((g->fcw >> 8) | 0xCu); cf = 0; of = 0; af = 0; zf = 0; sf = r >> 7; pf = PARITY(r); }']
 
 
 def mask(bits):
@@ -259,6 +276,12 @@ class FunctionTranslator:
         store = 'REGS_STORE;' if target in self.flag_entry() else 'REGS_STORE_CALL;'
         return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
                 '%s %s%08x(g); %s' % (store, self.ctx.prefix, target, self.load_after(ret_addr))]
+
+    def is_ftol(self, target):
+        cache = self.ctx.__dict__.setdefault('ftol_at', {})
+        if target not in cache:
+            cache[target] = bytes(self.ctx.read(target, len(FTOL_BYTES))) == FTOL_BYTES
+        return cache[target]
 
     def flag_entry(self):
         if getattr(self.ctx, 'flag_entry', None) is None:
@@ -577,6 +600,9 @@ class FunctionTranslator:
                 if tgt == nxt:  # call $+5 ; pop r  (get EIP)
                     return ['esp -= 4; wr32(esp, %s + RD);' % hexu(nxt)], True
                 if tgt in self.ctx.entries:
+                    if FTOL_INLINE and self.is_ftol(tgt):
+                        self.uses_x87 = True
+                        return ftol_inline(), True
                     return self.call(tgt, nxt), True
                 return ['RT_BADJUMP(%s);' % hexu(tgt)], False
             # (the flags go in: some of the functions that read them at entry are called through pointers)

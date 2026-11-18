@@ -91,6 +91,7 @@ class Plan:
             if any(w in t for w in WHOLE):
                 raise NoPlan('whole-state x87 at %08x' % a)
         self.calls = {}  # a call's address: (the depth before it, after it)
+        self.loose = set()  # calls the function leaves right after, whatever they did to the stack (call_depths)
         self.depth = {}
         self._infer = {}
         self.analyze(fn)
@@ -112,11 +113,21 @@ class Plan:
             return d, after  # (exact: the code after may push before it uses a float the call returned)
         if d != 0:
             raise NoPlan('a call at %08x with %d on the x87 stack' % (a, d))
-        return 0, self.infer(nxt) or 0
+        found = self.infer(nxt)
+        if found == {'out'}:
+            # every path from it leaves the function before touching the stack (`call [vtable+n]; ret`): a float the
+            # callee returned would be this function's, and whether it did isn't known. Loose: the top comes back from
+            # g as the callee left it, unchecked, so a return passes it on (no x87 code runs after it here)
+            self.loose.add(a)
+            return 0, 0
+        found.discard('out')  # (paths that use the stack say; a float the call returned then leaves at depth 1)
+        if len(found) > 1:
+            raise NoPlan('a call before %08x returns a float on one path, not on another' % nxt)
+        return 0, found.pop() if found else 0
 
     def infer(self, start, _unused=None):
-        """1 if every path from start reads ST0 before pushing, 0 if none does (they push first, leave the function, make a
-        call, or never touch the stack), None if no path says; NoPlan if they disagree"""
+        """what the paths from start do first: 1 reads ST0 (a float came back), 0 pushes or makes a call, 'out' leaves the
+        function; the set of them (empty when no path touches the stack or leaves)"""
         found = set()
         seen = set()
         work = [start]
@@ -126,21 +137,21 @@ class Plan:
                 continue
             seen.add(a)
             if a not in self.by:
-                found.add(0)  # into another function: it starts with an empty stack
+                found.add('out')  # into another function: it may take the float on
                 continue
             t = self.text[a]
             use = first_use(t)
             if use == 'read':
                 found.add(1)
-            elif use == 'push' or self.exit.search(t) or self.is_call(a):
+            elif use == 'push' or self.is_call(a):
                 found.add(0)
+            elif self.exit.search(t):
+                found.add('out')  # a return or tail jump: a float the call returned would be this function's
             else:
                 if self.falls[a]:
                     work.append(a + self.by[a].size)
                 work.extend(self.succ_of(self.by[a]))
-        if len(found) > 1:
-            raise NoPlan('a call before %08x returns a float on one path, not on another' % start)
-        return found.pop() if found else None
+        return found
 
     def analyze(self, fn):
         if fn not in self.by:
@@ -203,7 +214,10 @@ class Plan:
                 give += ' g->top = (x87_t0 - %du) & 7u; g->fcw = (uint16_t)x87_cw;' % before
                 back = 'x87_cw = g->fcw;'
                 back += ''.join(' x87_r%d = g->st[(x87_t0 - %du) & 7u];' % (k, k + 1) for k in range(after))
-                back += ' RT_X87_CHECK(g->top == ((x87_t0 - %du) & 7u), 0x%08Xu);' % (after, a)
+                if a in self.loose:
+                    back += ' x87_t0 = g->top & 7u;'
+                else:
+                    back += ' RT_X87_CHECK(g->top == ((x87_t0 - %du) & 7u), 0x%08Xu);' % (after, a)
                 return '%s%s %s %s %s' % (m.group('cs'), give, m.group('cf'), m.group('cl'), back)
             if m.group('es'):
                 return '%s %s%s' % (m.group('es'), self.out(d[0]), m.group('er'))
@@ -249,7 +263,7 @@ last_reason = None  # why the last plan() returned None (for recomp.py's --stats
 
 def net_effect(fn, insns, stmts, falls, succ_of, prefix):
     """What the function does to the stack's depth from entry to return (-1 for one that pops its argument, +1 for a
-    float return, 0), or None: it makes calls, uses the whole state, or returns at different depths"""
+    float return, 0), or None: it makes calls or tail jumps, uses the whole state, or returns at different depths"""
     by = {i.address: i for i in insns}
     text = {a: ' '.join(s) for a, s in stmts.items()}
     call, exit_ = calls_re(prefix), exits_re(prefix)
@@ -264,7 +278,9 @@ def net_effect(fn, insns, stmts, falls, succ_of, prefix):
         for m in TOKEN.finditer(text[a]):
             tok = m.group(0)
             d += 1 if tok.startswith('fpush') else -1 if tok.startswith('fpop') else 0
-        if exit_.search(text[a]):
+        for m in exit_.finditer(text[a]):
+            if m.group(2) != ' return;':
+                return None  # a tail jump: the other function's effect counts too
             ends.add(d)
         nxt = ([a + by[a].size] if falls[a] else []) + succ_of(by[a])
         for n in nxt:

@@ -34,6 +34,7 @@ int plat_thread_start(void (*fn)(void*), void* arg);
 void plat_thread_counts(uint32_t* made, uint32_t* idle); /* the thread pool: threads made, those waiting for a job */
 #endif
 void plat_sleep_ms(uint32_t ms);
+void plat_sleep_us(uint32_t us); /* at least us microseconds, where the system allows less than a millisecond */
 void plat_yield(void);
 
 /* Futex-style waiting: plat_wait32 returns once *addr != expected (or spuriously);

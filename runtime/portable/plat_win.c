@@ -64,6 +64,9 @@ int plat_thread_start(void (*fn)(void*), void* arg)
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
+void plat_sleep_ms(uint32_t ms);
+void plat_sleep_us(uint32_t us) { plat_sleep_ms((us + 999u) / 1000u); }
+
 /* Sleep rounds up to the system timer's tick: 15.6 ms unless something raised the resolution (SDL
  * does, on the desktop; the UWP build has no SDL). The game's frame limiter sleeps in short steps, so
  * at 15.6 ms a 33 ms frame became 47 (21 fps). A high-resolution waitable timer (Windows 10 1803+,
