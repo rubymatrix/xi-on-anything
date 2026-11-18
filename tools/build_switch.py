@@ -349,7 +349,7 @@ def host(a):
     # ours first: its errors show in seconds, the translation's compile takes a while
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
     hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + GFX + [
-        'runtime/portable/sdl_nx.c', 'runtime/portable/tls_nx.c', 'host/addons_none.c']
+        'runtime/portable/sdl_nx.c', 'runtime/portable/tls_nx.c', 'runtime/portable/sampler_nx.c', 'host/addons_none.c']
     # the render queue: GL's context is its render thread's, and the game calls from several threads
     queue = ['-DGFX_GL', '-DGFX_QUEUE']
     ours = bp.PORTABLE + hosts + ['runtime/portable/gfx_queue.c']

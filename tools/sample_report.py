@@ -1,5 +1,6 @@
 """Where the game thread's time goes: FFXI_SAMPLE's samples (runtime/portable/sampler_win.c) against
-the host executable's linker map (/MAP), or for a mingw build its llvm-nm listing.
+the host executable's linker map (/MAP), or for a mingw build its llvm-nm listing; on the Switch
+(runtime/portable/sampler_nx.c) `aarch64-none-elf-nm xi-on-anything.elf` with --base 0.
 
   python tools/sample_report.py <samples.bin> <exe.map | exe.nm> [--top 40] [--skip-seconds 0]
 
@@ -39,10 +40,13 @@ def load_map(path):
     return [s[0] for s in syms], [s[1] for s in syms]
 
 
+NM_BASE = 0x140000000  # lld's image base; --base 0 for the Switch's .elf (offsets from __start__)
+
+
 def load_nm(path):
     """llvm-nm's listing of a mingw build (tools/build_mingw.py): `llvm-nm host64.exe > host64.nm`.
     lld places the image at 0x140000000, as link does."""
-    base = 0x140000000
+    base = NM_BASE
     syms = []
     sym = re.compile(r'^([0-9a-fA-F]{8,16}) [tT] (\S+)$')
     with open(path, errors='replace') as f:
@@ -69,8 +73,13 @@ def main():
     ap.add_argument('samples')
     ap.add_argument('map')
     ap.add_argument('--top', type=int, default=40)
+    ap.add_argument('--base', type=lambda v: int(v, 0), help="an nm listing's image base (0 for the Switch: "
+                    "`aarch64-none-elf-nm xi-on-anything.elf`, runtime/portable/sampler_nx.c)")
     args = ap.parse_args()
 
+    global NM_BASE
+    if args.base is not None:
+        NM_BASE = args.base
     addrs, names = load_map(args.map)
     cache = {}
 

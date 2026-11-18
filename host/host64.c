@@ -100,7 +100,7 @@
 #include "addons/addons.h"
 #include "addons/game.h"
 #include "addons/host.h"
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__SWITCH__)
 #include "sampler.h"
 #endif
 #include "thunk.h"
@@ -1978,7 +1978,7 @@ int main(int argc, char** argv)
 
     /* IFFXiEntry::GameStart(pCore, &pFFXiMessage): the game runs inside this call */
     rt_log("[recomp] GameStart\n");
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__SWITCH__)
     /* FFXI_SAMPLE=<file>: where this thread's time goes, sampled (tools/sample_report.py) */
     if (getenv("FFXI_SAMPLE") && getenv("FFXI_SAMPLE")[0])
         rt_log("[recomp] sampling the game thread to %s: %s\n", getenv("FFXI_SAMPLE"),
