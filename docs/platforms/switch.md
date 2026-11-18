@@ -166,7 +166,7 @@ already; by hand, copy `switch/sphaira/sphaira.nro` from its release zip there. 
 
 A forwarder is an unsigned title: the console starts it only with signature patches (sys-patch is the
 usual one), and the setup says when it finds none on the card. The icon starts whatever `.nro` is on the
-card, so updates need nothing more. Not yet confirmed on a console; holding R over a game works either way.
+card, so updates need nothing more. Confirmed on a console (2026-11-18); holding R over a game works too.
 
 ## Performance
 
