@@ -8,8 +8,9 @@ Developer notes are in [../switch.md](../switch.md).
 > [!IMPORTANT]
 > **Status**: experimental, playable on a console. The sign-in screen, the game in the world, battles
 > and menus run on a Switch (Atmosphère), drawn with Mesa's OpenGL, with sound (music not yet
-> confirmed). Not yet: the scene effects (Modern FX, water, sun shadows), addons, sleep and resume,
-> and a shader cache: each effect's shaders compile the first time it is seen, a short hitch.
+> confirmed). Shaders are kept on the card (Mesa 26, which the setup downloads), so each compiles once:
+> a short hitch the first time an effect is ever seen, not every session. Not yet: the scene effects
+> (Modern FX, water, sun shadows), addons, sleep and resume.
 
 ## What you need
 
