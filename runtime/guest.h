@@ -43,18 +43,52 @@ extern RT_HOT_GLOBAL unsigned char* rt_guest_base;
 #define RT_INLINE static inline
 #endif
 
-RT_INLINE uint8_t rd8(uint32_t a) { return *GUEST_PTR(a); }
-RT_INLINE uint16_t rd16(uint32_t a) { uint16_t v; memcpy(&v, GUEST_PTR(a), 2); return v; }
-RT_INLINE uint32_t rd32(uint32_t a) { uint32_t v; memcpy(&v, GUEST_PTR(a), 4); return v; }
-RT_INLINE uint64_t rd64(uint32_t a) { uint64_t v; memcpy(&v, GUEST_PTR(a), 8); return v; }
-RT_INLINE void wr8(uint32_t a, uint8_t v) { *GUEST_PTR(a) = v; }
-RT_INLINE void wr16(uint32_t a, uint16_t v) { memcpy(GUEST_PTR(a), &v, 2); }
-RT_INLINE void wr32(uint32_t a, uint32_t v) { memcpy(GUEST_PTR(a), &v, 4); }
-RT_INLINE void wr64(uint32_t a, uint64_t v) { memcpy(GUEST_PTR(a), &v, 8); }
-RT_INLINE float rdf32(uint32_t a) { float v; memcpy(&v, GUEST_PTR(a), 4); return v; }
-RT_INLINE double rdf64(uint32_t a) { double v; memcpy(&v, GUEST_PTR(a), 8); return v; }
-RT_INLINE void wrf32(uint32_t a, float v) { memcpy(GUEST_PTR(a), &v, 4); }
-RT_INLINE void wrf64(uint32_t a, double v) { memcpy(GUEST_PTR(a), &v, 8); }
+/* The accessors take the window's base as an argument, RT_GB: the global, except in translated code built with
+ * RT_LOCAL_BASE (the end of this file), where it is a copy each function makes on entry (REGS_DECL). The base
+ * never changes once the window is reserved, and a store into guest memory (a char store, which may alias
+ * anything) made the compiler load the global again before the next access: on the Switch, 352,000 such
+ * reloads in the translated code, two accesses in three a dependent load longer (docs/switch.md). */
+#if defined(RT_GUEST_WINDOW) && defined(RT_LOCAL_BASE)
+/* Translated code built with RT_LOCAL_BASE (build_switch.py's generated files): RT_GB is rt_gb, at file scope the
+ * global itself under a second name (an asm label), which is what the inline helpers here and in runtime.h use, and
+ * in a translated function the copy REGS_DECL makes, which shadows it */
+extern RT_HOT_GLOBAL unsigned char* rt_gb __asm__("rt_guest_base");
+#define RT_GB rt_gb
+#define RT_GB_DECL unsigned char* const rt_gb = rt_guest_base; (void)rt_gb;
+#define GUEST_PTR_B(b, a) ((b) + (uint32_t)(a))
+#elif defined(RT_GUEST_WINDOW)
+#define RT_GB rt_guest_base
+#define RT_GB_DECL
+#define GUEST_PTR_B(b, a) ((b) + (uint32_t)(a))
+#else
+#define RT_GB_DECL
+#define RT_GB ((unsigned char*)0)
+#define GUEST_PTR_B(b, a) ((void)(b), GUEST_PTR(a))
+#endif
+RT_INLINE uint8_t rd8_b(unsigned char* b, uint32_t a) { return *GUEST_PTR_B(b, a); }
+RT_INLINE uint16_t rd16_b(unsigned char* b, uint32_t a) { uint16_t v; memcpy(&v, GUEST_PTR_B(b, a), 2); return v; }
+RT_INLINE uint32_t rd32_b(unsigned char* b, uint32_t a) { uint32_t v; memcpy(&v, GUEST_PTR_B(b, a), 4); return v; }
+RT_INLINE uint64_t rd64_b(unsigned char* b, uint32_t a) { uint64_t v; memcpy(&v, GUEST_PTR_B(b, a), 8); return v; }
+RT_INLINE void wr8_b(unsigned char* b, uint32_t a, uint8_t v) { *GUEST_PTR_B(b, a) = v; }
+RT_INLINE void wr16_b(unsigned char* b, uint32_t a, uint16_t v) { memcpy(GUEST_PTR_B(b, a), &v, 2); }
+RT_INLINE void wr32_b(unsigned char* b, uint32_t a, uint32_t v) { memcpy(GUEST_PTR_B(b, a), &v, 4); }
+RT_INLINE void wr64_b(unsigned char* b, uint32_t a, uint64_t v) { memcpy(GUEST_PTR_B(b, a), &v, 8); }
+RT_INLINE float rdf32_b(unsigned char* b, uint32_t a) { float v; memcpy(&v, GUEST_PTR_B(b, a), 4); return v; }
+RT_INLINE double rdf64_b(unsigned char* b, uint32_t a) { double v; memcpy(&v, GUEST_PTR_B(b, a), 8); return v; }
+RT_INLINE void wrf32_b(unsigned char* b, uint32_t a, float v) { memcpy(GUEST_PTR_B(b, a), &v, 4); }
+RT_INLINE void wrf64_b(unsigned char* b, uint32_t a, double v) { memcpy(GUEST_PTR_B(b, a), &v, 8); }
+#define rd8(a) rd8_b(RT_GB, (a))
+#define rd16(a) rd16_b(RT_GB, (a))
+#define rd32(a) rd32_b(RT_GB, (a))
+#define rd64(a) rd64_b(RT_GB, (a))
+#define wr8(a, v) wr8_b(RT_GB, (a), (v))
+#define wr16(a, v) wr16_b(RT_GB, (a), (v))
+#define wr32(a, v) wr32_b(RT_GB, (a), (v))
+#define wr64(a, v) wr64_b(RT_GB, (a), (v))
+#define rdf32(a) rdf32_b(RT_GB, (a))
+#define rdf64(a) rdf64_b(RT_GB, (a))
+#define wrf32(a, v) wrf32_b(RT_GB, (a), (v))
+#define wrf64(a, v) wrf64_b(RT_GB, (a), (v))
 
 typedef struct Guest
 {
@@ -82,6 +116,7 @@ extern uint32_t rt_image_lo, rt_image_hi; /* runtime range of the image */
 #define RD rt_reloc_delta
 
 #define REGS_DECL                                                                                \
+    RT_GB_DECL                                                                                   \
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;                                             \
     unsigned cf, pf, af, zf, sf, of, df;                                                         \
     unsigned rt_sp_n = 0; /* back edges taken here while another thread waited (RT_SAFEPOINT) */ \
@@ -95,6 +130,17 @@ extern uint32_t rt_image_lo, rt_image_hi; /* runtime range of the image */
     g->esp = esp; g->ebp = ebp; g->esi = esi; g->edi = edi;                                      \
     g->cf = (uint8_t)cf; g->pf = (uint8_t)pf; g->af = (uint8_t)af; g->zf = (uint8_t)zf;          \
     g->sf = (uint8_t)sf; g->of = (uint8_t)of; g->df = (uint8_t)df
+
+/* Around a call and at a return (recomp/x86c.py): the registers and DF, not the arithmetic flags. No compiled
+ * code leaves a flag live across a call (the callee may change them all) or reads one at a function's entry, so
+ * they were 12 memory accesses a call for nothing (docs/switch.md, the game thread's profile). A tail jump into
+ * another function, where flags can be live, still stores them all (REGS_STORE). */
+#define REGS_STORE_CALL                                                                          \
+    g->eax = eax; g->ecx = ecx; g->edx = edx; g->ebx = ebx;                                      \
+    g->esp = esp; g->ebp = ebp; g->esi = esi; g->edi = edi; g->df = (uint8_t)df
+#define REGS_LOAD_CALL                                                                           \
+    eax = g->eax; ecx = g->ecx; edx = g->edx; ebx = g->ebx;                                      \
+    esp = g->esp; ebp = g->ebp; esi = g->esi; edi = g->edi; df = g->df
 
 /* PF: set when the low byte has an even number of 1 bits. 0x6996 is the parity of each nibble. */
 #define PARITY(v) ((unsigned)(!((0x6996u >> ((((uint32_t)(v) & 0xFFu) ^ (((uint32_t)(v) & 0xFFu) >> 4)) & 0xFu)) & 1u)))
@@ -317,3 +363,4 @@ RT_INLINE void wrf80(uint32_t a, double v)
     memcpy(GUEST_PTR(a), &m, 8);
     memcpy(GUEST_PTR(a) + 8, &se, 2);
 }
+

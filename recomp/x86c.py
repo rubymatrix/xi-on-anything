@@ -51,7 +51,8 @@ def x87_locals(lines):
             out.append(line[:len(line) - len(code)] + 'X87_STORE; ' + code + ' X87_LOAD;')
             continue
         s = line.replace('REGS_DECL;', 'REGS_DECL; X87_DECL;').replace('REGS_LOAD;', 'REGS_LOAD; X87_LOAD;')
-        s = s.replace('REGS_STORE;', 'REGS_STORE; X87_STORE;')
+        s = s.replace('REGS_STORE;', 'REGS_STORE; X87_STORE;').replace('REGS_STORE_CALL;', 'REGS_STORE_CALL; X87_STORE;')
+        s = s.replace('REGS_LOAD_CALL;', 'REGS_LOAD_CALL; X87_LOAD;')
         s = re.sub(r'\bST\(([0-7])\)', r'x87_s\1', s)
         s = s.replace('fpush(g, ', 'X87_PUSH(').replace('fpop(g)', 'X87_POP()').replace('fr(g, ', 'fr_cw(x87_cw, ')
         for f in ('frnd', 'fist16', 'fist32', 'fist64'):
@@ -246,7 +247,9 @@ class FunctionTranslator:
 
     def call(self, target, ret_addr):
         self.ctx.referenced.add(target)
-        return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr), 'REGS_STORE; %s%08x(g); REGS_LOAD;' % (self.ctx.prefix, target)]
+        # a call passes no flags either way (guest.h, REGS_STORE_CALL): only a tail jump (goto above) keeps them
+        return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
+                'REGS_STORE_CALL; %s%08x(g); REGS_LOAD_CALL;' % (self.ctx.prefix, target)]
 
     # ------------------------------------------------------------------ translation
 
@@ -516,11 +519,11 @@ class FunctionTranslator:
                 if tgt in self.ctx.entries:
                     return self.call(tgt, nxt), True
                 return ['RT_BADJUMP(%s);' % hexu(tgt)], False
-            return pro + ['{ uint32_t t = %s; esp -= 4; wr32(esp, %s + RD); REGS_STORE; rt_call_indirect(g, t); REGS_LOAD; }'
+            return pro + ['{ uint32_t t = %s; esp -= 4; wr32(esp, %s + RD); REGS_STORE_CALL; rt_call_indirect(g, t); REGS_LOAD_CALL; }'
                           % (self.rd(ins, t, 32), hexu(nxt))], True
         if mn == 'ret':
             n = ops[0].imm if ops else 0
-            return ['esp += %d; REGS_STORE; return;' % (4 + n)], False
+            return ['esp += %d; REGS_STORE_CALL; return;' % (4 + n)], False
 
         raise Unsupported(mn)
 

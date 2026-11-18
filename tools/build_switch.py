@@ -361,6 +361,9 @@ def host(a):
     # GCC's names for the generated C's warnings (GEN_WARNINGS is clang's)
     warn = ['-w']
     jobs = int(os.environ.get('XI_SWITCH_JOBS', '6'))
+    # the guest window's base copied into each translated function (guest.h, RT_LOCAL_BASE): not reloaded after
+    # every store into guest memory
+    warn += ['-DRT_LOCAL_BASE']
     objs += compile_many(gen_all, 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
     objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
     phase('app')
