@@ -4067,6 +4067,38 @@ static Obj* wr_target(void)
     return t && t->wr_track ? t : NULL;
 }
 
+/* FFXI_PROFILE: how many draws could have been one with the draw before them - the same state, all but
+ * their vertices, indices and counts (keys, uniforms, textures, samplers, targets' viewport and scissor,
+ * the primitive type, static buffers) - by kind (DrawPrimitiveUP or from buffers), logged every 2 s. What
+ * batching consecutive draws would save. */
+static void merge_stats(const GfxDraw* d, int up)
+{
+    static GfxDraw last;
+    static int have, last_up;
+    static uint64_t since;
+    static uint32_t n[2], same[2], runs[2];
+    GfxDraw k = *d;
+    memset(k.data, 0, sizeof k.data), memset(k.size, 0, sizeof k.size), memset(k.buf_off, 0, sizeof k.buf_off);
+    k.count = 0, k.indices = NULL, k.ibuf_off = 0, k.vertex_start = 0, k.site = 0;
+    n[up]++;
+    int s = have && last_up == up && !memcmp(&k, &last, sizeof k);
+    if (s)
+        same[up]++;
+    else
+        runs[up]++;
+    last = k, have = 1, last_up = up;
+    uint64_t now = rt_monotonic_ns();
+    if (!since)
+        since = now;
+    if (now - since >= 2000000000ull)
+    {
+        rt_log("[d3d8] mergeable draws (2 s): UP %u of %u (%u runs), buffers %u of %u (%u runs)\n", same[1], n[1], runs[1],
+            same[0], n[0], runs[0]);
+        memset(n, 0, sizeof n), memset(same, 0, sizeof same), memset(runs, 0, sizeof runs);
+        since = now;
+    }
+}
+
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
     uint32_t up_data, uint32_t up_stride, uint32_t n)
 {
@@ -4152,6 +4184,8 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
             wt->wr_known = 0;
     }
     apply_targets();
+    if (gfx_profiling)
+        merge_stats(d, up_data != 0);
     gfx_draw(d);
     if (g_probe_wrapped)
     {

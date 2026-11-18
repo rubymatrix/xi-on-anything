@@ -509,6 +509,10 @@ uint64_t rt_monotonic_ns(void)
      * arguments and was most of the game thread's busy time (the guest lock's quantum, the game's
      * timers, the profile's per-call timing all read this) */
     return (uint64_t)(emscripten_get_now() * 1e6);
+#elif defined(__SWITCH__)
+    /* the CPU's counter (19.2 MHz) straight: newlib's clock_gettime around it was 4% of the game thread's
+     * time, the game reading its timers through this thousands of times a frame (docs/switch.md) */
+    return armTicksToNs(armGetSystemTick());
 #endif
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
