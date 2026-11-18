@@ -208,8 +208,9 @@ for a brighter row, mixed with the next row's; the grille is red, green and blue
 columns. The lines' depth follows the screen's lines per row: none at one (a picture as tall as the
 screen), full at two, so they don't beat against the screen's rows; a picture of half the screen's height
 or less is shown at a whole multiple of its height (512x448 at 1024x896 docked), touches following
-(`nx_present_rect`). The settings app sets it. Checked in Ryubing on the sign-in screen (2026-11-18); its cost
-on a console not yet measured (`FFXI_FRAMELOG`, the present's share).
+(`nx_present_rect`). The settings app sets it. Checked in Ryubing on the sign-in screen, and on a console
+(2026-11-18, 512x448 with a 512 background, uncapped): about 47 fps in the world with CRT and the curve, 43
+without, two runs in different scenes - its cost is under the noise; the game's own thread sets the rate.
 
 ## Back to the sign-in screen
 
