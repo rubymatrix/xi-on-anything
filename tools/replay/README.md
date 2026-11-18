@@ -29,6 +29,7 @@ in `scenes/`, with scene flags:
 | `markets`, `mines` | city | Bastok Markets and the Mines plaza at noon, a fixed vantage |
 | `dawn`, `noon`, `dusk`, `midnight` | lighting | one North Gustaberg vantage at four times of day |
 | `garden` | indoors | the Garden of Ru'Hmet at noon: no sky, so no sun shadows should reach it |
+| `qufim-*`, `kazham-*`, `gusgen-*` | `qufim`, `kazham`, `gusgen` | places hard on bounce light and shadows, each at dawn, morning, noon, afternoon, dusk and midnight (`qufim-dusk`, ...): Qufim Island before Delkfutt's Tower under its rock arches, Kazham's gate from Yuhtunga, and Gusgen Mines' depths (the noon visit moved there with `--zone` and `--hour`, so no NPCs or mobs) |
 | `hot-spell`, `heat-wave`, `sand-storm`, `sunshine`, `dust-storm`, `wind`, `gales`, `rain`, `squall`, `snow`, `blizzards`, `thunder`, `thunderstorms`, `clouds`, `gloom`, `darkness`, `auroras`, `stellar-glare` | weather | an open spot in a zone whose own weather includes it (Western Altepa, West Sarutabaruta, Konschtat, La Theine, Cape Teriggan, Pashhow, Yuhtunga, Xarcabard, Beaucedine, Zi'Tah, Jugner Forest, Lufaise Meadows, Castle Zvahl Baileys, Ru'Aun Gardens, Qufim Island), in that weather from the zone-in |
 | `mob-crowd` | crowd | about forty mobs held around the character, each made four (about 170), all named Monster |
 | `player-crowd` | crowd | 150 geared characters in a city |
@@ -148,6 +149,7 @@ What reshapes a scene, applied in this order whatever the order on the line:
 | `--mob-name NAME` | every mob shows NAME (they move to the client's dynamic entities, which take their name from the packet) |
 | `--players N` | N geared characters in rings around the zone-in, looks copied from recorded NPCs (`--looks a.jsonl,b.jsonl`) |
 | `--echo` | with `--players`: they repeat what the character does to itself (`--echo-spread S` staggers them over S seconds; `--echo-spells a,b` or `all`: each casts these self spells, like `haste`, `regen-iii` or `enfire`, in place of the recorded ones, so they cast different spells at a time) |
+| `--hour H[:MM]` | the character arrives at this Vana'diel time: the zone-in's clock moves back to it (never forward, within a day, as `!perftime` does), and the client runs its clock, sun and sky from there. Any recording at any time of day |
 | `--weather W` | the zone is in weather W (a name or id) when the character arrives: the client starts a weather's effects only at a zone-in, and only in a zone that has that weather |
 
 A flag that needs another (`--echo` without `--players`, `--at` without `--zone`) is an error in its

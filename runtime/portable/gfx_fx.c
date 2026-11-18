@@ -234,6 +234,9 @@ static const struct
     { "fog_ground", offsetof(GfxFxSettings, fog_ground), 0.5f },
     { "fog_ground_size", offsetof(GfxFxSettings, fog_ground_size), 8.0f },
     { "fog_drift", offsetof(GfxFxSettings, fog_drift), 0.6f },
+    /* how much of the fog volume's sky light a sun shadow takes away (0 none, 1 all): the haze in an arch's or a cliff's
+     * shadow darker than in the open, as the ground mist's, so thick fog doesn't lift the shadows to the lit rock's level */
+    { "fog_shade", offsetof(GfxFxSettings, fog_shade), 0.4f },
     /* the shadowed lamps' reach, red where shadowed and green where lit (0 off) */
     { "scene_lamp_debug", offsetof(GfxFxSettings, scene_lamp_debug), 0.0f },
     /* the HDR scene (gfx_metal.m hdr_update): the game's world target float, one tonemap at the scene's end; 0 off;

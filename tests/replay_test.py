@@ -38,6 +38,7 @@ def zone_in(char=ME, name=b'Recorder', zone=106):
     b = bytearray(0x100)
     struct.pack_into('<I', b, 0, char)
     struct.pack_into('<I', b, 0x2C, zone)
+    struct.pack_into('<I', b, 0x3C - 4, 781233988)  # the clock (+0x3C in the packet): 12:01
     b[0x80:0x80 + len(name)] = name
     return packet(0x00A, b)
 
@@ -297,6 +298,20 @@ class Transforms(unittest.TestCase):
         w, before, began = struct.unpack_from('<HHI', s.packets[0][1], 0x68)
         self.assertEqual((w, before, began), (7, 7, 2000000 - 300 * 25))
 
+    def test_hour_moves_the_clock_back_to_it(self):
+        s = self.scene([])
+        noon = 781233988  # a recording's zone-in at 12:01
+        struct.pack_into('<I', s.packets[0][1], 0x3C, noon)
+        self.assertEqual(replayscene.vana_minute(noon), 12 * 60 + 1)
+        for text, minute in (('9', 9 * 60), ('12', 12 * 60), ('18:30', 18 * 60 + 30), ('0', 0), ('12:01', 12 * 60 + 1)):
+            with self.subTest(hour=text):
+                struct.pack_into('<I', s.packets[0][1], 0x3C, noon)
+                back = replayscene._hour(s, replayscene.parse_hour(text))
+                at = struct.unpack_from('<I', s.packets[0][1], 0x3C)[0]
+                self.assertEqual(replayscene.vana_minute(at), minute)
+                self.assertNotEqual(replayscene.vana_minute(at - 1), minute)  # the minute's first second
+                self.assertTrue(0 <= back < 86400 // 25)  # back, never forward, within a day
+
 
 class SceneFlags(Folder):
     """Suite lines: flags parsed, checked and applied by tools/replayserver.py's load_scene."""
@@ -316,13 +331,20 @@ class SceneFlags(Folder):
         self.assertEqual(struct.unpack_from('<H', d, 0x68)[0], replayscene.WEATHERS.index('hot spell'))
         self.assertEqual(s.marks[-1], [0.6, 'end'])
 
+    def test_hour_comes_before_weather(self):
+        s = self.load('--hour 18 --weather rain')
+        d = s.packets[0][1]
+        clock, began = struct.unpack_from('<I', d, 0x3C)[0], struct.unpack_from('<I', d, 0x6C)[0]
+        self.assertEqual(replayscene.vana_minute(clock), 18 * 60)
+        self.assertEqual(began, clock - 300 * 25)  # the weather dated from the new clock
+
     def test_a_negative_position_is_a_value_not_a_flag(self):
         s = self.load('--zone 35 --at -322.5,5,-362.75,219 --turn -90')
         self.assertEqual(struct.unpack_from('<fff', s.packets[0][1], 0x0C), (-322.5, 5, -362.75))
 
     def test_flags_that_need_another(self):
         for flags in ('--echo', '--looks a.jsonl', '--echo-spells haste', '--at 1,2,3', '--zone 104', '--zone 104 --at 1,2',
-                      '--weather fog-bank', '--mob-spells no-such-spell'):
+                      '--weather fog-bank', '--mob-spells no-such-spell', '--hour 24', '--hour 9:60', '--hour dusk'):
             with self.subTest(flags=flags), self.assertRaises(ValueError):
                 self.load(flags)
 

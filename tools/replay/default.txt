@@ -17,6 +17,30 @@ scenes/lighting-4.jsonl --label midnight --group lighting
 # moved there; the clock stays pinned to noon)
 scenes/lighting-2.jsonl --label garden --group indoors --zone 35 --at -322.43,5.0,-362.77,219
 
+# zones hard on bounce light and shadows, each at six times of day: the noon visit moved there (no NPCs
+# or mobs), its clock moved back to the hour. Qufim Island before Delkfutt's Tower under its rock arches,
+# Kazham's gate from Yuhtunga, Gusgen Mines' depths. "!replay qufim kazham gusgen" plays them all.
+scenes/lighting-2.jsonl --label qufim-dawn --group qufim --zone 126 --at -226.75,-19.0,319.64,128 --hour 6
+scenes/lighting-2.jsonl --label qufim-morning --group qufim --zone 126 --at -226.75,-19.0,319.64,128 --hour 9
+scenes/lighting-2.jsonl --label qufim-noon --group qufim --zone 126 --at -226.75,-19.0,319.64,128 --hour 12
+scenes/lighting-2.jsonl --label qufim-afternoon --group qufim --zone 126 --at -226.75,-19.0,319.64,128 --hour 15
+scenes/lighting-2.jsonl --label qufim-dusk --group qufim --zone 126 --at -226.75,-19.0,319.64,128 --hour 18
+scenes/lighting-2.jsonl --label qufim-midnight --group qufim --zone 126 --at -226.75,-19.0,319.64,128 --hour 0
+
+scenes/lighting-2.jsonl --label kazham-dawn --group kazham --zone 250 --at -51.997,-11.656,-106.254,192 --hour 6
+scenes/lighting-2.jsonl --label kazham-morning --group kazham --zone 250 --at -51.997,-11.656,-106.254,192 --hour 9
+scenes/lighting-2.jsonl --label kazham-noon --group kazham --zone 250 --at -51.997,-11.656,-106.254,192 --hour 12
+scenes/lighting-2.jsonl --label kazham-afternoon --group kazham --zone 250 --at -51.997,-11.656,-106.254,192 --hour 15
+scenes/lighting-2.jsonl --label kazham-dusk --group kazham --zone 250 --at -51.997,-11.656,-106.254,192 --hour 18
+scenes/lighting-2.jsonl --label kazham-midnight --group kazham --zone 250 --at -51.997,-11.656,-106.254,192 --hour 0
+
+scenes/lighting-2.jsonl --label gusgen-dawn --group gusgen --zone 196 --at 21.181,-60.1,-20.081,63 --hour 6
+scenes/lighting-2.jsonl --label gusgen-morning --group gusgen --zone 196 --at 21.181,-60.1,-20.081,63 --hour 9
+scenes/lighting-2.jsonl --label gusgen-noon --group gusgen --zone 196 --at 21.181,-60.1,-20.081,63 --hour 12
+scenes/lighting-2.jsonl --label gusgen-afternoon --group gusgen --zone 196 --at 21.181,-60.1,-20.081,63 --hour 15
+scenes/lighting-2.jsonl --label gusgen-dusk --group gusgen --zone 196 --at 21.181,-60.1,-20.081,63 --hour 18
+scenes/lighting-2.jsonl --label gusgen-midnight --group gusgen --zone 196 --at 21.181,-60.1,-20.081,63 --hour 0
+
 # weather: each in a zone whose own weather includes it (the client draws effects only there),
 # set at the zone-in (the client starts a weather's effects only when it arrives)
 scenes/weather-1.jsonl --label hot-spell --group weather --weather hot-spell
