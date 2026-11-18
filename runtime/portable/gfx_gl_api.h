@@ -333,6 +333,7 @@ enum
     X(DeleteProgram, void, (GLuint), 0)                                                                               \
     X(UseProgram, void, (GLuint), 0)                                                                                  \
     X(DrawArrays, void, (GLenum, GLint, GLsizei), 0)                                                                  \
+    X(Uniform4f, void, (GLint, GLfloat, GLfloat, GLfloat, GLfloat), 0)                                                \
     X(DrawElements, void, (GLenum, GLsizei, GLenum, const void*), 0)                                                  \
     X(FenceSync, GLsync, (GLenum, GLbitfield), 0)                                                                     \
     X(ClientWaitSync, GLenum, (GLsync, GLbitfield, GLuint64), 0)                                                      \

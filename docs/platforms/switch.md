@@ -179,14 +179,17 @@ Confirmed on a console.
 
 **XI on Anything Settings** in the homebrew menu (`sdmc:/switch/xi-on-anything-settings/`, put there by
 the setup) changes what the game reads when it starts, on the console. The D-pad moves and changes, + saves
-and starts the game, B leaves.
+and starts the game, B leaves, **Reset to defaults** puts every setting back to its first choice (saved
+when you save).
 
 | Setting | Choices | Where it goes |
 | --- | --- | --- |
-| Resolution | 1920x1080, 1600x900, 1280x720, 960x540, 640x480 and 512x448 (the PS2's size). A 4:3 size is drawn with black bars at the sides. | `data/settings.reg` (0001, 0002) |
+| Resolution | The screen's (the default: 1280x720 handheld, 1920x1080 docked, following a dock), or 1920x1080, 1600x900, 1280x720, 960x540, 640x480 and 512x448 (the PS2's size) whichever the screen. A 4:3 size is drawn with black bars at the sides. | `data/settings.reg` (0001, 0002); a fixed size also `FFXI_SWITCH_FIT=0` in `run.args` |
 | Interface size | Large (2x), Medium (1.5x), Small (1x): the menus' resolution is the game's over it, 512x448 at least | `data/settings.reg` (0037, 0038) |
-| Background | 2048, 1024, 512: the world's resolution before it is fitted to the screen | `data/settings.reg` (0003, 0004) |
+| Background | The screen's (the default), 2048, 1024, 512: the world's resolution before it is fitted to the screen | `run.args`: `FFXI_SWITCH_BG=<size>` |
 | Frame rate | Uncapped (the default), 60, 30 | `run.args`: `--fps-divisor` |
+| CRT filter | Off (the default), Scanlines, CRT (scanlines and an aperture grille): an old TV's look, best at 512x448 or 640x480 docked, where a row's scanline is two of the TV's lines | `run.args`: `FFXI_CRT=1` or `2` |
+| Screen curve | Off (the default), On: with the CRT filter, the glass's curve and darker corners | `run.args`: `FFXI_CRT_CURVE=1` |
 | Buttons | Nintendo, Xbox | `run.args`: `--switch-layout` |
 | CPU | Boost while loading (the default), No boost (for sys-clk and the like), Full speed | `run.args`: `FFXI_SWITCH_LOADBOOST=0`, `FFXI_SWITCH_CPU=1785` |
 | After a lost connection | Back to the sign-in screen (from the icon), Close | `run.args`: `FFXI_SWITCH_RELOGIN=0` |

@@ -199,6 +199,18 @@ thread line; the API time). What it showed, in the world (about 1,200 draws a fr
   case match is skipped on the Switch (FAT finds any case), CreateFileA stats only for the dispositions that
   report it, and read-only `.DAT`s are kept open once closed (k32_io.c, 32 at most): 2.5 ms an open.
 
+## The CRT filter
+
+`FFXI_CRT=1` (scanlines) or `2` (with an aperture grille), `FFXI_CRT_CURVE=1` (the glass's curve): the
+present (`gfx_gl.c`, `crt_present`) draws the back buffer through a shader of its own instead of the blit,
+compiled once at the first present (a blit again if it doesn't compile). A row's beam is a Gaussian, wider
+for a brighter row, mixed with the next row's; the grille is red, green and blue every 3 of the screen's
+columns. The lines' depth follows the screen's lines per row: none at one (a picture as tall as the
+screen), full at two, so they don't beat against the screen's rows; a picture of half the screen's height
+or less is shown at a whole multiple of its height (512x448 at 1024x896 docked), touches following
+(`nx_present_rect`). The settings app sets it. Checked in Ryubing on the sign-in screen (2026-11-18); its cost
+on a console not yet measured (`FFXI_FRAMELOG`, the present's share).
+
 ## Back to the sign-in screen
 
 When the game ends by itself (a lost connection, its logout), `switch_main.c` restarts the application

@@ -2,7 +2,10 @@
  * its own, xi-on-anything-settings.nro, that changes what the game reads when it starts, without a PC:
  *   - the display, in data/settings.reg (the file Config > Display writes, read last): the game's
  *     resolution (0001 x 0002), the interface's size (0037 x 0038, the menus' resolution) and the
- *     background's (0003 x 0004, square: the world's size before it is fitted to the window)
+ *     background's (0003 x 0004: the world's size before it is fitted to the window). The game on the
+ *     Switch draws at the screen's size and its world at the screen's too unless run.args says otherwise
+ *     (host64.c: FFXI_SWITCH_FIT=0, FFXI_SWITCH_BG=<size>), so a size chosen here writes that line too;
+ *     "The screen's" (the first choice of each) takes it out
  *   - the rest, in run.args (one item a line; every line it doesn't set is kept as it is): the frame rate
  *     (--fps-divisor), the face buttons (--switch-layout), the CPU's clock (FFXI_SWITCH_LOADBOOST,
  *     FFXI_SWITCH_CPU) and what a lost connection does (FFXI_SWITCH_RELOGIN)
@@ -34,9 +37,10 @@ typedef struct
     int w, h;
 } Res;
 static const Res RES[] = {
-    { "1920x1080 (the TV's)", 1920, 1080 },
+    { "The screen's (720p / 1080p docked)", 0, 0 },
+    { "1920x1080", 1920, 1080 },
     { "1600x900", 1600, 900 },
-    { "1280x720 (handheld's)", 1280, 720 },
+    { "1280x720", 1280, 720 },
     { "960x540", 960, 540 },
     { "640x480 (4:3)", 640, 480 },
     { "512x448 (4:3, the PS2's)", 512, 448 },
@@ -44,13 +48,15 @@ static const Res RES[] = {
 #define NRES (int)(sizeof RES / sizeof RES[0])
 static const float UI_SCALE[] = { 2.0f, 1.5f, 1.0f };
 static const char* const UI_NAMES[] = { "Large (2x)", "Medium (1.5x)", "Small (1x)" };
-static const int BG[] = { 2048, 1024, 512 };
-static const char* const BG_NAMES[] = { "2048 (sharpest)", "1024", "512 (soft, lightest)" };
+static const int BG[] = { 0, 2048, 1024, 512 };
+static const char* const BG_NAMES[] = { "The screen's", "2048 (sharpest)", "1024", "512 (soft, lightest)" };
 static const char* const FPS_NAMES[] = { "Uncapped (up to 60)", "60", "30" };
 static const char* const FPS_VALUES[] = { NULL, "1", "2" };
 static const char* const LAYOUT_NAMES[] = { "Nintendo (A confirms)", "Xbox (B confirms)" };
 static const char* const CPU_NAMES[] = { "Boost while loading", "No boost", "Full speed (warmer)" };
 static const char* const RELOGIN_NAMES[] = { "Back to the sign-in screen", "Close the game" };
+static const char* const CRT_NAMES[] = { "Off", "Scanlines", "CRT (scanlines and grille)" };
+static const char* const CURVE_NAMES[] = { "Off", "On" };
 
 enum
 {
@@ -58,12 +64,15 @@ enum
     O_UI,
     O_BG,
     O_FPS,
+    O_CRT,
+    O_CURVE,
     O_LAYOUT,
     O_CPU,
     O_RELOGIN,
     NOPTS,
     A_START = NOPTS,
     A_SAVE,
+    A_RESET,
     A_QUIT,
     NROWS
 };
@@ -79,10 +88,13 @@ static Opt g_opt[NOPTS] = {
     { "Resolution", NRES, 0, g_res_names,
         "The size the game draws at, fitted to the screen. Lower is faster. 4:3 sizes get black bars at the sides." },
     { "Interface size", 3, 0, UI_NAMES, "How large the menus and text are. Large reads well on a TV and in handheld." },
-    { "Background", 3, 0, BG_NAMES,
+    { "Background", 4, 0, BG_NAMES,
         "The world's resolution before it is fitted to the screen. Lower uses less memory and looks softer." },
     { "Frame rate", 3, 0, FPS_NAMES,
         "Uncapped keeps the world at its real speed at any frame rate (with this game version's frame sites)." },
+    { "CRT filter", 3, 0, CRT_NAMES,
+        "An old TV's look: a scanline per row, and with CRT the screen's red, green and blue stripes. Best at 512x448 or 640x480, docked." },
+    { "Screen curve", 2, 0, CURVE_NAMES, "With the CRT filter: the glass's curve and darker corners." },
     { "Buttons", 2, 0, LAYOUT_NAMES, "Which face button confirms." },
     { "CPU", 3, 0, CPU_NAMES,
         "Boost: full speed while a zone loads. No boost: for an overclocking tool (sys-clk). Full speed: more fps, less battery." },
@@ -286,22 +298,27 @@ static void load(void)
 {
     for (int i = 0; i < NRES; ++i)
         g_res_names[i] = RES[i].name;
+    args_read();
     long w = reg_value("0001", 1920), h = reg_value("0002", 1080);
-    long mw = reg_value("0037", w / 2), bg = reg_value("0003", 2048);
-    int r = 0;
-    for (int i = 0; i < NRES; ++i)
-        if (RES[i].w == w && RES[i].h == h)
-            r = i;
+    long mw = reg_value("0037", w / 2);
+    const char* fit = args_env("FFXI_SWITCH_FIT");
+    int r = 0; /* the screen's, unless run.args turns that off */
+    if (fit && *fit == '0')
+        for (int i = 1; i < NRES; ++i)
+            if (RES[i].w == w && RES[i].h == h)
+                r = i;
     g_opt[O_RES].cur = r;
+    if (!r)
+        w = 1920; /* the interface's size is the docked screen's over the scale */
     float scale = mw > 0 ? (float)w / (float)mw : 2.0f;
     int u = 0;
     for (int i = 1; i < 3; ++i)
         if (fabsf(UI_SCALE[i] - scale) < fabsf(UI_SCALE[u] - scale))
             u = i;
     g_opt[O_UI].cur = u;
-    g_opt[O_BG].cur = nearest(BG, 3, bg);
+    const char* bg = args_env("FFXI_SWITCH_BG");
+    g_opt[O_BG].cur = bg && atoi(bg) > 0 ? 1 + nearest(BG + 1, 3, atol(bg)) : 0;
 
-    args_read();
     const char* fps = args_value("--fps-divisor");
     g_opt[O_FPS].cur = !fps || !strcmp(fps, "0") ? 0 : !strcmp(fps, "1") ? 1 : 2;
     const char* layout = args_value("--switch-layout");
@@ -311,30 +328,45 @@ static void load(void)
     g_opt[O_CPU].cur = cpu && atoi(cpu) > 0 ? 2 : boost && !strcmp(boost, "0") ? 1 : 0;
     const char* relogin = args_env("FFXI_SWITCH_RELOGIN");
     g_opt[O_RELOGIN].cur = relogin && !strcmp(relogin, "0");
+    const char* crt = args_env("FFXI_CRT");
+    g_opt[O_CRT].cur = crt ? (atoi(crt) >= 2 ? 2 : atoi(crt) == 1) : 0;
+    const char* curve = args_env("FFXI_CRT_CURVE");
+    g_opt[O_CURVE].cur = curve && atoi(curve) > 0;
 }
 
 static int save(void)
 {
     const Res* r = &RES[g_opt[O_RES].cur];
+    long rw = r->w ? r->w : 1920, rh = r->h ? r->h : 1080; /* the screen's: the docked size in the file */
     float s = UI_SCALE[g_opt[O_UI].cur];
-    long mw = (long)(r->w / s + 0.5f) & ~1L, mh = (long)(r->h / s + 0.5f) & ~1L;
+    long mw = (long)(rw / s + 0.5f) & ~1L, mh = (long)(rh / s + 0.5f) & ~1L;
     /* the game lays its windows out in at least 512x448 */
     if (mw < 512 || mh < 448)
-        mw = r->w, mh = r->h;
-    const long v[6] = { r->w, r->h, BG[g_opt[O_BG].cur], BG[g_opt[O_BG].cur], mw, mh };
+        mw = rw, mh = rh;
+    int b = BG[g_opt[O_BG].cur];
+    long bgv = b ? b : reg_value("0003", 2048); /* the screen's: the file's own kept (Config's, unused) */
+    const long v[6] = { rw, rh, bgv, b ? b : reg_value("0004", bgv), mw, mh };
     int ok = reg_write(v);
 
     args_read(); /* as it is now: lines added by hand meanwhile are kept */
+    char bgs[16];
+    snprintf(bgs, sizeof bgs, "%d", b);
+    args_set_env("FFXI_SWITCH_FIT", r->w ? "0" : NULL);
+    args_set_env("FFXI_SWITCH_BG", b ? bgs : NULL);
     args_set("--fps-divisor", FPS_VALUES[g_opt[O_FPS].cur]);
     args_set("--switch-layout", g_opt[O_LAYOUT].cur ? "xbox" : "nintendo");
     args_set_env("FFXI_SWITCH_LOADBOOST", g_opt[O_CPU].cur == 1 ? "0" : NULL);
     args_set_env("FFXI_SWITCH_CPU", g_opt[O_CPU].cur == 2 ? "1785" : NULL);
     args_set_env("FFXI_SWITCH_RELOGIN", g_opt[O_RELOGIN].cur ? "0" : NULL);
+    args_set_env("FFXI_CRT", g_opt[O_CRT].cur == 2 ? "2" : g_opt[O_CRT].cur == 1 ? "1" : NULL);
+    args_set_env("FFXI_CRT_CURVE", g_opt[O_CURVE].cur ? "1" : NULL);
     return args_write() && ok;
 }
 
 /* --- the screen ----------------------------------------------------------------------------------------- */
-static const char* const ACTIONS[] = { "Save and start the game", "Save and exit", "Exit without saving" };
+static const char* const ACTIONS[] = { "Save and start the game", "Save and exit", "Reset to defaults",
+    "Exit without saving" };
+#define NACTIONS (int)(sizeof ACTIONS / sizeof ACTIONS[0])
 
 static void draw(int row, const char* status)
 {
@@ -350,7 +382,7 @@ static void draw(int row, const char* status)
             printf("  %-26s   %s\n", o->label, o->names[o->cur]);
     }
     printf("\n");
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < NACTIONS; ++i)
         printf(row == NOPTS + i ? "\x1b[33;1m> %s\x1b[0m\n" : "  %s\n", ACTIONS[i]);
     printf("\n");
     if (row < NOPTS)
@@ -427,6 +459,14 @@ int main(int argc, char** argv)
         else if (k & HidNpadButton_B)
             act = A_QUIT;
         status = dirty ? "Not saved yet." : status;
+        if (act == A_RESET)
+        {
+            /* every setting's default is its first choice; saved only when saved */
+            for (int i = 0; i < NOPTS; ++i)
+                g_opt[i].cur = 0;
+            dirty = 1;
+            status = "Back to the defaults. Not saved yet: Save to keep them.";
+        }
         if (act == A_START || act == A_SAVE)
         {
             if (!save())

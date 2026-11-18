@@ -1707,6 +1707,133 @@ void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uin
 static int g_prect[4];
 static uint64_t g_serial;
 
+/* --- the CRT filter: the present through a shader of a picture tube's ------------------------------------------
+ * FFXI_CRT=1 (the Switch's settings app: Scanlines): a scanline for each of the picture's rows, as an electron
+ * beam draws them - brighter rows wider, the gaps between them dark. FFXI_CRT=2 (CRT): with an aperture grille
+ * too, the screen's columns in red, green and blue. FFXI_CRT_CURVE=1: the glass's curve and its darker corners.
+ * A row's scanline needs about two of the screen's lines to look like one: at fewer (a picture as tall as the
+ * screen, or 448 rows in handheld's 720) the lines are made fainter so they don't beat against the screen's
+ * rows, and a picture of half the screen's height or less is shown at a whole multiple of its height (448 rows
+ * at 896 of a TV's 1080), so that every scanline is as thick as the next. Compiled once, at the first present;
+ * if it doesn't compile, the present is the blit it was. */
+static const char CRT_GLSL[] =
+    "layout(location = 0) uniform vec4 u_src;  /* the picture: w, h, 1/w, 1/h */\n"
+    "layout(location = 1) uniform vec4 u_mode; /* x: 1 scanlines, 2 with the grille; y: the curve; z: the lines' depth */\n"
+    "#ifdef GFX_VS\n"
+    "out vec2 v_uv;\n"
+    "void main()\n"
+    "{\n"
+    "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+    "    v_uv = vec2(p.x, 1.0 - p.y); /* 0..1 over the screen (the triangle reaches 2); row 0 (D3D's top) at the top */\n"
+    "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n"
+    "#else\n"
+    "in vec2 v_uv;\n"
+    "out vec4 o_color;\n"
+    "layout(binding = 0) uniform sampler2D u_tex;\n"
+    "vec3 row_color(float x, float row) { vec3 c = texture(u_tex, vec2(x, row * u_src.w)).rgb; return c * c; }\n"
+    "vec3 beam(float d, vec3 c)\n"
+    "{\n"
+    "    vec3 w = mix(vec3(0.24), vec3(0.42), sqrt(c)); /* a brighter row's beam is wider */\n"
+    "    return exp(-0.5 * d * d / (w * w));\n"
+    "}\n"
+    "void main()\n"
+    "{\n"
+    "    vec2 uv = v_uv;\n"
+    "    float edge = 1.0;\n"
+    "    if (u_mode.y > 0.5)\n"
+    "    {\n"
+    "        vec2 c = uv * 2.0 - 1.0;\n"
+    "        c *= 1.0 + vec2(0.035, 0.05) * (c.yx * c.yx);\n"
+    "        uv = c * 0.5 + 0.5;\n"
+    "        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { o_color = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
+    "        vec2 v = uv * (1.0 - uv.yx);\n"
+    "        edge = clamp(pow(v.x * v.y * 24.0, 0.25), 0.0, 1.0);\n"
+    "    }\n"
+    "    float y = uv.y * u_src.y, row = floor(y) + 0.5, d = y - row;\n"
+    "    float other = row + (d < 0.0 ? -1.0 : 1.0);\n"
+    "    vec3 c0 = row_color(uv.x, row), c1 = row_color(uv.x, clamp(other, 0.5, u_src.y - 0.5));\n"
+    "    vec3 lit = c0 * beam(abs(d), c0) + c1 * beam(1.0 - abs(d), c1);\n"
+    "    vec3 c = mix(c0, lit * 1.45, u_mode.z);\n"
+    "    if (u_mode.x > 1.5)\n"
+    "    {\n"
+    "        int m = int(mod(gl_FragCoord.x, 3.0));\n"
+    "        vec3 grille = vec3(0.72);\n"
+    "        grille[m] = 1.0;\n"
+    "        c *= grille * 1.22;\n"
+    "    }\n"
+    "    o_color = vec4(sqrt(clamp(c, 0.0, 1.0)) * edge, 1.0);\n"
+    "}\n"
+    "#endif\n";
+
+static int g_crt = -1, g_crt_curve;  /* FFXI_CRT, FFXI_CRT_CURVE: -1 not read yet */
+static GLuint g_crt_prog, g_crt_samp;
+
+static int crt_ready(void)
+{
+    if (g_crt < 0)
+    {
+        const char* e = getenv("FFXI_CRT");
+        const char* k = getenv("FFXI_CRT_CURVE");
+        g_crt = e ? atoi(e) : 0;
+        g_crt = g_crt < 0 ? 0 : g_crt > 2 ? 2 : g_crt;
+        g_crt_curve = k && atoi(k) > 0;
+        if (g_crt)
+        {
+            g_crt_prog = program_from(CRT_GLSL);
+            gl.GenSamplers(1, &g_crt_samp);
+            gl.SamplerParameteri(g_crt_samp, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            gl.SamplerParameteri(g_crt_samp, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            gl.SamplerParameteri(g_crt_samp, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            gl.SamplerParameteri(g_crt_samp, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            LOG("[gfx] CRT filter: %s%s%s\n", g_crt == 2 ? "scanlines and aperture grille" : "scanlines",
+                g_crt_curve ? ", curved" : "", g_crt_prog ? "" : " - its shader did not compile: off");
+            if (!g_crt_prog)
+                g_crt = 0;
+        }
+    }
+    return g_crt;
+}
+
+/* the picture at a whole multiple of its height when it is half the screen's or less (even scanlines) */
+static void crt_fit(const GfxTex* b, int dw, int dh, int* rx, int* ry, int* rw, int* rh)
+{
+    int k = *rh / (int)b->h;
+    if (k < 2)
+        return;
+    int h = (int)b->h * k, w = (int)((long long)h * *rw / *rh);
+    if (w > dw)
+        return;
+    *rx = (dw - w) / 2, *ry = (dh - h) / 2, *rw = w, *rh = h;
+}
+
+/* the back buffer into the rectangle (window coordinates from the bottom) through the CRT shader */
+static void crt_present(GfxTex* b, int x, int y, int w, int h)
+{
+    st_draw_fbo(0);
+    st_program(g_crt_prog);
+    st_texture(0, GL_TEXTURE_2D, b->name);
+    st_sampler(0, g_crt_samp);
+    st_cap(GL_BLEND, &S.blend, 0);
+    st_cap(GL_DEPTH_TEST, &S.depth_test, 0);
+    st_cap(GL_STENCIL_TEST, &S.stencil_test, 0);
+    st_cap(GL_CULL_FACE, &S.cull, 0);
+    st_cap(GL_POLYGON_OFFSET_FILL, &S.poly_offset, 0);
+    st_scissor(0, 0, 0, 0, 0);
+    st_cmask(15);
+    if (S.poly_mode != GL_FILL)
+        gl.PolygonMode(GL_FRONT_AND_BACK, GL_FILL), S.poly_mode = GL_FILL;
+    GLint v[4] = { x, y, w, h };
+    if (memcmp(v, S.vp, sizeof v))
+        gl.Viewport(v[0], v[1], v[2], v[3]), memcpy(S.vp, v, sizeof v);
+    /* the scanlines' depth: full at two of the screen's lines a row, none at one */
+    float per_row = (float)h / (float)b->h;
+    float depth = per_row <= 1.0f ? 0.0f : per_row >= 2.0f ? 1.0f : per_row - 1.0f;
+    gl.Uniform4f(0, (float)b->w, (float)b->h, 1.0f / (float)b->w, 1.0f / (float)b->h);
+    gl.Uniform4f(1, (float)g_crt, (float)g_crt_curve, depth, 0.0f);
+    gl.DrawArrays(GL_TRIANGLES, 0, 3);
+}
+
 void gfx_set_present_rect(int x, int y, int w, int h)
 {
     g_prect[0] = x, g_prect[1] = y, g_prect[2] = w, g_prect[3] = h;
@@ -1742,6 +1869,11 @@ void gfx_present(GfxTex* backbuffer)
                     rw = (int)(dh * bw / bh) & ~1, rx = (dw - rw) / 2;
             }
         }
+#endif
+        int crt = crt_ready();
+        if (crt)
+            crt_fit(backbuffer, dw, dh, &rx, &ry, &rw, &rh);
+#if defined(__SWITCH__)
         nx_present_rect(rx, ry, rw, rh);
 #endif
         int sh = ctx_surface_h(); /* window rows count from the surface's bottom; the picture is at its top */
@@ -1757,7 +1889,10 @@ void gfx_present(GfxTex* backbuffer)
             st_scissor(0, 0, 0, 0, 0);
         }
         int same = rw == (int)backbuffer->w && rh == (int)backbuffer->h;
-        gl.BlitFramebuffer(0, 0, (GLint)backbuffer->w, (GLint)backbuffer->h, rx, sh - ry, rx + rw, sh - ry - rh, GL_COLOR_BUFFER_BIT,
+        if (crt)
+            crt_present(backbuffer, rx, sh - ry - rh, rw, rh);
+        else
+            gl.BlitFramebuffer(0, 0, (GLint)backbuffer->w, (GLint)backbuffer->h, rx, sh - ry, rx + rw, sh - ry - rh, GL_COLOR_BUFFER_BIT,
             same ? GL_NEAREST : GL_LINEAR);
         ctx_swap(dw, dh);
     }
