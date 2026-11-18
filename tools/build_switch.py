@@ -13,6 +13,12 @@
         in a reader, the console's SD mounted over USB (Hekate's UMS), or an emulator's virtual SD card
         (--sd emu: the one of the emulator `run` uses). --mtp [device] instead: the console over USB as an
         MTP device (DBI's MTP responder), on Windows (tools/switch_mtp.ps1).
+  python tools/build_switch.py install --sd <SD root> [--game "<FINAL FANTASY XI folder>"] [setup's options]
+        host, then setup: the .nro built and put on the card with the game and the settings, in one (what
+        the launcher runs, as build_android.py install; tools/setup_switch.py runs it for a player). The game
+        is copied only when it changed since the last copy there (--full-check: compare every file anyway).
+        FFXI_PROGRESS=1: the phases (@phase translate, compile, app, install) and the compile's progress
+        (@progress done total) as lines of their own, as build_posix.py's.
   python tools/build_switch.py run [file.nro]
         run an .nro in the emulator (switch_toolchain.emulator()): copies it to the emulator's SD card first
   python tools/build_switch.py deploy --ip <console IP> [file.nro]
@@ -30,6 +36,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -81,6 +88,16 @@ def run(args, **kw):
     subprocess.run(args, check=True, env=tc.env(), **kw)
 
 
+def depfile_paths(text):
+    """The files a GCC depfile (-MMD) lists an object as built from. Its paths are the host's: on Windows
+    D:\\work\\... with a drive's colon and backslashes, which a split at the first colon and shlex both
+    mangle (every dependency missing, so every object stale: the game's code compiled again each build).
+    Only a backslash before a space escapes; one before a line's end continues it."""
+    body = text.split('.o:', 1)[-1]  # after the target (it is the .o; a drive's colon comes before)
+    body = re.sub(r'\\\r?\n', ' ', body)
+    return [t.replace('\\ ', ' ') for t in re.findall(r'(?:\\ |\S)+', body)]
+
+
 def compile_one(job):
     src, obj, extra = job
     s = ROOT / src
@@ -94,7 +111,7 @@ def compile_one(job):
     stale = not obj.exists() or not stamp.exists() or not deps.exists() or stamp.read_text() != key
     if not stale:
         # a header changed since: the depfile lists every file the object was built from
-        for dep in shlex.split(deps.read_text().replace('\\\n', ' ').split(':', 1)[-1]):
+        for dep in depfile_paths(deps.read_text()):
             p = Path(dep)
             p = p if p.is_absolute() else ROOT / p
             if not p.exists() or p.stat().st_mtime_ns > obj.stat().st_mtime_ns:
@@ -109,19 +126,36 @@ def compile_one(job):
     return str(obj), None
 
 
+# FFXI_PROGRESS=1 (the launcher, tools/setup_switch.py): the phases (@phase translate, compile, app) and the
+# compile's progress (@progress done total) as lines of their own, as build_posix.py and build_mingw.py
+PROGRESS = bool(os.environ.get('FFXI_PROGRESS'))
+_progress = {'done': 0, 'total': 0}  # one count over every compile_many of a build (plan_progress)
+
+
+def phase(name):
+    if PROGRESS:
+        print('@phase ' + name, flush=True)
+
+
+def plan_progress(total):
+    """The files the build's compile_many calls will go through between them: @progress counts to it."""
+    _progress.update(done=0, total=total)
+
+
 def compile_many(srcs, group, extra=(), workers=None):
     """workers: at most this many compilers at once (the generated files are ~3 MB of C each, and GCC at
     -O2 takes gigabytes for one: XI_SWITCH_JOBS for those, default 6)"""
     jobs = [(s, OUT / 'obj' / group / (s.replace('/', '_') + '.o'), extra) for s in srcs]
     print(f'{group}: {len(jobs)} files (compiling the ones changed since the last build)', flush=True)
     errors = []
-    progress = os.environ.get('XI_SWITCH_PROGRESS') == '1'  # tools/setup_switch.py's progress bar
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers or os.cpu_count() or 4) as ex:
         for i, (name, err) in enumerate(ex.map(compile_one, jobs), 1):
             if err:
                 errors.append((name, err))
-            if progress:
-                print(f'@progress {group} {i} {len(jobs)}', flush=True)
+            if PROGRESS:
+                _progress['done'] += 1
+                print('@progress %d %d' % ((_progress['done'], _progress['total']) if _progress['total']
+                                            else (i, len(jobs))), flush=True)
     if errors:
         for name, err in errors:
             print(name + '\n' + err[-6000:], file=sys.stderr)
@@ -217,6 +251,7 @@ def host(a):
         raise SystemExit('prepare the game first: python tools/prepare.py --game "<FINAL FANTASY XI folder>"')
     print(f'game build {build.BUILD["build"]}', flush=True)
     if not a.no_translate:
+        phase('translate')
         # the desktop translation, shared with host64 (generated/all) and FFXi.dll's (generated/ffxi)
         bp.translate()
         bp.run([sys.executable, 'recomp/recomp.py', '--meta', build.FFXI_META, '--image', bp.GEN_FFXI_IMAGE,
@@ -230,15 +265,25 @@ def host(a):
         'runtime/portable/sdl_nx.c', 'runtime/portable/tls_nx.c', 'host/addons_none.c']
     # the render queue: GL's context is its render thread's, and the game calls from several threads
     queue = ['-DGFX_GL', '-DGFX_QUEUE']
-    objs = compile_many(bp.PORTABLE + hosts + ['runtime/portable/gfx_queue.c'], 'host',
-                        sdl + tls + queue + ['-Dmain=xi_host_main'])
+    ours = bp.PORTABLE + hosts + ['runtime/portable/gfx_queue.c']
+    gen_all, gen_ffxi = bp.generated('all'), bp.generated('ffxi')
+    phase('compile')
+    plan_progress(len(ours) + 1 + len(gen_all) + len(gen_ffxi))
+    objs = compile_many(ours, 'host', sdl + tls + queue + ['-Dmain=xi_host_main'])
     objs += compile_many(['host/switch_main.c'], 'entry', sdl)
     # GCC's names for the generated C's warnings (GEN_WARNINGS is clang's)
     warn = ['-w']
     jobs = int(os.environ.get('XI_SWITCH_JOBS', '6'))
-    objs += compile_many(bp.generated('all'), 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
-    objs += compile_many(bp.generated('ffxi'), 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
-    return link_nro(objs, 'xi-on-anything', [thirdparty.archive('mbedtls')] + GFX_LIBS + ['-lnx', '-lm'])
+    objs += compile_many(gen_all, 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
+    objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
+    phase('app')
+    nro = link_nro(objs, 'xi-on-anything', [thirdparty.archive('mbedtls')] + GFX_LIBS + ['-lnx', '-lm'])
+    # what it was built from (version, commit, game build): put on the card beside it, where the launcher or a
+    # later setup reads whether the card's app is current
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import buildinfo
+    buildinfo.stamp(str(OUT / 'runtime.json'))
+    return nro
 
 
 # --- the SD card ---------------------------------------------------------------------------------------
@@ -271,6 +316,20 @@ def pending(src, dst):
             more += st.st_size
         todo.append((p, out, st))
     return files, todo, more
+
+
+COPIED = '.xi-on-anything-copy'  # in a copied folder on the card: tree_signature() of what was copied there
+
+
+def tree_signature(src):
+    """Every file under src (its path, size and time), as one hash: on the PC's disk a second or two for the
+    game's 65k files, where comparing each with the card's takes minutes. The same as at the last complete
+    copy (its COPIED file): nothing to copy."""
+    h = hashlib.sha256()
+    for p in sorted(p for p in src.rglob('*') if p.is_file()):
+        st = p.stat()
+        h.update(f'{p.relative_to(src).as_posix()}\0{st.st_size}\0{int(st.st_mtime)}\n'.encode())
+    return h.hexdigest()
 
 
 def copy_tree(src, dst, workers=4):
@@ -389,6 +448,8 @@ def setup(a):
     if nro.exists():
         shutil.copyfile(nro, app / nro.name)
         print('copied', nro.name, '->', app)
+        if (OUT / 'runtime.json').exists() and not a.nro:  # what it was built from (host())
+            shutil.copyfile(OUT / 'runtime.json', app / 'runtime.json')
     elif a.nro:
         raise SystemExit(f'{nro}: no such file')
     else:
@@ -399,18 +460,26 @@ def setup(a):
             raise SystemExit(f'{game}: not a FINAL FANTASY XI folder (no FFXiMain.dll)')
         # the layout the game expects: SquareEnix/FINAL FANTASY XI, the viewer folder beside it
         dest = app / 'SquareEnix'
-        folders = [game] + [p for p in [game.parent / 'PlayOnlineViewer'] if p.is_dir()]
-        print('checking what to copy...', flush=True)
+        todo = []
+        for folder in [game] + [p for p in [game.parent / 'PlayOnlineViewer'] if p.is_dir()]:
+            sig, mark = tree_signature(folder), dest / folder.name / COPIED
+            if not a.full_check and mark.exists() and mark.read_text().strip() == sig:
+                print(f'{folder.name}: as on the card already (unchanged since the last copy)')
+            else:
+                todo.append((folder, sig, mark))
+        if todo:
+            print('checking what to copy...', flush=True)
         # (a cluster's slack a file: the game is 65k small files on FAT32/exFAT's 32-128 KB clusters)
-        more = sum(m + len(t) * 64 * 1024 for _, t, m in (pending(f, dest / f.name) for f in folders))
+        more = sum(m + len(t) * 64 * 1024 for _, t, m in (pending(f, dest / f.name) for f, _, _ in todo))
         free = shutil.disk_usage(app).free
         if more > free:
             raise SystemExit(f'the card needs about {more / 1e9:.1f} GB more for the game and has {free / 1e9:.1f} GB '
                              'free: free some space, or use a bigger card')
-        for folder in folders:
+        for folder, sig, mark in todo:
             print(f'copying {folder} -> {dest / folder.name} (only what changed)', flush=True)
             n, size = copy_tree(folder, dest / folder.name)
             print(f'  {n} files copied, {size / 1e9:.2f} GB')
+            mark.write_text(sig + '\n')  # last: a copy that stopped part way leaves the old one, or none
     if a.dats:
         n, size = copy_tree(Path(a.dats), app / 'dats')
         print(f'DAT overlay: {n} files copied, {size / 1e6:.0f} MB')
@@ -457,6 +526,31 @@ def logs(a):
             print(p.read_text(errors='replace'))
 
 
+def install(a):
+    """host, then setup: the .nro built and put on the card with the game and the settings (what the launcher, or
+    a player without it, runs: build_android.py install's counterpart)."""
+    if not a.sd:
+        raise SystemExit("install needs --sd <the card's folder> (or emu)")
+    sd_root(a.sd)  # (a card that isn't there stops it now, not after the build)
+    host(a)
+    a.mtp, a.nro = None, None
+    phase('install')
+    setup(a)
+
+
+def card_options(p):
+    p.add_argument('--sd', help="the SD card's root folder, or emu")
+    p.add_argument('--game', help='the FINAL FANTASY XI folder to copy')
+    p.add_argument('--full-check', action='store_true',
+                   help="compare every game file with the card's, even when the game is unchanged since the last copy")
+    p.add_argument('--server', help='the LandSandBoat server, by name or IP')
+    p.add_argument('--fps-divisor', type=int, choices=[0, 1, 2],
+                   help='0 uncapped, 1 60 fps, 2 30 fps (default: uncapped if the build has frame delta sites, else 30)')
+    p.add_argument('--dats', help='a DAT overlay folder to copy (--dats)')
+    p.add_argument('--layout', choices=['nintendo', 'xbox'], help='A/B as on the Switch, or swapped as on Xbox')
+    p.add_argument('--arg', action='append', help='more host options, as one string')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = ap.add_subparsers(dest='target', required=True)
@@ -465,19 +559,15 @@ def main():
     h = sub.add_parser('host')
     h.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
     s = sub.add_parser('setup')
-    s.add_argument('--sd', help="the SD card's root folder, or emu")
     s.add_argument('--mtp', nargs='?', const='Switch', help="the console over USB MTP (DBI's MTP responder), by its "
                    "name in This PC (default Switch); Windows only")
     s.add_argument('--storage', default='1: SD Card', help="--mtp: the device's storage (default '1: SD Card')")
     s.add_argument('--extra', action='append', help='--mtp: another file to put beside the .nro (plat-test.nro)')
     s.add_argument('--nro')
-    s.add_argument('--game', help='the FINAL FANTASY XI folder to copy')
-    s.add_argument('--server', help='the LandSandBoat server, by name or IP')
-    s.add_argument('--fps-divisor', type=int, choices=[0, 1, 2],
-                   help='0 uncapped, 1 60 fps, 2 30 fps (default: uncapped if the build has frame delta sites, else 30)')
-    s.add_argument('--dats', help='a DAT overlay folder to copy (--dats)')
-    s.add_argument('--layout', choices=['nintendo', 'xbox'], help='A/B as on the Switch, or swapped as on Xbox')
-    s.add_argument('--arg', action='append', help='more host options, as one string')
+    card_options(s)
+    i = sub.add_parser('install')
+    i.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
+    card_options(i)
     r = sub.add_parser('run')
     r.add_argument('nro', nargs='?')
     d = sub.add_parser('deploy')
@@ -486,7 +576,7 @@ def main():
     lg = sub.add_parser('logs')
     lg.add_argument('--sd', required=True)
     a = ap.parse_args()
-    {'plat-test': plat_test, 'gfx-test': gfx_test, 'host': host, 'setup': setup, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
+    {'plat-test': plat_test, 'gfx-test': gfx_test, 'host': host, 'setup': setup, 'install': install, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
 
 
 if __name__ == '__main__':

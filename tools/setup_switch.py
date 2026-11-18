@@ -78,7 +78,7 @@ def run(cmd, on_line=None, env=None):
     tail = []
     for line in p.stdout:
         log(line)
-        if not line.startswith('@progress'):
+        if not line.startswith(('@progress', '@phase')):
             tail = (tail + [line.rstrip()])[-15:]
         if on_line:
             on_line(line)
@@ -361,23 +361,26 @@ def has_frame_sites(label):
 # ---- 5. build -----------------------------------------------------------------------------------
 
 def build():
-    names = {'host': 'our code', 'entry': 'our code', 'all': "the game's code", 'ffxi': "the game's code (FFXi.dll)"}
+    """build_switch.py host, its @phase and @progress lines (FFXI_PROGRESS, as the launcher reads them) shown as
+    notes and a bar."""
     state = {'bar': False}
 
     def on_line(line):
-        if line.startswith('@progress'):
-            _, group, i, n = line.split()
+        if line.startswith('@progress '):
+            done, total = map(int, line.split()[1:3])
             state['bar'] = True
-            progress(int(i) / int(n), f'{names.get(group, group)}: {i}/{n}')
-            if i == n:
+            progress(done / total if total else 1.0, f'{done} of {total} files')
+            if done >= total:
                 sys.stdout.write('\n')
                 state['bar'] = False
-        elif line.startswith('game build '):
+        elif line.startswith('@phase translate'):
             note("translating the game's code (a few minutes)")
+        elif line.startswith('@phase compile'):
+            note('compiling (only what changed since the last build)')
         elif line.startswith('built '):
             note(line.strip())
 
-    env = dict(os.environ, XI_SWITCH_PROGRESS='1', PYTHONUNBUFFERED='1')
+    env = dict(os.environ, FFXI_PROGRESS='1', PYTHONUNBUFFERED='1')
     try:
         run([sys.executable, HERE / 'build_switch.py', 'host'], on_line, env)
     finally:
@@ -466,7 +469,7 @@ def server_args(card, a):
 def put_on_card(card, game, a):
     import build_switch
     ns = argparse.Namespace(mtp=None, sd=card, nro=None, game=game, server=a.server or None, fps_divisor=None,
-                            dats=a.dats, layout=a.layout, arg=a.arg)
+                            dats=a.dats, layout=a.layout, arg=a.arg, full_check=False)
     try:
         build_switch.setup(ns)
     except SystemExit as e:

@@ -7,7 +7,7 @@ together, what has been verified, and what is left.
 
 | Path | What it is | Modeled on |
 | --- | --- | --- |
-| `tools/build_switch.py` | `plat-test`, `host`, `setup`, `run`, `deploy`, `logs` | `build_android.py`, `xbox.py` |
+| `tools/build_switch.py` | `plat-test`, `host`, `setup`, `install` (host then setup, the launcher's entry, as `build_android.py install`; `FFXI_PROGRESS=1` prints `@phase`/`@progress` as `build_posix.py`; `runtime.json` stamped beside the `.nro` on the card), `run`, `deploy`, `logs` | `build_android.py`, `xbox.py` |
 | `tools/setup_switch.py`, `setup_switch_gui.py`, `setup-switch.bat`/`.sh` | the player's one command (the GUI, tkinter, runs it with the window's answers and installs what the PC lacks): checks the PC, then runs `prepare.py`, `frame_sites.py` (when the build has none), `build_switch.py host` (its `@progress` lines, `XI_SWITCH_PROGRESS=1`, drive the bar) and `build_switch.setup()`; answers kept in `build/switch/setup.json`, output in `build/switch/setup.log` | `tools/setup.py` (the Mac's) |
 | `tools/switch_toolchain.py` | finds devkitPro (and its msys2 on Windows) and the emulator | `android_toolchain.py` |
 | `host/switch_main.c` | libnx entry: sockets, the screen's size, `run.args`, the log; calls `xi_host_main` | `host/ios_main.c` |

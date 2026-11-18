@@ -118,6 +118,11 @@ python tools/build_switch.py setup --sd E:\ --game "<your FINAL FANTASY XI folde
 - `run.args` with the options you gave: an option given replaces its line there, and every other line
   (yours, added by hand) is kept
 
+After the first copy, a copy of the game is skipped when the game folder hasn't changed since (a file
+`.xi-on-anything-copy` on the card records what was copied); `--full-check` compares every file anyway.
+`build_switch.py install` takes the same options and does steps 1's `host` and 2 in one, as
+`build_android.py install` does for Android.
+
 `setup`'s options, which it writes to `run.args` (one host argument per line; edit the file on the card
 to change them later; `--layout` becomes `--switch-layout` there):
 
