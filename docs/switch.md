@@ -174,6 +174,10 @@ programs as MSYS paths (`/d/msys64/...`: MSYS's Meson reads `D:/...` as relative
 to where MSYS2 is. `XI_SWITCH_MESA=<DESTDIR>/opt/devkitpro/portlibs/switch` builds against it
 (`build_switch.py`: gfx_gl.c with its headers, its libraries ahead of portlibs'); the `.nro` is 46.5 MB
 (34.5 with switch-mesa). `switch_main.c` puts the cache in `sdmc:/switch/xi-on-anything/shader-cache`.
+Published as our build, `mesa-switch-26.2.4-0ff5207.zip` (12 MB, reproducible, its SHA-256 in `build_switch.py`) on
+the fork's release `switch-mesa-26.2.4`: `build_switch.py mesa` downloads and checks it into `build/switch/mesa/`,
+the setup runs it before the build (devkitPro's Mesa when it can't), and the build links it when it is there.
+It needs devkitPro's `switch-zlib` and `switch-libexpat`.
 
 - Ryubing: no display (the backend's first GPU mapping fails, `VA bind ... 0x195c`).
 - On a console (2026-11-18, 512x448, a 512 background, uncapped): the sign-in and the world as before, 44-54
@@ -261,6 +265,9 @@ with R (a restart there starts that game). `FFXI_SWITCH_RELOGIN=0` turns it off.
   connections end).
 
 ## Testing in the emulator
+
+Build for it with devkitPro's Mesa, `XI_SWITCH_MESA=0`: Mesa 26's Horizon backend gets no display in Ryubing
+(above), and the build takes Mesa 26 whenever `build_switch.py mesa` (or the setup) has downloaded it.
 
 `build_switch.py run [file.nro]` copies the `.nro` to the emulator's virtual SD card and starts it (a
 portable Ryubing under `XI_EMU_DIR`, default `D:/Emulator/Ryubing`; on macOS `Ryujinx.app` in
