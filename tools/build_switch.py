@@ -6,6 +6,10 @@
   python tools/build_switch.py gfx-test
         the graphics back end's test (tests/gfx_test.c on OpenGL, through EGL) as build/switch/gfx-test.nro:
         its lines to gfx-test.log on the card, then green on the screen when every check passed, red when not
+  python tools/build_switch.py settings
+        the settings app (host/switch_settings.c: the resolution, the frame rate and the rest of run.args, on
+        the console) as build/switch/xi-on-anything-settings.nro; host builds it too, setup copies it to
+        sdmc:/switch/xi-on-anything-settings/ (a folder of its own: the homebrew menu lists one .nro a folder)
   python tools/build_switch.py setup --sd <SD root> [--nro file.nro] [--game "<FINAL FANTASY XI folder>"]
         [--server <name or IP>] [--fps-divisor N] [--dats <folder>] [--layout nintendo|xbox] [--arg ...]
         copy the .nro to sdmc:/switch/xi-on-anything/ and, with --game, the game beside it (only the
@@ -48,6 +52,7 @@ import switch_toolchain as tc
 from switch_toolchain import OUT, ROOT
 
 APP_DIR = 'switch/xi-on-anything'  # on the SD card: the .nro, run.args, the game, the logs
+SETTINGS = 'xi-on-anything-settings'  # the settings app: its .nro, in switch/<it>/ on the card
 TITLE = 'XI on Anything'
 AUTHOR = 'xi-on-anything'
 
@@ -203,6 +208,14 @@ def plat_test(_a):
     return link_nro(objs, 'plat-test', ['-lnx', '-lm'], title='XI on Anything platform test')
 
 
+def settings(_a):
+    """The settings app (host/switch_settings.c): build/switch/xi-on-anything-settings.nro. No game code in it."""
+    tc.require()
+    OUT.mkdir(parents=True, exist_ok=True)
+    objs = compile_many(['host/switch_settings.c'], 'settings')
+    return link_nro(objs, SETTINGS, ['-lnx', '-lm'], title=TITLE + ' Settings')
+
+
 def gfx_test(_a):
     """tests/gfx_test.c on the OpenGL back end, through EGL (tests/switch_gfx_test.c): build/switch/gfx-test.nro"""
     tc.require()
@@ -278,6 +291,7 @@ def host(a):
     objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
     phase('app')
     nro = link_nro(objs, 'xi-on-anything', [thirdparty.archive('mbedtls')] + GFX_LIBS + ['-lnx', '-lm'])
+    settings(a)
     # what it was built from (version, commit, game build): put on the card beside it, where the launcher or a
     # later setup reads whether the card's app is current
     sys.path.insert(0, str(ROOT / 'tools'))
@@ -454,6 +468,11 @@ def setup(a):
         raise SystemExit(f'{nro}: no such file')
     else:
         print(f'no {nro.name} built yet: the game data and settings only')
+    own = OUT / (SETTINGS + '.nro')
+    if own.exists() and not a.nro:
+        (root / 'switch' / SETTINGS).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(own, root / 'switch' / SETTINGS / own.name)
+        print('copied', own.name, '->', root / 'switch' / SETTINGS)
     if a.game:
         game = Path(a.game)
         if not (game / 'FFXiMain.dll').exists():
@@ -556,6 +575,7 @@ def main():
     sub = ap.add_subparsers(dest='target', required=True)
     sub.add_parser('plat-test')
     sub.add_parser('gfx-test')
+    sub.add_parser('settings')
     h = sub.add_parser('host')
     h.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
     s = sub.add_parser('setup')
@@ -576,7 +596,7 @@ def main():
     lg = sub.add_parser('logs')
     lg.add_argument('--sd', required=True)
     a = ap.parse_args()
-    {'plat-test': plat_test, 'gfx-test': gfx_test, 'host': host, 'setup': setup, 'install': install, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
+    {'plat-test': plat_test, 'gfx-test': gfx_test, 'settings': settings, 'host': host, 'setup': setup, 'install': install, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
 
 
 if __name__ == '__main__':

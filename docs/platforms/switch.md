@@ -145,7 +145,8 @@ A line `FFXI_NAME=value` in `run.args` sets that environment variable instead of
 
 ### 3. Run
 
-- **Console**: hold R while starting any game, then pick **XI on Anything** in the homebrew menu.
+- **Console**: hold R while starting any game, then pick **XI on Anything** in the homebrew menu
+  ([Settings](#settings): **XI on Anything Settings**).
 - **Emulator**: `python tools/build_switch.py run` copies the `.nro` to the emulator's card and starts it.
 - **After a rebuild**, without copying the game again: `python tools/build_switch.py deploy --ip <console IP>`
   sends the new `.nro` over the network (press Y in the homebrew menu first, to receive it).
@@ -173,6 +174,25 @@ connection, its own logout): the app restarts, and **Remember password** signs y
 with R held over a game it closes instead, as a restart there would start that game. Close it from the
 HOME menu, or with B on the sign-in screen. `FFXI_SWITCH_RELOGIN=0` in `run.args` turns the restart off.
 Confirmed on a console.
+
+### Settings
+
+**XI on Anything Settings** in the homebrew menu (`sdmc:/switch/xi-on-anything-settings/`, put there by
+the setup) changes what the game reads when it starts, on the console. The D-pad moves and changes, + saves
+and starts the game, B leaves.
+
+| Setting | Choices | Where it goes |
+| --- | --- | --- |
+| Resolution | 1920x1080, 1600x900, 1280x720, 960x540, 640x480 and 512x448 (the PS2's size). A 4:3 size is drawn with black bars at the sides. | `data/settings.reg` (0001, 0002) |
+| Interface size | Large (2x), Medium (1.5x), Small (1x): the menus' resolution is the game's over it, 512x448 at least | `data/settings.reg` (0037, 0038) |
+| Background | 2048, 1024, 512: the world's resolution before it is fitted to the screen | `data/settings.reg` (0003, 0004) |
+| Frame rate | Uncapped (the default), 60, 30 | `run.args`: `--fps-divisor` |
+| Buttons | Nintendo, Xbox | `run.args`: `--switch-layout` |
+| CPU | Boost while loading (the default), No boost (for sys-clk and the like), Full speed | `run.args`: `FFXI_SWITCH_LOADBOOST=0`, `FFXI_SWITCH_CPU=1785` |
+| After a lost connection | Back to the sign-in screen (from the icon), Close | `run.args`: `FFXI_SWITCH_RELOGIN=0` |
+
+Every other line of `run.args` is kept. It holds no game code. Make it a HOME menu icon too with Sphaira,
+as above.
 
 ## Performance
 

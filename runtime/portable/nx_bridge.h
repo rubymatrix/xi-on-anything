@@ -9,5 +9,9 @@ void nx_set_view_size(int w, int h);
 /* The face buttons: 0 Nintendo's (A confirms, B cancels), 1 Xbox's by position (B, the bottom one, confirms). */
 void nx_set_layout(int xbox);
 
+/* Where the picture is on the screen, in the screen's pixels: all of it, or a 4:3 resolution's middle
+ * (gfx_gl.c's present). Touches are mapped through it. */
+void nx_present_rect(int x, int y, int w, int h);
+
 /* Whether the system has asked the game to close (the player closed it from the HOME menu). */
 int nx_exit_requested(void);

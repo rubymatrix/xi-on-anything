@@ -11,6 +11,7 @@ together, what has been verified, and what is left.
 | `tools/setup_switch.py`, `setup_switch_gui.py`, `switch/setup-switch.bat`/`.sh` | the player's one command (the GUI, tkinter, runs it with the window's answers and installs what the PC lacks): checks the PC, then runs `prepare.py`, `frame_sites.py` (when the build has none), `build_switch.py host` (its `@progress` lines, `FFXI_PROGRESS=1`, drive the bar) and `build_switch.setup()`; answers kept in `build/switch/setup.json`, output in `build/switch/setup.log` | `tools/setup.py` (the Mac's) |
 | `tools/switch_toolchain.py` | finds devkitPro (and its msys2 on Windows) and the emulator | `android_toolchain.py` |
 | `host/switch_main.c` | libnx entry: sockets, the screen's size, `run.args`, the log; calls `xi_host_main` | `host/ios_main.c` |
+| `host/switch_settings.c` | the settings app (`build_switch.py settings`, `xi-on-anything-settings.nro`, its own folder on the card): libnx's text console over `data/settings.reg` (resolution, interface, background, as modern.c's `save_display`) and `run.args` (the other lines kept); + starts the game (`envSetNextLoad`) | |
 | `runtime/portable/sdl_nx.c`, `nx_bridge.h` | the SDL3 calls the runtime makes, over libnx (HID, touch, swkbd, audout) | `sdl_web.c`, `sdl_uwp.c` |
 | `runtime/portable/plat_posix.c` (`__SWITCH__`) | memory, address waits, thread ids, time | the Emscripten branch |
 | `runtime/portable/tls_nx.c`, `switch/mbedtls_config.h` | mbedtls' clock and entropy | — |

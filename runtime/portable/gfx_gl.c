@@ -54,6 +54,9 @@
 #include "gfx_fx.h"
 #include "gfx_gl_api.h"
 #include "gfx_msl.h"
+#if defined(__SWITCH__)
+#include "nx_bridge.h"
+#endif
 
 #define FOURCC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
 
@@ -1725,6 +1728,22 @@ void gfx_present(GfxTex* backbuffer)
         int rx = 0, ry = 0, rw = dw, rh = dh;
         if (g_prect[2] > 0 && g_prect[3] > 0)
             rx = g_prect[0], ry = g_prect[1], rw = g_prect[2], rh = g_prect[3];
+#if defined(__SWITCH__)
+        /* a picture of another shape than the screen's (a 4:3 resolution, the settings app's 640x480 or the
+         * PS2's 512x448): as large as fits, in the middle, black beside it - not stretched */
+        else if (backbuffer->w && backbuffer->h)
+        {
+            long long bw = backbuffer->w, bh = backbuffer->h;
+            if (llabs(bw * dh - bh * dw) * 50 > (long long)dw * dh)
+            {
+                if (bw * dh > bh * dw)
+                    rh = (int)(dw * bh / bw) & ~1, ry = (dh - rh) / 2;
+                else
+                    rw = (int)(dh * bw / bh) & ~1, rx = (dw - rw) / 2;
+            }
+        }
+        nx_present_rect(rx, ry, rw, rh);
+#endif
         int sh = ctx_surface_h(); /* window rows count from the surface's bottom; the picture is at its top */
         st_read_fbo(fbo_for(backbuffer, 0, 0, NULL));
         st_draw_fbo(0);

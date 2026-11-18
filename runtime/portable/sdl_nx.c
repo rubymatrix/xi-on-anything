@@ -172,6 +172,7 @@ struct SDL_Window
 };
 static SDL_Window g_window;
 static volatile int g_view_w = 1280, g_view_h = 720;
+static int g_rect_last[4]; /* the picture's rectangle last given (nx_present_rect); a new screen size forgets it */
 static int g_have_window;
 
 void nx_set_view_size(int w, int h)
@@ -185,6 +186,7 @@ void nx_set_view_size(int w, int h)
      * screen's units, is mapped to the client's pixels through it (else 1280x720 handheld touches landed at
      * two thirds of the way, and the screen's foot was out of reach) */
     user32_set_view(0, 0, (float)w, (float)h);
+    memset(g_rect_last, 0, sizeof g_rect_last); /* the next present gives the picture's rectangle again */
     if (g_have_window && (w != was_w || h != was_h))
     {
         SDL_Event e;
@@ -614,6 +616,16 @@ static int g_input_ready, g_layout_xbox;
 void nx_set_layout(int xbox) { g_layout_xbox = xbox; }
 
 static int closing; /* the system asked the game to close (appletMainLoop, below) */
+
+/* the picture's rectangle, from the render thread's present: touches go through it (user32's view) */
+void nx_present_rect(int x, int y, int w, int h)
+{
+    int* last = g_rect_last;
+    if (last[0] == x && last[1] == y && last[2] == w && last[3] == h)
+        return;
+    last[0] = x, last[1] = y, last[2] = w, last[3] = h;
+    user32_set_view((float)x, (float)y, (float)w, (float)h);
+}
 int nx_exit_requested(void) { return closing; }
 
 /* The game's confirm is SDL's south button (Xbox A, the bottom one). Nintendo's layout: A, the right
