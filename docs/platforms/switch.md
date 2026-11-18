@@ -172,6 +172,7 @@ Started from the icon, the game goes back to the sign-in screen when it ends by 
 connection, its own logout): the app restarts, and **Remember password** signs you in again. Started
 with R held over a game it closes instead, as a restart there would start that game. Close it from the
 HOME menu, or with B on the sign-in screen. `FFXI_SWITCH_RELOGIN=0` in `run.args` turns the restart off.
+Confirmed on a console.
 
 ## Performance
 

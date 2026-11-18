@@ -206,7 +206,8 @@ the forwarder's hbloader then loads the `.nro` at the sign-in screen again. Not 
 in the same process (`envSetNextLoad`): the game's threads (plat_posix.c's pool, the render thread) outlive
 `GameStart` and only the process's end stops them. Not after a close from HOME (`nx_exit_requested`),
 nor when the sign-in screen is left without a game (`xi_host_game_started`, host64.c), nor over a game held
-with R (a restart there starts that game). `FFXI_SWITCH_RELOGIN=0` turns it off. Not yet tried on a console.
+with R (a restart there starts that game). `FFXI_SWITCH_RELOGIN=0` turns it off. Confirmed on a console
+(2026-11-18): a lost connection came back to the sign-in screen.
 
 ## Not yet
 
