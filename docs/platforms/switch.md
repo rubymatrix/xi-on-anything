@@ -16,7 +16,7 @@ Developer notes are in [../switch.md](../switch.md).
 - A Windows, Linux or macOS PC. The [Quick start](#quick-start)'s setup installs what follows when it is
   missing (on Windows: Python with winget, devkitPro with its own installer, then the packages; on Linux and
   macOS the packages, once devkitPro's pacman is in). By hand: [devkitPro](https://devkitpro.org/wiki/Getting_Started) and these
-  packages: `pacman -S switch-dev switch-mesa switch-libdrm_nouveau switch-glad`. On Windows, devkitPro's
+  packages: `pacman -S switch-dev switch-mesa switch-libdrm_nouveau switch-glad switch-zlib switch-libexpat`. On Windows, devkitPro's
   msys2 or your own msys2 with devkitPro's pacman repositories both work; set `DEVKITPRO` (or `XI_MSYS2`)
   if it is not in `C:\devkitPro`, `C:\msys64` or `D:\msys64`.
 - Python 3.12+ with `capstone` and `pefile`.

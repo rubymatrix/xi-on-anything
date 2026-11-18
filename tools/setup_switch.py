@@ -42,7 +42,7 @@ LOG = OUT / 'setup.log'
 SAVED = OUT / 'setup.json'
 CALLER_DIR = os.getcwd()
 PACKAGES = ['capstone', 'pefile']
-DKP_PACKAGES = 'switch-dev switch-mesa switch-libdrm_nouveau switch-glad'
+DKP_PACKAGES = 'switch-dev switch-mesa switch-libdrm_nouveau switch-glad switch-zlib switch-libexpat'
 STEPS = ['Checking this PC', 'Finding the game', "Preparing the game's code", 'Frame delta sites',
          'Building the app', 'Putting it on the SD card']
 
@@ -174,7 +174,9 @@ def absent_packages(tc):
     if not tc.DKP:
         return DKP_PACKAGES.split()
     want = {'switch-dev': tc.LIBNX / 'lib/libnx.a', 'switch-mesa': tc.PORTLIBS / 'lib/libEGL.a',
-            'switch-libdrm_nouveau': tc.PORTLIBS / 'lib/libdrm_nouveau.a', 'switch-glad': tc.PORTLIBS / 'include/glad'}
+            'switch-libdrm_nouveau': tc.PORTLIBS / 'lib/libdrm_nouveau.a', 'switch-glad': tc.PORTLIBS / 'include/glad',
+            # Mesa 26's (build_switch.py mesa)
+            'switch-zlib': tc.PORTLIBS / 'lib/libz.a', 'switch-libexpat': tc.PORTLIBS / 'lib/libexpat.a'}
     return [pkg for pkg, path in want.items() if not path.exists()]
 
 
@@ -386,6 +388,15 @@ def build():
             note(line.strip())
 
     env = dict(os.environ, FFXI_PROGRESS='1', PYTHONUNBUFFERED='1')
+    # Mesa 26, for the shader cache (the first time a download of 12 MB); without it the build links devkitPro's
+    # switch-mesa, which plays the same with a hitch the first time each effect is seen in every session
+    if os.environ.get('XI_SWITCH_MESA') != '0':
+        try:
+            run([sys.executable, HERE / 'build_switch.py', 'mesa'], None, env)
+            note('Mesa 26: shaders are kept on the card, so each compiles once rather than every session')
+        except Failure as e:
+            log(str(e))
+            note("could not download Mesa 26 (the shader cache): building with devkitPro's Mesa instead")
     try:
         run([sys.executable, HERE / 'build_switch.py', 'host'], on_line, env)
     finally:

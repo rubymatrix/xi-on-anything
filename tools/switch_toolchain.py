@@ -70,7 +70,7 @@ def require():
     if not DKP:
         raise SystemExit(
             'devkitPro not found: install it (https://devkitpro.org/wiki/Getting_Started) with '
-            '`pacman -S switch-dev switch-mesa switch-libdrm_nouveau switch-glad`, and set DEVKITPRO '
+            '`pacman -S switch-dev switch-mesa switch-libdrm_nouveau switch-glad switch-zlib switch-libexpat`, and set DEVKITPRO '
             '(or XI_MSYS2 to the msys2 it is in)'
         )
 

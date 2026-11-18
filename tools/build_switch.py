@@ -10,6 +10,10 @@
         the settings app (host/switch_settings.c: the resolution, the frame rate and the rest of run.args, on
         the console) as build/switch/xi-on-anything-settings.nro; host builds it too, setup copies it to
         sdmc:/switch/xi-on-anything-settings/ (a folder of its own: the homebrew menu lists one .nro a folder)
+  python tools/build_switch.py mesa
+        download our build of Mesa 26 (mesa-switch: the disk shader cache) from the fork's release into
+        build/switch/mesa/, checked; host and gfx-test then link it (XI_SWITCH_MESA=<folder> another build of
+        it, XI_SWITCH_MESA=0 devkitPro's switch-mesa)
   python tools/build_switch.py setup --sd <SD root> [--nro file.nro] [--game "<FINAL FANTASY XI folder>"]
         [--server <name or IP>] [--fps-divisor N] [--dats <folder>] [--layout nintendo|xbox] [--arg ...]
         copy the .nro to sdmc:/switch/xi-on-anything/ and, with --game, the game beside it (only the
@@ -222,6 +226,7 @@ def settings(_a):
 def gfx_test(_a):
     """tests/gfx_test.c on the OpenGL back end, through EGL (tests/switch_gfx_test.c): build/switch/gfx-test.nro"""
     tc.require()
+    pick_mesa()
     OUT.mkdir(parents=True, exist_ok=True)
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
     objs = compile_many(GFX + ['runtime/portable/sdl_nx.c', 'runtime/portable/plat_posix.c', 'runtime/portable/gwin.c',
@@ -256,21 +261,77 @@ def desktop_tools():
 GFX = ['runtime/portable/gfx_gl.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
        'runtime/portable/gfx_fx.c']
 GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
-# XI_SWITCH_MESA=<prefix>: a newer Mesa instead, mesa-switch's (github.com/danfromtico/mesa-switch, Mesa 26 with
-# a Horizon backend over libnx and the disk shader cache; docs/switch.md, Mesa 26): its build-opengl.sh's
-# staged portlibs folder, <DESTDIR>/opt/devkitpro/portlibs/switch. Only gfx_gl.c includes EGL and GL, so only it
-# is compiled again; the link takes its libraries (egl.pc's, with no libdrm_nouveau).
-MESA = Path(os.environ['XI_SWITCH_MESA']) if os.environ.get('XI_SWITCH_MESA') else None
+# Mesa 26, mesa-switch's (github.com/danfromtico/mesa-switch: a Horizon backend over libnx, and Mesa's disk
+# shader cache, which switch-mesa 20.1 is built without; docs/switch.md, Mesa 26), when there is one:
+#   - XI_SWITCH_MESA=<prefix>: a build of it, build-opengl.sh's <DESTDIR>/opt/devkitpro/portlibs/switch
+#   - else the one `build_switch.py mesa` downloaded into build/switch/mesa/ (our build of it, on the fork's
+#     release MESA_RELEASE: static libraries and headers, Mesa's licenses, no game code)
+#   - XI_SWITCH_MESA=0, or neither: switch-mesa
+# Only gfx_gl.c includes EGL and GL, so only it is compiled again; the link takes its libraries (egl.pc's, with
+# no libdrm_nouveau) ahead of portlibs'.
+MESA_NAME = 'mesa-switch-26.2.4-0ff5207'
+MESA_RELEASE = ('https://github.com/hasanzainul10/xi-on-anything/releases/download/switch-mesa-26.2.4/'
+                + MESA_NAME + '.zip')
+MESA_SHA256 = '5f559138e4ec571cd3064dcb581624c75fa747df750807b0ef044095baa0df9d'
 MESA_INCLUDERS = {'runtime/portable/gfx_gl.c'}
-if MESA:
-    if not (MESA / 'lib/libEGL.a').exists():
-        raise SystemExit(f'XI_SWITCH_MESA={MESA}: no lib/libEGL.a there (the staged portlibs/switch folder)')
-    GFX_LIBS = ['-lEGL', '-lglapi', '-lz', '-lexpat', '-lstdc++']  # (link_nro: its lib folder first)
+MESA = None
+
+
+def mesa_dir():
+    return OUT / 'mesa' / MESA_NAME
+
+
+def pick_mesa():
+    """Which Mesa this build links (MESA, GFX_LIBS), as above; printed."""
+    global MESA, GFX_LIBS
+    env = os.environ.get('XI_SWITCH_MESA', '')
+    if env == '0':
+        MESA = None
+    elif env:
+        MESA = Path(env)
+        if not (MESA / 'lib/libEGL.a').exists():
+            raise SystemExit(f'XI_SWITCH_MESA={MESA}: no lib/libEGL.a there (the staged portlibs/switch folder)')
+    else:
+        MESA = mesa_dir() if (mesa_dir() / 'lib/libEGL.a').exists() else None
+    if MESA:
+        GFX_LIBS = ['-lEGL', '-lglapi', '-lz', '-lexpat', '-lstdc++']  # (link_nro: its lib folder first)
+    print('Mesa:', f'26 ({MESA})' if MESA else 'switch-mesa (devkitPro\'s, no shader cache)', flush=True)
+    return MESA
+
+
+def fetch_mesa(_a=None):
+    """Our build of Mesa 26 from the fork's release into build/switch/mesa/ (checked against MESA_SHA256);
+    nothing when it is there already. Its folder."""
+    import urllib.request
+    import zipfile
+    if (mesa_dir() / 'lib/libEGL.a').exists():
+        print('Mesa 26: already in', mesa_dir())
+        return mesa_dir()
+    z = OUT / 'mesa' / (MESA_NAME + '.zip')
+    z.parent.mkdir(parents=True, exist_ok=True)
+    if not z.exists() or hashlib.sha256(z.read_bytes()).hexdigest() != MESA_SHA256:
+        print('downloading', MESA_RELEASE, flush=True)
+        part = z.with_suffix('.part')
+        req = urllib.request.Request(MESA_RELEASE, headers={'User-Agent': 'xi-on-anything-build'})
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, 'wb') as f:
+            shutil.copyfileobj(r, f)
+        if hashlib.sha256(part.read_bytes()).hexdigest() != MESA_SHA256:
+            part.unlink()
+            raise SystemExit(f'{MESA_RELEASE}: not the file this build expects (its SHA-256 differs)')
+        part.replace(z)
+    with zipfile.ZipFile(z) as zf:
+        for m in zf.namelist():  # (its own folder only)
+            if not m.startswith(MESA_NAME + '/') or '..' in m.split('/'):
+                raise SystemExit(f'{z}: an unexpected path in it: {m}')
+        zf.extractall(OUT / 'mesa')
+    print('Mesa 26:', mesa_dir())
+    return mesa_dir()
 
 
 def host(a):
     """The game: build/switch/xi-on-anything.nro."""
     tc.require()
+    pick_mesa()
     OUT.mkdir(parents=True, exist_ok=True)
     build, bp, thirdparty = desktop_tools()
     if build.BUILD is None:
@@ -589,6 +650,7 @@ def main():
     sub.add_parser('plat-test')
     sub.add_parser('gfx-test')
     sub.add_parser('settings')
+    sub.add_parser('mesa', help='download our build of Mesa 26 (the shader cache) into build/switch/mesa/')
     h = sub.add_parser('host')
     h.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
     s = sub.add_parser('setup')
@@ -609,7 +671,7 @@ def main():
     lg = sub.add_parser('logs')
     lg.add_argument('--sd', required=True)
     a = ap.parse_args()
-    {'plat-test': plat_test, 'gfx-test': gfx_test, 'settings': settings, 'host': host, 'setup': setup, 'install': install, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
+    {'plat-test': plat_test, 'gfx-test': gfx_test, 'settings': settings, 'mesa': fetch_mesa, 'host': host, 'setup': setup, 'install': install, 'run': emu_run, 'deploy': deploy, 'logs': logs}[a.target](a)
 
 
 if __name__ == '__main__':
