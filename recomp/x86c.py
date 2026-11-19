@@ -21,6 +21,7 @@ import capstone
 from capstone import x86_const as X
 
 import flags_across_calls
+import native_loops
 import x87_slots
 
 # XI_X87_SLOTS=0: every function keeps x87_locals' rotating stack (to compare against recomp/x87_slots.py's)
@@ -308,6 +309,27 @@ class FunctionTranslator:
             emitted.append((ins, stmts, falls))
         return emitted
 
+    def native_loops(self, emitted):
+        """the game loops with a native version (recomp/native_loops.py): called after their first instruction,
+        going on at their exit when it ran"""
+        found = native_loops.sites(self.ctx)
+        if not found:
+            return emitted
+        here = {a: v for a, v in found.items() if a in self.addrs and v[1] in self.addrs}
+        if not here:
+            return emitted
+        exits = {v[1]: v[0] for v in here.values()}
+        out = []
+        for ins, stmts, falls in emitted:
+            if ins.address in exits:
+                stmts = [native_loops.at_exit(exits[ins.address])] + stmts
+            if ins.address in here and falls:
+                loop, exit_, g = here[ins.address]
+                stmts = stmts + native_loops.call(loop, exit_, g)
+                self.labels.add(exit_)
+            out.append((ins, stmts, falls))
+        return out
+
     def x87_effect(self, target):
         """what the function at target does to the x87 stack's depth (x87_slots.net_effect), None if unknown"""
         cache = self.ctx.__dict__.setdefault('x87_effects', {})
@@ -325,6 +347,7 @@ class FunctionTranslator:
 
     def translate(self):
         emitted = self.emit()
+        emitted = self.native_loops(emitted)
         # the x87 stack in fixed locals by its depth, where the function allows it (recomp/x87_slots.py); else
         # x87_locals' rotating ones, below
         plan = None

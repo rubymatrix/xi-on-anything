@@ -31,6 +31,7 @@ static RtNativeHandler g_native = NULL;
 void rt_set_native_handler(RtNativeHandler h) { g_native = h; }
 
 uint32_t rt_reloc_delta;
+int rt_native_check = -1; /* native_skin.h: FFXI_SKIN_CHECK, read at the first native loop */
 uint32_t rt_image_lo, rt_image_hi;
 static volatile uint32_t g_lookup_gen = 1; /* rt_lookup_any's cache: bumped when code is placed */
 

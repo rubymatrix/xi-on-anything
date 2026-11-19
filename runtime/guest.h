@@ -389,3 +389,6 @@ RT_INLINE void wrf80(uint32_t a, double v)
     memcpy(GUEST_PTR(a) + 8, &se, 2);
 }
 
+
+/* native versions of hot game loops the translation calls (recomp/native_loops.py) */
+#include "native_skin.h"
