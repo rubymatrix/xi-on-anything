@@ -43,6 +43,26 @@
 #if defined(FFXI_ANDROID_VULKAN)
 #include "build.h" /* FFXI_WRAP_PROBE_CTOR/DTOR, when the Android translation wraps them */
 #endif
+#include "d3d8_cmd.h" /* the D3D calls recorded for a worker thread (FFXI_D3D_WORKER), or run at once */
+
+/* the records d3d8_cmd.h carries (d3dw_run) */
+enum
+{
+    W_NOP = 1, /* one a frame, from Present: the ring's path in use before any call goes through it */
+};
+
+static void d3dw_run(uint32_t op, const void* body, uint32_t bytes)
+{
+    (void)body, (void)bytes;
+    switch (op)
+    {
+    case W_NOP:
+        break;
+    default:
+        fprintf(stderr, "d3d8 worker: an unknown record %u\n", op);
+        abort();
+    }
+}
 
 #define D3D_OK 0u
 #define D3DERR_INVALIDCALL 0x8876086Cu
@@ -240,28 +260,37 @@ static void ws_frame(void)
     g_ws.on = 1, g_ws.frame = frame, g_ws.at = now;
 }
 
-static Obj* g_objs;
-static uint32_t g_nobjs, g_capobjs, g_free_hint = 1;
+/* The objects, in pages that never move (a d3d8 worker thread may hold an Obj* while the game's thread makes
+ * more): object i is OBJ_AT(i). */
+#define OBJ_PAGE 1024u
+#define OBJ_PAGES 256u
+static Obj* g_obj_pages[OBJ_PAGES];
+#define OBJ_AT(i) (&g_obj_pages[(i) / OBJ_PAGE][(i) % OBJ_PAGE])
+static uint32_t g_nobjs, g_free_hint = 1;
 static uint32_t g_vtbl[O_SURFACE + 1];
 
 static uint32_t obj_new(int kind)
 {
     uint32_t i = g_free_hint;
-    while (i < g_nobjs && g_objs[i].kind != O_FREE)
+    while (i < g_nobjs && OBJ_AT(i)->kind != O_FREE)
         i++;
     if (i >= g_nobjs)
     {
-        if (g_nobjs + 2 > g_capobjs)
+        if ((g_nobjs + 2) / OBJ_PAGE >= OBJ_PAGES)
         {
-            g_capobjs = g_capobjs ? g_capobjs * 2 : 1024;
-            g_objs = (Obj*)realloc(g_objs, g_capobjs * sizeof *g_objs);
+            rt_log("[recomp] d3d8: more than %u objects\n", OBJ_PAGE * OBJ_PAGES);
+            abort();
         }
+        /* the page of the next one or two (index 0 and the first object, at the start) */
+        for (uint32_t k = g_nobjs; k <= g_nobjs + 1; ++k)
+            if (!g_obj_pages[k / OBJ_PAGE])
+                g_obj_pages[k / OBJ_PAGE] = (Obj*)calloc(OBJ_PAGE, sizeof(Obj));
         if (!g_nobjs)
-            g_objs[g_nobjs++].kind = O_FREE; /* index 0 is never an object */
+            OBJ_AT(g_nobjs++)->kind = O_FREE; /* index 0 is never an object */
         i = g_nobjs++;
     }
     g_free_hint = i + 1;
-    Obj* o = &g_objs[i];
+    Obj* o = OBJ_AT(i);
     memset(o, 0, sizeof *o);
     g_ws.creates++;
     o->kind = (uint8_t)kind;
@@ -277,7 +306,10 @@ static Obj* obj(uint32_t p)
     if (!p)
         return NULL;
     uint32_t i = rd32(p + 4);
-    return i && i < g_nobjs && g_objs[i].kind != O_FREE && g_objs[i].guest == p ? &g_objs[i] : NULL;
+    if (!i || i >= g_nobjs)
+        return NULL;
+    Obj* o = OBJ_AT(i);
+    return o->kind != O_FREE && o->guest == p ? o : NULL;
 }
 
 static uint32_t obj_release(uint32_t p);
@@ -1433,6 +1465,9 @@ static void capture_frame(Obj* bb)
 static void IDirect3DDevice8_Present(Guest* g)
 {
     ws_frame();
+    d3dw_rec(W_NOP, 0);
+    d3dw_done();
+    d3dw_sync(); /* (nothing goes over yet but the NOP: the worker, if on, is idle again before the present) */
     WORLD_FLUSH();
     cap_present();
     scene_present();
@@ -1511,7 +1546,7 @@ int d3d8_resize(uint32_t w, uint32_t h)
     /* the interface's targets: drawn at the new screen size (their contents are drawn again each frame) */
     for (uint32_t i = 1; i < g_nobjs; ++i)
     {
-        Obj* t = &g_objs[i];
+        Obj* t = OBJ_AT(i);
         if (t->kind != O_TEXTURE || !t->pw)
             continue;
         uint32_t pw = 0, ph = 0;
