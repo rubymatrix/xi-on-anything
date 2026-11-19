@@ -12,7 +12,8 @@
  * thread other than the main one broke the main thread's (docs/switch.md). Samples gather in a buffer that is
  * written each second.
  *
- * File: "FXSAMPL1", then records { u32 count; u32 rva[count]; }. */
+ * File: "FXSAMPL1", then records { u32 count; u32 rva[count]; }. A count with its top bit set is a mark instead: the
+ * game thread's frame sampler_frame (its low 31 bits) began, and the samples after it are that frame's. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@ static s64 g_off;
 static uint32_t g_buf[BUF_WORDS];
 static size_t g_n;
 static uint64_t g_stack_lo, g_stack_hi; /* the game thread's stack: where frame records may be */
+volatile uint32_t sampler_frame;
 
 static uint32_t rva(uint64_t a)
 {
@@ -73,8 +75,12 @@ static void sampler_main(void* unused)
             if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, c.sp)))
                 g_stack_lo = mi.addr, g_stack_hi = mi.addr + mi.size;
         }
-        if (g_n + 1 + SAMPLE_DEPTH > BUF_WORDS)
+        if (g_n + 2 + SAMPLE_DEPTH > BUF_WORDS)
             flush_buf();
+        static uint32_t marked = 0xFFFFFFFFu;
+        uint32_t f = sampler_frame;
+        if (f != marked)
+            g_buf[g_n++] = 0x80000000u | (f & 0x7FFFFFFFu), marked = f;
         uint32_t* rec = &g_buf[g_n];
         uint32_t n = 0;
         rec[1 + n++] = rva(c.pc.x);

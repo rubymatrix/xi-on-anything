@@ -9,6 +9,11 @@
 
 #include "plat.h"
 #include "runtime.h"
+#if defined(__SWITCH__)
+#include "gthread.h"
+#include "sampler.h"
+#include "thunk.h"
+#endif
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
@@ -1319,6 +1324,15 @@ void gfxq_present(GfxTex* backbuffer)
     g_game_wait_all += gfx_now_ns() - t0;
 #if defined(__SWITCH__)
     adapt_interval(enter, gfx_now_ns());
+    {
+        /* the frame that ended: a long one logged with what it did (thunk.c), and the sampler's frame marks */
+        static uint64_t last, rt_was, lock_was;
+        uint64_t now = gfx_now_ns(), lock = gt_wait_ns();
+        if (last && gfx_profiling)
+            thunk_frame_end(sampler_frame, now - last, g_game_wait_all - rt_was, lock - lock_was);
+        last = now, rt_was = g_game_wait_all, lock_was = lock;
+        sampler_frame++;
+    }
 #endif
     if (gfx_profiling)
         profile_line();

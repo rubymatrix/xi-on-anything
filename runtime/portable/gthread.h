@@ -31,6 +31,18 @@ void gt_init(void);
 void gt_lock(void);
 void gt_unlock(void);
 int gt_holds(void);
+uint64_t gt_wait_ns(void); /* the calling thread's time waiting in gt_lock, all along */
+/* Who kept the game thread waiting (FFXI_PROFILE's long frames, thunk.c): with a thread watched, the longest any other
+ * thread held the lock since the last take, and the shim it spent longest in meanwhile (thunk_dispatch notes them) */
+typedef struct GtHold
+{
+    uint64_t ns, in_ns;
+    uint32_t tid;
+    const char* in;
+} GtHold;
+void gt_watch(uint32_t tid);
+void gt_note_shim(const char* name, uint64_t ns);
+void gt_take_long_hold(GtHold* h);
 /* Nesting: while on, this thread keeps the lock at safepoints (translated loops don't hand it to
  * another guest thread). For host code that must not be re-entered from another thread while it
  * calls into the guest (the addon host's Lua states). Blocking shims still release the lock. */

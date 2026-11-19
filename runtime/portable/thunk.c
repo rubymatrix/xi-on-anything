@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gthread.h"
 #include "plat.h"
 #include "thunk.h"
 
@@ -18,7 +19,12 @@ typedef struct Thunk
     char name[96]; /* DLL!name */
     Shim shim;
     uint64_t prof_ns, prof_calls; /* the game thread's time in it since the last report */
+    uint64_t frame_ns;            /* ... in this frame (thunk_frame_end), when frame_tag is the frame's */
+    uint32_t frame_calls, frame_tag;
 } Thunk;
+
+static uint32_t g_frame_tag = 1;
+static unsigned g_touched[256], g_ntouched; /* the thunks the game thread called this frame */
 
 static Thunk* g_thunks;
 static unsigned g_count, g_cap;
@@ -111,6 +117,55 @@ void thunk_prof_report(void)
         g_thunks[i].prof_ns = g_thunks[i].prof_calls = 0;
 }
 
+/* A frame of the game thread's ended (gfx_queue.c, at its present): one that took long (FFXI_PROFILE) is logged with
+ * the shims it spent the most time in, and its waits; the rest of it was translated code */
+void thunk_frame_end(uint32_t frame, uint64_t frame_ns, uint64_t render_wait_ns, uint64_t lock_wait_ns)
+{
+    static int watching;
+    if (!watching)
+        gt_watch(plat_thread_id()), watching = 1;
+    GtHold h;
+    gt_take_long_hold(&h);
+    if (frame_ns >= 60000000ull && g_ntouched)
+    {
+        unsigned top[5], n = 0;
+        uint64_t in_shims = 0;
+        for (unsigned j = 0; j < g_ntouched; ++j)
+        {
+            unsigned i = g_touched[j];
+            in_shims += g_thunks[i].frame_ns;
+            unsigned k = n < 5 ? n++ : 5;
+            while (k > 0 && g_thunks[top[k - 1]].frame_ns < g_thunks[i].frame_ns)
+            {
+                if (k < 5)
+                    top[k] = top[k - 1];
+                k--;
+            }
+            if (k < 5)
+                top[k] = i;
+        }
+        char line[768];
+        int o = snprintf(line, sizeof line, "[switch] long frame #%u: %.1f ms; waiting for the render thread %.1f, the guest lock %.1f; "
+            "translated code and the rest %.1f; in shims:", frame, (double)frame_ns * 1e-6, (double)render_wait_ns * 1e-6,
+            (double)lock_wait_ns * 1e-6, (double)(frame_ns > in_shims ? frame_ns - in_shims : 0) * 1e-6);
+        for (unsigned k = 0; k < n && o < (int)sizeof line - 100; ++k)
+        {
+            const Thunk* t = &g_thunks[top[k]];
+            const char* nm = strchr(t->name, '!');
+            o += snprintf(line + o, sizeof line - (size_t)o, " %s %.1f ms/%u", nm ? nm + 1 : t->name,
+                (double)t->frame_ns * 1e-6, t->frame_calls);
+        }
+        if (h.ns >= 2000000ull && o < (int)sizeof line - 160)
+        {
+            const char* hn = h.in ? strchr(h.in, '!') : NULL;
+            o += snprintf(line + o, sizeof line - (size_t)o, "; the lock held by thread %u for up to %.1f ms (in %s %.1f ms)",
+                h.tid, (double)h.ns * 1e-6, hn ? hn + 1 : h.in ? h.in : "translated code", (double)h.in_ns * 1e-6);
+        }
+        rt_log("%s\n", line);
+    }
+    g_frame_tag++, g_ntouched = 0;
+}
+
 int thunk_dispatch(Guest* g, uint32_t target)
 {
     const char* name = thunk_name(target);
@@ -143,10 +198,18 @@ int thunk_dispatch(Guest* g, uint32_t target)
         t_depth--;
         uint64_t ns = rt_monotonic_ns() - t0;
         thunk_timer(ns);
+        gt_note_shim(name, ns);
         if (plat_thread_id() == thunk_prof_thread)
         {
             Thunk* t = &g_thunks[(target - THUNK_BASE) / THUNK_STRIDE];
             t->prof_ns += ns, t->prof_calls++;
+            if (t->frame_tag != g_frame_tag)
+            {
+                t->frame_tag = g_frame_tag, t->frame_ns = 0, t->frame_calls = 0;
+                if (g_ntouched < sizeof g_touched / sizeof g_touched[0])
+                    g_touched[g_ntouched++] = (target - THUNK_BASE) / THUNK_STRIDE;
+            }
+            t->frame_ns += ns, t->frame_calls++;
         }
         return 1;
     }

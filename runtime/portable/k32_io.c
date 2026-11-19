@@ -294,9 +294,6 @@ static void sh_CreateFileA(Guest* g)
     else
         dat_forget(host);
 #endif
-    /* whether it was there: only CREATE_ALWAYS and OPEN_ALWAYS say (a trip to the disk saved otherwise) */
-    PlatStat st;
-    int existed = (disp == 2 || disp == 4) && plat_stat(host, &st);
     switch (disp)
     {
     case 1: flags |= PLAT_CREATE | PLAT_EXCL; break;     /* CREATE_NEW */
@@ -306,10 +303,17 @@ static void sh_CreateFileA(Guest* g)
     case 5: flags |= PLAT_TRUNCATE; break;               /* TRUNCATE_EXISTING */
     default: gt_set_error(ERROR_INVALID_PARAMETER); RET(INVALID_HANDLE, 7);
     }
+    /* the disk without the guest lock (10-28 ms an open on the Switch's card, the game thread waiting) */
+    gt_unlock();
+    /* whether it was there: only CREATE_ALWAYS and OPEN_ALWAYS say (a trip to the disk saved otherwise) */
+    PlatStat st;
+    int existed = (disp == 2 || disp == 4) && plat_stat(host, &st);
     PlatFile* f = plat_file_open(host, flags);
+    PlatError err = f ? (PlatError)0 : plat_error(); /* (before gt_lock, which may change it) */
+    gt_lock();
     if (!f)
     {
-        fail_plat();
+        gt_set_error(win32_error(err));
         trace_miss("CreateFileA", ARGS(0));
         RET(INVALID_HANDLE, 7);
     }
@@ -529,6 +533,7 @@ typedef struct Find
     char dir_host[1400];
     char** names;
     unsigned n, next;
+    int listed; /* find_list: 1 the folder was listed, -1 it couldn't be opened */
 } Find;
 
 static void find_close(void* p)
@@ -565,33 +570,50 @@ static int wild(const char* pat, const char* s)
     return !*s;
 }
 
-static int find_fill(Find* f, uint32_t out)
+/* the next name's attributes (a file's stat: no guest memory, so without the guest lock), 0 when none is left */
+static int find_next_stat(Find* f, const char** name, PlatStat* st)
 {
     while (f->next < f->n)
     {
-        const char* name = f->names[f->next++];
+        const char* nm = f->names[f->next++];
         char host[1700];
-        PlatStat st;
-        snprintf(host, sizeof host, "%s%c%s", f->dir_host, plat_path_sep, name);
-        if (!strcmp(name, ".") || !strcmp(name, ".."))
+        snprintf(host, sizeof host, "%s%c%s", f->dir_host, plat_path_sep, nm);
+        if (!strcmp(nm, ".") || !strcmp(nm, ".."))
         {
-            memset(&st, 0, sizeof st);
-            st.is_dir = 1;
+            memset(st, 0, sizeof *st);
+            st->is_dir = 1;
         }
-        else if (!plat_stat(host, &st))
+        else if (!plat_stat(host, st))
             continue;
-        memset(GUEST_PTR(out), 0, 320);
-        wr32(out, attributes(&st));
-        wr64(out + 4, ms_to_ft(st.ctime_ms));
-        wr64(out + 12, ms_to_ft(st.atime_ms));
-        wr64(out + 20, ms_to_ft(st.mtime_ms));
-        wr32(out + 28, (uint32_t)(st.size >> 32));
-        wr32(out + 32, (uint32_t)st.size);
-        to_guest_name(name, (char*)GUEST_PTR(out + 44), 260);
+        *name = nm;
         return 1;
     }
     return 0;
 }
+
+static void find_write(uint32_t out, const char* name, const PlatStat* st)
+{
+    memset(GUEST_PTR(out), 0, 320);
+    wr32(out, attributes(st));
+    wr64(out + 4, ms_to_ft(st->ctime_ms));
+    wr64(out + 12, ms_to_ft(st->atime_ms));
+    wr64(out + 20, ms_to_ft(st->mtime_ms));
+    wr32(out + 28, (uint32_t)(st->size >> 32));
+    wr32(out + 32, (uint32_t)st->size);
+    to_guest_name(name, (char*)GUEST_PTR(out + 44), 260);
+}
+
+static int find_fill(Find* f, uint32_t out)
+{
+    const char* name;
+    PlatStat st;
+    if (!find_next_stat(f, &name, &st))
+        return 0;
+    find_write(out, name, &st);
+    return 1;
+}
+
+static void find_list(Find* f, const char* pattern, int dots);
 
 static void sh_FindFirstFileA(Guest* g)
 {
@@ -630,16 +652,58 @@ static void sh_FindFirstFileA(Guest* g)
         RET(INVALID_HANDLE, 2);
     }
     int wildcard = strchr(pattern, '*') || strchr(pattern, '?');
-    PlatDir* d = plat_dir_open(f->dir_host);
-    if (!d)
+    /* The host's part without the guest lock (the game's loader thread asks for one DAT at a time, and held it
+     * 8-30 ms each on the Switch's card while the game thread waited). One name without wildcards: looked at
+     * directly, which finds it whatever its case where the file system ignores case (the Switch's card, macOS,
+     * Windows); listing the folder (hundreds of DATs) to match it is for where that fails. */
+    gt_unlock();
+    const char* first = NULL;
+    PlatStat first_st;
+    if (!wildcard)
+    {
+        char host[1700];
+        snprintf(host, sizeof host, "%s%c%s", f->dir_host, plat_path_sep, pattern);
+        if (plat_stat(host, &first_st))
+        {
+            f->names = (char**)malloc(sizeof *f->names);
+            f->names[f->n++] = strdup(pattern);
+            f->next = 1, first = f->names[0];
+        }
+    }
+    if (!first)
+        find_list(f, pattern, wildcard && strlen(full) > 3);
+    int found = first || find_next_stat(f, &first, &first_st);
+    gt_lock();
+    if (!found && f->listed < 0)
     {
         free(f);
         trace_miss("FindFirstFileA", ARGS(0));
         gt_set_error(ERROR_PATH_NOT_FOUND);
         RET(INVALID_HANDLE, 2);
     }
+    if (!found)
+    {
+        find_close(f);
+        trace_miss("FindFirstFileA", ARGS(0));
+        gt_set_error(ERROR_FILE_NOT_FOUND);
+        RET(INVALID_HANDLE, 2);
+    }
+    find_write(ARG(1), first, &first_st);
+    RET(k_new(K_FIND, f, find_close), 2);
+}
+
+/* the folder's names matching pattern (and . and .. when dots), into f; f->listed -1 when it can't be opened */
+static void find_list(Find* f, const char* pattern, int dots)
+{
+    PlatDir* d = plat_dir_open(f->dir_host);
+    if (!d)
+    {
+        f->listed = -1;
+        return;
+    }
+    f->listed = 1;
     unsigned cap = 0;
-    if (wildcard && strlen(full) > 3)
+    if (dots)
         for (int k = 0; k < 2; ++k)
             if (wild(pattern, k ? ".." : "."))
             {
@@ -658,14 +722,6 @@ static void sh_FindFirstFileA(Guest* g)
         f->names[f->n++] = strdup(e);
     }
     plat_dir_close(d);
-    if (!find_fill(f, ARG(1)))
-    {
-        find_close(f);
-        trace_miss("FindFirstFileA", ARGS(0));
-        gt_set_error(ERROR_FILE_NOT_FOUND);
-        RET(INVALID_HANDLE, 2);
-    }
-    RET(k_new(K_FIND, f, find_close), 2);
 }
 
 static void sh_FindNextFileA(Guest* g)

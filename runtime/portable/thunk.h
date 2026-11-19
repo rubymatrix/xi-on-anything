@@ -38,6 +38,8 @@ extern void (*thunk_timer)(uint64_t ns);
  * logs the top shims by time since the last report. */
 extern uint32_t thunk_prof_thread;
 void thunk_prof_report(void);
+/* The game thread's frame ended (gfx_queue.c): logs a long one with its top shims (FFXI_PROFILE), and starts the next. */
+void thunk_frame_end(uint32_t frame, uint64_t frame_ns, uint64_t render_wait_ns, uint64_t lock_wait_ns);
 /* Logs every bound import that has no shim yet; returns how many. */
 unsigned thunk_report_missing(void);
 
