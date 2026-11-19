@@ -364,6 +364,10 @@ def host(a):
     # the guest window's base copied into each translated function (guest.h, RT_LOCAL_BASE): not reloaded after
     # every store into guest memory
     warn += ['-DRT_LOCAL_BASE']
+    # XI_REGS_CHECK=1: a test build checking recomp/regs_across_calls.py at every direct call (guest.h, RT_REGS_CHECK);
+    # switching it needs the generated objects rebuilt (they are compiled again only when their source changes)
+    if os.environ.get('XI_REGS_CHECK') == '1':
+        warn += ['-DRT_REGS_CHECK']
     objs += compile_many(gen_all, 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
     objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
     phase('app')

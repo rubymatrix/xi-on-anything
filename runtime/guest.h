@@ -151,6 +151,63 @@ extern RT_HOT_GLOBAL uint32_t rt_rd __asm__("rt_reloc_delta");
     eax = g->eax; ecx = g->ecx; edx = g->edx; ebx = g->ebx;                                      \
     esp = g->esp; ebp = g->ebp; esi = g->esi; edi = g->edi; df = g->df
 
+/* Around a direct call and at a return (recomp/regs_across_calls.py): only the registers in m (a constant: eax 1,
+ * ecx 2, edx 4, ebx 8, esp 0x10, ebp 0x20, esi 0x40, edi 0x80, the arithmetic flags 0x100), and DF. A call stores what
+ * its callee may use or change and reloads what it may change; a return stores what the function may have changed.
+ * RT_REGS_CHECK (a test build): REGS_PUT stores everything, and RT_REGS_CHECK_CALL after a call compares each register
+ * it doesn't reload with what the callee left (rt_regs_off logs a difference: the analysis was wrong there). */
+#if defined(RT_REGS_CHECK)
+#define REGS_PUT_M(m) 0x1FFu
+#else
+#define REGS_PUT_M(m) (m)
+#endif
+#define REGS_PUT(m)                                                                              \
+    do {                                                                                         \
+        if (REGS_PUT_M(m) & 0x01u) g->eax = eax;                                                 \
+        if (REGS_PUT_M(m) & 0x02u) g->ecx = ecx;                                                 \
+        if (REGS_PUT_M(m) & 0x04u) g->edx = edx;                                                 \
+        if (REGS_PUT_M(m) & 0x08u) g->ebx = ebx;                                                 \
+        if (REGS_PUT_M(m) & 0x10u) g->esp = esp;                                                 \
+        if (REGS_PUT_M(m) & 0x20u) g->ebp = ebp;                                                 \
+        if (REGS_PUT_M(m) & 0x40u) g->esi = esi;                                                 \
+        if (REGS_PUT_M(m) & 0x80u) g->edi = edi;                                                 \
+        if (REGS_PUT_M(m) & 0x100u)                                                              \
+        {                                                                                        \
+            g->cf = (uint8_t)cf; g->pf = (uint8_t)pf; g->af = (uint8_t)af; g->zf = (uint8_t)zf;  \
+            g->sf = (uint8_t)sf; g->of = (uint8_t)of;                                            \
+        }                                                                                        \
+        g->df = (uint8_t)df;                                                                     \
+    } while (0)
+#define REGS_GET(m)                                                                              \
+    do {                                                                                         \
+        if ((m) & 0x01u) eax = g->eax;                                                           \
+        if ((m) & 0x02u) ecx = g->ecx;                                                           \
+        if ((m) & 0x04u) edx = g->edx;                                                           \
+        if ((m) & 0x08u) ebx = g->ebx;                                                           \
+        if ((m) & 0x10u) esp = g->esp;                                                           \
+        if ((m) & 0x20u) ebp = g->ebp;                                                           \
+        if ((m) & 0x40u) esi = g->esi;                                                           \
+        if ((m) & 0x80u) edi = g->edi;                                                           \
+        if ((m) & 0x100u)                                                                        \
+        {                                                                                        \
+            cf = g->cf; pf = g->pf; af = g->af; zf = g->zf; sf = g->sf; of = g->of;              \
+        }                                                                                        \
+        df = g->df;                                                                              \
+    } while (0)
+#if defined(RT_REGS_CHECK)
+void rt_regs_off(uint32_t at, unsigned reg, uint32_t mine, uint32_t left);
+#define RT_REGS_CHECK_CALL(m, at)                                                                \
+    do {                                                                                         \
+        const uint32_t mine_[8] = { eax, ecx, edx, ebx, esp, ebp, esi, edi };                    \
+        const uint32_t left_[8] = { g->eax, g->ecx, g->edx, g->ebx, g->esp, g->ebp, g->esi, g->edi }; \
+        for (unsigned r_ = 0; r_ < 8; ++r_)                                                      \
+            if (!((m) >> r_ & 1u) && mine_[r_] != left_[r_])                                     \
+                rt_regs_off((at), r_, mine_[r_], left_[r_]);                                     \
+    } while (0)
+#else
+#define RT_REGS_CHECK_CALL(m, at) ((void)0)
+#endif
+
 /* PF: set when the low byte has an even number of 1 bits. 0x6996 is the parity of each nibble. */
 #define PARITY(v) ((unsigned)(!((0x6996u >> ((((uint32_t)(v) & 0xFFu) ^ (((uint32_t)(v) & 0xFFu) >> 4)) & 0xFu)) & 1u)))
 

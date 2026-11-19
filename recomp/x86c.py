@@ -22,10 +22,12 @@ from capstone import x86_const as X
 
 import flags_across_calls
 import native_loops
+import regs_across_calls
 import x87_slots
 
 # XI_X87_SLOTS=0: every function keeps x87_locals' rotating stack (to compare against recomp/x87_slots.py's)
 X87_SLOTS = __import__('os').environ.get('XI_X87_SLOTS', '1') != '0'
+REGS_CALLS = os.environ.get('XI_REGS_CALLS', '1') != '0'  # recomp/regs_across_calls.py
 
 R32 = ('eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi')
 R16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
@@ -61,6 +63,8 @@ def x87_locals(lines):
         s = line.replace('REGS_DECL;', 'REGS_DECL; X87_DECL;').replace('REGS_LOAD;', 'REGS_LOAD; X87_LOAD;')
         s = s.replace('REGS_STORE;', 'REGS_STORE; X87_STORE;').replace('REGS_STORE_CALL;', 'REGS_STORE_CALL; X87_STORE;')
         s = s.replace('REGS_LOAD_CALL;', 'REGS_LOAD_CALL; X87_LOAD;')
+        s = re.sub(r'(REGS_PUT\(0x[0-9A-F]+u\);)', r'\1 X87_STORE;', s)
+        s = re.sub(r'(REGS_GET\(0x[0-9A-F]+u\);)', r'\1 X87_LOAD;', s)
         s = re.sub(r'\bST\(([0-7])\)', r'x87_s\1', s)
         s = s.replace('fpush(g, ', 'X87_PUSH(').replace('fpop(g)', 'X87_POP()').replace('fr(g, ', 'fr_cw(x87_cw, ')
         for f in ('frnd', 'fist16', 'fist32', 'fist64'):
@@ -290,9 +294,29 @@ class FunctionTranslator:
         # the arithmetic flags go in only to a function that reads them at entry, and come back only where the code
         # after the call may read them (guest.h, REGS_STORE_CALL; recomp/flags_across_calls.py); returns store them
         # all, a tail jump (goto above) too
-        store = 'REGS_STORE;' if target in self.flag_entry() else 'REGS_STORE_CALL;'
+        flags_in = target in self.flag_entry()
+        rw = self.regs()
+        if rw is not None and target in rw[0]:
+            # only the registers the callee may use or change go in, only those it may change come back
+            # (recomp/regs_across_calls.py, guest.h REGS_PUT); the flags as before
+            w, u = rw[0][target], rw[1][target]
+            put = w | u | regs_across_calls.ESP | (regs_across_calls.FLAGS_BIT if flags_in else 0)
+            clean = flags_across_calls.scan(self.ctx, ret_addr) == flags_across_calls.CLEAN
+            get = w | regs_across_calls.ESP | (0 if clean else regs_across_calls.FLAGS_BIT)
+            return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
+                    'REGS_PUT(0x%Xu); %s%08x(g); REGS_GET(0x%Xu); RT_REGS_CHECK_CALL(0x%Xu, 0x%08Xu);'
+                    % (put, self.ctx.prefix, target, get, get, ret_addr - 5)]
+        store = 'REGS_STORE;' if flags_in else 'REGS_STORE_CALL;'
         return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
                 '%s %s%08x(g); %s' % (store, self.ctx.prefix, target, self.load_after(ret_addr))]
+
+    def regs(self):
+        """(W, U) of every function (recomp/regs_across_calls.py), once per translation; None when off"""
+        if not REGS_CALLS:
+            return None
+        if getattr(self.ctx, 'regs_w', None) is None:
+            regs_across_calls.analyze(self.ctx, FunctionTranslator)
+        return self.ctx.regs_w, self.ctx.regs_u
 
     def xform_kind(self, target):
         """1 for the game's point transform, 0 for its direction transform (XFORM_BYTES), None for anything else"""
@@ -662,6 +686,14 @@ class FunctionTranslator:
                           % (self.rd(ins, t, 32), hexu(nxt), self.load_after(nxt))], True
         if mn == 'ret':
             n = ops[0].imm if ops else 0
+            rw = self.regs()
+            if rw is not None and self.entry in rw[0]:
+                # the registers this function may have changed, those it (or a callee) may have left in the guest's
+                # changed (regs_across_calls.dirtied: put in for a call, then restored), and the flags (returns store
+                # them all)
+                return ['esp += %d; REGS_PUT(0x%Xu); return;' % (4 + n, rw[0][self.entry] | self.ctx.regs_d[self.entry]
+                                                                  | regs_across_calls.ESP |
+                                                                  regs_across_calls.FLAGS_BIT)], False
             return ['esp += %d; REGS_STORE; return;' % (4 + n)], False
 
         raise Unsupported(mn)

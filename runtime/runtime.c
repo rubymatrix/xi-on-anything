@@ -197,6 +197,25 @@ void rt_x87_off(Guest* g, uint32_t at)
     }
 }
 
+/* A test build's check (RT_REGS_CHECK, guest.h): the call at `at` left a register the translation keeps in its local
+ * (recomp/regs_across_calls.py says the callee gives it back) changed. Logged for the first 32 calls and registers. */
+void rt_regs_off(uint32_t at, unsigned reg, uint32_t mine, uint32_t left)
+{
+    static const char* const names[8] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
+    static uint32_t said[32];
+    static unsigned n;
+    uint32_t key = at ^ (reg << 28);
+    for (unsigned i = 0; i < n; ++i)
+        if (said[i] == key)
+            return;
+    if (n < 32)
+    {
+        said[n++] = key;
+        rt_log("[recomp] regs: the call at %08x changed %s (%08x, kept %08x), which its translation doesn't reload\n", at,
+            names[reg & 7u], left, mine);
+    }
+}
+
 void rt_fatal(Guest* g, uint32_t addr, const char* what)
 {
     rt_log("\n[recomp] FATAL at %08x: %s\n", addr, what);

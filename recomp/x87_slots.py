@@ -34,13 +34,13 @@ class NoPlan(Exception):
 def calls_re(prefix):
     """a call, as x86c.py emits it: REGS_STORE(_CALL); <fn>(g) or rt_call_indirect(g, t); REGS_LOAD(_CALL);"""
     fn = r'(?:%s[0-9a-f]{8}\(g\)|rt_call_indirect\(g, t\))' % re.escape(prefix)
-    return re.compile(r'(REGS_STORE(?:_CALL)?;) (%s;) (REGS_LOAD(?:_CALL)?;)' % fn)
+    return re.compile(r'((?:REGS_STORE(?:_CALL)?|REGS_PUT\(0x[0-9A-F]+u\));) (%s;) ((?:REGS_LOAD(?:_CALL)?|REGS_GET\(0x[0-9A-F]+u\));)' % fn)
 
 
 def exits_re(prefix):
     """a way out of the function: a return, a tail call, an indirect jump"""
     fn = r'(?:%s[0-9a-f]{8}\(g\)|rt_call_indirect\(g, t\))' % re.escape(prefix)
-    return re.compile(r'(REGS_STORE(?:_CALL)?;)( (?:%s; )?return;)' % fn)
+    return re.compile(r'((?:REGS_STORE(?:_CALL)?|REGS_PUT\(0x[0-9A-F]+u\));)( (?:%s; )?return;)' % fn)
 
 
 def simulate(text, d):
@@ -236,8 +236,8 @@ class Plan:
 
         fn = r'(?:%s[0-9a-f]{8}\(g\)|rt_call_indirect\(g, t\))' % re.escape(self.prefix)
         pat = re.compile(
-            r'(?P<call>(?P<cs>REGS_STORE(?:_CALL)?;) (?P<cf>%s;) (?P<cl>REGS_LOAD(?:_CALL)?;))'
-            r'|(?P<es>REGS_STORE(?:_CALL)?;)(?P<er> (?:%s; )?return;)'
+            r'(?P<call>(?P<cs>(?:REGS_STORE(?:_CALL)?|REGS_PUT\(0x[0-9A-F]+u\));) (?P<cf>%s;) (?P<cl>(?:REGS_LOAD(?:_CALL)?|REGS_GET\(0x[0-9A-F]+u\));))'
+            r'|(?P<es>(?:REGS_STORE(?:_CALL)?|REGS_PUT\(0x[0-9A-F]+u\));)(?P<er> (?:%s; )?return;)'
             r'|ST\((?P<st>[0-7])\)|fpush\(g, |fpop\(g\)|fstsw\(g\)' % (fn, fn))
         out = []
         for line in stmts:  # in order: the depth goes on from one statement to the next
@@ -254,7 +254,7 @@ class Plan:
         d = simulate(self.text[a_prev], self.depth.get(a_prev, 0)) if a_prev in self.text else 0
         if a_prev in self.calls:
             d = self.calls[a_prev][1]
-        return re.sub(r'(REGS_STORE(?:_CALL)?;)( (?:\w+\(g(?:, t)?\); )?return;)',
+        return re.sub(r'((?:REGS_STORE(?:_CALL)?|REGS_PUT\(0x[0-9A-F]+u\));)( (?:\w+\(g(?:, t)?\); )?return;)',
                       lambda m: '%s %s%s' % (m.group(1), self.out(d), m.group(2)), line)
 
 
