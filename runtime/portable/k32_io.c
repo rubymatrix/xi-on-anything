@@ -283,6 +283,8 @@ static void sh_CreateFileA(Guest* g)
 #if defined(__SWITCH__)
     int keep = flags == PLAT_READ && disp == 3 && is_dat(host); /* read-only, OPEN_EXISTING */
     if (keep)
+        flags |= PLAT_CACHED;
+    if (keep)
     {
         PlatFile* kept = dat_take(host);
         if (kept)

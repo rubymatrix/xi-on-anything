@@ -610,7 +610,195 @@ struct PlatFile
 {
     int fd;
     HttpFile* h; /* the browser's served files */
+    uint32_t path_hash; /* (the Switch's read profile) */
+    uint64_t path64;    /* PLAT_CACHED on the Switch: read through the block cache (bc_read), by this */
 };
+
+#if defined(__SWITCH__)
+/* FFXI_PROFILE: what the game reads, on any thread (atomics; the game thread reports it, plat_read_report): reads,
+ * bytes and time by size, and of them those of a file, offset and size read before (what a cache would save) */
+static int g_read_prof = -1;
+static uint64_t g_rd_n[4], g_rd_bytes[4], g_rd_ns[4], g_rd_again_n, g_rd_again_bytes, g_rd_again_ns;
+static uint64_t g_rd_seen[1u << 16];
+
+static uint32_t path_hash(const char* p)
+{
+    uint32_t h = 2166136261u;
+    for (; *p; ++p)
+        h = (h ^ (uint8_t)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p)) * 16777619u;
+    return h;
+}
+
+static void read_note(const PlatFile* f, int64_t off, int64_t got, uint64_t ns)
+{
+    if (got <= 0)
+        return;
+    int b = got < 4096 ? 0 : got < 65536 ? 1 : got < 1048576 ? 2 : 3;
+    __atomic_fetch_add(&g_rd_n[b], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_rd_bytes[b], (uint64_t)got, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_rd_ns[b], ns, __ATOMIC_RELAXED);
+    uint64_t key = ((uint64_t)f->path_hash << 32) ^ ((uint64_t)off * 0x9E3779B97F4A7C15ull) ^ (uint64_t)got;
+    key |= 1;
+    uint64_t* slot = &g_rd_seen[(key ^ (key >> 29)) & 0xFFFFu];
+    if (__atomic_load_n(slot, __ATOMIC_RELAXED) == key)
+    {
+        __atomic_fetch_add(&g_rd_again_n, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_rd_again_bytes, (uint64_t)got, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_rd_again_ns, ns, __ATOMIC_RELAXED);
+    }
+    else
+        __atomic_store_n(slot, key, __ATOMIC_RELAXED);
+}
+
+int plat_read_report(char* out, size_t n)
+{
+    if (g_read_prof <= 0)
+        return 0;
+    static const char* names[4] = { "under 4 KB", "4-64 KB", "64 KB-1 MB", "1 MB and over" };
+    int o = snprintf(out, n, "reads:");
+    for (int b = 0; b < 4; ++b)
+    {
+        uint64_t c = __atomic_exchange_n(&g_rd_n[b], 0, __ATOMIC_RELAXED);
+        uint64_t by = __atomic_exchange_n(&g_rd_bytes[b], 0, __ATOMIC_RELAXED);
+        uint64_t ns = __atomic_exchange_n(&g_rd_ns[b], 0, __ATOMIC_RELAXED);
+        if (c && o < (int)n)
+            o += snprintf(out + o, n - (size_t)o, " %s %llu (%.1f MB, %.0f ms, %.2f ms each);", names[b],
+                (unsigned long long)c, (double)by / 1048576.0, (double)ns * 1e-6, (double)ns * 1e-6 / (double)c);
+    }
+    uint64_t an = __atomic_exchange_n(&g_rd_again_n, 0, __ATOMIC_RELAXED);
+    uint64_t ab = __atomic_exchange_n(&g_rd_again_bytes, 0, __ATOMIC_RELAXED);
+    uint64_t ans = __atomic_exchange_n(&g_rd_again_ns, 0, __ATOMIC_RELAXED);
+    if (o < (int)n)
+        snprintf(out + o, n - (size_t)o, " read before: %llu (%.1f MB, %.0f ms)", (unsigned long long)an,
+            (double)ab / 1048576.0, (double)ans * 1e-6);
+    return 1;
+}
+#endif
+
+#if defined(__SWITCH__)
+/* The game's DATs through a block cache (PLAT_CACHED: k32_io.c's read-only opens of them). On the Switch's card a read
+ * costs ~1 ms however small (a request to the file system service), and in a crowd the game reads 100-400 times in
+ * 10 s, under 64 KB mostly and 40-60% of them a file, offset and size read before. Reads under 256 KB go through 64 KB
+ * blocks, the last 32 MB of them kept (4-way sets, least recently used out); bigger ones go to the card as they are.
+ * The DATs are never written while the game runs (k32_io.c opens them so only read-only), so a block stays good. */
+#define BC_BLOCK 65536u
+#define BC_WAYS 4u
+#define BC_SETS 128u /* 512 blocks: 32 MB */
+#define BC_DIRECT (256u * 1024u)
+
+typedef struct BcBlock
+{
+    uint64_t path, block; /* path: the file's FNV-1a 64 (case folded); 0 empty */
+    uint32_t len;         /* < BC_BLOCK only for a file's last */
+    uint64_t used;
+    uint8_t* data;
+} BcBlock;
+
+static BcBlock g_bc[BC_SETS][BC_WAYS];
+static pthread_mutex_t g_bc_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_bc_tick;
+
+static uint64_t path_hash64(const char* p)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (; *p; ++p)
+        h = (h ^ (uint8_t)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p)) * 1099511628211ull;
+    return h ? h : 1;
+}
+
+/* a block's bytes into out (at most len), from the cache or the card; its length, or -1 */
+static int64_t bc_block(PlatFile* f, uint64_t block, uint8_t* out)
+{
+    unsigned set = (unsigned)((f->path64 ^ (block * 0x9E3779B97F4A7C15ull)) >> 7) % BC_SETS;
+    pthread_mutex_lock(&g_bc_mu);
+    for (unsigned w = 0; w < BC_WAYS; ++w)
+    {
+        BcBlock* b = &g_bc[set][w];
+        if (b->path == f->path64 && b->block == block && b->data)
+        {
+            b->used = ++g_bc_tick;
+            uint32_t len = b->len;
+            memcpy(out, b->data, len);
+            pthread_mutex_unlock(&g_bc_mu);
+            return len;
+        }
+    }
+    pthread_mutex_unlock(&g_bc_mu);
+    /* a miss: from the card, outside the cache's lock */
+    ssize_t r;
+    if (lseek(f->fd, (off_t)(block * BC_BLOCK), SEEK_SET) < 0)
+        return -1;
+    do
+        r = read(f->fd, out, BC_BLOCK);
+    while (r < 0 && errno == EINTR);
+    if (r < 0)
+        return -1;
+    pthread_mutex_lock(&g_bc_mu);
+    BcBlock* victim = &g_bc[set][0];
+    for (unsigned w = 0; w < BC_WAYS; ++w)
+    {
+        BcBlock* b = &g_bc[set][w];
+        if (b->path == f->path64 && b->block == block)
+        {
+            victim = b; /* (another thread read it meanwhile) */
+            break;
+        }
+        if (!b->data || b->used < victim->used)
+            victim = b;
+    }
+    if (!victim->data)
+        victim->data = (uint8_t*)malloc(BC_BLOCK);
+    if (victim->data)
+    {
+        memcpy(victim->data, out, (size_t)r);
+        victim->path = f->path64, victim->block = block, victim->len = (uint32_t)r, victim->used = ++g_bc_tick;
+    }
+    pthread_mutex_unlock(&g_bc_mu);
+    return r;
+}
+
+/* a cached file's read at its position: through the blocks, the position then moved past what was read */
+static int64_t bc_read(PlatFile* f, void* buf, uint32_t n)
+{
+    off_t pos = lseek(f->fd, 0, SEEK_CUR);
+    if (pos < 0)
+        return -1;
+    if (n >= BC_DIRECT)
+    {
+        ssize_t r;
+        do
+            r = read(f->fd, buf, n);
+        while (r < 0 && errno == EINTR);
+        return r;
+    }
+    static __thread uint8_t* tmp;
+    if (!tmp && !(tmp = (uint8_t*)malloc(BC_BLOCK)))
+        return -1;
+    uint64_t done = 0;
+    while (done < n)
+    {
+        uint64_t at = (uint64_t)pos + done, block = at / BC_BLOCK, in = at % BC_BLOCK;
+        int64_t len = bc_block(f, block, tmp);
+        if (len < 0)
+        {
+            if (!done)
+                return -1;
+            break;
+        }
+        if ((uint64_t)len <= in)
+            break; /* the end of the file */
+        uint64_t take = (uint64_t)len - in;
+        if (take > n - done)
+            take = n - done;
+        memcpy((uint8_t*)buf + done, tmp + in, (size_t)take);
+        done += take;
+        if ((uint64_t)len < BC_BLOCK)
+            break;
+    }
+    lseek(f->fd, pos + (off_t)done, SEEK_SET);
+    return (int64_t)done;
+}
+#endif
 
 PlatFile* plat_file_open(const char* path, int flags)
 {
@@ -654,6 +842,17 @@ PlatFile* plat_file_open(const char* path, int flags)
     }
     PlatFile* f = (PlatFile*)calloc(1, sizeof *f);
     f->fd = fd;
+#if defined(__SWITCH__)
+    if (g_read_prof < 0)
+    {
+        const char* e = getenv("FFXI_PROFILE");
+        g_read_prof = e && *e && *e != '0';
+    }
+    if (g_read_prof)
+        f->path_hash = path_hash(path);
+    if ((flags & PLAT_CACHED) && !(flags & PLAT_WRITE))
+        f->path64 = path_hash64(path);
+#endif
     t_error = PLAT_OK;
     return f;
 }
@@ -670,11 +869,24 @@ int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n)
     }
 #endif
     ssize_t r;
-    do
-        r = read(f->fd, buf, n);
-    while (r < 0 && errno == EINTR);
+#if defined(__SWITCH__)
+    int64_t off = g_read_prof > 0 ? (int64_t)lseek(f->fd, 0, SEEK_CUR) : 0;
+    uint64_t t0 = g_read_prof > 0 ? rt_monotonic_ns() : 0;
+#endif
+#if defined(__SWITCH__)
+    if (f->path64)
+        r = (ssize_t)bc_read(f, buf, n);
+    else
+#endif
+        do
+            r = read(f->fd, buf, n);
+        while (r < 0 && errno == EINTR);
     if (r < 0)
         set_error(NULL);
+#if defined(__SWITCH__)
+    if (g_read_prof > 0)
+        read_note(f, off, r, rt_monotonic_ns() - t0);
+#endif
     return r;
 }
 

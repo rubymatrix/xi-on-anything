@@ -1332,6 +1332,14 @@ void gfxq_present(GfxTex* backbuffer)
             thunk_frame_end(sampler_frame, now - last, g_game_wait_all - rt_was, lock - lock_was);
         last = now, rt_was = g_game_wait_all, lock_was = lock;
         sampler_frame++;
+        static uint64_t read_said;
+        if (gfx_profiling && now - read_said > 10000000000ull)
+        {
+            char line[640];
+            if (read_said && plat_read_report(line, sizeof line))
+                rt_log("[switch] %s (10 s)\n", line);
+            read_said = now;
+        }
     }
 #endif
     if (gfx_profiling)

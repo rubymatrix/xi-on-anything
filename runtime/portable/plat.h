@@ -32,6 +32,7 @@ uint32_t plat_thread_id(void);
 int plat_thread_start(void (*fn)(void*), void* arg);
 #if defined(__SWITCH__)
 void plat_thread_counts(uint32_t* made, uint32_t* idle); /* the thread pool: threads made, those waiting for a job */
+int plat_read_report(char* out, size_t n); /* FFXI_PROFILE: file reads since the last report, by size; 0 when off */
 #endif
 void plat_sleep_ms(uint32_t ms);
 void plat_sleep_us(uint32_t us); /* at least us microseconds, where the system allows less than a millisecond */
@@ -75,6 +76,7 @@ typedef struct PlatFile PlatFile;
 #define PLAT_CREATE 4    /* create if missing */
 #define PLAT_EXCL 8      /* fail if it exists */
 #define PLAT_TRUNCATE 16
+#define PLAT_CACHED 32   /* with PLAT_READ alone: a file not written while open (the game's DATs), which the Switch reads through a block cache */
 PlatFile* plat_file_open(const char* path, int flags);
 int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n);        /* bytes, or -1 */
 int64_t plat_file_write(PlatFile* f, const void* buf, uint32_t n);
