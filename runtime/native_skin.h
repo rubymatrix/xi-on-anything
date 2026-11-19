@@ -229,4 +229,22 @@ RT_INLINE void rt_skin_two_bone_check(unsigned char* gb)
             (unsigned long long)values, (unsigned long long)bad_values);
 }
 
+/* FFXiMain's point and direction transforms (0x10028040 and 0x100280d0 in 2025-12-26: m's 3x3 part times the vector,
+ * plus m's fourth row for a point), called at 53 places, the skinning's second loop among them: translated inline at
+ * each call (recomp/x86c.py, by their bytes) instead of a call that stores and reloads every register. The x87's
+ * order, its rounding at the control word's precision (fr_cw), and its reads: each component's inputs are read just
+ * before its store, so an output over the vector gives what the x87 code gives. */
+RT_INLINE void rt_xform3(unsigned char* gb, unsigned cw, uint32_t m, uint32_t v, uint32_t out, int point)
+{
+    for (uint32_t k = 0; k < 3; ++k)
+    {
+        double a = fr_cw(cw, (double)rdf32_b(gb, m + 0x20u + 4u * k) * rdf32_b(gb, v + 8u));
+        a = fr_cw(cw, a + fr_cw(cw, (double)rdf32_b(gb, m + 0x10u + 4u * k) * rdf32_b(gb, v + 4u)));
+        a = fr_cw(cw, a + fr_cw(cw, (double)rdf32_b(gb, v) * rdf32_b(gb, m + 4u * k)));
+        if (point)
+            a = fr_cw(cw, a + rdf32_b(gb, m + 0x30u + 4u * k));
+        wrf32_b(gb, out + 4u * k, (float)a);
+    }
+}
+
 #endif

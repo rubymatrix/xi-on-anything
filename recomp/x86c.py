@@ -86,6 +86,22 @@ def ftol_inline():
             '{ uint8_t r = (uint8_t)((g->fcw >> 8) | 0xCu); cf = 0; of = 0; af = 0; zf = 0; sf = r >> 7; pf = PARITY(r); }']
 
 
+# FFXiMain's point and direction transforms (thiscall: ecx the matrix; out and the vector on the stack, popped):
+# translated inline at each call as rt_xform3 (runtime/native_skin.h), the same results, eax and edx as they leave
+# them, the flags untouched (their x87 code changes none); nothing is written below esp.
+XFORM_BYTES = {
+    1: bytes.fromhex('8b4424088b542404d94120d84808d94110d84804dec1d900d809dec1d84130d91ad94124d84808d94114d84804dec1'
+                     'd94104d808dec1d84134d95a04d94128d84808d94118d84804dec1d94108d808dec1d84138d95a08c20800'),
+    0: bytes.fromhex('8b4424088b542404d94120d84808d94110d84804dec1d900d809dec1d91ad94124d84808d94114d84804dec1d94104'
+                     'd808dec1d95a04d94128d84808d94118d84804dec1d94108d808dec1d95a08c20800'),
+}
+
+
+def xform_inline(point):
+    return ['{ uint32_t o_ = rd32(esp), v_ = rd32(esp + 4u); rt_xform3(RT_GB, g->fcw, ecx, v_, o_, %d); '
+            'eax = v_; edx = o_; esp += 8; }' % point]
+
+
 def mask(bits):
     return (1 << bits) - 1
 
@@ -277,6 +293,16 @@ class FunctionTranslator:
         store = 'REGS_STORE;' if target in self.flag_entry() else 'REGS_STORE_CALL;'
         return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
                 '%s %s%08x(g); %s' % (store, self.ctx.prefix, target, self.load_after(ret_addr))]
+
+    def xform_kind(self, target):
+        """1 for the game's point transform, 0 for its direction transform (XFORM_BYTES), None for anything else"""
+        cache = self.ctx.__dict__.setdefault('xform_at', {})
+        if target not in cache:
+            cache[target] = None
+            for kind, code in XFORM_BYTES.items():
+                if bytes(self.ctx.read(target, len(code))) == code:
+                    cache[target] = kind
+        return cache[target]
 
     def is_ftol(self, target):
         cache = self.ctx.__dict__.setdefault('ftol_at', {})
@@ -626,6 +652,9 @@ class FunctionTranslator:
                     if FTOL_INLINE and self.is_ftol(tgt):
                         self.uses_x87 = True
                         return ftol_inline(), True
+                    xf = self.xform_kind(tgt) if FTOL_INLINE else None
+                    if xf is not None:
+                        return xform_inline(xf), True
                     return self.call(tgt, nxt), True
                 return ['RT_BADJUMP(%s);' % hexu(tgt)], False
             # (the flags go in: some of the functions that read them at entry are called through pointers)
