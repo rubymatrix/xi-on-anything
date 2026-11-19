@@ -113,10 +113,19 @@ typedef void (*GuestFn)(Guest*);
  * addresses before lookup. RD is 0 when the image sits at its preferred base. */
 extern RT_HOT_GLOBAL uint32_t rt_reloc_delta;
 extern uint32_t rt_image_lo, rt_image_hi; /* runtime range of the image */
+#if defined(RT_LOCAL_BASE)
+/* As the window's base above: a copy per translated function (REGS_DECL), since after every guest store the global
+ * was loaded again (54 times in f_1002efe0 alone); rt_rd at file scope is the global under a second name */
+extern RT_HOT_GLOBAL uint32_t rt_rd __asm__("rt_reloc_delta");
+#define RD rt_rd
+#define RT_RD_DECL const uint32_t rt_rd = rt_reloc_delta; (void)rt_rd;
+#else
 #define RD rt_reloc_delta
+#define RT_RD_DECL
+#endif
 
 #define REGS_DECL                                                                                \
-    RT_GB_DECL                                                                                   \
+    RT_GB_DECL RT_RD_DECL                                                                        \
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;                                             \
     unsigned cf, pf, af, zf, sf, of, df;                                                         \
     unsigned rt_sp_n = 0; /* back edges taken here while another thread waited (RT_SAFEPOINT) */ \

@@ -224,6 +224,8 @@ static uint32_t g_presents_sent;
 /* profile (FFXI_PROFILE): the game thread's waits on the render thread, the render thread's work */
 static uint64_t g_wait_pace_ns, g_wait_sync_ns, g_bytes, g_since_ns;
 static uint64_t g_batched_in, g_batched_out; /* FFXI_PROFILE: draws that went into batches of two or more, and those batches */
+static void count_vertex_copy(const void* p, size_t n);
+static uint64_t g_op_bytes[32], g_u_bytes, g_idx_bytes; /* FFXI_PROFILE: what was recorded, by command; draws' constants */
 static uint32_t g_syncs, g_frames;
 static volatile uint64_t g_render_busy_ns;
 
@@ -280,6 +282,7 @@ static void* rec(uint32_t op, size_t body)
     g_cur->n += size;
     g_cur->cmds++;
     g_bytes += size;
+    g_op_bytes[op < 32 ? op : 0] += size;
     return c + 1;
 }
 
@@ -354,15 +357,17 @@ static void drain(void)
 /* --- the render thread ------------------------------------------------------------------------------- */
 typedef struct DrawRec
 {
-    GfxDraw head; /* up to u; u's needed bytes, the rest after u, and the payloads follow */
     uint32_t need, tail_off, data_off[GFX_NSTREAMS], idx_off;
+    /* the draw up to u (u's needed bytes, the rest after u, and the payloads follow). Only those bytes: as a whole
+     * GfxDraw it was 4 KB a draw, most of it the constants left unused, 6 MB a frame through the queue in a crowd */
+    uint8_t head[offsetof(GfxDraw, u)];
 } DrawRec;
 
 static void run_draw(const uint8_t* body)
 {
     static GfxDraw d; /* the render thread's */
     const DrawRec* r = (const DrawRec*)body;
-    memcpy(&d, &r->head, offsetof(GfxDraw, u));
+    memcpy(&d, r->head, sizeof r->head);
     memcpy(&d.u, body + sizeof(DrawRec), r->need);
     memcpy(&d.tex, body + r->tail_off, sizeof(GfxDraw) - offsetof(GfxDraw, tex));
     for (int i = 0; i < 8; ++i)
@@ -955,6 +960,8 @@ static void batch_add(const GfxDraw* d)
 {
     uint32_t n = vertex_count(d->prim, d->count), stride = (uint32_t)d->u.stride[0], b = g_batch.verts;
     g_batch.v = (uint8_t*)grow(g_batch.v, &g_batch.v_cap, g_batch.v_n + (size_t)n * stride);
+    if (gfx_profiling)
+        count_vertex_copy(d->data[0], (size_t)n * stride);
     memcpy(g_batch.v + g_batch.v_n, d->data[0], (size_t)n * stride);
     g_batch.v_n += (size_t)n * stride;
     g_batch.idx = (uint16_t*)grow(g_batch.idx, &g_batch.i_cap, (g_batch.i_n + (size_t)d->count * 3) * 2) ;
@@ -1027,6 +1034,32 @@ void gfxq_draw(const GfxDraw* d)
     g_batch.active = 1;
 }
 
+/* FFXI_PROFILE: the vertex bytes draws copy, and of them those of a range (the same memory, the same size) already
+ * copied this frame - what copying each range once a frame would save at most (the game may write it in between) */
+static uint64_t g_vtx_bytes, g_vtx_again;
+static uint32_t g_vtx_frame = 1;
+static struct { const void* p; size_t n; uint32_t frame; } g_vtx_seen[4096];
+
+static void count_vertex_copy(const void* p, size_t n)
+{
+    uintptr_t k = (uintptr_t)p ^ (n << 7);
+    unsigned i = (unsigned)((k ^ (k >> 12) ^ (k >> 24)) & 4095u);
+    g_vtx_bytes += n;
+    for (unsigned j = 0; j < 4; ++j, i = (i + 1) & 4095u)
+    {
+        if (g_vtx_seen[i].frame == g_vtx_frame && g_vtx_seen[i].p == p && g_vtx_seen[i].n == n)
+        {
+            g_vtx_again += n;
+            return;
+        }
+        if (g_vtx_seen[i].frame != g_vtx_frame)
+        {
+            g_vtx_seen[i].p = p, g_vtx_seen[i].n = n, g_vtx_seen[i].frame = g_vtx_frame;
+            return;
+        }
+    }
+}
+
 static void record_draw(const GfxDraw* d)
 {
     size_t need = u_need(d), tail = sizeof(GfxDraw) - offsetof(GfxDraw, tex);
@@ -1047,10 +1080,13 @@ static void record_draw(const GfxDraw* d)
 
     uint8_t* body = (uint8_t*)rec(OP_DRAW, total);
     DrawRec* r = (DrawRec*)body;
-    memcpy(&r->head, d, offsetof(GfxDraw, u));
-    r->head.vs_tokens = intern_tokens(d->vs.prog, d->vs_tokens);
-    r->head.ps_tokens = intern_tokens(d->fs.prog, d->ps_tokens);
+    memcpy(r->head, d, sizeof r->head);
+    const uint32_t* vt = intern_tokens(d->vs.prog, d->vs_tokens);
+    const uint32_t* pt = intern_tokens(d->fs.prog, d->ps_tokens);
+    memcpy(r->head + offsetof(GfxDraw, vs_tokens), &vt, sizeof vt);
+    memcpy(r->head + offsetof(GfxDraw, ps_tokens), &pt, sizeof pt);
     r->need = (uint32_t)need, r->tail_off = (uint32_t)tail_off;
+    g_u_bytes += need + tail;
     memcpy(body + sizeof(DrawRec), &d->u, need);
     memcpy(body + tail_off, &d->tex, tail);
     for (int s = 0; s < GFX_NSTREAMS; ++s)
@@ -1058,6 +1094,8 @@ static void record_draw(const GfxDraw* d)
         r->data_off[s] = 0;
         if (data_bytes[s])
         {
+            if (gfx_profiling && !g_batching) /* (a batch's vertices were counted as they went in) */
+                count_vertex_copy(d->data[s], data_bytes[s]);
             memcpy(body + off, d->data[s], data_bytes[s]);
             r->data_off[s] = (uint32_t)off;
             off = ALIGN16(off + data_bytes[s]);
@@ -1067,6 +1105,7 @@ static void record_draw(const GfxDraw* d)
     if (idx_bytes)
     {
         memcpy(body + off, d->indices, idx_bytes);
+        g_idx_bytes += idx_bytes;
         r->idx_off = (uint32_t)off;
     }
     done();
@@ -1093,6 +1132,7 @@ static void profile_line(void)
 {
     uint64_t now = gfx_now_ns();
     g_frames++;
+    g_vtx_frame++;
     if (!g_since_ns)
         g_since_ns = now;
     if (now - g_since_ns < 2000000000ull)
@@ -1100,11 +1140,19 @@ static void profile_line(void)
     double ms = 1e-6 / g_frames;
     fprintf(stderr,
         "[gfx]   render thread: busy %.2f ms/frame; the game waited %.2f ms/frame for it (%.2f pacing, %.2f in %u syncs), "
-        "%.0f KB recorded/frame; %.0f draws/frame batched into %.0f\n",
+        "%.0f KB recorded/frame (vertices %.0f KB, %.0f KB of them a range copied before that frame); "
+        "%.0f draws/frame batched into %.0f; KB/frame: draws %.0f (constants and state %.0f, indices %.0f), buffer uploads %.0f, "
+        "texture uploads %.0f\n",
         (double)g_render_busy_ns * ms, (double)(g_wait_pace_ns + g_wait_sync_ns) * ms, (double)g_wait_pace_ns * ms,
-        (double)g_wait_sync_ns * ms, g_syncs, (double)g_bytes / g_frames / 1024.0, (double)g_batched_in / g_frames,
-        (double)g_batched_out / g_frames);
+        (double)g_wait_sync_ns * ms, g_syncs, (double)g_bytes / g_frames / 1024.0,
+        (double)g_vtx_bytes / g_frames / 1024.0, (double)g_vtx_again / g_frames / 1024.0, (double)g_batched_in / g_frames,
+        (double)g_batched_out / g_frames, (double)g_op_bytes[OP_DRAW] / g_frames / 1024.0,
+        (double)g_u_bytes / g_frames / 1024.0, (double)g_idx_bytes / g_frames / 1024.0,
+        (double)g_op_bytes[OP_BUF_UPLOAD] / g_frames / 1024.0,
+        (double)(g_op_bytes[OP_TEX_UPLOAD] + g_op_bytes[OP_TEX_UPLOAD_RECT]) / g_frames / 1024.0);
     g_batched_in = g_batched_out = 0;
+    memset(g_op_bytes, 0, sizeof g_op_bytes), g_u_bytes = g_idx_bytes = 0;
+    g_vtx_bytes = g_vtx_again = 0;
     g_render_busy_ns = g_wait_pace_ns = g_wait_sync_ns = g_bytes = 0;
     g_syncs = g_frames = 0;
     g_since_ns = now;

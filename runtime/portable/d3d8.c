@@ -4108,7 +4108,14 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
         d->index_size = index_size;
         Obj* ib = up_data ? NULL : obj(g_dev.cur.ib);
         GfxBuf* gb = ib && indices >= ib->mem && indices < ib->mem + ib->size ? static_buffer(ib) : NULL;
-        if (gb && !((indices - ib->mem) & 3) && prim != 6 /* fans are rebuilt from the indices */)
+        /* the index buffer at an offset: Metal's must be a multiple of 4, the other back ends' of the index's size
+         * (16-bit indices at 2 mod 4 were copied per draw: on the Switch, ~6 MB a frame in a crowd) */
+#if defined(__APPLE__)
+        uint32_t ib_align = 4;
+#else
+        uint32_t ib_align = index_size;
+#endif
+        if (gb && !((indices - ib->mem) & (ib_align - 1)) && prim != 6 /* fans are rebuilt from the indices */)
             d->ibuf = gb, d->ibuf_off = indices - ib->mem;
     }
     if (!set_streams(d, first, nverts, up_data, up_stride))
