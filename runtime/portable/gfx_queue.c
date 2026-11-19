@@ -367,8 +367,11 @@ static void drain(void)
 }
 
 /* --- the render thread ------------------------------------------------------------------------------- */
+#define U_PIECE 64u /* u_delta's pieces of GfxU */
+
 typedef struct DrawRec
 {
+    uint64_t umask; /* the 64-byte pieces of u (within need) that follow, the changed ones (u_delta) */
     uint32_t need, tail_off, data_off[GFX_NSTREAMS], idx_off;
     /* the draw up to u (u's needed bytes, the rest after u, and the payloads follow). Only those bytes: as a whole
      * GfxDraw it was 4 KB a draw, most of it the constants left unused, 6 MB a frame through the queue in a crowd */
@@ -380,7 +383,17 @@ static void run_draw(const uint8_t* body)
     static GfxDraw d; /* the render thread's */
     const DrawRec* r = (const DrawRec*)body;
     memcpy(&d, r->head, sizeof r->head);
-    memcpy(&d.u, body + sizeof(DrawRec), r->need);
+    {
+        /* u: the pieces that changed since the draw before (u_delta); the render thread's d keeps the rest */
+        const uint8_t* src = body + sizeof(DrawRec);
+        for (size_t at = 0, i = 0; at < r->need; at += U_PIECE, ++i)
+            if (r->umask >> i & 1u)
+            {
+                size_t len = r->need - at < U_PIECE ? r->need - at : U_PIECE;
+                memcpy((uint8_t*)&d.u + at, src, len);
+                src += len;
+            }
+    }
     memcpy(&d.tex, body + r->tail_off, sizeof(GfxDraw) - offsetof(GfxDraw, tex));
     for (int i = 0; i < 8; ++i)
         d.tex[i] = real_tex(d.tex[i]);
@@ -1087,11 +1100,35 @@ static void count_vertex_copy(const void* p, size_t n)
     }
 }
 
+/* The constants (GfxU, ~2.5 KB a draw: 3 MB a frame in a crowd) mostly repeat from one draw to the next: a draw
+ * records only the 64-byte pieces of them (within its need) that differ from what the render thread's draw already
+ * has, which g_u_shadow mirrors. The render thread runs the draws in the order recorded, so the two agree. */
+typedef char u_pieces_fit[(sizeof(GfxU) + U_PIECE - 1) / U_PIECE <= 64 ? 1 : -1];
+static GfxU g_u_shadow;
+static int g_u_shadow_ok;
+
+static size_t u_delta(const GfxDraw* d, size_t need, uint64_t* mask)
+{
+    uint64_t m = 0;
+    size_t bytes = 0;
+    const uint8_t *a = (const uint8_t*)&d->u, *b = (const uint8_t*)&g_u_shadow;
+    for (size_t at = 0, i = 0; at < need; at += U_PIECE, ++i)
+    {
+        size_t len = need - at < U_PIECE ? need - at : U_PIECE;
+        if (!g_u_shadow_ok || memcmp(a + at, b + at, len))
+            m |= 1ull << i, bytes += len;
+    }
+    *mask = m;
+    return bytes;
+}
+
 static void record_draw(const GfxDraw* d)
 {
     size_t need = u_need(d), tail = sizeof(GfxDraw) - offsetof(GfxDraw, tex);
     size_t data_bytes[GFX_NSTREAMS] = { 0 }, idx_bytes = 0;
-    size_t off = ALIGN16(sizeof(DrawRec) + need);
+    uint64_t umask;
+    size_t usent = u_delta(d, need, &umask);
+    size_t off = ALIGN16(sizeof(DrawRec) + usent);
     size_t tail_off = off;
     off = ALIGN16(off + tail);
     size_t total = off;
@@ -1113,8 +1150,20 @@ static void record_draw(const GfxDraw* d)
     memcpy(r->head + offsetof(GfxDraw, vs_tokens), &vt, sizeof vt);
     memcpy(r->head + offsetof(GfxDraw, ps_tokens), &pt, sizeof pt);
     r->need = (uint32_t)need, r->tail_off = (uint32_t)tail_off;
-    g_u_bytes += need + tail;
-    memcpy(body + sizeof(DrawRec), &d->u, need);
+    g_u_bytes += usent + tail;
+    r->umask = umask;
+    {
+        uint8_t* dst = body + sizeof(DrawRec);
+        for (size_t at = 0, i = 0; at < need; at += U_PIECE, ++i)
+            if (umask >> i & 1u)
+            {
+                size_t len = need - at < U_PIECE ? need - at : U_PIECE;
+                memcpy(dst, (const uint8_t*)&d->u + at, len);
+                memcpy((uint8_t*)&g_u_shadow + at, (const uint8_t*)&d->u + at, len);
+                dst += len;
+            }
+        g_u_shadow_ok = 1;
+    }
     memcpy(body + tail_off, &d->tex, tail);
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {

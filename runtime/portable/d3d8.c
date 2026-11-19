@@ -175,6 +175,7 @@ typedef struct Obj
     GfxTex* gpu;         /* textures, render targets, depth surfaces */
     GfxBuf* gbuf;        /* static vertex and index buffers: the GPU's copy */
     uint8_t gbuf_dirty;  /* ... which a lock that writes makes stale */
+    uint32_t serial;     /* vertex and index buffers: new at creation and at every lock that writes (range_cached) */
     uint8_t face, level; /* surfaces of a texture: where in it */
     uint8_t dirty;       /* surfaces of a texture: guest memory is newer than the GPU's copy */
     uint8_t gpu_locked;  /* a GPU-owned surface is locked: written back at unlock */
@@ -190,6 +191,7 @@ typedef struct Obj
     uint8_t wr_track, wr_known; /* render-target textures composited as a whole: what was drawn is followed (wr) */
     int32_t wr[4];       /* ... its pixels x0, y0, x1, y1 since a clear to alpha 0, when wr_known (fade_scissor) */
 } Obj;
+static uint32_t g_buf_serial; /* Obj.serial's last */
 
 static Obj* g_objs;
 static uint32_t g_nobjs, g_capobjs, g_free_hint = 1;
@@ -1654,6 +1656,7 @@ static void IDirect3DDevice8_CreateIndexBuffer(Guest* g)
     uint32_t p = obj_new(O_IB);
     Obj* b = obj(p);
     b->size = ARG(1), b->usage = ARG(2), b->format = ARG(3), b->pool = ARG(4);
+    b->serial = ++g_buf_serial;
     static_buffer_init(b);
     wr32(ARG(5), p);
     RET(D3D_OK, 6);
@@ -2848,11 +2851,20 @@ static int build_draw(GfxDraw* d)
     }
 
     /* transforms: WORLD is D3DTS_WORLDMATRIX(0), index 24 here */
-    float wv[16];
-    mat_mul(wv, s->xf[24], s->xf[2]);
-    mat_mul(d->u.wvp, wv, s->xf[3]);
-    memcpy(d->u.wv, wv, 64);
-    normal_matrix(d->u.wvit, wv);
+    /* (the products and the normals' matrix are those of the draw before while world, view and projection are:
+     * most draws of a model share them) */
+    static struct { float in[3][16], wv[16], wvp[16], wvit[16]; int ok; } xc;
+    if (!xc.ok || memcmp(xc.in[0], s->xf[24], 64) || memcmp(xc.in[1], s->xf[2], 64) || memcmp(xc.in[2], s->xf[3], 64))
+    {
+        memcpy(xc.in[0], s->xf[24], 64), memcpy(xc.in[1], s->xf[2], 64), memcpy(xc.in[2], s->xf[3], 64);
+        mat_mul(xc.wv, s->xf[24], s->xf[2]);
+        mat_mul(xc.wvp, xc.wv, s->xf[3]);
+        normal_matrix(xc.wvit, xc.wv);
+        xc.ok = 1;
+    }
+    memcpy(d->u.wvp, xc.wvp, 64);
+    memcpy(d->u.wv, xc.wv, 64);
+    memcpy(d->u.wvit, xc.wvit, 64);
     for (int i = 0; i < 8; ++i)
         memcpy(d->u.texm[i], s->xf[16 + i], 64);
 
@@ -3058,6 +3070,23 @@ static int set_streams(GfxDraw* d, uint32_t first, uint32_t count, uint32_t up_d
         d->u.stride[st] = (int32_t)stride;
     }
     return 1;
+}
+
+/* index_range of an index buffer's indices, kept while the buffer isn't written (its serial): every indexed draw
+ * scanned all its indices for the lowest and highest */
+static void index_range(uint32_t indices, uint32_t size, uint32_t n, uint32_t* lo, uint32_t* hi);
+static void range_cached(const Obj* ib, uint32_t indices, uint32_t size, uint32_t n, uint32_t* lo, uint32_t* hi)
+{
+    static struct { uint32_t serial, indices, n, size, lo, hi; } c[512];
+    uint32_t k = (indices >> 1) ^ (indices >> 11) ^ (n * 2654435761u);
+    unsigned i = (k ^ (k >> 16)) & 511u;
+    if (c[i].serial == ib->serial && c[i].indices == indices && c[i].n == n && c[i].size == size)
+    {
+        *lo = c[i].lo, *hi = c[i].hi;
+        return;
+    }
+    index_range(indices, size, n, lo, hi);
+    c[i].serial = ib->serial, c[i].indices = indices, c[i].n = n, c[i].size = size, c[i].lo = *lo, c[i].hi = *hi;
 }
 
 static void index_range(uint32_t indices, uint32_t size, uint32_t n, uint32_t* lo, uint32_t* hi)
@@ -4100,7 +4129,11 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
     if (indices)
     {
         uint32_t lo, hi;
-        index_range(indices, index_size, n, &lo, &hi);
+        Obj* rib = up_data ? NULL : obj(g_dev.cur.ib);
+        if (rib && rib->mem && indices >= rib->mem && indices < rib->mem + rib->size)
+            range_cached(rib, indices, index_size, n, &lo, &hi);
+        else
+            index_range(indices, index_size, n, &lo, &hi);
         first = lo + (up_data ? 0 : g_dev.cur.base_vertex);
         nverts = hi - lo + 1;
         d->u.vofs = -(int32_t)lo;
@@ -4566,7 +4599,7 @@ static void Buffer_Lock(Guest* g)
     if (!b || ARG(1) > b->size)
         RET(D3DERR_INVALIDCALL, 5);
     if (!(ARG(4) & LOCK_READONLY))
-        b->gbuf_dirty = 1;
+        b->gbuf_dirty = 1, b->serial = ++g_buf_serial;
     wr32(ARG(3), obj_mem(b) + ARG(1));
     RET(D3D_OK, 5);
 }
