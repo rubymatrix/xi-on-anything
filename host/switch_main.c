@@ -193,6 +193,67 @@ static void clock_end(void)
 
 /* FFXI_PROFILE: the CPU's, GPU's and memory's clocks every 10 s (what the system, sys-clk or Horizon OC set
  * them to: a GPU held low shows as Present's wait in the profile) */
+/* FFXI_PROFILE: how idle each of the application's cores (0-2) is - what a thread moved off the game's core
+ * would find. The kernel tells a core's idle time only to a thread on that core, so one sleeping thread per core
+ * at the lowest priority reads it each second (a core with no idle time never runs it: its reading goes stale,
+ * shown as busy); the game thread logs them (clock_report: another thread's stdio breaks the main thread's). */
+static volatile uint32_t g_idle_pm[3];  /* idle in the last second, per mille */
+static volatile uint64_t g_idle_at[3];  /* when read, ns */
+static Thread g_idle_t[3];
+
+static void idle_main(void* arg)
+{
+    int core = (int)(intptr_t)arg;
+    u64 last = 0, t0 = armGetSystemTick();
+    if (R_FAILED(svcGetInfo(&last, InfoType_IdleTickCount, INVALID_HANDLE, (u64)-1)))
+    {
+        g_idle_pm[core] = 0xFFFFFFFFu;
+        return;
+    }
+    for (;;)
+    {
+        svcSleepThread(1000000000ll);
+        u64 idle = 0, t = armGetSystemTick();
+        if (R_FAILED(svcGetInfo(&idle, InfoType_IdleTickCount, INVALID_HANDLE, (u64)-1)))
+            return;
+        g_idle_pm[core] = t > t0 ? (uint32_t)((idle - last) * 1000u / (t - t0)) : 0;
+        g_idle_at[core] = armTicksToNs(t);
+        last = idle, t0 = t;
+    }
+}
+
+static void idle_start(void)
+{
+    /* 0x3B: an application's lowest priority (0x3F is refused) */
+    for (int c = 0; c < 3; ++c)
+    {
+        Result rc = threadCreate(&g_idle_t[c], idle_main, (void*)(intptr_t)c, NULL, 0x2000, 0x3B, c);
+        if (R_SUCCEEDED(rc))
+            rc = threadStart(&g_idle_t[c]);
+        if (R_FAILED(rc))
+        {
+            g_idle_pm[c] = 0xFFFFFFFFu;
+            fprintf(stderr, "[switch] cores: no idle reader on core %d (0x%x)\n", c, rc);
+        }
+    }
+}
+
+static void idle_report(void)
+{
+    uint64_t now = armTicksToNs(armGetSystemTick());
+    char s[3][24];
+    for (int c = 0; c < 3; ++c)
+    {
+        if (g_idle_pm[c] == 0xFFFFFFFFu)
+            snprintf(s[c], sizeof s[c], "not readable");
+        else if (!g_idle_at[c] || now - g_idle_at[c] > 3000000000ull)
+            snprintf(s[c], sizeof s[c], "busy (no idle)");
+        else
+            snprintf(s[c], sizeof s[c], "%u.%u%% idle", g_idle_pm[c] / 10u, g_idle_pm[c] % 10u);
+    }
+    fprintf(stderr, "[switch] cores (last second): 0 %s, 1 %s, 2 %s\n", s[0], s[1], s[2]);
+}
+
 static void clock_report(uint64_t now)
 {
     static int state; /* 0 not tried, 1 open, -1 not available */
@@ -218,7 +279,10 @@ static void clock_report(uint64_t now)
                 return;
             }
         state = 1;
+        idle_start();
     }
+    else
+        idle_report();
     u32 hz[3] = { 0 };
     for (int i = 0; i < 3; ++i)
         clkrstGetClockRate(&s[i], &hz[i]);

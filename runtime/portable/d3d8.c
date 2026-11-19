@@ -190,8 +190,55 @@ typedef struct Obj
     uint8_t unread;      /* render-target textures: drawn into since last cleared or sampled (d3d8_probe_test) */
     uint8_t wr_track, wr_known; /* render-target textures composited as a whole: what was drawn is followed (wr) */
     int32_t wr[4];       /* ... its pixels x0, y0, x1, y1 since a clear to alpha 0, when wr_known (fade_scissor) */
+    uint32_t drawn;      /* FFXI_PROFILE: the frame (g_ws.frame) a draw last used it in: vertex and index buffers,
+                          * textures */
 } Obj;
 static uint32_t g_buf_serial; /* Obj.serial's last */
+
+/* FFXI_PROFILE: what a d3d8 worker thread (draws built off the game thread) would have to wait for - the calls
+ * that need the worker's results or its work done, and the locks of what it may still be drawing from (an
+ * object drawn from this frame) - and what the locks would copy. Logged every 10 s from Present. */
+static struct
+{
+    int on; /* -1 not read */
+    uint32_t frame;
+    uint64_t at;
+    uint32_t frames, creates, destroys, buf_locks, buf_locks_drawn, tex_locks, tex_locks_drawn, rt_locks, copies,
+        resets, draws;
+    uint64_t buf_lock_bytes, tex_lock_bytes;
+} g_ws = { -1, 1 };
+
+static int ws_on(void)
+{
+    if (g_ws.on < 0)
+    {
+        const char* e = getenv("FFXI_PROFILE");
+        g_ws.on = e && *e && *e != '0';
+    }
+    return g_ws.on;
+}
+
+static void ws_frame(void)
+{
+    if (!ws_on())
+        return;
+    g_ws.frame++, g_ws.frames++;
+    uint64_t now = rt_monotonic_ns();
+    if (!g_ws.at)
+        g_ws.at = now;
+    if (now - g_ws.at < 10000000000ull)
+        return;
+    double f = g_ws.frames ? (double)g_ws.frames : 1.0;
+    rt_log("[d3d8] for a worker, per frame: %.0f draws; waits: %.2f creates, %.2f destroys, %.2f render-target locks, "
+           "%.2f CopyRects, %u resets; locks: buffers %.1f (%.1f of ones drawn this frame, "
+           "%.0f KB), textures %.1f (%.1f drawn this frame, %.0f KB)\n",
+        g_ws.draws / f, g_ws.creates / f, g_ws.destroys / f, g_ws.rt_locks / f, g_ws.copies / f, g_ws.resets,
+        g_ws.buf_locks / f, g_ws.buf_locks_drawn / f, (double)g_ws.buf_lock_bytes / f / 1024.0, g_ws.tex_locks / f,
+        g_ws.tex_locks_drawn / f, (double)g_ws.tex_lock_bytes / f / 1024.0);
+    uint32_t frame = g_ws.frame;
+    memset(&g_ws, 0, sizeof g_ws);
+    g_ws.on = 1, g_ws.frame = frame, g_ws.at = now;
+}
 
 static Obj* g_objs;
 static uint32_t g_nobjs, g_capobjs, g_free_hint = 1;
@@ -216,6 +263,7 @@ static uint32_t obj_new(int kind)
     g_free_hint = i + 1;
     Obj* o = &g_objs[i];
     memset(o, 0, sizeof *o);
+    g_ws.creates++;
     o->kind = (uint8_t)kind;
     o->refs = 1;
     o->guest = gheap_alloc(8, 1);
@@ -236,6 +284,7 @@ static uint32_t obj_release(uint32_t p);
 
 static void obj_destroy(Obj* o)
 {
+    g_ws.destroys++;
     for (uint32_t i = 0; i < o->nsubs; ++i)
     {
         Obj* s = obj(o->subs[i]);
@@ -622,6 +671,7 @@ static GfxTex* texture_for_draw(uint32_t p, int* kind)
     Obj* t = obj(p);
     if (!t || !t->gpu || (t->kind != O_TEXTURE && t->kind != O_CUBE))
         return NULL;
+    t->drawn = g_ws.frame;
     if (t->dirty)
     {
         for (uint32_t i = 0; i < t->nsubs; ++i)
@@ -1190,6 +1240,7 @@ static void IDirect3DDevice8_ShowCursor(Guest* g)
 
 static void IDirect3DDevice8_Reset(Guest* g)
 {
+    g_ws.resets++;
     Dev* d = &g_dev;
     for (int i = 0; i < 13; ++i)
         d->pp[i] = rd32(ARG(1) + 4u * (uint32_t)i);
@@ -1381,6 +1432,7 @@ static void capture_frame(Obj* bb)
 
 static void IDirect3DDevice8_Present(Guest* g)
 {
+    ws_frame();
     WORLD_FLUSH();
     cap_present();
     scene_present();
@@ -1709,6 +1761,7 @@ static void IDirect3DDevice8_CreateImageSurface(Guest* g)
  * destination is uploaded: at once if the GPU owns it, before its next draw if not. */
 static void IDirect3DDevice8_CopyRects(Guest* g)
 {
+    g_ws.copies++;
     WORLD_FLUSH();
     Obj* s = obj(ARG(1));
     Obj* d = obj(ARG(4));
@@ -3098,6 +3151,7 @@ static int set_streams(GfxDraw* d, uint32_t first, uint32_t count, uint32_t up_d
             Obj* b = obj(g_dev.cur.stream[st]);
             if (!b || !b->mem)
                 return gfx_prof_skip(GFX_SKIP_NO_BUFFER), 0;
+            b->drawn = g_ws.frame;
             stride = g_dev.cur.stride[st], base = b->mem, size = b->size;
         }
         uint32_t start = first * stride, bytes = stride ? count * stride : 64;
@@ -3914,6 +3968,7 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
 static void draw(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size, uint32_t up_data,
     uint32_t up_stride)
 {
+    g_ws.draws++;
     WORLD_FLUSH();
     uint32_t n = prim_vertices(prim, count);
     if (!n)
@@ -4187,6 +4242,8 @@ static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t 
         d->indices = GUEST_PTR(indices);
         d->index_size = index_size;
         Obj* ib = up_data ? NULL : obj(g_dev.cur.ib);
+        if (ib)
+            ib->drawn = g_ws.frame;
         GfxBuf* gb = ib && indices >= ib->mem && indices < ib->mem + ib->size ? static_buffer(ib) : NULL;
         /* the index buffer at an offset: Metal's must be a multiple of 4, the other back ends' of the index's size
          * (16-bit indices at 2 mod 4 were copied per draw: on the Switch, ~6 MB a frame in a crowd) */
@@ -4500,6 +4557,17 @@ static uint64_t android_surface_probe_key(Guest* guest, const Obj* surface, uint
 static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags ANDROID_PROBE_ARGUMENT(uint64_t probe_key))
 {
     uint32_t pitch = fmt_pitch(s->format, s->width), bits = obj_mem(s);
+    if (gpu_owned(s))
+        g_ws.rt_locks++;
+    else
+    {
+        Obj* tc = s->container ? obj(s->container) : NULL;
+        g_ws.tex_locks++;
+        if (tc && tc->drawn == g_ws.frame)
+            g_ws.tex_locks_drawn++;
+        if (!(flags & LOCK_READONLY))
+            g_ws.tex_lock_bytes += s->size;
+    }
     if (gpu_owned(s) && surface_scaled(s))
     {
         /* its pixels are not the game's size: not read back (FFXI never reads its menu target) */
@@ -4647,6 +4715,11 @@ static void Buffer_Lock(Guest* g)
         RET(D3DERR_INVALIDCALL, 5);
     if (!(ARG(4) & LOCK_READONLY))
         b->gbuf_dirty = 1, b->serial = ++g_buf_serial;
+    g_ws.buf_locks++;
+    if (b->drawn == g_ws.frame)
+        g_ws.buf_locks_drawn++;
+    if (b->gbuf && !(ARG(4) & LOCK_READONLY)) /* a static buffer's: what an upload at unlock would copy */
+        g_ws.buf_lock_bytes += ARG(2) ? ARG(2) : b->size - ARG(1);
     wr32(ARG(3), obj_mem(b) + ARG(1));
     RET(D3D_OK, 5);
 }
