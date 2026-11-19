@@ -1120,7 +1120,22 @@ static size_t u_delta(const GfxDraw* d, size_t need, uint64_t* mask)
     for (size_t at = 0, i = 0; at < need; at += U_PIECE, ++i)
     {
         size_t len = need - at < U_PIECE ? need - at : U_PIECE;
-        if (!g_u_shadow_ok || memcmp(a + at, b + at, len))
+        int differs;
+        if (len == U_PIECE)
+        {
+            /* a whole piece as eight words, inline (memcmp's call per piece was 1.7% of the game thread) */
+            uint64_t x = 0;
+            for (unsigned k = 0; k < U_PIECE / 8u; ++k)
+            {
+                uint64_t p, q;
+                memcpy(&p, a + at + 8u * k, 8), memcpy(&q, b + at + 8u * k, 8);
+                x |= p ^ q;
+            }
+            differs = x != 0;
+        }
+        else
+            differs = memcmp(a + at, b + at, len) != 0;
+        if (!g_u_shadow_ok || differs)
             m |= 1ull << i, bytes += len;
     }
     *mask = m;

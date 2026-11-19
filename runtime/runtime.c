@@ -97,6 +97,10 @@ static GuestFn lookup_uncached(uint32_t target)
  * no translation (an import, a thunk) is not cached: it keeps taking the cheap range checks. */
 #if defined(_MSC_VER)
 #define LOOKUP_TLS __declspec(thread)
+#elif defined(__SWITCH__)
+/* one cache for all: translated code runs only under the guest lock, one thread at a time, and a thread-local's
+ * every access is a call here (-mtp=soft: __aarch64_read_tp, 1.2% of the game thread with the shims' own) */
+#define LOOKUP_TLS
 #else
 #define LOOKUP_TLS _Thread_local
 #endif
