@@ -2077,3 +2077,13 @@ void gfx_init_then(void* sdl_window, int vsync, GfxqCall* call)
 }
 void gfx_web_tick(void) {}
 #endif
+
+#if defined(__SWITCH__)
+/* vblanks each frame is shown for (gfx_queue.c's adaptive cap): 1 for 60 fps, 2 for an even 30. On the window itself:
+ * eglSwapInterval(2) does nothing here (Mesa's maximum is 1), and the swap doesn't wait for the vblank, so pacing
+ * by the clock after it gave 38 fps, a frame shown for one vblank or two */
+void gfx_nx_swap_interval(int n)
+{
+    nwindowSetSwapInterval(nwindowGetDefault(), (u32)n);
+}
+#endif

@@ -521,6 +521,9 @@ int gfx_rt_supported(void);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);
+#if defined(__SWITCH__)
+void gfx_nx_swap_interval(int n); /* gfx_gl.c: vblanks per frame, 1 or 2 (the render thread's) */
+#endif
 /* Metal and Android's C++ Vulkan (the screen's safe area, host/display_fit.c): the rectangle of the
  * drawable, in its pixels, the back buffer is presented into, the rest black; w 0 for all of it
  * (Android: the letterbox present_rect.h makes). */

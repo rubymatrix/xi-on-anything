@@ -223,7 +223,15 @@ static uint32_t g_presents_sent;
 
 /* profile (FFXI_PROFILE): the game thread's waits on the render thread, the render thread's work */
 static uint64_t g_wait_pace_ns, g_wait_sync_ns, g_bytes, g_since_ns;
+static uint64_t g_game_wait_all; /* every wait of the game's thread for the render thread, all along (adapt_interval) */
 static uint64_t g_batched_in, g_batched_out; /* FFXI_PROFILE: draws that went into batches of two or more, and those batches */
+#if defined(__SWITCH__)
+/* The adaptive cap (adapt_interval): the vblanks a frame is shown for (1: 60 fps, 2: 30), the game thread's to
+ * choose; the render thread's time running batches all along, of it the time in its presents, and its last swap */
+static volatile uint32_t g_interval_want = 1;
+static uint32_t g_interval_have = 1;
+static volatile uint64_t g_rt_busy_all, g_rt_present_all;
+#endif
 static void count_vertex_copy(const void* p, size_t n);
 static uint64_t g_op_bytes[32], g_u_bytes, g_idx_bytes; /* FFXI_PROFILE: what was recorded, by command; draws' constants */
 static uint32_t g_syncs, g_frames;
@@ -301,6 +309,7 @@ static void flush(void)
         g_cur = b;
         return;
     }
+    uint64_t w0 = g_head - g_tail < NSLOTS ? 0 : gfx_now_ns();
     for (;;)
     {
         uint32_t t = g_tail;
@@ -308,6 +317,8 @@ static void flush(void)
             break;
         plat_wait32(&g_tail, t);
     }
+    if (w0)
+        g_game_wait_all += gfx_now_ns() - w0;
     g_slots[g_head % NSLOTS] = b;
     plat_atomic_add32(&g_head, 1);
     plat_wake_all32(&g_head);
@@ -351,6 +362,7 @@ static void drain(void)
         plat_wait32(&g_tail, t);
     }
     g_wait_sync_ns += gfx_now_ns() - t0;
+    g_game_wait_all += gfx_now_ns() - t0;
     g_syncs++;
 }
 
@@ -443,6 +455,7 @@ static void call_wait(GfxqCall* c)
             said = 1, rt_log("[recomp] gfx: a call to the render thread has waited 3 s (head %u tail %u, op %u, %u ops run)\n",
                 g_head, g_tail, g_cur_op, g_ops_run);
     }
+    g_game_wait_all += gfx_now_ns() - t0;
 }
 
 static int g_ran_present; /* the batch just run had a Present */
@@ -559,7 +572,18 @@ static void run_batch(Batch* b)
             break;
         }
         case OP_PRESENT:
+#if defined(__SWITCH__)
+        {
+            /* held to 30 or not (adapt_interval), on the window; the present's time is not work */
+            uint64_t t = gfx_now_ns();
+            if (g_interval_want != g_interval_have)
+                g_interval_have = g_interval_want, gfx_nx_swap_interval((int)g_interval_have);
             gfx_present(real_tex(*(GfxTex* const*)body));
+            g_rt_present_all += gfx_now_ns() - t;
+        }
+#else
+            gfx_present(real_tex(*(GfxTex* const*)body));
+#endif
             g_ran_present = 1;
             plat_atomic_add32(&g_presents_done, 1);
             plat_wake_all32(&g_presents_done);
@@ -591,6 +615,9 @@ static void consume(uint32_t t)
         Batch* b = g_slots[t % NSLOTS];
         uint64_t t0 = gfx_now_ns();
         run_batch(b);
+#if defined(__SWITCH__)
+        g_rt_busy_all += gfx_now_ns() - t0;
+#endif
         if (gfx_profiling)
             g_render_busy_ns += gfx_now_ns() - t0;
         plat_atomic_add32(&g_tail, 1);
@@ -1158,8 +1185,71 @@ static void profile_line(void)
     g_since_ns = now;
 }
 
+#if defined(__SWITCH__)
+/* FFXI_FPS_ADAPT (on unless 0): uncapped, a frame over 16.7 ms waits for the next vblank, so in a crowd frames took
+ * 33 ms, then 50, then 33: 20 to 30 fps, never even. Below 40 fps - the frames of 30 at a time (each counted to 50 ms
+ * at most: a zone's loading is one long frame) averaging over 25 ms, twice running - each frame is shown for two
+ * vblanks instead (the render thread's OP_PRESENT, on the window): an even 30. Uncapped again is tried after a while
+ * at 30, when a frame's work looks like it fits 22 ms (the game's time between presents less its waits for the
+ * render thread, and the render thread's running its batches less its presents). That estimate is hopeful at 30 (in
+ * the field it read 1 to 2 ms where uncapped ran at 44 to 57 fps), so a try that falls below 40 again within 10 s
+ * waits twice as long for the next one (4 s, 8, ... 64); one that holds starts the wait over. */
+static void adapt_interval(uint64_t enter, uint64_t leave)
+{
+    static int on = -1;
+    static uint64_t last_enter, last_leave, last_wait, frames, work, rt_last, since, wait_ns = 4000000000ull;
+    static uint32_t n, over;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_FPS_ADAPT");
+        on = !(e && *e == '0');
+        rt_last = g_rt_busy_all - g_rt_present_all;
+        since = enter;
+    }
+    if (!on)
+        return;
+    if (last_enter)
+    {
+        uint64_t f = enter - last_enter;
+        frames += f < 50000000ull ? f : 50000000ull;
+        uint64_t w = enter - last_leave, waited = g_game_wait_all - last_wait;
+        w = w > waited ? w - waited : 0;
+        work += w < 50000000ull ? w : 50000000ull;
+    }
+    last_enter = enter, last_leave = leave, last_wait = g_game_wait_all;
+    if (++n < 30)
+        return;
+    uint64_t rt_now = g_rt_busy_all - g_rt_present_all, rt = rt_now > rt_last ? rt_now - rt_last : 0; /* (read mid-batch) */
+    rt_last = rt_now;
+    double fms = (double)frames / n * 1e-6, gms = (double)work / n * 1e-6, rms = (double)rt / n * 1e-6;
+    double worse = gms > rms ? gms : rms;
+    n = 0, frames = 0, work = 0;
+    if (g_interval_want == 1)
+    {
+        over = fms > 25.0 ? over + 1 : 0;
+        if (over >= 2)
+        {
+            /* a try at uncapped that didn't hold: the next waits twice as long */
+            wait_ns = leave - since < 10000000000ull ? (wait_ns < 64000000000ull ? wait_ns * 2 : wait_ns) : 4000000000ull;
+            g_interval_want = 2, over = 0, since = leave;
+            rt_log("[switch] frame rate: 30 fps (frames of %.1f ms; uncapped again tried in %.0f s at the soonest)\n", fms,
+                (double)wait_ns * 1e-9);
+        }
+    }
+    else if (leave - since >= wait_ns && worse < 22.0)
+    {
+        g_interval_want = 1, over = 0, since = leave;
+        rt_log("[switch] frame rate: uncapped again (a frame's work looks like %.1f ms: the game %.1f, the render thread "
+               "%.1f)\n", worse, gms, rms);
+    }
+}
+#endif
+
 void gfxq_present(GfxTex* backbuffer)
 {
+#if defined(__SWITCH__)
+    uint64_t enter = gfx_now_ns();
+#endif
     *(GfxTex**)rec(OP_PRESENT, sizeof(void*)) = backbuffer;
     flush();
     if (!g_threaded)
@@ -1177,6 +1267,10 @@ void gfxq_present(GfxTex* backbuffer)
             said = 1, rt_log("[recomp] gfx: Present has waited 3 s for the render thread (head %u tail %u)\n", g_head, g_tail);
     }
     g_wait_pace_ns += gfx_now_ns() - t0;
+    g_game_wait_all += gfx_now_ns() - t0;
+#if defined(__SWITCH__)
+    adapt_interval(enter, gfx_now_ns());
+#endif
     if (gfx_profiling)
         profile_line();
 }
