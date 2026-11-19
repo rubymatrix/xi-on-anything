@@ -204,6 +204,11 @@ thread line; the API time). What it showed, in the world (about 1,200 draws a fr
 
 - **The game's thread** (the recompiled game, plus ~4 ms of d3d8 recording) is 26 ms a frame at 1020 MHz: 38 fps
   at best. At 1785 MHz (`FFXI_SWITCH_CPU`) it is 10-13 ms.
+- **A busy town** (2026-11-19, Windurst's crowds, 1,100-1,500 draws): game + d3d about 39 ms at 1224 MHz (sys-clk's
+  profile; 22-26 fps), 27-29 ms at 1785 (a steady 30, the adaptive cap's). Of the game thread's working time about
+  57% is the game's own code (spread thin; its hottest functions wait on its memory), 31% d3d8 and the queue's
+  recording, 12% the runtime. Storing only the registers that cross calls (regs_across_calls.py) and the constants'
+  versions (GfxDraw.u_ver) each gave under a millisecond.
 - **The render thread** is ~19 ms (GL ~15 of it), in parallel: not the limit at 1020 MHz, so deko3d would not
   have helped then.
 - **The GPU** is the limit once the CPU is faster: a 2048x2048 background (Config's smallest) is 4.5 times the

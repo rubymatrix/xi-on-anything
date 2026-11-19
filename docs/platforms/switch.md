@@ -224,7 +224,9 @@ change the rest:
 | `FFXI_PROFILE=1` | Where each frame's time goes, and the clocks, in the log. |
 
 With an overclocking tool (sys-clk, Horizon OC), let one thing set the clocks: drop `FFXI_SWITCH_CPU` and add
-`FFXI_SWITCH_LOADBOOST=0`.
+`FFXI_SWITCH_LOADBOOST=0`. sys-clk puts its own clock back within a moment, so `FFXI_SWITCH_CPU` alongside it
+does nothing (the log says so: `the CPU keeps going back to ...`); set the speed in sys-clk's profile instead.
+At 1785 MHz a busy town holds 30 fps (27-29 ms a frame in Windurst's crowds, against about 39 at 1224).
 
 ## Controls
 

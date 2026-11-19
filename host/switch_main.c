@@ -248,8 +248,23 @@ void switch_clock_frame(void)
         /* the system's performance modes (dock, sleep) put their clock back */
         checked = now;
         u32 hz = 0;
+        static int undone, said_undone;
         if (R_SUCCEEDED(clkrstGetClockRate(&g_clk, &hz)) && hz / 1000000u != (u32)g_clk_mhz)
+        {
             clkrstSetClockRate(&g_clk, (u32)g_clk_mhz * 1000000u);
+            /* put back at every check: another tool holds the clocks (sys-clk re-applies its profile within a
+             * moment, and ours never lasts) - say so once */
+            if (++undone >= 3 && !said_undone)
+            {
+                said_undone = 1;
+                fprintf(stderr,
+                    "[switch] FFXI_SWITCH_CPU: the CPU keeps going back to %u MHz: another tool sets the clocks "
+                    "(sys-clk?); set %d MHz there instead\n",
+                    hz / 1000000u, g_clk_mhz);
+            }
+        }
+        else
+            undone = 0;
     }
 }
 
