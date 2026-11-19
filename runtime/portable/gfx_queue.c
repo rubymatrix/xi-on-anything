@@ -238,6 +238,7 @@ static uint32_t g_interval_have = 1;
 static volatile uint64_t g_rt_busy_all, g_rt_present_all;
 #endif
 static void count_vertex_copy(const void* p, size_t n);
+static uint64_t g_u_known, g_u_compared; /* FFXI_PROFILE: constants' bytes known the same by version, compared */
 static uint64_t g_op_bytes[32], g_u_bytes, g_idx_bytes; /* FFXI_PROFILE: what was recorded, by command; draws' constants */
 static uint32_t g_syncs, g_frames;
 static volatile uint64_t g_render_busy_ns;
@@ -373,6 +374,12 @@ static void drain(void)
 
 /* --- the render thread ------------------------------------------------------------------------------- */
 #define U_PIECE 64u /* u_delta's pieces of GfxU */
+/* GfxDraw.u_ver's blocks of GfxU, in order */
+static const struct { size_t at, n; } g_uv_block[GFX_NUV] = {
+    [GFX_UV_TEXM] = { offsetof(GfxU, texm), sizeof(((GfxU*)0)->texm) },
+    [GFX_UV_VSC] = { offsetof(GfxU, vsc), sizeof(((GfxU*)0)->vsc) },
+    [GFX_UV_PSC] = { offsetof(GfxU, psc), sizeof(((GfxU*)0)->psc) },
+};
 
 typedef struct DrawRec
 {
@@ -979,8 +986,21 @@ static int batchable(const GfxDraw* d)
 /* the same state as the batch's: keys, the uniforms the back ends read, textures, samplers, viewport, scissor */
 static int same_state(const GfxDraw* a, const GfxDraw* b, size_t need)
 {
-    return !memcmp(a, b, offsetof(GfxDraw, u)) && !memcmp(&a->u, &b->u, need) &&
-           !memcmp(&a->tex, &b->tex, offsetof(GfxDraw, data) - offsetof(GfxDraw, tex));
+    if (memcmp(a, b, offsetof(GfxDraw, u)) ||
+        memcmp(&a->tex, &b->tex, offsetof(GfxDraw, data) - offsetof(GfxDraw, tex)))
+        return 0;
+    /* u within need, less the blocks both have one version of (equal by the heads: u_ver is in them) */
+    size_t at = 0;
+    for (int k = 0; k < GFX_NUV; ++k)
+    {
+        size_t lo = g_uv_block[k].at, hi = lo + g_uv_block[k].n;
+        if (!a->u_ver[k] || lo >= need)
+            continue;
+        if (memcmp((const uint8_t*)&a->u + at, (const uint8_t*)&b->u + at, lo - at))
+            return 0;
+        at = hi < need ? hi : need;
+    }
+    return at >= need || !memcmp((const uint8_t*)&a->u + at, (const uint8_t*)&b->u + at, need - at);
 }
 
 static void* grow(void* p, size_t* cap, size_t want)
@@ -1111,18 +1131,56 @@ static void count_vertex_copy(const void* p, size_t n)
 typedef char u_pieces_fit[(sizeof(GfxU) + U_PIECE - 1) / U_PIECE <= 64 ? 1 : -1];
 static GfxU g_u_shadow;
 static int g_u_shadow_ok;
+/* the versions (GfxDraw.u_ver) of the blocks g_u_shadow holds, 0 for not known: a piece wholly in a block whose
+ * version a draw has too is the same, not compared (a block's version is its content's own number, d3d8.c) */
+static uint32_t g_shadow_ver[GFX_NUV];
+
+/* the pieces wholly inside a block of d's whose version the shadow has */
+static uint64_t u_known_same(const GfxDraw* d)
+{
+    uint64_t m = 0;
+    if (!g_u_shadow_ok)
+        return 0;
+    for (int k = 0; k < GFX_NUV; ++k)
+        if (d->u_ver[k] && d->u_ver[k] == g_shadow_ver[k])
+        {
+            size_t lo = (g_uv_block[k].at + U_PIECE - 1) / U_PIECE, hi = (g_uv_block[k].at + g_uv_block[k].n) / U_PIECE;
+            for (size_t i = lo; i < hi; ++i)
+                m |= 1ull << i;
+        }
+    return m;
+}
 
 static size_t u_delta(const GfxDraw* d, size_t need, uint64_t* mask)
 {
     uint64_t m = 0;
     size_t bytes = 0;
     const uint8_t *a = (const uint8_t*)&d->u, *b = (const uint8_t*)&g_u_shadow;
+    uint64_t same = u_known_same(d);
     for (size_t at = 0, i = 0; at < need; at += U_PIECE, ++i)
     {
         size_t len = need - at < U_PIECE ? need - at : U_PIECE;
         int differs;
-        if (len == U_PIECE)
+        if (same >> i & 1u)
         {
+            differs = 0;
+            g_u_known += len;
+            /* FFXI_U_CHECK=1: compare it anyway, and say where a version was wrong (a write d3d8.c missed) */
+            static int check = -1;
+            if (check < 0)
+                check = getenv("FFXI_U_CHECK") && *getenv("FFXI_U_CHECK") == '1';
+            if (check && memcmp(a + at, b + at, len))
+            {
+                static unsigned said;
+                if (said++ < 16)
+                    rt_log("[gfx] u check: piece %u (byte %u) differs though its block's version is the same\n",
+                        (unsigned)i, (unsigned)at);
+                differs = 1;
+            }
+        }
+        else if (len == U_PIECE)
+        {
+            g_u_compared += len;
             /* a whole piece as eight words, inline (memcmp's call per piece was 1.7% of the game thread) */
             uint64_t x = 0;
             for (unsigned k = 0; k < U_PIECE / 8u; ++k)
@@ -1183,6 +1241,12 @@ static void record_draw(const GfxDraw* d)
                 dst += len;
             }
         g_u_shadow_ok = 1;
+        /* the shadow's blocks now: those wholly within need are d's; one partly within, not known */
+        for (int k = 0; k < GFX_NUV; ++k)
+            if (g_uv_block[k].at + g_uv_block[k].n <= need)
+                g_shadow_ver[k] = d->u_ver[k];
+            else if (g_uv_block[k].at < need)
+                g_shadow_ver[k] = 0;
     }
     memcpy(body + tail_off, &d->tex, tail);
     for (int s = 0; s < GFX_NSTREAMS; ++s)
@@ -1238,14 +1302,16 @@ static void profile_line(void)
         "[gfx]   render thread: busy %.2f ms/frame; the game waited %.2f ms/frame for it (%.2f pacing, %.2f in %u syncs), "
         "%.0f KB recorded/frame (vertices %.0f KB, %.0f KB of them a range copied before that frame); "
         "%.0f draws/frame batched into %.0f; KB/frame: draws %.0f (constants and state %.0f, indices %.0f), buffer uploads %.0f, "
-        "texture uploads %.0f\n",
+        "texture uploads %.0f; constants compared %.0f KB/frame, %.0f KB known the same by version\n",
         (double)g_render_busy_ns * ms, (double)(g_wait_pace_ns + g_wait_sync_ns) * ms, (double)g_wait_pace_ns * ms,
         (double)g_wait_sync_ns * ms, g_syncs, (double)g_bytes / g_frames / 1024.0,
         (double)g_vtx_bytes / g_frames / 1024.0, (double)g_vtx_again / g_frames / 1024.0, (double)g_batched_in / g_frames,
         (double)g_batched_out / g_frames, (double)g_op_bytes[OP_DRAW] / g_frames / 1024.0,
         (double)g_u_bytes / g_frames / 1024.0, (double)g_idx_bytes / g_frames / 1024.0,
         (double)g_op_bytes[OP_BUF_UPLOAD] / g_frames / 1024.0,
-        (double)(g_op_bytes[OP_TEX_UPLOAD] + g_op_bytes[OP_TEX_UPLOAD_RECT]) / g_frames / 1024.0);
+        (double)(g_op_bytes[OP_TEX_UPLOAD] + g_op_bytes[OP_TEX_UPLOAD_RECT]) / g_frames / 1024.0,
+        (double)g_u_compared / g_frames / 1024.0, (double)g_u_known / g_frames / 1024.0);
+    g_u_known = g_u_compared = 0;
     g_batched_in = g_batched_out = 0;
     memset(g_op_bytes, 0, sizeof g_op_bytes), g_u_bytes = g_idx_bytes = 0;
     g_vtx_bytes = g_vtx_again = 0;

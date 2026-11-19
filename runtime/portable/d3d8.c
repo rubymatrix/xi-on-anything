@@ -669,7 +669,19 @@ typedef struct State
     uint32_t ib, base_vertex;
     uint32_t vs, ps;
     float vsc[NVSC][4], psc[NPSC][4];
+    /* the versions of what texture matrices (xf 16-23), vsc and psc hold: a new number (state_ver) at every write,
+     * 0 for not known; build_draw copies them into its draw only when they are new, and passes them on to the
+     * queue (GfxDraw.u_ver), which compares and sends them only then */
+    uint32_t ver_texm, ver_vsc, ver_psc;
 } State;
+
+static uint32_t g_state_ver;
+static uint32_t state_ver(void)
+{
+    if (!++g_state_ver)
+        ++g_state_ver;
+    return g_state_ver;
+}
 
 /* what a state block holds */
 typedef struct Mask
@@ -851,7 +863,11 @@ static void state_copy(State* to, const State* from, const Mask* m)
     }
     for (int i = 0; i < g_xf_top; ++i)
         if (m->xf[i])
+        {
             memcpy(to->xf[i], from->xf[i], 64);
+            if (i >= 16 && i < 24)
+                to->ver_texm = state_ver();
+        }
     if (m->vp)
         memcpy(to->vp, from->vp, sizeof to->vp);
     if (m->mat)
@@ -883,10 +899,14 @@ static void state_copy(State* to, const State* from, const Mask* m)
         to->ps = from->ps;
     for (int i = 0; i < g_vsc_top; ++i)
         if (m->vsc[i])
-            memcpy(to->vsc[i], from->vsc[i], 16);
+            memcpy(to->vsc[i], from->vsc[i], 16), to->ver_vsc = 0;
     for (int i = 0; i < NPSC; ++i)
         if (m->psc[i])
-            memcpy(to->psc[i], from->psc[i], 16);
+            memcpy(to->psc[i], from->psc[i], 16), to->ver_psc = 0;
+    if (!to->ver_vsc)
+        to->ver_vsc = state_ver();
+    if (!to->ver_psc)
+        to->ver_psc = state_ver();
 }
 
 static void block_free(Block* b)
@@ -1831,6 +1851,8 @@ static void IDirect3DDevice8_SetTransform(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->xf[i], ARGP(2), 64);
+    if (i >= 16 && i < 24)
+        s->ver_texm = state_ver();
     raise_top(&g_xf_top, (uint32_t)i + 1);
     if (m)
         m->xf[i] = 1;
@@ -1861,6 +1883,8 @@ static void IDirect3DDevice8_MultiplyTransform(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->xf[i], r, 64);
+    if (i >= 16 && i < 24)
+        s->ver_texm = state_ver();
     raise_top(&g_xf_top, (uint32_t)i + 1);
     if (m)
         m->xf[i] = 1;
@@ -2042,6 +2066,7 @@ static void IDirect3DDevice8_CreateStateBlock(Guest* g)
     memcpy(b->s.xf, g_dev.cur.xf, sizeof b->s.xf);
     memcpy(b->s.light, g_dev.cur.light, sizeof b->s.light);
     memcpy(b->s.vsc, g_dev.cur.vsc, sizeof b->s.vsc);
+    b->s.ver_texm = g_dev.cur.ver_texm, b->s.ver_vsc = g_dev.cur.ver_vsc; /* (the same contents) */
     Mask* m = &b->m;
     memset(m->rs, 1, sizeof m->rs);
     memset(m->tss, 1, sizeof m->tss);
@@ -2492,6 +2517,7 @@ static void IDirect3DDevice8_SetVertexShader(Guest* g)
             for (uint32_t k = 0; k < count && reg + k < NVSC && i + 1 + 4 * k + 3 < sh->ndecl; ++k)
             {
                 memcpy(s->vsc[reg + k], &sh->decl[i + 1 + 4 * k], 16);
+                s->ver_vsc = state_ver();
                 raise_top(&g_vsc_top, reg + k + 1);
                 if (m)
                     m->vsc[reg + k] = 1;
@@ -2532,6 +2558,7 @@ static void IDirect3DDevice8_SetVertexShaderConstant(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->vsc[r], ARGP(2), 16 * n);
+    s->ver_vsc = state_ver();
     raise_top(&g_vsc_top, r + n);
     if (m)
         memset(&m->vsc[r], 1, n);
@@ -2647,6 +2674,7 @@ static void IDirect3DDevice8_SetPixelShaderConstant(Guest* g)
     Mask* m;
     State* s = target(&m);
     memcpy(s->psc[r], ARGP(2), 16 * n);
+    s->ver_psc = state_ver();
     if (m)
         memset(&m->psc[r], 1, n);
     RET(D3D_OK, 4);
@@ -2788,8 +2816,14 @@ static int build_draw(GfxDraw* d)
     const uint32_t* rs = s->rs;
     /* the keys and bindings, and the uniforms up to the lights; lights and shader constants are
      * written where they are used (the back end uploads only those) */
+    /* the blocks of u kept from the draw before when their versions say they are the same (State.ver_*): what
+     * this draw's u holds of them, its version; d is always g_draw */
+    static uint32_t have[GFX_NUV];
+    if (d != &g_draw)
+        memset(have, 0, sizeof have);
     memset(d, 0, offsetof(GfxDraw, u));
-    memset(&d->u, 0, offsetof(GfxU, light));
+    /* (wvp, wv, wvit and texm are written below whatever the draw) */
+    memset(d->u.mat_d, 0, offsetof(GfxU, light) - offsetof(GfxU, mat_d));
     memset(d->tex, 0, sizeof(GfxDraw) - offsetof(GfxDraw, tex));
 
     Layout fvf;
@@ -2836,7 +2870,11 @@ static int build_draw(GfxDraw* d)
         d->vs.prog = vs->hash;
         d->vs_tokens = vs->func;
         d->vs_token_count = vs->nfunc;
-        memcpy(d->u.vsc, s->vsc, sizeof d->u.vsc);
+        if (!s->ver_vsc || have[GFX_UV_VSC] != s->ver_vsc)
+        {
+            memcpy(d->u.vsc, s->vsc, sizeof d->u.vsc);
+            have[GFX_UV_VSC] = s->ver_vsc;
+        }
     }
     if (s->ps)
     {
@@ -2846,7 +2884,11 @@ static int build_draw(GfxDraw* d)
             d->fs.prog = g_dev.ps[i].hash;
             d->ps_tokens = g_dev.ps[i].func;
             d->ps_token_count = g_dev.ps[i].nfunc;
-            memcpy(d->u.psc, s->psc, sizeof d->u.psc);
+            if (!s->ver_psc || have[GFX_UV_PSC] != s->ver_psc)
+            {
+                memcpy(d->u.psc, s->psc, sizeof d->u.psc);
+                have[GFX_UV_PSC] = s->ver_psc;
+            }
         }
     }
 
@@ -2865,8 +2907,13 @@ static int build_draw(GfxDraw* d)
     memcpy(d->u.wvp, xc.wvp, 64);
     memcpy(d->u.wv, xc.wv, 64);
     memcpy(d->u.wvit, xc.wvit, 64);
-    for (int i = 0; i < 8; ++i)
-        memcpy(d->u.texm[i], s->xf[16 + i], 64);
+    if (!s->ver_texm || have[GFX_UV_TEXM] != s->ver_texm)
+    {
+        for (int i = 0; i < 8; ++i)
+            memcpy(d->u.texm[i], s->xf[16 + i], 64);
+        have[GFX_UV_TEXM] = s->ver_texm;
+    }
+    memcpy(d->u_ver, have, sizeof d->u_ver);
 
     /* D3DMATERIAL8: Diffuse, Ambient, Specular, Emissive, Power */
     memcpy(d->u.mat_d, &s->mat[0], 16);

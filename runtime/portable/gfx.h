@@ -148,6 +148,8 @@ typedef struct GfxLight
     float spot[4]; /* cos(theta / 2), cos(phi / 2) */
 } GfxLight;
 
+enum { GFX_UV_TEXM, GFX_UV_VSC, GFX_UV_PSC, GFX_NUV }; /* GfxDraw.u_ver's blocks of GfxU */
+
 /* The values the generated functions read: one buffer for both stages. Layout is mirrored in
  * gfx_msl.c's MSL struct; keep them together. */
 typedef struct GfxU
@@ -189,6 +191,10 @@ typedef struct GfxDraw
     const uint32_t* ps_tokens;
     uint32_t vs_token_count, ps_token_count; /* their lengths in words, END included; 0 unknown (the
                                               * render worker then draws directly) */
+    /* the version of what u's texture matrices, vertex and pixel shader constants hold (GFX_UV_*): d3d8.c gives
+     * each content of them a number of its own, 0 for one not known; the queue then compares and copies a block
+     * only when its version isn't the one the render thread already has */
+    uint32_t u_ver[GFX_NUV];
     GfxU u;
     GfxTex* tex[8];
     GfxSampler samp[8];
