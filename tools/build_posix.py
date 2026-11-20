@@ -108,6 +108,10 @@ def pol(rust_target=None, out=None, env=None):
     if not folder:
         return [], [], []
     folder = os.path.abspath(os.path.expanduser(folder))
+    # Windows' extended-length form (\\?\D:\...), which the launcher's resource folder has there: Windows
+    # parses nothing below it, so the '/' in "aarch64-linux-android/libxipol.a" would be no separator
+    if folder.startswith('\\\\?\\') and not folder.upper().startswith('\\\\?\\UNC\\'):
+        folder = folder[4:]
     try:
         with open(os.path.join(folder, 'xi-build.json')) as f:
             m = json.load(f)
@@ -119,12 +123,12 @@ def pol(rust_target=None, out=None, env=None):
         libs = m['prebuilt'].get(rust_target or '')
         if not libs:
             raise SystemExit('XI_POL=%s has no PlayOnline client for %s' % (folder, rust_target))
-        libs = [os.path.join(folder, a) for a in libs]
+        libs = [os.path.join(folder, *a.split('/')) for a in libs]
         missing = [a for a in libs if not os.path.isfile(a)]
         if missing:
             raise SystemExit('XI_POL=%s has no %s' % (folder, ', '.join(missing)))
         return [], ['-DFFXI_POL', '-I', os.path.join(root, 'host')], libs
-    sources = [os.path.join(folder, s) for s in m['sources']]
+    sources = [os.path.join(folder, *s.split('/')) for s in m['sources']]
     manifest = os.path.join(folder, m['crate'], 'Cargo.toml')
     missing = [s for s in sources + [manifest] if not os.path.isfile(s)]
     if missing:
