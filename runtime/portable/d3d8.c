@@ -54,7 +54,13 @@ enum
     W_GPU_SKIP, /* d3d8_probe_test's g_gpu_skip, in order with the draws it is for */
     W_BUFDATA,  /* what the game wrote into a vertex or index buffer (Buffer_Unlock) */
     W_HOST,     /* a host function, with bytes of its own (d3d8_host_call) */
+    W_FAST,     /* a deferred call whose arguments (and what they point at, a little) are in the record itself */
 };
+typedef struct WFast
+{
+    Shim fn;
+    uint32_t nwords, nblob; /* its argument words (`this` first), then nblob bytes at 16 past them */
+} WFast;
 typedef struct WHost
 {
     void (*fn)(const void* data);
@@ -133,6 +139,14 @@ static struct
     uint32_t stream[16], stride[16], ib, base; /* 16 = NSTREAMS */
     uint32_t vs;                               /* the vertex shader or FVF: which of the streams a draw reads */
 } g_fs;
+/* FFXI_PROFILE: how many of the game's state calls set what it had set already (the game's own view: a state block
+ * applied, or Reset, forgets it) - what dropping them on the game's thread would save */
+static struct
+{
+    uint32_t rs[256], tss[8][32], tex[8];
+    uint8_t rs_ok[256], tss_ok[8][32], tex_ok[8];
+} g_fm;
+
 
 
 static void d3dw_after_sync(void)
@@ -171,6 +185,20 @@ static void d3dw_run(uint32_t op, const void* body, uint32_t bytes)
     case W_BUFDATA:
         buf_data((const struct WBufData*)body);
         break;
+    case W_FAST:
+    {
+        /* (its arguments into the worker's frame, the pointers already at their places there: the front set them) */
+        const WFast* c = (const WFast*)body;
+        const uint8_t* w = (const uint8_t*)(c + 1);
+        uint32_t wbytes = (uint32_t)D3DW_ALIGN16(4u * c->nwords);
+        memcpy(GUEST_PTR(g_w.scratch), w, 4u * c->nwords);
+        if (c->nblob)
+            memcpy(GUEST_PTR(g_w.scratch + wbytes), w + wbytes, c->nblob);
+        static Guest fg;
+        fg.esp = g_w.scratch - 4u;
+        c->fn(&fg);
+        break;
+    }
     case W_HOST:
     {
         const WHost* h = (const WHost*)body;
@@ -350,6 +378,7 @@ static struct
     uint32_t frames, creates, destroys, buf_locks, buf_locks_drawn, tex_locks, tex_locks_drawn, rt_locks, copies,
         resets, draws, probe_locks;
     uint64_t buf_lock_bytes, tex_lock_bytes, unlock_bytes, snap_bytes;
+    uint32_t rs_calls, rs_same, tss_calls, tss_same, tex_calls, tex_same; /* same_count */
 } g_ws = { -1, 1 };
 
 /* the worker's check of the buffers (d3dw_check_buffers) */
@@ -420,6 +449,10 @@ static void ws_frame(void)
             (double)g_w.syncs / f, (double)g_w.waits / f,
             (double)g_w.wait_ns / f * 1e-6, (double)g_w.present_waits / f, (double)g_w.present_wait_ns / f * 1e-6,
             by[0] ? "; waits by call:" : "", by);
+        rt_log("[d3d8] worker: per frame, calls that set what was set already: render states %.0f of %.0f, texture "
+               "stages %.0f of %.0f, textures %.0f of %.0f\n",
+            g_ws.rs_same / f, g_ws.rs_calls / f, g_ws.tss_same / f, g_ws.tss_calls / f, g_ws.tex_same / f,
+            g_ws.tex_calls / f);
         if (g_w.threaded)
             rt_log("[d3d8] worker check: %llu nested buffer locks; %llu buffers checked, %llu written outside a lock "
                    "(%llu KB)\n",
@@ -1376,6 +1409,7 @@ static void IDirect3D8_CreateDevice(Guest* g)
 {
     memset(g_fxf_ok, 0, sizeof g_fxf_ok);
     memset(&g_fs, 0, sizeof g_fs);
+    memset(&g_fm, 0, sizeof g_fm);
     wr32(ARG(6), 0);
     if (ARG(1) || g_dev.guest)
         RET(g_dev.guest ? D3DERR_NOTAVAILABLE : D3DERR_INVALIDCALL, 7);
@@ -1479,6 +1513,7 @@ static void IDirect3DDevice8_Reset(Guest* g)
     g_ws.resets++;
     memset(g_fxf_ok, 0, sizeof g_fxf_ok);
     memset(&g_fs, 0, sizeof g_fs);
+    memset(&g_fm, 0, sizeof g_fm);
     Dev* d = &g_dev;
     for (int i = 0; i < 13; ++i)
         d->pp[i] = rd32(ARG(1) + 4u * (uint32_t)i);
@@ -5254,12 +5289,65 @@ static int defer_on(void)
     return g_w.mode;
 }
 
+static void same_count(Shim fn, Guest* g)
+{
+    if (g_dev.rec)
+        return;
+    uint32_t* v = NULL;
+    uint8_t* ok = NULL;
+    uint32_t want = 0;
+    if (fn == IDirect3DDevice8_SetRenderState && ARG(1) < 256)
+        v = &g_fm.rs[ARG(1)], ok = &g_fm.rs_ok[ARG(1)], want = ARG(2), g_ws.rs_calls++;
+    else if (fn == IDirect3DDevice8_SetTextureStageState && ARG(1) < 8 && ARG(2) < 32)
+        v = &g_fm.tss[ARG(1)][ARG(2)], ok = &g_fm.tss_ok[ARG(1)][ARG(2)], want = ARG(3), g_ws.tss_calls++;
+    else if (fn == IDirect3DDevice8_SetTexture && ARG(1) < 8)
+        v = &g_fm.tex[ARG(1)], ok = &g_fm.tex_ok[ARG(1)], want = ARG(2), g_ws.tex_calls++;
+    else if (fn == IDirect3DDevice8_ApplyStateBlock)
+    {
+        memset(&g_fm, 0, sizeof g_fm);
+        return;
+    }
+    if (!v)
+        return;
+    if (*ok && *v == want)
+        fn == IDirect3DDevice8_SetRenderState ? g_ws.rs_same++ : fn == IDirect3DDevice8_SetTexture ? g_ws.tex_same++ : g_ws.tss_same++;
+    *v = want, *ok = 1;
+}
+
 static void defer(Guest* g, Shim fn, uint32_t nwords, const uint32_t* barg, const uint32_t* bbytes, unsigned nblobs)
 {
-    uint32_t total = (uint32_t)D3DW_ALIGN16(4u * nwords);
+    if (g_ws.on > 0)
+        same_count(fn, g);
+    uint32_t total = (uint32_t)D3DW_ALIGN16(4u * nwords), blob = 0;
     for (unsigned i = 0; i < nblobs; ++i)
         if (ARG(barg[i]) && bbytes[i])
-            total += (uint32_t)D3DW_ALIGN16(bbytes[i]);
+            blob += (uint32_t)D3DW_ALIGN16(bbytes[i]);
+    total += blob;
+    /* A short call - its arguments and a little they point at (a matrix, a light, rectangles) - goes in its record
+     * (W_FAST): no room in the guest ring, no guest writes here. Not the UP draws: their vertices are long, and a draw's
+     * may be held past its record (merged with the next draws). */
+    if (total <= 1024 && fn != IDirect3DDevice8_DrawPrimitiveUP && fn != IDirect3DDevice8_DrawIndexedPrimitiveUP)
+    {
+        uint32_t wbytes = (uint32_t)D3DW_ALIGN16(4u * nwords);
+        WFast* c = (WFast*)d3dw_rec(W_FAST, (uint32_t)sizeof *c + wbytes + blob);
+        c->fn = fn, c->nwords = nwords, c->nblob = blob;
+        uint32_t* w = (uint32_t*)(c + 1);
+        for (uint32_t i = 0; i < nwords; ++i)
+            w[i] = ARG(i);
+        uint8_t* b = (uint8_t*)w + wbytes;
+        uint32_t at = g_w.scratch + wbytes;
+        for (unsigned i = 0; i < nblobs; ++i)
+            if (ARG(barg[i]) && bbytes[i])
+            {
+                memcpy(b, ARGP(barg[i]), bbytes[i]);
+                w[barg[i]] = at;
+                b += D3DW_ALIGN16(bbytes[i]), at += (uint32_t)D3DW_ALIGN16(bbytes[i]);
+            }
+        d3dw_done();
+        g->eax = D3D_OK;
+        g->esp += 4u + 4u * nwords;
+        return;
+    }
     uint32_t a = d3dw_guest(total);
     for (uint32_t i = 0; i < nwords; ++i)
         wr32(a + 4u * i, ARG(i));

@@ -66,6 +66,7 @@ static struct
     uint32_t gend_pending;    /* the record being filled: its end in the guest ring */
     size_t last;              /* ... and where it is in the batch */
     int running;              /* inline: a record being run (one that records another is a bug) */
+    uint32_t scratch;                  /* the worker's argument frame for the short records (W_FAST), guest memory */
     uint32_t presents_sent;            /* the game's thread: the Presents handed to the worker */
     volatile uint32_t presents_done;   /* ... and the ones it has run (the game stays at most one frame ahead) */
     uint64_t present_waits, present_wait_ns; /* FFXI_PROFILE: the game's thread waiting for the frame before */
@@ -174,7 +175,9 @@ static void d3dw_start(int can)
     if (g_w.mode)
     {
         g_w.gbase = gheap_alloc(D3DW_GUEST, 0);
-        if (!g_w.gbase)
+        uint32_t sc = gheap_alloc(4096 + 64, 0);
+        g_w.scratch = sc ? sc + 16 : 0; /* (room below it: its esp is 4 under) */
+        if (!g_w.gbase || !g_w.scratch)
         {
             fprintf(stderr, "[d3d8] FFXI_D3D_WORKER: no guest memory for its ring; the calls run as they always have\n");
             g_w.mode = 0;
