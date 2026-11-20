@@ -164,9 +164,18 @@ static RtFatalHook g_fatal_hook;
 void rt_set_log(FILE* f) { g_log = f; }
 void rt_set_fatal_hook(RtFatalHook h) { g_fatal_hook = h; }
 
+/* rt_log from more than one thread (the d3d8 worker's): their lock, which the platform gives (rt_set_log_lock) */
+static void (*g_log_lock)(void), (*g_log_unlock)(void);
+void rt_set_log_lock(void (*lock)(void), void (*unlock)(void)) { g_log_lock = lock, g_log_unlock = unlock; }
+
 void rt_log(const char* fmt, ...)
 {
     va_list ap;
+    void (*unlock)(void) = g_log_unlock;
+    if (g_log_lock && unlock)
+        g_log_lock();
+    else
+        unlock = NULL;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -177,6 +186,8 @@ void rt_log(const char* fmt, ...)
         va_end(ap);
         fflush(g_log);
     }
+    if (unlock)
+        unlock();
 }
 
 /* A call in a function with its x87 stack in fixed locals (recomp/x87_slots.py) came back with the top where the

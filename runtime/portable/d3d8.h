@@ -9,6 +9,8 @@ void d3d8_setup(void);
 /* Called at every Present, on the game's thread with the guest lock held, before the frame goes
  * out: where the host adjusts per-frame game state (host64: the frame-rate divisor). */
 void d3d8_set_present_hook(void (*fn)(void));
+/* fn(copy of data): on the d3d8 worker in order with the draws when it is on (FFXI_D3D_WORKER=1), else at once */
+void d3d8_host_call(void (*fn)(const void* data), const void* data, uint32_t bytes);
 /* Called at every Present just after the frame went out, on the game's thread: between frames, where
  * the host changes the display (modern.c). */
 void d3d8_set_after_present(void (*fn)(void));

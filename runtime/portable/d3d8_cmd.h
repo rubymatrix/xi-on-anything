@@ -66,6 +66,9 @@ static struct
     uint32_t gend_pending;    /* the record being filled: its end in the guest ring */
     size_t last;              /* ... and where it is in the batch */
     int running;              /* inline: a record being run (one that records another is a bug) */
+    uint32_t presents_sent;            /* the game's thread: the Presents handed to the worker */
+    volatile uint32_t presents_done;   /* ... and the ones it has run (the game stays at most one frame ahead) */
+    uint64_t present_waits, present_wait_ns; /* FFXI_PROFILE: the game's thread waiting for the frame before */
     uint64_t syncs, waits, wait_ns, recs, bytes; /* FFXI_PROFILE */
 } g_w = { -1 };
 
@@ -140,6 +143,20 @@ static void d3dw_worker(void* arg)
     }
 }
 
+/* rt_log's lock with the worker on (it logs too): a waiting one (the worker runs a step below the game's threads, so
+ * one of them spinning on its core would never let it finish) */
+static volatile uint32_t g_w_log;
+static void d3dw_log_lock(void)
+{
+    while (plat_atomic_cas32(&g_w_log, 0, 1) != 0)
+        plat_wait32(&g_w_log, 1);
+}
+static void d3dw_log_unlock(void)
+{
+    plat_atomic_cas32(&g_w_log, 1, 0);
+    plat_wake_all32(&g_w_log);
+}
+
 /* the mode, read at the first d3d8 call (on the game's thread); `can` 0 keeps it off (d3d8.c: what the worker can't
  * do yet is in use) */
 static void d3dw_start(int can)
@@ -169,7 +186,7 @@ static void d3dw_start(int can)
          * runs until it waits, so one sharing the render thread's core took turns with it); FFXI_D3D_WORKER_CORE */
         const char* ce = getenv("FFXI_D3D_WORKER_CORE");
         if (plat_thread_start_core(d3dw_worker, NULL, ce && *ce ? atoi(ce) : 2))
-            g_w.threaded = 1;
+            g_w.threaded = 1, rt_set_log_lock(d3dw_log_lock, d3dw_log_unlock);
         else
         {
             fprintf(stderr, "[d3d8] FFXI_D3D_WORKER=1: no worker thread; the calls are recorded and run at once\n");

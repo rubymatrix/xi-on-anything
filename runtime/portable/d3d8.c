@@ -53,7 +53,13 @@ enum
     W_CALL = 1, /* a deferred call: its shim, run with its arguments (and what they point at) in the guest ring */
     W_GPU_SKIP, /* d3d8_probe_test's g_gpu_skip, in order with the draws it is for */
     W_BUFDATA,  /* what the game wrote into a vertex or index buffer (Buffer_Unlock) */
+    W_HOST,     /* a host function, with bytes of its own (d3d8_host_call) */
 };
+typedef struct WHost
+{
+    void (*fn)(const void* data);
+    uint32_t n, pad;
+} WHost; /* (and its n bytes) */
 struct WBufData;
 static void buf_data(const struct WBufData* w);
 
@@ -165,6 +171,12 @@ static void d3dw_run(uint32_t op, const void* body, uint32_t bytes)
     case W_BUFDATA:
         buf_data((const struct WBufData*)body);
         break;
+    case W_HOST:
+    {
+        const WHost* h = (const WHost*)body;
+        h->fn(h + 1);
+        break;
+    }
     default:
         fprintf(stderr, "d3d8 worker: an unknown record %u\n", op);
         abort();
@@ -402,18 +414,19 @@ static void ws_frame(void)
         memset(g_wait_by, 0, sizeof g_wait_by);
         rt_log("[d3d8] worker: %.0f records/frame (%.0f KB, %.0f KB of buffer writes, %.0f KB of dynamic buffers at "
                "the draws); %.1f probe locks/frame without a wait; %.1f syncs/frame, %.1f of them waited "
-               "(%.2f ms/frame)%s%s\n",
+               "(%.2f ms/frame); Present waited for the frame before %.2f times/frame (%.2f ms/frame)%s%s\n",
             (double)g_w.recs / f, (double)g_w.bytes / f / 1024.0, (double)g_ws.unlock_bytes / f / 1024.0,
             (double)g_ws.snap_bytes / f / 1024.0, g_ws.probe_locks / f,
             (double)g_w.syncs / f, (double)g_w.waits / f,
-            (double)g_w.wait_ns / f * 1e-6, by[0] ? "; waits by call:" : "", by);
+            (double)g_w.wait_ns / f * 1e-6, (double)g_w.present_waits / f, (double)g_w.present_wait_ns / f * 1e-6,
+            by[0] ? "; waits by call:" : "", by);
         if (g_w.threaded)
             rt_log("[d3d8] worker check: %llu nested buffer locks; %llu buffers checked, %llu written outside a lock "
                    "(%llu KB)\n",
                 (unsigned long long)g_bufchk.nested, (unsigned long long)g_bufchk.checked,
                 (unsigned long long)g_bufchk.differ, (unsigned long long)(g_bufchk.differ_bytes >> 10));
         g_bufchk.nested = g_bufchk.checked = g_bufchk.differ = g_bufchk.differ_bytes = 0;
-        g_w.recs = g_w.bytes = g_w.syncs = g_w.waits = g_w.wait_ns = 0;
+        g_w.recs = g_w.bytes = g_w.syncs = g_w.waits = g_w.wait_ns = g_w.present_waits = g_w.present_wait_ns = 0;
     }
     uint32_t frame = g_ws.frame;
     memset(&g_ws, 0, sizeof g_ws);
@@ -1669,6 +1682,25 @@ static void capture_frame(Obj* bb)
 
 static void d3dw_check_buffers(void);
 
+/* Present's d3d8 half: the frame's end for d3d8's own passes, the overlay, and the render queue's present. On the
+ * worker with it on (F_Present), after the host's hook has run on the game's thread. */
+static void present_back(Guest* g)
+{
+    WORLD_FLUSH();
+    cap_present();
+    scene_present();
+    ui_present();
+    Obj* bb = obj(g_dev.backbuffer);
+    if (g_overlay && bb && bb->gpu)
+        g_overlay(bb->gpu, bb->width, bb->height);
+    if (g_capture_path[0])
+        capture_frame(bb);
+    gfx_present(bb ? bb->gpu : NULL);
+    plat_atomic_add32(&g_w.presents_done, 1);
+    plat_wake_all32(&g_w.presents_done);
+    RET(D3D_OK, 5);
+}
+
 static void IDirect3DDevice8_Present(Guest* g)
 {
     d3dw_check_buffers(); /* (the worker idle: Present waits for it) */
@@ -1691,6 +1723,22 @@ static void IDirect3DDevice8_Present(Guest* g)
 }
 
 void d3d8_set_after_present(void (*fn)(void)) { g_after_present = fn; }
+
+/* A host function that calls the render queue each frame (the sun's shadow focus, the weather): on the worker with it
+ * on, in order with the frame's draws - on the game's thread its queue call waited for the worker to finish all it
+ * had (gfxq_record_hook) - else at once. data is copied. From the game's threads, under the guest lock. */
+void d3d8_host_call(void (*fn)(const void* data), const void* data, uint32_t bytes)
+{
+    if (g_w.threaded && !d3dw_on_worker() && bytes <= 4096)
+    {
+        WHost* h = (WHost*)d3dw_rec(W_HOST, (uint32_t)sizeof *h + bytes);
+        h->fn = fn, h->n = bytes, h->pad = 0;
+        memcpy(h + 1, data, bytes);
+        d3dw_done();
+        return;
+    }
+    fn(data);
+}
 
 void d3d8_set_overlay(void (*fn)(GfxTex* backbuffer, uint32_t w, uint32_t h)) { g_overlay = fn; }
 
@@ -4188,7 +4236,7 @@ static void scene_present(void)
         g_scene.tally[i].t = NULL, g_scene.tally[i].n = 0;
     if (gfx_profiling && ++g_scene.st_frames == 120)
     {
-        fprintf(stderr, "[recomp] d3d8: scenes (120 frames, the last on %s): ended sampled %u, interface %u, present %u, switch %u; camera fogged %u, "
+        rt_log("[recomp] d3d8: scenes (120 frames, the last on %s): ended sampled %u, interface %u, present %u, switch %u; camera fogged %u, "
             "unfogged %u, none %u; 3D after the effects %u; over the scene before them %u (%u screen-space); the game's own shadows left out %u\n",
             g_scene.rt == g_scene.world ? "the world's view" : "another target", g_scene.st_why[0], g_scene.st_why[1], g_scene.st_why[2],
             g_scene.st_why[3], g_scene.st_cam[2], g_scene.st_cam[1], g_scene.st_cam[0],
@@ -4964,6 +5012,7 @@ static void d3dw_check_buffers(void)
     if (g_bufchk.every <= 0 || ++g_bufchk.n < (uint32_t)g_bufchk.every)
         return;
     g_bufchk.n = 0;
+    d3dw_sync_at("the buffer check"); /* (both copies compared with the worker idle; Present doesn't wait) */
     int found = 0;
     for (uint32_t i = 1; i < g_nobjs; ++i)
     {
@@ -5378,6 +5427,42 @@ static void F_CopyRects(Guest* g)
     defer(g, IDirect3DDevice8_CopyRects, 6, ba, bb, 2);
 }
 
+/* Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion) with the worker on: the game's thread doesn't
+ * wait for the frame to be drawn, only for the one before it to have been presented (at most one frame ahead: the
+ * worker draws frame N while the game makes N+1). The host's hook (frame pacing, the host's own per-frame work, which
+ * runs the game's code) and the after-present (a resize) stay on the game's thread; d3d8's half, the render queue's
+ * present among it, runs on the worker in order with the draws (present_back). */
+static void F_Present(Guest* g)
+{
+    if (!defer_on() || !g_w.threaded)
+    {
+        IDirect3DDevice8_Present(g);
+        return;
+    }
+    if (g_w.presents_done != g_w.presents_sent)
+    {
+        uint64_t t0 = rt_monotonic_ns();
+        d3dw_flush();
+        for (;;)
+        {
+            uint32_t d = g_w.presents_done;
+            if (d == g_w.presents_sent)
+                break;
+            plat_wait32(&g_w.presents_done, d);
+        }
+        g_w.present_waits++, g_w.present_wait_ns += rt_monotonic_ns() - t0;
+    }
+    d3dw_check_buffers(); /* (every FFXI_D3D_CHECK frames: it waits for the worker itself) */
+    ws_frame();
+    if (g_present_hook)
+        g_present_hook();
+    g_w.presents_sent++;
+    defer(g, present_back, 5, NULL, NULL, 0);
+    d3dw_flush(); /* (the frame goes over now, not when the next one's records fill a batch) */
+    if (g_after_present)
+        g_after_present();
+}
+
 /* LockRect of the game's occlusion probe (lock_rect: a 16x16 render target, read only) at occlusion setting 0: its
  * answer is "fully visible", or for the sky's probe a late read - neither needs the worker's results now, so it doesn't
  * wait for it (8 a frame in a town, each a wait for everything recorded). The game is given the surface's memory at
@@ -5603,7 +5688,8 @@ static int d3dw_exempt(const char* name)
         "SetIndices", "SetVertexShader", "SetVertexShaderConstant", "SetPixelShader", "SetPixelShaderConstant",
         "ApplyStateBlock", "BeginScene", "EndScene", "Clear", "DrawPrimitiveUP", "DrawIndexedPrimitiveUP",
         "DrawPrimitive", "DrawIndexedPrimitive", "GetTransform", "SetRenderTarget", "CopyRects",
-        "TestCooperativeLevel" /* (always D3D_OK) */, NULL };
+        "TestCooperativeLevel" /* (always D3D_OK) */, "Present" /* (waits for the frame before itself: F_Present) */,
+        NULL };
     /* the buffers' locks (the game's own copy, sent over at the unlock), and references (atomic; a last Release
      * waits itself, obj_release) */
     if (!strcmp(name, "IDirect3DVertexBuffer8::Lock") || !strcmp(name, "IDirect3DVertexBuffer8::Unlock") ||
@@ -5676,7 +5762,7 @@ static const ShimDef D3D8[] = {
     D(IDirect3DDevice8, SetCursorPosition),
     D(IDirect3DDevice8, ShowCursor),
     D(IDirect3DDevice8, Reset),
-    D(IDirect3DDevice8, Present),
+    W(IDirect3DDevice8, Present),
     D(IDirect3DDevice8, GetBackBuffer),
     D(IDirect3DDevice8, GetRasterStatus),
     D(IDirect3DDevice8, SetGammaRamp),

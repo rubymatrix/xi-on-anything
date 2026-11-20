@@ -887,12 +887,29 @@ static int g_addons_on; /* the addon host (host/addons/): off with FFXI_ADDONS=0
 
 /* The player's place for the sun's near shadow map (gfx_set_focus): entity_t.Movement.LocalPosition
  * (+4 in Ashita's SDK), x, height, z, the world's own coordinates. */
+/* (the render queue's, through d3d8_host_call: with the d3d8 worker on, a queue call from the game's thread waits for
+ * it to finish the frame so far) */
+typedef struct FocusWeather
+{
+    float p[3];
+    int has_p, set_weather, weather;
+} FocusWeather;
+static void focus_weather_set(const void* data)
+{
+    const FocusWeather* f = (const FocusWeather*)data;
+    gfx_set_focus(f->has_p ? f->p : NULL);
+    if (f->set_weather)
+        gfx_set_weather(f->weather);
+}
+
 static void shadow_focus(void)
 {
     int32_t pi = xi_game_player_index();
     uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0;
-    float p[3];
-    gfx_set_focus(e && xi_game_rd(e + 4, p, sizeof p) && isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]) ? p : NULL);
+    FocusWeather f;
+    memset(&f, 0, sizeof f);
+    float* p = f.p;
+    f.has_p = e && xi_game_rd(e + 4, p, 3 * sizeof *p) && isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]);
     /* the weather, from the newer of the zone-in (0x00A, +0x68) and the weather change (0x057, +0x08), as the addon host
      * keeps them (none without it) */
     if (g_addons_on)
@@ -904,8 +921,9 @@ static void shadow_focus(void)
         size_t nb = xi_packet_last(0, 0x057, b, sizeof b, &tb);
         if (nb > 0x08 && (!na || tb >= ta))
             w = b[0x08];
-        gfx_set_weather(w);
+        f.set_weather = 1, f.weather = w;
     }
+    d3d8_host_call(focus_weather_set, &f, (uint32_t)sizeof f);
 }
 
 #if !defined(__APPLE__) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)

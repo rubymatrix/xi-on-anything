@@ -62,6 +62,7 @@ GuestFn rt_lookup_any(uint32_t runtime_addr);
 /* Diagnostics: everything goes to stderr and, once set, to a log file. The fatal hook runs just
  * before abort (the Windows host shows a message box there). */
 void rt_log(const char* fmt, ...);
+void rt_set_log_lock(void (*lock)(void), void (*unlock)(void)); /* rt_log's, for threads that log */
 void rt_set_log(FILE* f);
 typedef void (*RtFatalHook)(uint32_t addr, const char* what);
 void rt_set_fatal_hook(RtFatalHook h);
