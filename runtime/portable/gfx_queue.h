@@ -54,6 +54,10 @@ void gfxq_set_sync_pipelines(int on);
 uint32_t gfxq_failures(void);
 void gfxq_set_focus(const float* pos);
 void gfxq_set_moghouse(int in);
+/* Called before every call is recorded or waited on: one thread records at a time. d3d8.c's worker thread
+ * (FFXI_D3D_WORKER=1) records the game's draws; a call from the game's thread while it may be recording first
+ * waits for it (d3dw_gfx_hook). */
+extern void (*gfxq_record_hook)(void);
 void gfxq_trace_dump(const char* path);
 
 /* The browser: the page's main thread runs what the game recorded, from requestAnimationFrame.

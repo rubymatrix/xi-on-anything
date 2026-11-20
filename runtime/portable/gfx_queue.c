@@ -270,8 +270,12 @@ static struct
 static int g_targets_valid;
 
 /* room for a command with body bytes after the header; returns the body */
+void (*gfxq_record_hook)(void);
+
 static void* rec(uint32_t op, size_t body)
 {
+    if (gfxq_record_hook)
+        gfxq_record_hook();
     if (!g_batching)
         batch_flush();
     if (op != OP_DRAW && op != OP_SET_TARGETS)
@@ -345,6 +349,8 @@ static void nop_call(GfxqCall* c) { gfxq_call_done(c); }
  * render thread's alone, GFXQ_OWNED: there, calls go over with call_wait) */
 static void drain(void)
 {
+    if (gfxq_record_hook)
+        gfxq_record_hook();
 #if defined(GFXQ_OWNED)
     if (g_threaded)
     {
@@ -879,7 +885,9 @@ void gfxq_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, ui
     uint32_t pub = q->async_pub;
     if (!g_threaded || !pub || q->async_key != key || q->async_size != size)
     {
-        /* the first read of this level (or no thread): in place, as the back end would */
+        /* the first read of this level (or no thread): in place, as the back end would (once the render thread is
+         * done with a read of the old one still queued: it fills these buffers) */
+        drain();
         for (int i = 0; i < 3; ++i)
             free(q->async[i]), q->async[i] = NULL;
         q->async_key = key, q->async_size = size, q->async_pub = 0;

@@ -1,4 +1,5 @@
 /* Synthetic import addresses and shim dispatch. See thunk.h. */
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@ typedef struct Thunk
 {
     char name[96]; /* DLL!name */
     Shim shim;
+    ThunkPre pre; /* run before the shim (thunk_pre_rule) */
     uint64_t prof_ns, prof_calls; /* the game thread's time in it since the last report */
     uint64_t frame_ns;            /* ... in this frame (thunk_frame_end), when frame_tag is the frame's */
     uint32_t frame_calls, frame_tag;
@@ -30,6 +32,39 @@ static Thunk* g_thunks;
 static unsigned g_count, g_cap;
 static const ShimDef* g_tables[32];
 static unsigned g_ntables;
+static struct
+{
+    const char* dll;
+    ThunkPre pre;
+    int (*exempt)(const char* name);
+} g_pre_rules[4];
+static unsigned g_npre_rules;
+
+static ThunkPre pre_for(const char* full)
+{
+    for (unsigned r = 0; r < g_npre_rules; ++r)
+    {
+        const char* d = g_pre_rules[r].dll;
+        size_t n = 0;
+        while (d[n] && full[n] && tolower((unsigned char)d[n]) == tolower((unsigned char)full[n]))
+            n++;
+        if (!d[n] && full[n] == '!' &&
+            !(g_pre_rules[r].exempt && g_pre_rules[r].exempt(full + n + 1)))
+            return g_pre_rules[r].pre;
+    }
+    return NULL;
+}
+
+void thunk_pre_rule(const char* dll, ThunkPre pre, int (*exempt)(const char* name))
+{
+    if (g_npre_rules >= sizeof g_pre_rules / sizeof g_pre_rules[0])
+        return;
+    g_pre_rules[g_npre_rules].dll = dll, g_pre_rules[g_npre_rules].pre = pre, g_pre_rules[g_npre_rules].exempt = exempt;
+    g_npre_rules++;
+    for (unsigned i = 0; i < g_count; ++i)
+        if (!g_thunks[i].pre)
+            g_thunks[i].pre = pre_for(g_thunks[i].name);
+}
 
 void thunk_register(const ShimDef* defs)
 {
@@ -64,8 +99,11 @@ uint32_t thunk_for(const char* dll, const char* name)
     memset(t, 0, sizeof *t);
     strcpy(t->name, full);
     t->shim = find_shim(dll, name);
+    t->pre = pre_for(full);
     return THUNK_BASE + g_count++ * THUNK_STRIDE;
 }
+
+const char* thunk_name_at(uint32_t thunk) { return thunk < g_count ? g_thunks[thunk].name : NULL; }
 
 const char* thunk_name(uint32_t addr)
 {
@@ -172,6 +210,9 @@ int thunk_dispatch(Guest* g, uint32_t target)
     if (!name)
         return 0;
     Shim s = g_thunks[(target - THUNK_BASE) / THUNK_STRIDE].shim;
+    ThunkPre pre = g_thunks[(target - THUNK_BASE) / THUNK_STRIDE].pre;
+    if (pre && s)
+        pre((target - THUNK_BASE) / THUNK_STRIDE);
     if (!s)
     {
         char buf[160];

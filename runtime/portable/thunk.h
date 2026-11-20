@@ -23,6 +23,14 @@ typedef struct ShimDef
     Shim fn;
 } ShimDef;
 
+/* Run before every shim of a DLL (thunk_pre_rule), with the thunk's index: d3d8.c's waits for its worker thread
+ * before a call that isn't one the worker runs. */
+typedef void (*ThunkPre)(uint32_t thunk);
+/* pre before every shim of dll ("d3d8.dll") but those exempt(name) says (the name after the '!'). */
+void thunk_pre_rule(const char* dll, ThunkPre pre, int (*exempt)(const char* name));
+/* "DLL!name" of a thunk by its index (a ThunkPre's argument). */
+const char* thunk_name_at(uint32_t thunk);
+
 /* Adds a NULL-terminated table of shims (k32.c and friends call this from their init). */
 void thunk_register(const ShimDef* defs);
 /* The guest address for dll!name, created on first request. */

@@ -25,6 +25,7 @@
  * The method set is the one the game was measured to use (specs/FFXiMain.2026-08-22.d3d8-surface.txt); vtable order is the D3D8 ABI, as the R1 proxy
  * (d3d8proxy.cpp) lists it. */
 #include <math.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,18 +46,109 @@
 #endif
 #include "d3d8_cmd.h" /* the D3D calls recorded for a worker thread (FFXI_D3D_WORKER), or run at once */
 
-/* the records d3d8_cmd.h carries (d3dw_run) */
+/* --- the worker's side (d3d8_cmd.h) -------------------------------------------------------------------------- */
+/* the records */
 enum
 {
-    W_NOP = 1, /* one a frame, from Present: the ring's path in use before any call goes through it */
+    W_CALL = 1, /* a deferred call: its shim, run with its arguments (and what they point at) in the guest ring */
+    W_GPU_SKIP, /* d3d8_probe_test's g_gpu_skip, in order with the draws it is for */
+    W_BUFDATA,  /* what the game wrote into a vertex or index buffer (Buffer_Unlock) */
 };
+struct WBufData;
+static void buf_data(const struct WBufData* w);
+
+typedef struct WCall
+{
+    Shim fn;
+    uint32_t frame; /* the guest address of its arguments, `this` first */
+} WCall;
+
+static int g_gpu_skip; /* inside a call whose draws, clears and copies nobody sees (d3d8_probe_test) */
+static int g_gpu_skip_seen; /* the call's first draw has been looked at */
+
+/* The worker logs nothing itself (another thread's stdio breaks the game thread's, on the Switch): its lines wait
+ * here until the game's thread has it idle (d3dw_after_sync) */
+static char g_relay[8192];
+static size_t g_relay_n;
+static unsigned g_relay_lost;
+
+static void d3d_log(const char* fmt, ...)
+{
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (!d3dw_on_worker())
+    {
+        (rt_log)("%s", line);
+        return;
+    }
+    size_t n = strlen(line);
+    if (g_relay_n + n + 1 > sizeof g_relay)
+    {
+        g_relay_lost++;
+        return;
+    }
+    memcpy(g_relay + g_relay_n, line, n + 1);
+    g_relay_n += n + 1;
+}
+#define rt_log d3d_log
+
+/* objects whose last reference the worker dropped (an unbind): destroyed on the game's thread, which has the guest
+ * heap (d3dw_after_sync) */
+static uint32_t g_dead[4096];
+static uint32_t g_ndead;
+
+static void obj_destroy_now(uint32_t p);
+static int defer_on(void);
+/* FFXI_PROFILE: the calls that waited for the worker, by thunk */
+static uint32_t g_wait_by[4096];
+/* the transforms on the game's thread, for GetTransform (F_GetTransform): 280 = NXF */
+static float g_fxf[280][16];
+static uint8_t g_fxf_ok[280];
+/* the streams and indices on the game's thread, for the draws' snapshots of dynamic buffers (front_snapshot) */
+static struct
+{
+    uint32_t stream[16], stride[16], ib, base; /* 16 = NSTREAMS */
+} g_fs;
+
+
+static void d3dw_after_sync(void)
+{
+    for (size_t at = 0; at < g_relay_n;)
+    {
+        (rt_log)("%s", g_relay + at);
+        at += strlen(g_relay + at) + 1;
+    }
+    g_relay_n = 0;
+    if (g_relay_lost)
+        (rt_log)("[d3d8] the worker's log: %u lines lost\n", g_relay_lost), g_relay_lost = 0;
+    uint32_t n = g_ndead;
+    g_ndead = 0;
+    for (uint32_t i = 0; i < n; ++i)
+        obj_destroy_now(g_dead[i]);
+}
 
 static void d3dw_run(uint32_t op, const void* body, uint32_t bytes)
 {
-    (void)body, (void)bytes;
+    (void)bytes;
     switch (op)
     {
-    case W_NOP:
+    case W_CALL:
+    {
+        const WCall* c = (const WCall*)body;
+        static Guest wg; /* (the worker's, or inline the game thread's: never both) */
+        wg.esp = c->frame - 4u;
+        c->fn(&wg);
+        break;
+    }
+    case W_GPU_SKIP:
+        memcpy(&g_gpu_skip, body, sizeof g_gpu_skip);
+        g_gpu_skip_seen = 0;
+        break;
+    case W_BUFDATA:
+        buf_data((const struct WBufData*)body);
         break;
     default:
         fprintf(stderr, "d3d8 worker: an unknown record %u\n", op);
@@ -212,6 +304,11 @@ typedef struct Obj
     int32_t wr[4];       /* ... its pixels x0, y0, x1, y1 since a clear to alpha 0, when wr_known (fade_scissor) */
     uint32_t drawn;      /* FFXI_PROFILE: the frame (g_ws.frame) a draw last used it in: vertex and index buffers,
                           * textures */
+    /* vertex and index buffers with the worker on (FFXI_D3D_WORKER=1): mem is the worker's, fmem the game's - its
+     * locks write there, and an unlock sends what it wrote over (W_BUFDATA), in order with the draws */
+    uint32_t fmem, lk_off, lk_n; /* (lk_*: what the locks since the last send wrote, as one range) */
+    uint8_t lk_write, lk_depth;  /* ... and the locks not yet unlocked: it goes over at the last unlock */
+    uint8_t loose;               /* written outside its locks (d3dw_check_buffers found it): sent at the draws */
 } Obj;
 static uint32_t g_buf_serial; /* Obj.serial's last */
 
@@ -225,8 +322,17 @@ static struct
     uint64_t at;
     uint32_t frames, creates, destroys, buf_locks, buf_locks_drawn, tex_locks, tex_locks_drawn, rt_locks, copies,
         resets, draws;
-    uint64_t buf_lock_bytes, tex_lock_bytes;
+    uint64_t buf_lock_bytes, tex_lock_bytes, unlock_bytes, snap_bytes;
 } g_ws = { -1, 1 };
+
+/* the worker's check of the buffers (d3dw_check_buffers) */
+static struct
+{
+    int every; /* -1 not read */
+    uint32_t n;
+    uint64_t nested, checked, differ, differ_bytes;
+    uint32_t logged;
+} g_bufchk = { -1 };
 
 static int ws_on(void)
 {
@@ -255,6 +361,40 @@ static void ws_frame(void)
         g_ws.draws / f, g_ws.creates / f, g_ws.destroys / f, g_ws.rt_locks / f, g_ws.copies / f, g_ws.resets,
         g_ws.buf_locks / f, g_ws.buf_locks_drawn / f, (double)g_ws.buf_lock_bytes / f / 1024.0, g_ws.tex_locks / f,
         g_ws.tex_locks_drawn / f, (double)g_ws.tex_lock_bytes / f / 1024.0);
+    if (g_w.mode > 0)
+    {
+        char by[512];
+        int o = 0;
+        by[0] = 0;
+        if (g_w.threaded)
+            for (int k = 0; k < 6; ++k)
+            {
+                uint32_t best = 0, bi = 0;
+                for (uint32_t i = 0; i < 4096; ++i)
+                    if (g_wait_by[i] > best)
+                        best = g_wait_by[i], bi = i;
+                if (!best)
+                    break;
+                const char* nm = thunk_name_at(bi);
+                const char* m = nm ? strstr(nm, "::") : NULL;
+                o += snprintf(by + o, sizeof by - (size_t)o, " %s %.1f", m ? m + 2 : nm ? nm : "?", best / f);
+                g_wait_by[bi] = 0;
+            }
+        memset(g_wait_by, 0, sizeof g_wait_by);
+        rt_log("[d3d8] worker: %.0f records/frame (%.0f KB, %.0f KB of buffer writes, %.0f KB of dynamic buffers at "
+               "the draws); %.1f syncs/frame, %.1f of them waited (%.2f ms/frame)%s%s\n",
+            (double)g_w.recs / f, (double)g_w.bytes / f / 1024.0, (double)g_ws.unlock_bytes / f / 1024.0,
+            (double)g_ws.snap_bytes / f / 1024.0,
+            (double)g_w.syncs / f, (double)g_w.waits / f,
+            (double)g_w.wait_ns / f * 1e-6, by[0] ? "; waits by call:" : "", by);
+        if (g_w.threaded)
+            rt_log("[d3d8] worker check: %llu nested buffer locks; %llu buffers checked, %llu written outside a lock "
+                   "(%llu KB)\n",
+                (unsigned long long)g_bufchk.nested, (unsigned long long)g_bufchk.checked,
+                (unsigned long long)g_bufchk.differ, (unsigned long long)(g_bufchk.differ_bytes >> 10));
+        g_bufchk.nested = g_bufchk.checked = g_bufchk.differ = g_bufchk.differ_bytes = 0;
+        g_w.recs = g_w.bytes = g_w.syncs = g_w.waits = g_w.wait_ns = 0;
+    }
     uint32_t frame = g_ws.frame;
     memset(&g_ws, 0, sizeof g_ws);
     g_ws.on = 1, g_ws.frame = frame, g_ws.at = now;
@@ -333,6 +473,8 @@ static void obj_destroy(Obj* o)
     gfx_buf_destroy(o->gbuf);
     if (o->mem)
         gheap_free(o->mem);
+    if (o->fmem)
+        gheap_free(o->fmem);
     uint32_t idx = rd32(o->guest + 4);
     wr32(o->guest, 0);
     gheap_free(o->guest);
@@ -348,7 +490,8 @@ static uint32_t obj_addref(uint32_t p)
         return 0;
     if (o->container)
         return obj_addref(o->container);
-    return (uint32_t)++o->refs;
+    /* (atomic: the worker binds and unbinds while the game's thread adds and drops its own references) */
+    return plat_atomic_add32((volatile uint32_t*)&o->refs, 1) + 1;
 }
 
 static uint32_t obj_release(uint32_t p)
@@ -358,14 +501,42 @@ static uint32_t obj_release(uint32_t p)
         return 0;
     if (o->container)
         return obj_release(o->container);
-    if (o->refs > 0)
-        o->refs--;
-    if (!o->refs && !o->implicit && o->kind != O_DEVICE && o->kind != O_D3D)
+    /* whether this release took the last reference: from the exchange itself, not a second read of refs (the game's
+     * thread and the worker may each drop one at once, and both would read 0 after) */
+    uint32_t r;
+    for (;;)
     {
-        obj_destroy(o);
-        return 0;
+        r = (uint32_t)o->refs;
+        if (!r || plat_atomic_cas32((volatile uint32_t*)&o->refs, r, r - 1) == r)
+            break;
     }
-    return (uint32_t)o->refs;
+    if (r <= 1 && !o->implicit && o->kind != O_DEVICE && o->kind != O_D3D)
+    {
+        if (d3dw_on_worker())
+        {
+            /* (its last holder was the device: the game's thread destroys it once the worker is idle) */
+            if (g_ndead < sizeof g_dead / sizeof g_dead[0])
+                g_dead[g_ndead++] = p;
+            return 0;
+        }
+        /* the game's last reference: a call of its still to run on the worker may bind it again (and the wait may
+         * itself destroy it, if the worker dropped it too: obj_destroy_now) */
+        d3dw_sync();
+        o = obj(p);
+        if (!o)
+            return 0;
+        if (!o->refs)
+            obj_destroy(o);
+        return (uint32_t)o->refs;
+    }
+    return r ? r - 1 : 0;
+}
+
+static void obj_destroy_now(uint32_t p)
+{
+    Obj* o = obj(p);
+    if (o && !o->refs && !o->implicit && o->kind != O_DEVICE && o->kind != O_D3D)
+        obj_destroy(o);
 }
 
 /* a pointer the device or a state block holds: references the new one, releases the old */
@@ -826,8 +997,6 @@ static void raise_top(int* top, uint32_t n)
 /* A 16x16 occlusion probe tests a quad at the sky's depth (z 0x3f7ffffe, 1 - 2^-23: the game's
  * probe for the sun and its lens flare) since the last probe was read; see lock_rect. */
 static int g_probe_sky;
-static int g_gpu_skip; /* inside a call whose draws, clears and copies nobody sees (d3d8_probe_test) */
-static int g_gpu_skip_seen; /* the call's first draw has been looked at */
 static int g_probe_wrapped; /* d3d8_probe_test installed: render targets' unread is kept */
 static int g_fade_scissor; /* fade_scissor on (d3d8_setup; FFXI_FADE_SCISSOR=0: off) */
 static Obj* wr_target(void);
@@ -1172,6 +1341,8 @@ static void IDirect3D8_GetAdapterMonitor(Guest* g) { RET(0x00050001u, 2); }
 /* CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppDevice) */
 static void IDirect3D8_CreateDevice(Guest* g)
 {
+    memset(g_fxf_ok, 0, sizeof g_fxf_ok);
+    memset(&g_fs, 0, sizeof g_fs);
     wr32(ARG(6), 0);
     if (ARG(1) || g_dev.guest)
         RET(g_dev.guest ? D3DERR_NOTAVAILABLE : D3DERR_INVALIDCALL, 7);
@@ -1273,6 +1444,8 @@ static void IDirect3DDevice8_ShowCursor(Guest* g)
 static void IDirect3DDevice8_Reset(Guest* g)
 {
     g_ws.resets++;
+    memset(g_fxf_ok, 0, sizeof g_fxf_ok);
+    memset(&g_fs, 0, sizeof g_fs);
     Dev* d = &g_dev;
     for (int i = 0; i < 13; ++i)
         d->pp[i] = rd32(ARG(1) + 4u * (uint32_t)i);
@@ -1341,7 +1514,17 @@ static int probe_forced(void)
 void d3d8_probe_test(Guest* g, GuestFn orig, int character)
 {
     g_probe_wrapped = 1;
-    g_gpu_skip = character && g_occlusion == 0 && !probe_forced();
+    int skip = character && g_occlusion == 0 && !probe_forced();
+    if (defer_on())
+    {
+        /* (the draws it is for are run later, on the worker: the flag goes with them) */
+        memcpy(d3dw_rec(W_GPU_SKIP, sizeof skip), &skip, sizeof skip), d3dw_done();
+        orig(g);
+        skip = 0;
+        memcpy(d3dw_rec(W_GPU_SKIP, sizeof skip), &skip, sizeof skip), d3dw_done();
+        return;
+    }
+    g_gpu_skip = skip;
     g_gpu_skip_seen = 0;
     orig(g);
     g_gpu_skip = 0;
@@ -1415,6 +1598,7 @@ int d3d8_occlusion(void) { return g_occlusion; }
 
 void d3d8_screen_size(uint32_t* w, uint32_t* h)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     *w = g_dev.pp[0], *h = g_dev.pp[1];
     if (g_dev.hwnd)
         user32_client_size(g_dev.hwnd, w, h);
@@ -1434,6 +1618,7 @@ void d3d8_capture(const char* path) { snprintf(g_capture_path, sizeof g_capture_
 
 uint32_t d3d8_capture_result(uint32_t* w, uint32_t* h, uint32_t* format, int* ok)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     *w = g_capture_w, *h = g_capture_h, *format = g_capture_fmt, *ok = g_capture_ok;
     return g_capture_serial;
 }
@@ -1462,12 +1647,12 @@ static void capture_frame(Obj* bb)
     g_capture_serial++;
 }
 
+static void d3dw_check_buffers(void);
+
 static void IDirect3DDevice8_Present(Guest* g)
 {
+    d3dw_check_buffers(); /* (the worker idle: Present waits for it) */
     ws_frame();
-    d3dw_rec(W_NOP, 0);
-    d3dw_done();
-    d3dw_sync(); /* (nothing goes over yet but the NOP: the worker, if on, is idle again before the present) */
     WORLD_FLUSH();
     cap_present();
     scene_present();
@@ -1491,6 +1676,7 @@ void d3d8_set_overlay(void (*fn)(GfxTex* backbuffer, uint32_t w, uint32_t h)) { 
 
 void d3d8_backbuffer_size(uint32_t* w, uint32_t* h)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     Obj* bb = obj(g_dev.backbuffer);
     *w = bb ? bb->width : 0;
     *h = bb ? bb->height : 0;
@@ -1500,6 +1686,7 @@ uint32_t d3d8_window(void) { return g_dev.hwnd; }
 
 int d3d8_get_transform(uint32_t ts, float m[16])
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     int i = xf_index(ts);
     if (!g_dev.guest || i < 0)
         return 0;
@@ -1509,6 +1696,7 @@ int d3d8_get_transform(uint32_t ts, float m[16])
 
 int d3d8_get_render_state(uint32_t rs, uint32_t* v)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     if (!g_dev.guest || rs >= 256)
         return 0;
     *v = g_dev.cur.rs[rs];
@@ -1520,6 +1708,7 @@ int d3d8_get_render_state(uint32_t rs, uint32_t* v)
  * frames (d3d8_set_after_present); the game's own copies of the size are the host's to change. */
 int d3d8_resize(uint32_t w, uint32_t h)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     Dev* d = &g_dev;
     Obj* bb = obj(d->backbuffer);
     if (!d->guest || !bb || w < 64 || h < 64)
@@ -2309,12 +2498,12 @@ static void IDirect3DDevice8_DrawIndexedPrimitive(Guest* g)
  * takes in the edge of the glyph beside it there (shown between letters) and cuts the glyph's own lean
  * and outline. The quad is drawn over the ink box of the glyph that starts in the cell instead: the
  * same texels where they overlap, so it lands where the game put it. */
+static uint32_t g_quad_buf[3]; /* fit_quad's, widen_quad's and inset_quad's quads (d3d8_setup) */
+
 static uint32_t fit_quad(uint32_t data, const Obj* t)
 {
     const PackEntry* e = (const PackEntry*)t->repl_entry;
-    static uint32_t buf;
-    if (!buf)
-        buf = gheap_alloc(4 * 28, 1);
+    uint32_t buf = g_quad_buf[0]; /* (made at setup: the worker has no guest heap) */
     float x[4], u[4], v[4], ulo = 1e30f, uhi = -1e30f, vlo = 1e30f, vhi = -1e30f, xlo = 1e30f, xhi = -1e30f;
     for (int i = 0; i < 4; ++i)
     {
@@ -2354,9 +2543,7 @@ static uint32_t fit_quad(uint32_t data, const Obj* t)
  * name were lost (the neighbours hide it inside the name). A copy: the game's vertices stay. */
 static uint32_t widen_quad(uint32_t data, const Obj* t)
 {
-    static uint32_t buf;
-    if (!buf)
-        buf = gheap_alloc(4 * 28, 1);
+    uint32_t buf = g_quad_buf[1]; /* (made at setup: the worker has no guest heap) */
     float x[4], u[4], ulo = 1e30f, uhi = -1e30f, xlo = 1e30f, xhi = -1e30f, vlo = 1e30f, vhi = -1e30f;
     for (int i = 0; i < 4; ++i)
     {
@@ -2408,9 +2595,7 @@ static uint32_t inset_quad(uint32_t data, const Obj* t)
         fabsf(x[1] - x[3]) > 0.01f || fabsf(v[0] - v[1]) > 1e-6f || fabsf(u[0] - u[2]) > 1e-6f)
         return data;
     g_cap_inset = 1;
-    static uint32_t buf;
-    if (!buf)
-        buf = gheap_alloc(4 * 28, 1);
+    uint32_t buf = g_quad_buf[2]; /* (made at setup: the worker has no guest heap) */
     memcpy(GUEST_PTR(buf), GUEST_PTR(data), 4 * 28);
     float uc = (u[0] + u[1]) * 0.5f, vc = (v[0] + v[2]) * 0.5f;
     for (int i = 0; i < 4; ++i)
@@ -4742,24 +4927,138 @@ static void Cube_UnlockRect(Guest* g)
 }
 static void Cube_AddDirtyRect(Guest* g) { RET(D3D_OK, 3); }
 
+/* The worker's check of the buffers (FFXI_D3D_CHECK=N, every N frames; 0 off; 30 by default with the worker on): at a
+ * Present, with the worker idle, each buffer's two copies are the same unless the game wrote into its copy outside a
+ * lock (with a pointer it kept from one) - which the worker never hears of. Each one found is logged and mended
+ * (the game's copy over the worker's). */
+
+static void d3dw_check_buffers(void)
+{
+    if (!g_w.threaded)
+        return;
+    if (g_bufchk.every < 0)
+    {
+        const char* e = getenv("FFXI_D3D_CHECK");
+        g_bufchk.every = e && *e ? atoi(e) : 30;
+    }
+    if (g_bufchk.every <= 0 || ++g_bufchk.n < (uint32_t)g_bufchk.every)
+        return;
+    g_bufchk.n = 0;
+    int found = 0;
+    for (uint32_t i = 1; i < g_nobjs; ++i)
+    {
+        Obj* b = OBJ_AT(i);
+        /* (dynamic ones are written outside their locks, and sent at the draws: front_snapshot) */
+        if ((b->kind != O_VB && b->kind != O_IB) || !b->fmem || !b->mem || b->lk_depth || (b->usage & USAGE_DYNAMIC) ||
+            b->loose)
+            continue;
+        g_bufchk.checked++;
+        const uint8_t* f = GUEST_PTR(b->fmem);
+        uint8_t* m = GUEST_PTR(b->mem);
+        if (!memcmp(f, m, b->size))
+            continue;
+        uint32_t lo = 0, hi = b->size;
+        while (lo < hi && f[lo] == m[lo])
+            lo++;
+        while (hi > lo && f[hi - 1] == m[hi - 1])
+            hi--;
+        g_bufchk.differ++, g_bufchk.differ_bytes += hi - lo;
+        if (g_bufchk.logged < 16)
+            g_bufchk.logged++,
+                rt_log("[d3d8] worker check: %s %08x (%u bytes, usage %x, pool %u, fvf %x) was written outside a lock: "
+                       "bytes %u-%u differ; mended\n",
+                    b->kind == O_VB ? "vertex buffer" : "index buffer", b->guest, b->size, b->usage, b->pool, b->fvf, lo,
+                    hi);
+        memcpy(m + lo, f + lo, hi - lo);
+        b->gbuf_dirty = 1, b->serial = ++g_buf_serial;
+        b->loose = 1, found = 1; /* (from now on its draws send what they use: front_snapshot) */
+    }
+    /* while it finds some, it looks again at the next frame (a zone's load writes a few at a time) */
+    if (found)
+        g_bufchk.n = (uint32_t)g_bufchk.every;
+}
+
 /* Lock(OffsetToLock, SizeToLock, ppbData, Flags) */
 static void Buffer_Lock(Guest* g)
 {
     Obj* b = obj(ARG(0));
     if (!b || ARG(1) > b->size)
         RET(D3DERR_INVALIDCALL, 5);
-    if (!(ARG(4) & LOCK_READONLY))
-        b->gbuf_dirty = 1, b->serial = ++g_buf_serial;
     g_ws.buf_locks++;
     if (b->drawn == g_ws.frame)
         g_ws.buf_locks_drawn++;
     if (b->gbuf && !(ARG(4) & LOCK_READONLY)) /* a static buffer's: what an upload at unlock would copy */
         g_ws.buf_lock_bytes += ARG(2) ? ARG(2) : b->size - ARG(1);
+    if (g_w.threaded)
+    {
+        /* the game's copy (fmem): its writes go over at the unlock; the worker's (mem) is made here too - the
+         * worker has no guest heap */
+        obj_mem(b);
+        if (!b->fmem)
+        {
+            b->fmem = gheap_alloc(b->size ? b->size : 16, 1);
+            memcpy(GUEST_PTR(b->fmem), GUEST_PTR(b->mem), b->size); /* (as the worker's has it, at its first lock) */
+        }
+        uint32_t off = ARG(1), n = ARG(2) ? ARG(2) : b->size - off;
+        if (n > b->size - off)
+            n = b->size - off;
+        if (!(ARG(4) & LOCK_READONLY) && n)
+        {
+            if (!b->lk_write)
+                b->lk_off = off, b->lk_n = n, b->lk_write = 1;
+            else
+            {
+                /* (a lock inside another, or one again before the send: both ranges go over) */
+                uint32_t lo = off < b->lk_off ? off : b->lk_off;
+                uint32_t hi = off + n > b->lk_off + b->lk_n ? off + n : b->lk_off + b->lk_n;
+                b->lk_off = lo, b->lk_n = hi - lo;
+            }
+        }
+        if (b->lk_depth)
+            g_bufchk.nested++;
+        if (b->lk_depth < 255)
+            b->lk_depth++;
+        wr32(ARG(3), b->fmem + off);
+        RET(D3D_OK, 5);
+    }
+    if (!(ARG(4) & LOCK_READONLY))
+        b->gbuf_dirty = 1, b->serial = ++g_buf_serial;
     wr32(ARG(3), obj_mem(b) + ARG(1));
     RET(D3D_OK, 5);
 }
 
-static void Buffer_Unlock(Guest* g) { RET(obj(ARG(0)) ? D3D_OK : D3DERR_INVALIDCALL, 1); }
+/* the worker: what the game wrote into a buffer (Buffer_Unlock), into the worker's copy */
+typedef struct WBufData
+{
+    uint32_t buf, off, n, data; /* the buffer's COM pointer; where; how much; the bytes, in the guest ring */
+} WBufData;
+
+static void buf_data(const WBufData* w)
+{
+    Obj* b = obj(w->buf);
+    if (!b || !b->mem || w->off > b->size || w->n > b->size - w->off)
+        return;
+    memcpy(GUEST_PTR(b->mem + w->off), GUEST_PTR(w->data), w->n);
+    b->gbuf_dirty = 1, b->serial = ++g_buf_serial;
+}
+
+static void Buffer_Unlock(Guest* g)
+{
+    Obj* b = obj(ARG(0));
+    if (b && b->lk_depth)
+        b->lk_depth--;
+    if (b && g_w.threaded && !b->lk_depth && b->lk_write && b->lk_n && b->fmem)
+    {
+        uint32_t data = d3dw_guest(b->lk_n);
+        memcpy(GUEST_PTR(data), GUEST_PTR(b->fmem + b->lk_off), b->lk_n);
+        WBufData* w = (WBufData*)d3dw_rec(W_BUFDATA, sizeof *w);
+        w->buf = ARG(0), w->off = b->lk_off, w->n = b->lk_n, w->data = data;
+        d3dw_done();
+        g_ws.unlock_bytes += b->lk_n;
+        b->lk_write = 0, b->lk_n = 0;
+    }
+    RET(b ? D3D_OK : D3DERR_INVALIDCALL, 1);
+}
 
 static void VertexBuffer_GetDesc(Guest* g)
 {
@@ -4855,7 +5154,353 @@ static void sh_ValidatePixelShader(Guest* g)
     RET(v >= 0xFFFF0100u && v <= 0xFFFF0104u ? D3D_OK : E_FAIL, 4);
 }
 
+/* --- the calls the worker runs (FFXI_D3D_WORKER): their fronts, on the game's thread ------------------------- */
+/* Each front copies its call's argument words (`this` first) and what its pointer arguments point at into the guest
+ * ring, the pointers set to the copies, records the call, and returns D3D_OK at once - the worker then runs the
+ * shim itself on them (d3dw_run). These never fail here but on arguments the game doesn't pass. Every other d3d8
+ * call waits for the worker first (d3dw_pre). */
+#if defined(GFX_QUEUE)
+/* a render-queue call from the game's thread (a host overlay, an icon's texture) while the worker may be recording
+ * draws: it waits for the worker, so one thread records at a time (gfxq_record_hook) */
+static void d3dw_gfx_hook(void) { d3dw_sync(); }
+#endif
+
+static int defer_on(void)
+{
+    if (g_w.mode < 0)
+    {
+        d3dw_start(!g_world_flush); /* (the scene renderer's flush reads the game's memory where it draws) */
+#if defined(GFX_QUEUE)
+        if (g_w.threaded)
+            gfxq_record_hook = d3dw_gfx_hook;
+#else
+        if (g_w.threaded)
+        {
+            /* (no render queue: the back end itself isn't for two threads) */
+            fprintf(stderr, "[d3d8] FFXI_D3D_WORKER=1 needs the render queue (-DGFX_QUEUE)\n");
+            abort();
+        }
+#endif
+    }
+    return g_w.mode;
+}
+
+static void defer(Guest* g, Shim fn, uint32_t nwords, const uint32_t* barg, const uint32_t* bbytes, unsigned nblobs)
+{
+    uint32_t total = (uint32_t)D3DW_ALIGN16(4u * nwords);
+    for (unsigned i = 0; i < nblobs; ++i)
+        if (ARG(barg[i]) && bbytes[i])
+            total += (uint32_t)D3DW_ALIGN16(bbytes[i]);
+    uint32_t a = d3dw_guest(total);
+    for (uint32_t i = 0; i < nwords; ++i)
+        wr32(a + 4u * i, ARG(i));
+    uint32_t at = a + (uint32_t)D3DW_ALIGN16(4u * nwords);
+    for (unsigned i = 0; i < nblobs; ++i)
+        if (ARG(barg[i]) && bbytes[i])
+        {
+            memcpy(GUEST_PTR(at), ARGP(barg[i]), bbytes[i]);
+            wr32(a + 4u * barg[i], at);
+            at += (uint32_t)D3DW_ALIGN16(bbytes[i]);
+        }
+    WCall* c = (WCall*)d3dw_rec(W_CALL, sizeof *c);
+    c->fn = fn, c->frame = a;
+    d3dw_done();
+    /* (the UP draws leave stream 0, and the indexed one the indices, unset: g_fs follows) */
+    if (fn == IDirect3DDevice8_DrawPrimitiveUP || fn == IDirect3DDevice8_DrawIndexedPrimitiveUP)
+    {
+        g_fs.stream[0] = 0, g_fs.stride[0] = 0;
+        if (fn == IDirect3DDevice8_DrawIndexedPrimitiveUP)
+            g_fs.ib = 0;
+    }
+    g->eax = D3D_OK;
+    g->esp += 4u + 4u * nwords;
+}
+
+/* a front: method m, n argument words, its pointer arguments' sizes (arg, bytes), 0-2 of them */
+#define FRONT(m, n)                                                                                                  \
+    static void F_##m(Guest* g)                                                                                      \
+    {                                                                                                                \
+        if (!defer_on())                                                                                             \
+        {                                                                                                            \
+            IDirect3DDevice8_##m(g);                                                                                 \
+            return;                                                                                                  \
+        }                                                                                                            \
+        defer(g, IDirect3DDevice8_##m, n, NULL, NULL, 0);                                                            \
+    }
+#define FRONT1(m, n, a0, b0)                                                                                         \
+    static void F_##m(Guest* g)                                                                                      \
+    {                                                                                                                \
+        if (!defer_on())                                                                                             \
+        {                                                                                                            \
+            IDirect3DDevice8_##m(g);                                                                                 \
+            return;                                                                                                  \
+        }                                                                                                            \
+        uint32_t ba[1] = { a0 }, bb[1] = { b0 };                                                                     \
+        defer(g, IDirect3DDevice8_##m, n, ba, bb, 1);                                                                \
+    }
+#define FRONT2(m, n, a0, b0, a1, b1)                                                                                 \
+    static void F_##m(Guest* g)                                                                                      \
+    {                                                                                                                \
+        if (!defer_on())                                                                                             \
+        {                                                                                                            \
+            IDirect3DDevice8_##m(g);                                                                                 \
+            return;                                                                                                  \
+        }                                                                                                            \
+        uint32_t ba[2] = { a0, a1 }, bb[2] = { b0, b1 };                                                             \
+        defer(g, IDirect3DDevice8_##m, n, ba, bb, 2);                                                                \
+    }
+#define CAP(x, most) ((x) < (most) ? (x) : (most))
+
+FRONT(SetRenderState, 3)
+FRONT(SetTextureStageState, 4)
+FRONT(SetTexture, 3)
+/* The transforms as the game set them, kept on its thread too (fxf), so GetTransform - ~100 a frame - needn't wait
+ * for the worker: a transform is known here once set (not inside a state block's recording) and unknown again after
+ * a state block that holds it is applied, or the device is made or reset */
+
+static void F_SetTransform(Guest* g)
+{
+    if (!defer_on())
+    {
+        IDirect3DDevice8_SetTransform(g);
+        return;
+    }
+    int i = xf_index(ARG(1));
+    if (i >= 0 && !g_dev.rec)
+        memcpy(g_fxf[i], ARGP(2), 64), g_fxf_ok[i] = 1;
+    uint32_t ba[1] = { 2 }, bb[1] = { 64 };
+    defer(g, IDirect3DDevice8_SetTransform, 3, ba, bb, 1);
+}
+
+static void F_MultiplyTransform(Guest* g)
+{
+    if (!defer_on())
+    {
+        IDirect3DDevice8_MultiplyTransform(g);
+        return;
+    }
+    int i = xf_index(ARG(1));
+    if (i >= 0 && !g_dev.rec)
+    {
+        if (g_fxf_ok[i])
+        {
+            /* as IDirect3DDevice8_MultiplyTransform: pMatrix * the matrix */
+            float a[16], r[16];
+            memcpy(a, ARGP(2), 64);
+            const float* b = g_fxf[i];
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x)
+                    r[y * 4 + x] = a[y * 4] * b[x] + a[y * 4 + 1] * b[4 + x] + a[y * 4 + 2] * b[8 + x] + a[y * 4 + 3] * b[12 + x];
+            memcpy(g_fxf[i], r, 64);
+        }
+    }
+    uint32_t ba[1] = { 2 }, bb[1] = { 64 };
+    defer(g, IDirect3DDevice8_MultiplyTransform, 3, ba, bb, 1);
+}
+
+static void F_ApplyStateBlock(Guest* g)
+{
+    if (!defer_on())
+    {
+        IDirect3DDevice8_ApplyStateBlock(g);
+        return;
+    }
+    Block* b = block_of(ARG(1));
+    if (b && !g_dev.rec)
+    {
+        for (int i = 0; i < NXF; ++i)
+            if (b->m.xf[i])
+                g_fxf_ok[i] = 0;
+        /* (a block is the game's thread's to read: only made, recorded into and captured with the worker idle) */
+        for (int i = 0; i < NSTREAMS; ++i)
+            if (b->m.stream[i])
+                g_fs.stream[i] = b->s.stream[i], g_fs.stride[i] = b->s.stride[i];
+        if (b->m.ib)
+            g_fs.ib = b->s.ib, g_fs.base = b->s.base_vertex;
+    }
+    defer(g, IDirect3DDevice8_ApplyStateBlock, 2, NULL, NULL, 0);
+}
+
+static void F_GetTransform(Guest* g)
+{
+    int i = xf_index(ARG(1));
+    if (g_w.threaded && i >= 0 && g_fxf_ok[i])
+    {
+        memcpy(ARGP(2), g_fxf[i], 64);
+        RET(D3D_OK, 3);
+    }
+    d3dw_sync();
+    IDirect3DDevice8_GetTransform(g);
+    if (g_w.threaded && i >= 0 && !g_dev.rec)
+        memcpy(g_fxf[i], g_dev.cur.xf[i], 64), g_fxf_ok[i] = 1;
+}
+
+/* (pRenderTarget, pNewZStencil): ~85 a frame in a town; the game's thread reads the targets only in calls that wait */
+FRONT(SetRenderTarget, 3)
+
+/* CopyRects(pSourceSurface, pSourceRectsArray, cRects, pDestinationSurface, pDestPointsArray): a copy between two
+ * GPU surfaces runs on the worker; one with a surface in memory waits (it may make the surface's memory, read the
+ * GPU back) */
+static void F_CopyRects(Guest* g)
+{
+    Obj* s = obj(ARG(1));
+    Obj* d = obj(ARG(4));
+    if (!defer_on() || !g_w.threaded || !s || !d || !gpu_owned(s) || !gpu_owned(d))
+    {
+        d3dw_sync();
+        IDirect3DDevice8_CopyRects(g);
+        return;
+    }
+    uint32_t n = ARG(2) ? CAP(ARG(3), 4096u) : 0;
+    uint32_t ba[2] = { 2, 5 }, bb[2] = { 16u * n, 8u * n };
+    defer(g, IDirect3DDevice8_CopyRects, 6, ba, bb, 2);
+}
+
+/* A dynamic buffer's part a draw uses, as the game's copy has it now, to the worker's before the draw. The game writes
+ * some of its dynamic buffers outside a lock (through the pointer a lock gave it, after the unlock - its effects'),
+ * which an unlock's send misses; D3D draws what a buffer holds at the draw. */
+static void front_snapshot(uint32_t p, uint32_t off, uint32_t bytes)
+{
+    Obj* b = obj(p);
+    if (!b || !b->fmem || !((b->usage & USAGE_DYNAMIC) || b->loose) || off >= b->size || !bytes)
+        return;
+    if (bytes > b->size - off)
+        bytes = b->size - off;
+    if (bytes > D3DW_GUEST / 8)
+        return; /* (not a draw's part: whatever the unlocks sent stands) */
+    uint32_t data = d3dw_guest(bytes);
+    memcpy(GUEST_PTR(data), GUEST_PTR(b->fmem + off), bytes);
+    WBufData* w = (WBufData*)d3dw_rec(W_BUFDATA, sizeof *w);
+    w->buf = p, w->off = off, w->n = bytes, w->data = data;
+    d3dw_done();
+    g_ws.snap_bytes += bytes;
+}
+
+static void front_snapshot_streams(uint32_t first, uint32_t n)
+{
+    for (int i = 0; i < NSTREAMS; ++i)
+        if (g_fs.stream[i] && g_fs.stride[i])
+            front_snapshot(g_fs.stream[i], first * g_fs.stride[i], n * g_fs.stride[i]);
+}
+
+/* (PrimitiveType, StartVertex, PrimitiveCount): the vertices are the worker's copies of the buffers */
+static void F_DrawPrimitive(Guest* g)
+{
+    if (!defer_on())
+    {
+        IDirect3DDevice8_DrawPrimitive(g);
+        return;
+    }
+    if (g_w.threaded)
+        front_snapshot_streams(ARG(2), prim_vertices(ARG(1), ARG(3)));
+    defer(g, IDirect3DDevice8_DrawPrimitive, 4, NULL, NULL, 0);
+}
+
+/* (PrimitiveType, MinIndex, NumVertices, StartIndex, PrimitiveCount) */
+static void F_DrawIndexedPrimitive(Guest* g)
+{
+    if (!defer_on())
+    {
+        IDirect3DDevice8_DrawIndexedPrimitive(g);
+        return;
+    }
+    if (g_w.threaded)
+    {
+        front_snapshot_streams(g_fs.base + ARG(2), ARG(3));
+        Obj* ib = obj(g_fs.ib);
+        if (ib)
+        {
+            uint32_t isize = ib->format == FMT_INDEX32 ? 4u : 2u;
+            front_snapshot(g_fs.ib, ARG(4) * isize, prim_vertices(ARG(1), ARG(5)) * isize);
+        }
+    }
+    defer(g, IDirect3DDevice8_DrawIndexedPrimitive, 6, NULL, NULL, 0);
+}
+
+/* (StreamNumber, pStreamData, Stride), (pIndexData, BaseVertexIndex): followed on the game's thread too (g_fs) */
+static void F_SetStreamSource(Guest* g)
+{
+    if (!defer_on())
+    {
+        IDirect3DDevice8_SetStreamSource(g);
+        return;
+    }
+    if (!g_dev.rec && ARG(1) < NSTREAMS)
+        g_fs.stream[ARG(1)] = ARG(2), g_fs.stride[ARG(1)] = ARG(3);
+    defer(g, IDirect3DDevice8_SetStreamSource, 4, NULL, NULL, 0);
+}
+
+static void F_SetIndices(Guest* g)
+{
+    if (!defer_on())
+    {
+        IDirect3DDevice8_SetIndices(g);
+        return;
+    }
+    if (!g_dev.rec)
+        g_fs.ib = ARG(1), g_fs.base = ARG(2);
+    defer(g, IDirect3DDevice8_SetIndices, 3, NULL, NULL, 0);
+}
+FRONT1(SetViewport, 2, 1, 24)
+FRONT1(SetMaterial, 2, 1, 68)
+FRONT1(SetLight, 3, 2, 104)
+FRONT(LightEnable, 3)
+FRONT1(SetClipPlane, 3, 2, 16)
+FRONT(SetVertexShader, 2)
+FRONT1(SetVertexShaderConstant, 4, 2, 16u * CAP(ARG(3), NVSC))
+FRONT(SetPixelShader, 2)
+FRONT1(SetPixelShaderConstant, 4, 2, 16u * CAP(ARG(3), NPSC))
+FRONT(BeginScene, 1)
+FRONT(EndScene, 1)
+FRONT1(Clear, 7, 2, 16u * CAP(ARG(1), 4096u))
+/* (PrimitiveType, PrimitiveCount, pVertexStreamZeroData, VertexStreamZeroStride) */
+FRONT1(DrawPrimitiveUP, 5, 3, CAP(prim_vertices(ARG(1), ARG(2)) * ARG(4), D3DW_GUEST / 8))
+/* (PrimitiveType, MinVertexIndex, NumVertexIndices, PrimitiveCount, pIndexData, IndexDataFormat,
+ *  pVertexStreamZeroData, VertexStreamZeroStride): the indices, and the vertices up to the last they may name */
+FRONT2(DrawIndexedPrimitiveUP, 9, 5, CAP(prim_vertices(ARG(1), ARG(4)) * (ARG(6) == FMT_INDEX32 ? 4u : 2u), D3DW_GUEST / 8),
+    7, CAP((ARG(2) + ARG(3)) * ARG(8), D3DW_GUEST / 8))
+
+/* the calls that don't wait for the worker: those it runs */
+static int d3dw_exempt(const char* name)
+{
+    static const char* const run[] = { "SetRenderState", "SetTextureStageState", "SetTexture", "SetTransform",
+        "MultiplyTransform", "SetViewport", "SetMaterial", "SetLight", "LightEnable", "SetClipPlane", "SetStreamSource",
+        "SetIndices", "SetVertexShader", "SetVertexShaderConstant", "SetPixelShader", "SetPixelShaderConstant",
+        "ApplyStateBlock", "BeginScene", "EndScene", "Clear", "DrawPrimitiveUP", "DrawIndexedPrimitiveUP",
+        "DrawPrimitive", "DrawIndexedPrimitive", "GetTransform", "SetRenderTarget", "CopyRects",
+        "TestCooperativeLevel" /* (always D3D_OK) */, NULL };
+    /* the buffers' locks (the game's own copy, sent over at the unlock), and references (atomic; a last Release
+     * waits itself, obj_release) */
+    if (!strcmp(name, "IDirect3DVertexBuffer8::Lock") || !strcmp(name, "IDirect3DVertexBuffer8::Unlock") ||
+        !strcmp(name, "IDirect3DIndexBuffer8::Lock") || !strcmp(name, "IDirect3DIndexBuffer8::Unlock") ||
+        !strcmp(name, "IDirect3DTexture8::GetSurfaceLevel"))
+        return 1;
+    const char* r = strstr(name, "::");
+    if (r && (!strcmp(r, "::AddRef") || !strcmp(r, "::Release")))
+        return 1;
+    /* what an object is (format, size, usage, pool, levels, fvf): set only by the calls that make or reset it, which
+     * wait; the worker never writes it */
+    if (r && (!strcmp(r, "::GetDesc") || !strcmp(r, "::GetLevelDesc") || !strcmp(r, "::GetLevelCount") ||
+              !strcmp(r, "::GetLOD")))
+        return 1;
+    const char* m = strstr(name, "IDirect3DDevice8::");
+    if (!m)
+        return 0;
+    m += 18;
+    for (int i = 0; run[i]; ++i)
+        if (!strcmp(m, run[i]))
+            return 1;
+    return 0;
+}
+
+static void d3dw_pre(uint32_t thunk)
+{
+    if (g_w.threaded && d3dw_sync() && thunk < 4096)
+        g_wait_by[thunk]++;
+}
+
 #define D(i, m) { "d3d8.dll", #i "::" #m, i##_##m }
+#define W(i, m) { "d3d8.dll", #i "::" #m, F_##m }
 #define U(i, m, f) { "d3d8.dll", #i "::" #m, f }
 #define UNKNOWN(i) U(i, QueryInterface, Unknown_QueryInterface), U(i, AddRef, Unknown_AddRef), U(i, Release, Unknown_Release)
 #define RESOURCE(i)                                                                                                   \
@@ -4905,61 +5550,61 @@ static const ShimDef D3D8[] = {
     D(IDirect3DDevice8, CreateRenderTarget),
     D(IDirect3DDevice8, CreateDepthStencilSurface),
     D(IDirect3DDevice8, CreateImageSurface),
-    D(IDirect3DDevice8, CopyRects),
-    D(IDirect3DDevice8, SetRenderTarget),
+    W(IDirect3DDevice8, CopyRects),
+    W(IDirect3DDevice8, SetRenderTarget),
     D(IDirect3DDevice8, GetRenderTarget),
     D(IDirect3DDevice8, GetDepthStencilSurface),
-    D(IDirect3DDevice8, BeginScene),
-    D(IDirect3DDevice8, EndScene),
-    D(IDirect3DDevice8, Clear),
-    D(IDirect3DDevice8, SetTransform),
-    D(IDirect3DDevice8, GetTransform),
-    D(IDirect3DDevice8, MultiplyTransform),
-    D(IDirect3DDevice8, SetViewport),
+    W(IDirect3DDevice8, BeginScene),
+    W(IDirect3DDevice8, EndScene),
+    W(IDirect3DDevice8, Clear),
+    W(IDirect3DDevice8, SetTransform),
+    W(IDirect3DDevice8, GetTransform),
+    W(IDirect3DDevice8, MultiplyTransform),
+    W(IDirect3DDevice8, SetViewport),
     D(IDirect3DDevice8, GetViewport),
-    D(IDirect3DDevice8, SetMaterial),
+    W(IDirect3DDevice8, SetMaterial),
     D(IDirect3DDevice8, GetMaterial),
-    D(IDirect3DDevice8, SetLight),
+    W(IDirect3DDevice8, SetLight),
     D(IDirect3DDevice8, GetLight),
-    D(IDirect3DDevice8, LightEnable),
+    W(IDirect3DDevice8, LightEnable),
     D(IDirect3DDevice8, GetLightEnable),
-    D(IDirect3DDevice8, SetClipPlane),
-    D(IDirect3DDevice8, SetRenderState),
+    W(IDirect3DDevice8, SetClipPlane),
+    W(IDirect3DDevice8, SetRenderState),
     D(IDirect3DDevice8, GetRenderState),
     D(IDirect3DDevice8, BeginStateBlock),
     D(IDirect3DDevice8, EndStateBlock),
-    D(IDirect3DDevice8, ApplyStateBlock),
+    W(IDirect3DDevice8, ApplyStateBlock),
     D(IDirect3DDevice8, CaptureStateBlock),
     D(IDirect3DDevice8, DeleteStateBlock),
     D(IDirect3DDevice8, CreateStateBlock),
     D(IDirect3DDevice8, GetTexture),
-    D(IDirect3DDevice8, SetTexture),
+    W(IDirect3DDevice8, SetTexture),
     D(IDirect3DDevice8, GetTextureStageState),
-    D(IDirect3DDevice8, SetTextureStageState),
+    W(IDirect3DDevice8, SetTextureStageState),
     D(IDirect3DDevice8, ValidateDevice),
     D(IDirect3DDevice8, SetPaletteEntries),
     D(IDirect3DDevice8, GetPaletteEntries),
     D(IDirect3DDevice8, SetCurrentTexturePalette),
     D(IDirect3DDevice8, GetCurrentTexturePalette),
-    D(IDirect3DDevice8, DrawPrimitive),
-    D(IDirect3DDevice8, DrawIndexedPrimitive),
-    D(IDirect3DDevice8, DrawPrimitiveUP),
-    D(IDirect3DDevice8, DrawIndexedPrimitiveUP),
+    W(IDirect3DDevice8, DrawPrimitive),
+    W(IDirect3DDevice8, DrawIndexedPrimitive),
+    W(IDirect3DDevice8, DrawPrimitiveUP),
+    W(IDirect3DDevice8, DrawIndexedPrimitiveUP),
     D(IDirect3DDevice8, CreateVertexShader),
-    D(IDirect3DDevice8, SetVertexShader),
+    W(IDirect3DDevice8, SetVertexShader),
     D(IDirect3DDevice8, GetVertexShader),
     D(IDirect3DDevice8, DeleteVertexShader),
-    D(IDirect3DDevice8, SetVertexShaderConstant),
+    W(IDirect3DDevice8, SetVertexShaderConstant),
     D(IDirect3DDevice8, GetVertexShaderConstant),
-    D(IDirect3DDevice8, SetStreamSource),
+    W(IDirect3DDevice8, SetStreamSource),
     D(IDirect3DDevice8, GetStreamSource),
-    D(IDirect3DDevice8, SetIndices),
+    W(IDirect3DDevice8, SetIndices),
     D(IDirect3DDevice8, GetIndices),
     D(IDirect3DDevice8, CreatePixelShader),
-    D(IDirect3DDevice8, SetPixelShader),
+    W(IDirect3DDevice8, SetPixelShader),
     D(IDirect3DDevice8, GetPixelShader),
     D(IDirect3DDevice8, DeletePixelShader),
-    D(IDirect3DDevice8, SetPixelShaderConstant),
+    W(IDirect3DDevice8, SetPixelShaderConstant),
 
     RESOURCE(IDirect3DTexture8),
     U(IDirect3DTexture8, SetLOD, Texture_SetLOD),
@@ -5053,6 +5698,10 @@ static uint32_t make_vtbl(const char* iface, const char* const* names)
 void d3d8_init(void)
 {
     thunk_register(D3D8);
+    /* FFXI_D3D_WORKER=1: every d3d8 call the worker doesn't run waits for it first */
+    const char* w = getenv("FFXI_D3D_WORKER");
+    if (w && *w == '1')
+        thunk_pre_rule("d3d8.dll", d3dw_pre, d3dw_exempt);
 }
 
 /* the vtables are guest memory: built once the guest heap is up (from the host, before GameStart) */
@@ -5063,6 +5712,8 @@ void d3d8_setup(void)
     android_probe_hooks_init();
 #endif
     g_fade_scissor = !(getenv("FFXI_FADE_SCISSOR") && getenv("FFXI_FADE_SCISSOR")[0] == '0');
+    for (int i = 0; i < 3; ++i)
+        g_quad_buf[i] = gheap_alloc(4 * 28, 1);
     g_vtbl[O_D3D] = make_vtbl("IDirect3D8", kD3D8);
     g_vtbl[O_DEVICE] = make_vtbl("IDirect3DDevice8", kDevice);
     g_vtbl[O_TEXTURE] = make_vtbl("IDirect3DTexture8", kTexture);
@@ -5075,6 +5726,7 @@ void d3d8_setup(void)
 /* --- the scene renderer's view of the device (host/scene.c) ------------------------------------------------- */
 GfxTex* d3d8_world_texture(uint32_t iface)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     int kind = 0;
     GfxTex* t = texture_for_draw(iface, &kind);
     return kind == 1 ? t : NULL;
@@ -5083,6 +5735,7 @@ GfxTex* d3d8_world_texture(uint32_t iface)
 /* stage 0's sampler as a draw now would have it with this texture (build_draw's) */
 int d3d8_world_sampler(uint32_t iface, GfxSampler* out)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     Obj* to = obj(iface);
     if (!to)
         return 0;
@@ -5097,6 +5750,7 @@ int d3d8_world_sampler(uint32_t iface, GfxSampler* out)
 
 GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     Obj* b = obj(iface);
     if (!b || b->kind != O_VB)
         return NULL;
@@ -5107,6 +5761,7 @@ GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size)
 
 uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     Obj* b = obj(iface);
     if (!b || (b->kind != O_VB && b->kind != O_IB) || !b->mem)
         return 0;
@@ -5117,6 +5772,7 @@ uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size)
 
 GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size)
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     Obj* b = obj(iface);
     if (!b || b->kind != O_IB)
         return NULL;
@@ -5135,6 +5791,7 @@ GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size)
  * order of the frame's draws, from frame to frame - a strobe. */
 void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t vp[6])
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     uint32_t face, level;
     Obj* rt = obj(g_dev.rt);
     GfxTex* c = rt ? surface_gpu(rt, &face, &level) : NULL;
@@ -5177,6 +5834,7 @@ void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t
 
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6])
 {
+    d3dw_sync(); /* (the device's state is the worker's while it runs) */
     if (!g_dev.rt)
         return 0;
     Obj* wt = g_fade_scissor ? wr_target() : NULL;
