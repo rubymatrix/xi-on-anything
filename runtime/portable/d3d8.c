@@ -386,9 +386,21 @@ static struct
 {
     int every; /* -1 not read */
     uint32_t n;
-    uint64_t nested, checked, differ, differ_bytes;
-    uint32_t logged;
+    uint64_t nested, checked, differ, differ_bytes, bytes, ns, runs; /* (bytes, ns, runs: what the checks compared, took) */
+    uint32_t logged, next; /* next: where the next check starts (an eighth at a time) */
 } g_bufchk = { -1 };
+
+/* FFXI_D3D_SNAP=all: every dynamic buffer copied at its draws (as before the buffer check found the loose ones) */
+static int snap_all(void)
+{
+    static int v = -1;
+    if (v < 0)
+    {
+        const char* e = getenv("FFXI_D3D_SNAP");
+        v = e && !strcmp(e, "all");
+    }
+    return v;
+}
 
 static int ws_on(void)
 {
@@ -449,16 +461,19 @@ static void ws_frame(void)
             (double)g_w.syncs / f, (double)g_w.waits / f,
             (double)g_w.wait_ns / f * 1e-6, (double)g_w.present_waits / f, (double)g_w.present_wait_ns / f * 1e-6,
             by[0] ? "; waits by call:" : "", by);
-        rt_log("[d3d8] worker: per frame, calls that set what was set already: render states %.0f of %.0f, texture "
+        rt_log("[d3d8] worker: per frame, calls that set what was set already (not sent: FFXI_D3D_SKIP): render states %.0f of %.0f, texture "
                "stages %.0f of %.0f, textures %.0f of %.0f\n",
             g_ws.rs_same / f, g_ws.rs_calls / f, g_ws.tss_same / f, g_ws.tss_calls / f, g_ws.tex_same / f,
             g_ws.tex_calls / f);
         if (g_w.threaded)
             rt_log("[d3d8] worker check: %llu nested buffer locks; %llu buffers checked, %llu written outside a lock "
-                   "(%llu KB)\n",
+                   "(%llu KB); %llu checks, %.2f ms and %.0f KB each\n",
                 (unsigned long long)g_bufchk.nested, (unsigned long long)g_bufchk.checked,
-                (unsigned long long)g_bufchk.differ, (unsigned long long)(g_bufchk.differ_bytes >> 10));
+                (unsigned long long)g_bufchk.differ, (unsigned long long)(g_bufchk.differ_bytes >> 10),
+                (unsigned long long)g_bufchk.runs, g_bufchk.runs ? (double)g_bufchk.ns / g_bufchk.runs * 1e-6 : 0.0,
+                g_bufchk.runs ? (double)g_bufchk.bytes / g_bufchk.runs / 1024.0 : 0.0);
         g_bufchk.nested = g_bufchk.checked = g_bufchk.differ = g_bufchk.differ_bytes = 0;
+        g_bufchk.bytes = g_bufchk.ns = g_bufchk.runs = 0;
         g_w.recs = g_w.bytes = g_w.syncs = g_w.waits = g_w.wait_ns = g_w.present_waits = g_w.present_wait_ns = 0;
     }
     uint32_t frame = g_ws.frame;
@@ -5048,15 +5063,22 @@ static void d3dw_check_buffers(void)
         return;
     g_bufchk.n = 0;
     d3dw_sync_at("the buffer check"); /* (both copies compared with the worker idle; Present doesn't wait) */
+    uint64_t t0 = rt_monotonic_ns();
     int found = 0;
-    for (uint32_t i = 1; i < g_nobjs; ++i)
+    /* an eighth of the objects each time, in turn (all of them at once compared ~22 MB in a town: a 13 ms hitch) */
+    uint32_t n = g_nobjs > 1 ? (g_nobjs - 1 + 7) / 8 : 0;
+    for (uint32_t k = 0; k < n; ++k)
     {
+        if (g_bufchk.next < 1 || g_bufchk.next >= g_nobjs)
+            g_bufchk.next = 1;
+        uint32_t i = g_bufchk.next++;
         Obj* b = OBJ_AT(i);
-        /* (dynamic ones are written outside their locks, and sent at the draws: front_snapshot) */
-        if ((b->kind != O_VB && b->kind != O_IB) || !b->fmem || !b->mem || b->lk_depth || (b->usage & USAGE_DYNAMIC) ||
-            b->loose)
+        /* (dynamic ones too: only the loose ones - found here - are sent at their draws, front_snapshot; and those
+         * all copied at the draws with FFXI_D3D_SNAP=all) */
+        if ((b->kind != O_VB && b->kind != O_IB) || !b->fmem || !b->mem || b->lk_depth || b->loose ||
+            (snap_all() && (b->usage & USAGE_DYNAMIC)))
             continue;
-        g_bufchk.checked++;
+        g_bufchk.checked++, g_bufchk.bytes += b->size;
         const uint8_t* f = GUEST_PTR(b->fmem);
         uint8_t* m = GUEST_PTR(b->mem);
         if (!memcmp(f, m, b->size))
@@ -5077,6 +5099,7 @@ static void d3dw_check_buffers(void)
         b->gbuf_dirty = 1, b->serial = ++g_buf_serial;
         b->loose = 1, found = 1; /* (from now on its draws send what they use: front_snapshot) */
     }
+    g_bufchk.ns += rt_monotonic_ns() - t0, g_bufchk.runs++;
     /* while it finds some, it looks again at the next frame (a zone's load writes a few at a time) */
     if (found)
         g_bufchk.n = (uint32_t)g_bufchk.every;
@@ -5289,35 +5312,56 @@ static int defer_on(void)
     return g_w.mode;
 }
 
-static void same_count(Shim fn, Guest* g)
+/* A render state, texture stage state or texture set to what it is already (as the game's thread has followed them):
+ * 1 when the call does nothing and needn't go to the worker. Those three shims only store the value (or, recording a
+ * state block, mark it there: never skipped then); only a state block applied, Reset and CreateDevice set them
+ * otherwise, and the first two forget what is known here (the third starts from nothing). A bound texture holds a
+ * reference, so the same pointer is the same texture. FFXI_D3D_SKIP=0 sends them all. */
+static int front_same(Shim fn, Guest* g)
 {
+    static int skip = -1;
+    if (skip < 0)
+    {
+        const char* e = getenv("FFXI_D3D_SKIP");
+        skip = !(e && *e == '0');
+    }
+    if (fn == IDirect3DDevice8_ApplyStateBlock)
+    {
+        if (!g_dev.rec)
+            memset(&g_fm, 0, sizeof g_fm);
+        return 0;
+    }
     if (g_dev.rec)
-        return;
+        return 0;
     uint32_t* v = NULL;
     uint8_t* ok = NULL;
-    uint32_t want = 0;
+    uint32_t want = 0, *same = NULL;
     if (fn == IDirect3DDevice8_SetRenderState && ARG(1) < 256)
-        v = &g_fm.rs[ARG(1)], ok = &g_fm.rs_ok[ARG(1)], want = ARG(2), g_ws.rs_calls++;
+        v = &g_fm.rs[ARG(1)], ok = &g_fm.rs_ok[ARG(1)], want = ARG(2), g_ws.rs_calls++, same = &g_ws.rs_same;
     else if (fn == IDirect3DDevice8_SetTextureStageState && ARG(1) < 8 && ARG(2) < 32)
-        v = &g_fm.tss[ARG(1)][ARG(2)], ok = &g_fm.tss_ok[ARG(1)][ARG(2)], want = ARG(3), g_ws.tss_calls++;
+        v = &g_fm.tss[ARG(1)][ARG(2)], ok = &g_fm.tss_ok[ARG(1)][ARG(2)], want = ARG(3), g_ws.tss_calls++,
+        same = &g_ws.tss_same;
     else if (fn == IDirect3DDevice8_SetTexture && ARG(1) < 8)
-        v = &g_fm.tex[ARG(1)], ok = &g_fm.tex_ok[ARG(1)], want = ARG(2), g_ws.tex_calls++;
-    else if (fn == IDirect3DDevice8_ApplyStateBlock)
-    {
-        memset(&g_fm, 0, sizeof g_fm);
-        return;
-    }
-    if (!v)
-        return;
+        v = &g_fm.tex[ARG(1)], ok = &g_fm.tex_ok[ARG(1)], want = ARG(2), g_ws.tex_calls++, same = &g_ws.tex_same;
+    else
+        return 0;
     if (*ok && *v == want)
-        fn == IDirect3DDevice8_SetRenderState ? g_ws.rs_same++ : fn == IDirect3DDevice8_SetTexture ? g_ws.tex_same++ : g_ws.tss_same++;
+    {
+        (*same)++;
+        return skip;
+    }
     *v = want, *ok = 1;
+    return 0;
 }
 
 static void defer(Guest* g, Shim fn, uint32_t nwords, const uint32_t* barg, const uint32_t* bbytes, unsigned nblobs)
 {
-    if (g_ws.on > 0)
-        same_count(fn, g);
+    if (front_same(fn, g))
+    {
+        g->eax = D3D_OK;
+        g->esp += 4u + 4u * nwords;
+        return;
+    }
     uint32_t total = (uint32_t)D3DW_ALIGN16(4u * nwords), blob = 0;
     for (unsigned i = 0; i < nblobs; ++i)
         if (ARG(barg[i]) && bbytes[i])
@@ -5647,7 +5691,7 @@ static void F_TextureUnlockRect(Guest* g)
 static void front_snapshot(uint32_t p, uint32_t off, uint32_t bytes)
 {
     Obj* b = obj(p);
-    if (!b || !b->fmem || !((b->usage & USAGE_DYNAMIC) || b->loose) || off >= b->size || !bytes)
+    if (!b || !b->fmem || !(b->loose || (snap_all() && (b->usage & USAGE_DYNAMIC))) || off >= b->size || !bytes)
         return;
     if (bytes > b->size - off)
         bytes = b->size - off;
