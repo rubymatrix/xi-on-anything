@@ -43,6 +43,13 @@ static DWORD WINAPI thread_entry(LPVOID p)
     return 0;
 }
 
+int plat_thread_start(void (*fn)(void*), void* arg);
+int plat_thread_start_core(void (*fn)(void*), void* arg, int core)
+{
+    (void)core;
+    return plat_thread_start(fn, arg);
+}
+
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
     ThreadStart* s = (ThreadStart*)malloc(sizeof *s);

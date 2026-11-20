@@ -30,6 +30,7 @@ void plat_decommit(void* p, size_t size);
 /* Threads. */
 uint32_t plat_thread_id(void);
 int plat_thread_start(void (*fn)(void*), void* arg);
+int plat_thread_start_core(void (*fn)(void*), void* arg, int core); /* one that never ends, on that core where it can */
 #if defined(__SWITCH__)
 void plat_thread_counts(uint32_t* made, uint32_t* idle); /* the thread pool: threads made, those waiting for a job */
 int plat_read_report(char* out, size_t n); /* FFXI_PROFILE: file reads since the last report, by size; 0 when off */

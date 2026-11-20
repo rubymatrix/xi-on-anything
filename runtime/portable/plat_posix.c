@@ -347,6 +347,23 @@ void plat_thread_counts(uint32_t* made, uint32_t* idle)
 }
 #endif
 
+#if defined(__SWITCH__)
+static int nx_thread_new(void (*fn)(void*), void* arg, int core, int pooled);
+#endif
+static int plat_thread_start_posix(void (*fn)(void*), void* arg);
+
+/* a thread that never ends, on a core of its own choosing where the platform lets it (the Switch: 0-2) */
+int plat_thread_start_core(void (*fn)(void*), void* arg, int core)
+{
+#if defined(__SWITCH__)
+    mutexLock(&g_pool_lock);
+    return nx_thread_new(fn, arg, core, 0);
+#else
+    (void)core;
+    return plat_thread_start(fn, arg);
+#endif
+}
+
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
 #if defined(__SWITCH__)
@@ -361,13 +378,29 @@ int plat_thread_start(void (*fn)(void*), void* arg)
         mutexUnlock(&g_pool_lock);
         return 1;
     }
+    return nx_thread_new(fn, arg, -1, 1);
+#else
+    return plat_thread_start_posix(fn, arg);
+#endif
+}
+
+#if defined(__SWITCH__)
+/* (called with g_pool_lock held; unlocks it) core -1: the pool's turn */
+static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled)
+{
+    NxWorker* w;
     /* Horizon doesn't share a core between threads of one priority: a thread runs until it waits. The
      * application's main thread (the game's) has core 0; the threads made here take cores 1 and 2 in
      * turn - the first, the render thread (gfx_queue.c), core 1 - at the main thread's priority. libnx's
      * pthread_create can't choose a core. A reused thread keeps its core. */
-    int core = 1 + (int)(g_workers % 2);
+    int core = core_want >= 0 ? core_want : 1 + (int)(g_workers % 2);
     s32 prio = 0x2C;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    /* one of its own core's (plat_thread_start_core: the d3d8 worker) a step below the game's threads: on a core it
+     * shares with them it would otherwise run until it waits, while one of them with a ticket for the guest lock
+     * couldn't run - and the game's main thread waited behind that ticket (8% of its time) */
+    if (!pooled && prio < 0x3F)
+        prio += 1;
     /* the stack page-aligned and whole pages (libnx carves the TLS and reent out of its top) */
     const size_t stack_sz = 8u << 20; /* translated frames are large */
     void* stack = aligned_alloc(0x1000, stack_sz);
@@ -388,13 +421,18 @@ int plat_thread_start(void (*fn)(void*), void* arg)
         mutexUnlock(&g_pool_lock);
         return 0;
     }
-    g_workers++;
+    if (pooled)
+        g_workers++;
     mutexUnlock(&g_pool_lock);
     /* until it has started (as libnx's pthread_create waits) */
     while (!__atomic_load_n(&w->started, __ATOMIC_SEQ_CST))
         svcWaitForAddress((void*)&w->started, ArbitrationType_WaitIfEqual, 0, 1000000000ll);
     return 1; /* its Thread and stack are kept for the next start */
+}
 #endif
+
+static int plat_thread_start_posix(void (*fn)(void*), void* arg)
+{
     ThreadStart* s = (ThreadStart*)malloc(sizeof *s);
     if (!s)
         return 0;

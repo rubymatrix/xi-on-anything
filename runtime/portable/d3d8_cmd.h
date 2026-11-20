@@ -165,7 +165,10 @@ static void d3dw_start(int can)
     }
     if (g_w.mode == 2)
     {
-        if (plat_thread_start(d3dw_worker, NULL))
+        /* a core of its own (the Switch: core 2 - core 0 is the game's, core 1 the render thread's, and a thread there
+         * runs until it waits, so one sharing the render thread's core took turns with it); FFXI_D3D_WORKER_CORE */
+        const char* ce = getenv("FFXI_D3D_WORKER_CORE");
+        if (plat_thread_start_core(d3dw_worker, NULL, ce && *ce ? atoi(ce) : 2))
             g_w.threaded = 1;
         else
         {
