@@ -38,6 +38,13 @@ import pefile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from x86c import FunctionTranslator  # noqa: E402
 
+# The MSVC CRT's _setjmp3, up to where it stores the return address: mov edx,[esp+4]; then ebp,
+# ebx, edi, esi, esp and [esp] into the jmp_buf. Found by its bytes, so every build has it without
+# an address in the metadata (FFXiMain 2026-09-03: 0x103161e4, 2026-10-05: 0x10316224, 2026-11-02:
+# 0x10317824). A call to it is followed by the host's setjmp (x86c.py call, runtime.c), which is
+# where the CRT's longjmp lands.
+SETJMP3 = bytes.fromhex('8b542404' '892a' '895a04' '897a08' '89720c' '896210' '8b0424' '894214')
+
 
 class Program:
     def __init__(self, meta, image_path):
@@ -62,6 +69,8 @@ class Program:
         self.relocs = self.text_relocations(pe)
         self.inner = self.add_data_entries(pe)
         self.inner |= self.add_branch_entries()
+        self.setjmp = {e for e in self.entries if self.read(e, len(SETJMP3)) == SETJMP3}
+        self.setjmp_sites = []  # the return address of every call to _setjmp3 translated
 
     def add_data_entries(self, pe):
         """Code the image's data points at (vtables, callbacks, exception handlers) is called
@@ -344,6 +353,20 @@ def gate(prog, e, lines, variants):
     return out
 
 
+def report_setjmp(prog):
+    """_setjmp3 and the calls to it (x86c.py call). A resume address that is also an entry would be
+    found by rt_lookup_any before runtime.c's longjmp records, and run as a call: refuse it."""
+    if not prog.setjmp:
+        return
+    sites = sorted(set(prog.setjmp_sites))
+    print('setjmp: _setjmp3 at %s, %d call(s) resumed by the host\'s longjmp'
+          % (', '.join('%#x' % e for e in sorted(prog.setjmp)), len(sites)))
+    clash = [a for a in sites if a in prog.entries]
+    if clash:
+        raise SystemExit('setjmp: resume address(es) %s are also function entries'
+                         % ', '.join('%#x' % a for a in clash))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--meta', required=True)
@@ -483,6 +506,7 @@ def main():
                                                                      'packed_rva', 'packed_len', 'oep', 'reloc_rva')))
             f.write(',\n};\n')
             print('module %s: translated %d functions (%d with unimplemented instructions)' % (m, len(entries), len(unimpl_funcs)))
+            report_setjmp(prog)
             if args.stats or unimpl:
                 for k, v in unimpl.most_common(40):
                     print('  %7d  %s' % (v, k))
@@ -537,6 +561,7 @@ def main():
     print('entry patches: %d jmp, %d int3' % (kinds.count(0), kinds.count(1)))
 
     print('translated %d functions (%d with unimplemented instructions)' % (len(entries), len(unimpl_funcs)))
+    report_setjmp(prog)
     if args.stats or unimpl:
         total = sum(unimpl.values())
         print('unimplemented instructions: %d' % total)
