@@ -31,10 +31,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-import android_translation
-from android_toolchain import CACHE, MAKE, ROOT, SDK, SDL, TC
-import build
-import build_posix
+# tools/ itself: the launcher's Python on Windows (the embeddable one, with a ._pth) does not put the
+# script's folder on sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import android_translation  # noqa: E402
+from android_toolchain import CACHE, MAKE, ROOT, SDK, SDL, TC  # noqa: E402
+import build  # noqa: E402
+import build_posix  # noqa: E402
 
 MIN_API = 28
 WINDOWS = sys.platform == 'win32'
