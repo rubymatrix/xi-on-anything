@@ -24,8 +24,11 @@ import sys
 import tempfile
 import zipfile
 
-from android_toolchain import CACHE, ROOT, SDK, SDL, TC
-import buildinfo
+# tools/ itself: the launcher's Python on Windows (the embeddable one, with a ._pth) does not put the
+# script's folder on sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from android_toolchain import CACHE, ROOT, SDK, SDL, TC  # noqa: E402
+import buildinfo  # noqa: E402
 
 BT = SDK / 'build-tools/36.0.0'
 ANDROID_JAR = SDK / 'platforms/android-36/android.jar'

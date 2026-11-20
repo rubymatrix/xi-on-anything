@@ -14,11 +14,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import urllib.request
 from pathlib import Path
 
-from android_toolchain import CACHE, NDK, SDL
+# tools/ itself: the launcher's Python on Windows (the embeddable one, with a ._pth) does not put the
+# script's folder on sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from android_toolchain import CACHE, NDK, SDL  # noqa: E402
 
 SDL_SHA256 = '7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68'  # release-3.4.16 (android_toolchain.SDL)
 # (archive name, GitHub repository, ref, archive SHA-256, where it goes in the glslang tree)
