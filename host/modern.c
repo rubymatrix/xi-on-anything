@@ -240,8 +240,8 @@ static int g_now_w, g_now_h;
  * 4 right, 5 left, 6 up, 7 down, 8 LB, 9 LT, 10 L stick, 11 RB, 12 RT, 13 R stick, 14 Start, 15 Back
  * (the table at 10329810), -1 none; 32 lX, 33 lY, 35 lRx, 36 lRy a stick (negated: its up or left). Config > Gamepad's rows are the functions a button does ("@pad<n>": function n), a list
  * of the buttons each; a button given to one function is taken from the one that had it, which gets
- * this one's. Written at once, and the game told (its window's message 0x800b reads the pad's values
- * again, as the tool's saving does): no restart. */
+ * this one's. Written when select confirms (left and right only step), and the game told (its window's
+ * message 0x800b reads the pad's values again, as the tool's saving does): no restart. */
 static const char PAD_KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI",
                   PAD_DEFAULT[] = "8,9,13,12,10,0,1,3,2,15,-1,-1,14,-33,-33,32,32,-36,-36,35,35,6,7,5,4,11,-1";
 enum
@@ -263,6 +263,10 @@ enum
     PAD_NBUTTONS = sizeof PAD_BUTTONS / sizeof PAD_BUTTONS[0],
 };
 static List g_pad = { "@pad" };
+/* the button left and right have stepped a row to, not yet confirmed: select writes it (pad_set), and
+ * leaving the row or the page drops it. Stepping applies nothing, so no button passed on the way is
+ * taken from the function that has it; get() shows the swap select would make. */
+static int g_pad_stage_f = -1, g_pad_stage = -1;
 
 /* the map as the registry has it (the game's default when it has none) */
 static void pad_read(int v[PAD_FUNCS])
@@ -393,7 +397,18 @@ static int quality_now(void)
 static float get(const Row* r)
 {
     if (!strncmp(r->key, "@pad", 4))
-        return (float)pad_get(atoi(r->key + 4));
+    {
+        int f = atoi(r->key + 4);
+        if (g_pad_stage_f >= 0 && g_pad_stage >= 0)
+        {
+            if (f == g_pad_stage_f)
+                return (float)g_pad_stage;
+            /* the row that has the staged button shows the one the staged row has: the swap select makes */
+            if (g_pad_stage > 0 && pad_get(f) == g_pad_stage)
+                return (float)pad_get(g_pad_stage_f);
+        }
+        return (float)pad_get(f);
+    }
     const List* l = list_of(r->key);
     if (l)
         return (float)list_at(l);
@@ -2017,10 +2032,15 @@ static void config_draw(Guest* g)
     RET(0, 0);
 }
 
-static void page_open(Guest* g) { RET(0, 0); }
+static void page_open(Guest* g)
+{
+    g_pad_stage_f = g_pad_stage = -1;
+    RET(0, 0);
+}
 
 static void page_close(Guest* g)
 {
+    g_pad_stage_f = g_pad_stage = -1;
     if (page_of(g->ecx) == &PAGES[PAGE_ADDONS] && g_addons)
         g_addons->seen();
     save();
@@ -2110,10 +2130,26 @@ static void page_input(Guest* g)
         const Item* it = &p->items[id - 1];
         const Row* row = &p->rows[it->row];
         const List* l = list_of(row->key);
+        if (l != &g_pad || atoi(row->key + 4) != g_pad_stage_f || ev == EV_UP || ev == EV_DOWN)
+            g_pad_stage_f = g_pad_stage = -1; /* another row, or moving off this one: a choice not confirmed is dropped */
         if (row->kind == PICK && l && l->n)
         {
             int at = (int)get(row);
-            if (ev == EV_LEFT)
+            if (l == &g_pad)
+            {
+                int f = atoi(row->key + 4);
+                if (ev == EV_SELECT && g_pad_stage >= 0)
+                {
+                    pad_set(f, g_pad_stage);
+                    g_pad_stage_f = g_pad_stage = -1;
+                }
+                else if (ev == EV_LEFT || ev == EV_RIGHT || ev == EV_SELECT) /* select with none staged: a click or touch has no left or right */
+                {
+                    g_pad_stage_f = f;
+                    g_pad_stage = (at + (ev == EV_LEFT ? l->n - 1 : 1)) % l->n;
+                }
+            }
+            else if (ev == EV_LEFT)
                 set(row, (float)((at + l->n - 1) % l->n));
             else if (ev == EV_RIGHT || ev == EV_SELECT)
                 set(row, (float)((at + 1) % l->n));

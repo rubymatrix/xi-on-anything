@@ -154,8 +154,10 @@ The game's own button map, registry `padsin000`, which on Windows only `FFXiPadC
 Gamepad buttons in the title screen's Config window and in Config (item 13) open **Config › Gamepad**
 in its place; it is also in the Advanced list. Each row is a function, set to a button (None, A, B, X,
 Y, LB, RB, LT, RT, L Stick, R Stick, Start, Back, the D-pad). A button given to one function is taken
-from the function that had it, which gets the old one's. A change is written at once and the game
-reads the map again (window message `0x800b`), so it applies without a restart. Button names are an
+from the function that had it, which gets the old one's. Left and right step a row through the
+buttons (the row that has the one shown shows the swap); select writes it, and the game reads the map
+again (window message `0x800b`), so it applies without a restart. A click, which has no left or right,
+steps to the next button first. Moving to another row drops a choice not confirmed. Button names are an
 Xbox pad's; SDL lays every pad out as one (A is the bottom face button).
 
 | Rows | Default |
