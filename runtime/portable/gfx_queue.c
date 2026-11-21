@@ -1363,8 +1363,8 @@ static void profile_line(void)
 }
 
 #if defined(__SWITCH__)
-/* FFXI_FPS_ADAPT (on unless 0): uncapped, a frame over 16.7 ms waits for the next vblank, so in a crowd frames took
- * 33 ms, then 50, then 33: 20 to 30 fps, never even. Below 40 fps - the frames of 30 at a time (each counted to 50 ms
+/* FFXI_FPS_ADAPT=1 (opt in: the settings app's "Uncapped, 30 when slow"): uncapped, a frame over 16.7 ms waits for
+ * the next vblank, so in a crowd frames took 33 ms, then 50, then 33: 20 to 30 fps, never even. Below 40 fps - the frames of 30 at a time (each counted to 50 ms
  * at most: a zone's loading is one long frame) averaging over 25 ms, twice running - each frame is shown for two
  * vblanks instead (the render thread's OP_PRESENT, on the window): an even 30. Uncapped again is tried after a while
  * at 30, when a frame's work looks like it fits 22 ms (the game's time between presents less its waits for the
@@ -1378,8 +1378,10 @@ static void adapt_interval(uint64_t enter, uint64_t leave)
     static uint32_t n, over;
     if (on < 0)
     {
+        /* (off unless asked for: since the busy towns hold 30 by themselves - the d3d8 worker and the GPU's characters -
+         * uncapped's 30 to 60 reads better than a held 30) */
         const char* e = getenv("FFXI_FPS_ADAPT");
-        on = !(e && *e == '0');
+        on = e && *e && *e != '0';
         rt_last = g_rt_busy_all - g_rt_present_all;
         since = enter;
     }

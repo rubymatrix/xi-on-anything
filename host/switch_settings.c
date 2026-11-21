@@ -50,8 +50,8 @@ static const float UI_SCALE[] = { 2.0f, 1.5f, 1.0f };
 static const char* const UI_NAMES[] = { "Large (2x)", "Medium (1.5x)", "Small (1x)" };
 static const int BG[] = { 0, 2048, 1024, 512 };
 static const char* const BG_NAMES[] = { "The screen's", "2048 (sharpest)", "1024", "512 (soft, lightest)" };
-static const char* const FPS_NAMES[] = { "Uncapped (up to 60)", "60", "30" };
-static const char* const FPS_VALUES[] = { NULL, "1", "2" };
+static const char* const FPS_NAMES[] = { "Uncapped (up to 60)", "Uncapped, 30 when slow", "60", "30" };
+static const char* const FPS_VALUES[] = { NULL, NULL, "1", "2" }; /* (the second: FFXI_FPS_ADAPT=1, uncapped) */
 static const char* const LAYOUT_NAMES[] = { "Nintendo (A confirms)", "Xbox (B confirms)" };
 static const char* const CPU_NAMES[] = { "Boost while loading", "No boost", "Full speed (warmer)" };
 static const char* const RELOGIN_NAMES[] = { "Back to the sign-in screen", "Close the game" };
@@ -90,8 +90,9 @@ static Opt g_opt[NOPTS] = {
     { "Interface size", 3, 0, UI_NAMES, "How large the menus and text are. Large reads well on a TV and in handheld." },
     { "Background", 4, 0, BG_NAMES,
         "The world's resolution before it is fitted to the screen. Lower uses less memory and looks softer." },
-    { "Frame rate", 3, 0, FPS_NAMES,
-        "Uncapped keeps the world at its real speed at any frame rate (with this game version's frame sites)." },
+    { "Frame rate", 4, 0, FPS_NAMES,
+        "Uncapped keeps the world at its real speed at any frame rate (with this game version's frame sites). 30 when "
+        "slow: an even 30 while frames can't keep above 40, uncapped again when they can." },
     { "CRT filter", 3, 0, CRT_NAMES,
         "An old TV's look: a scanline per row, and with CRT the screen's red, green and blue stripes. Best at 512x448 or 640x480, docked." },
     { "Screen curve", 2, 0, CURVE_NAMES, "With the CRT filter: the glass's curve and darker corners." },
@@ -320,7 +321,8 @@ static void load(void)
     g_opt[O_BG].cur = bg && atoi(bg) > 0 ? 1 + nearest(BG + 1, 3, atol(bg)) : 0;
 
     const char* fps = args_value("--fps-divisor");
-    g_opt[O_FPS].cur = !fps || !strcmp(fps, "0") ? 0 : !strcmp(fps, "1") ? 1 : 2;
+    const char* adapt = args_env("FFXI_FPS_ADAPT");
+    g_opt[O_FPS].cur = !fps || !strcmp(fps, "0") ? (adapt && atoi(adapt) > 0 ? 1 : 0) : !strcmp(fps, "1") ? 2 : 3;
     const char* layout = args_value("--switch-layout");
     g_opt[O_LAYOUT].cur = layout && !strcmp(layout, "xbox");
     const char* cpu = args_env("FFXI_SWITCH_CPU");
@@ -354,6 +356,7 @@ static int save(void)
     args_set_env("FFXI_SWITCH_FIT", r->w ? "0" : NULL);
     args_set_env("FFXI_SWITCH_BG", b ? bgs : NULL);
     args_set("--fps-divisor", FPS_VALUES[g_opt[O_FPS].cur]);
+    args_set_env("FFXI_FPS_ADAPT", g_opt[O_FPS].cur == 1 ? "1" : NULL);
     args_set("--switch-layout", g_opt[O_LAYOUT].cur ? "xbox" : "nintendo");
     args_set_env("FFXI_SWITCH_LOADBOOST", g_opt[O_CPU].cur == 1 ? "0" : NULL);
     args_set_env("FFXI_SWITCH_CPU", g_opt[O_CPU].cur == 2 ? "1785" : NULL);
