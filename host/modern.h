@@ -30,6 +30,8 @@ void modern_frame(void);
 /* The window has a new size (the browser's: the page was resized), and the menus' size for it (0: the
  * window's over the UI scale): applied between frames as Config > Display applies a size it picks. */
 void modern_window_size(int w, int h, int menu_w, int menu_h);
+/* The UI Scale the player picked, as data_dir's modern.cfg has it: 0 if none. */
+float modern_saved_ui_scale(const char* data_dir);
 
 /* Config > Interface > Addons: back buffer pixels an addon's pixel. Addons draw and are told the
  * screen in their own pixels (the back buffer's over this), which the overlay scales up as it draws.

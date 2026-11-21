@@ -384,7 +384,7 @@ public final class MainActivity extends SDLActivity {
         }
         return new String[] {"--game", game.getPath(), "--data-dir", data.getPath(), "--reg", reg.getPath(),
                 "--reg-overlay", new File(data, "settings.reg").getPath(), "--user-dir",
-                new File(data, "USER").getPath(), "--fps-divisor", "2", "--aspect", "off"};
+                new File(data, "USER").getPath(), "--aspect", "off"};
     }
 
     /* Saved sign-in passwords (host/keychain.c, from any thread): each one encrypted with an AES key
