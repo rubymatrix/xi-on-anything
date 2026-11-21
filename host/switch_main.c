@@ -596,6 +596,11 @@ int main(int argc, char** argv)
     setenv("FFXI_DISCORD", "0", 0);
     setenv("FFXI_FX", "0", 0);
     setenv("FFXI_FPS", "0", 0);
+    /* the game's thread is what limits a busy town: its D3D calls run on a worker thread (core 2), and its characters
+     * are skinned and drawn on the GPU where the build has their addresses (docs/platforms/switch.md, Performance);
+     * run.args' FFXI_D3D_WORKER=0, FFXI_SCENE_CHARS=0 turn them off */
+    setenv("FFXI_D3D_WORKER", "1", 0);
+    setenv("FFXI_SCENE_CHARS", "1", 0);
     args[n] = NULL;
     fprintf(stderr, "[switch] host64 with %d arguments:", n - 1);
     for (int i = 1; i < n; ++i)

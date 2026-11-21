@@ -221,6 +221,8 @@ change the rest:
 | `FFXI_SWITCH_GPU=614` | The GPU held at that speed in handheld mode (docked, the system's 768 MHz is kept). Put back when the game ends. |
 | `FFXI_SWITCH_LOADBOOST=0` | No CPU boost while a zone loads. |
 | `FFXI_SWITCH_FIT=0` | The game's size from Config › Display, not the screen's. |
+| `FFXI_D3D_WORKER=0` | The game's D3D calls on its own thread, as before the worker (below). |
+| `FFXI_SCENE_CHARS=0` | The characters skinned on the CPU and drawn by the game, as before (below). |
 | `FFXI_FRAMELOG=1` | The frame rate in the log every 5 seconds. |
 | `FFXI_PROFILE=1` | Where each frame's time goes, and the clocks, in the log. |
 
@@ -231,6 +233,35 @@ The same goes for `FFXI_SWITCH_GPU`: Horizon OC at its defaults puts the handhel
 seconds, so set the GPU in its profile. In a busy town at 307 MHz the GPU is ~72% busy at 25 fps; at 614 MHz
 (memory left at 1331) about 1.5 times faster, and a ~600-draw scene that topped out at 52-54 fps holds 60.
 At 1785 MHz a busy town holds 30 fps (27-29 ms a frame in Windurst's crowds, against about 39 at 1224).
+
+### The game's thread
+
+In a busy town the frame rate is the game's main thread's: one core runs the game's code, and on it two
+things took most of what wasn't the game's own logic. Both are moved off it by default:
+
+- **The D3D calls run on a worker thread** (`FFXI_D3D_WORKER`, on core 2; `runtime/portable/d3d8_cmd.h`). The
+  game's thread records each call (a few repeated state calls are dropped there), and the worker builds the draws
+  for the render thread. What the game reads back comes from the game's thread's own view of the device's state;
+  the few calls that need the worker's results wait for it (`FFXI_PROFILE`: `[d3d8] worker: ... waits by call`).
+- **The characters are skinned and drawn on the GPU** (`FFXI_SCENE_CHARS`, `host/scene.c`'s characters with
+  `gfx_gl.c`'s `gfx_chars_draw`): each mesh's vertices go to the GPU once, and a frame's bones, lights and
+  materials are copied per draw, instead of the game skinning every vertex on the CPU and drawing the result.
+  The game still draws a few itself (environment-mapped armour, a fading character, the shine pass);
+  `FFXI_SCENELOG=1` counts them. Needs the game version's character addresses in `meta/builds.json`
+  (2025-12-26 has them); without them the game draws its characters.
+
+A busy town at 1020 MHz handheld (1,400-1,600 draws), the GPU at 614 MHz:
+
+| | Frame | The game's thread |
+| --- | --- | --- |
+| Neither | 48 ms, 21 fps | 46 ms busy (its code 36, the D3D calls ~10) |
+| The worker | 40 ms, 25 fps | ~39 ms (skinning 6.5) |
+| The GPU's characters | 35 ms, 28-29 fps | its code 27-28 ms, the D3D calls 5 |
+| Both (the default) | 30 fps held (`Uncapped, 30 when slow`) or above it uncapped | 13-19 ms |
+
+With both, the GPU was ~41-53% busy at 614 MHz in that town, and the render thread's 17-23 ms of OpenGL calls a
+frame become what limits the rate above 30. At the stock
+handheld 307 MHz the GPU is the tighter: hold it at 614 (`FFXI_SWITCH_GPU`, or the overclocking tool's profile).
 
 ## Controls
 
