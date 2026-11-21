@@ -127,6 +127,45 @@ static void clock_start(void)
     fprintf(stderr, "[switch] CPU clock: %u MHz, was %u MHz (set: 0x%x)\n", now / 1000000u, g_clk_was / 1000000u, rc);
 }
 
+/* FFXI_SWITCH_GPU=<MHz> (run.args, e.g. FFXI_SWITCH_GPU=614): the GPU held at that clock in handheld mode, as
+ * FFXI_SWITCH_CPU holds the CPU (docked, the system's 768 MHz is left alone; it is set again when undocked). In a
+ * busy town at 307 MHz the GPU is ~72% busy at 25 fps: ~88% at 30, no room for work moved onto it. Not while the
+ * loading boost runs (it puts the GPU at its least on purpose). */
+static int g_gclk_mhz;
+static ClkrstSession g_gclk;
+static int g_gclk_open;
+static u32 g_gclk_was;
+
+static int handheld(void) { return appletGetOperationMode() == AppletOperationMode_Handheld; }
+
+static void gpu_clock_start(void)
+{
+    const char* e = getenv("FFXI_SWITCH_GPU");
+    g_gclk_mhz = e ? atoi(e) : 0;
+    if (g_gclk_mhz <= 0)
+        return;
+    Result rc = clkrstInitialize();
+    if (R_SUCCEEDED(rc))
+    {
+        rc = clkrstOpenSession(&g_gclk, PcvModuleId_GPU, 3);
+        if (R_FAILED(rc))
+            clkrstExit();
+    }
+    if (R_FAILED(rc))
+    {
+        fprintf(stderr, "[switch] FFXI_SWITCH_GPU: no clock control (clkrst 0x%x); the GPU stays at the system's\n", rc);
+        g_gclk_mhz = 0;
+        return;
+    }
+    g_gclk_open = 1;
+    clkrstGetClockRate(&g_gclk, &g_gclk_was);
+    rc = handheld() ? clkrstSetClockRate(&g_gclk, (u32)g_gclk_mhz * 1000000u) : 0;
+    u32 now = 0;
+    clkrstGetClockRate(&g_gclk, &now);
+    fprintf(stderr, "[switch] GPU clock: %u MHz, was %u MHz (%s, set: 0x%x)\n", now / 1000000u, g_gclk_was / 1000000u,
+        handheld() ? "handheld" : "docked: left to the system", rc);
+}
+
 /* the loading boost's watcher: it logs nothing (another thread's stdio breaks the main thread's); the game's
  * thread logs its turns (switch_clock_frame) */
 static Thread g_watch;
@@ -189,6 +228,14 @@ static void clock_end(void)
         clkrstExit();
         g_clk_open = 0;
     }
+    if (g_gclk_open)
+    {
+        if (g_gclk_was && handheld())
+            clkrstSetClockRate(&g_gclk, g_gclk_was);
+        clkrstCloseSession(&g_gclk);
+        clkrstExit();
+        g_gclk_open = 0;
+    }
 }
 
 /* FFXI_PROFILE: the CPU's, GPU's and memory's clocks every 10 s (what the system, sys-clk or Horizon OC set
@@ -200,6 +247,18 @@ static void clock_end(void)
 static volatile uint32_t g_idle_pm[3];  /* idle in the last second, per mille */
 static volatile uint64_t g_idle_at[3];  /* when read, ns */
 static Thread g_idle_t[3];
+/* ... and the GPU's load (busy per mille, the GPU's own counter: what sys-clk shows), read ten times a second by
+ * core 2's reader and averaged between reports - whether the GPU has room for work moved to it */
+static u32 g_gpu_fd;
+static int g_gpu_ok;
+static volatile uint32_t g_gpu_sum, g_gpu_n;
+#define NVGPU_GPU_IOCTL_PMU_GET_GPU_LOAD 0x80044715u
+static void gpu_sample(void)
+{
+    u32 load = 0;
+    if (g_gpu_ok && R_SUCCEEDED(nvIoctl(g_gpu_fd, NVGPU_GPU_IOCTL_PMU_GET_GPU_LOAD, &load)))
+        __atomic_add_fetch(&g_gpu_sum, load, __ATOMIC_RELAXED), __atomic_add_fetch(&g_gpu_n, 1, __ATOMIC_RELEASE);
+}
 
 static void idle_main(void* arg)
 {
@@ -212,7 +271,11 @@ static void idle_main(void* arg)
     }
     for (;;)
     {
-        svcSleepThread(1000000000ll);
+        if (core == 2)
+            for (int i = 0; i < 10; ++i)
+                svcSleepThread(100000000ll), gpu_sample();
+        else
+            svcSleepThread(1000000000ll);
         u64 idle = 0, t = armGetSystemTick();
         if (R_FAILED(svcGetInfo(&idle, InfoType_IdleTickCount, INVALID_HANDLE, (u64)-1)))
             return;
@@ -224,6 +287,10 @@ static void idle_main(void* arg)
 
 static void idle_start(void)
 {
+    if (R_SUCCEEDED(nvInitialize()) && R_SUCCEEDED(nvOpen(&g_gpu_fd, "/dev/nvhost-ctrl-gpu")))
+        g_gpu_ok = 1;
+    else
+        fprintf(stderr, "[switch] GPU load: not readable\n");
     /* 0x3B: an application's lowest priority (0x3F is refused) */
     for (int c = 0; c < 3; ++c)
     {
@@ -252,6 +319,10 @@ static void idle_report(void)
             snprintf(s[c], sizeof s[c], "%u.%u%% idle", g_idle_pm[c] / 10u, g_idle_pm[c] % 10u);
     }
     fprintf(stderr, "[switch] cores (last second): 0 %s, 1 %s, 2 %s\n", s[0], s[1], s[2]);
+    uint32_t n = __atomic_exchange_n(&g_gpu_n, 0, __ATOMIC_ACQUIRE);
+    uint32_t sum = __atomic_exchange_n(&g_gpu_sum, 0, __ATOMIC_RELAXED);
+    if (n)
+        fprintf(stderr, "[switch] GPU load: %u.%u%% busy (%u readings)\n", sum / n / 10u, sum / n % 10u, n);
 }
 
 static void clock_report(uint64_t now)
@@ -329,6 +400,27 @@ void switch_clock_frame(void)
         }
         else
             undone = 0;
+    }
+    static uint64_t gchecked;
+    if (g_gclk_open && now - gchecked > 3000000000ull)
+    {
+        gchecked = now;
+        u32 hz = 0;
+        static int gundone, said_gundone;
+        if (handheld() && !g_boost_on && R_SUCCEEDED(clkrstGetClockRate(&g_gclk, &hz)) && hz / 1000000u != (u32)g_gclk_mhz)
+        {
+            clkrstSetClockRate(&g_gclk, (u32)g_gclk_mhz * 1000000u);
+            if (++gundone >= 3 && !said_gundone)
+            {
+                said_gundone = 1;
+                fprintf(stderr,
+                    "[switch] FFXI_SWITCH_GPU: the GPU keeps going back to %u MHz: another tool sets the clocks "
+                    "(sys-clk?); set %d MHz there instead\n",
+                    hz / 1000000u, g_gclk_mhz);
+            }
+        }
+        else
+            gundone = 0;
     }
 }
 
@@ -510,6 +602,7 @@ int main(int argc, char** argv)
         fprintf(stderr, " %s", i > 1 && (!strcmp(args[i - 1], "--pass") || !strcmp(args[i - 1], "--otp")) ? "(hidden)" : args[i]);
     fprintf(stderr, "\n");
     clock_start();
+    gpu_clock_start();
     boost_start();
     atexit(clock_end); /* the game may end with exit() too */
     atexit(back_to_signin);

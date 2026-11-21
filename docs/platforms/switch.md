@@ -218,6 +218,7 @@ change the rest:
 | --- | --- |
 | `FFXI_SWITCH_BG=1920x1080` | The world drawn at another size, read at the start (`FFXI_SWITCH_BG=config`: Config › Display's, 2048 and up, which a stock GPU can't draw at 60). |
 | `FFXI_SWITCH_CPU=1785` | The CPU held at that speed the whole session: more frames, less battery, a warmer console. Put back when the game ends. |
+| `FFXI_SWITCH_GPU=614` | The GPU held at that speed in handheld mode (docked, the system's 768 MHz is kept). Put back when the game ends. |
 | `FFXI_SWITCH_LOADBOOST=0` | No CPU boost while a zone loads. |
 | `FFXI_SWITCH_FIT=0` | The game's size from Config › Display, not the screen's. |
 | `FFXI_FRAMELOG=1` | The frame rate in the log every 5 seconds. |
@@ -226,6 +227,9 @@ change the rest:
 With an overclocking tool (sys-clk, Horizon OC), let one thing set the clocks: drop `FFXI_SWITCH_CPU` and add
 `FFXI_SWITCH_LOADBOOST=0`. sys-clk puts its own clock back within a moment, so `FFXI_SWITCH_CPU` alongside it
 does nothing (the log says so: `the CPU keeps going back to ...`); set the speed in sys-clk's profile instead.
+The same goes for `FFXI_SWITCH_GPU`: Horizon OC at its defaults puts the handheld GPU back to 307 MHz within
+seconds, so set the GPU in its profile. In a busy town at 307 MHz the GPU is ~72% busy at 25 fps; at 614 MHz
+(memory left at 1331) about 1.5 times faster, and a ~600-draw scene that topped out at 52-54 fps holds 60.
 At 1785 MHz a busy town holds 30 fps (27-29 ms a frame in Windurst's crowds, against about 39 at 1224).
 
 ## Controls
