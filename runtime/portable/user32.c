@@ -579,6 +579,7 @@ static uint16_t scan_of_vk(uint32_t vk)
 }
 
 int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h);
+int (*user32_key_filter)(int scancode, int down);
 void (*user32_pump_hook)(void);
 void (*user32_quit_hook)(void);
 
@@ -693,6 +694,9 @@ static void pump(void)
     SDL_Event e;
     while (SDL_PollEvent(&e))
     {
+        if (user32_key_filter && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
+            user32_key_filter((int)e.key.scancode, e.type == SDL_EVENT_KEY_DOWN))
+            continue;
         if (user32_event_hook && e.type != SDL_EVENT_KEY_UP && e.type != SDL_EVENT_MOUSE_BUTTON_UP &&
             e.type != SDL_EVENT_MOUSE_MOTION)
         {

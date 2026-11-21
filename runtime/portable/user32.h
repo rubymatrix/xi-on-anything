@@ -50,6 +50,9 @@ extern int (*user32_ui_hit)(float fx, float fy);
 extern int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h);
 /* Called on the window's thread each time it pumps (dsound.c's report) */
 extern void (*user32_pump_hook)(void);
+/* Set by Config > Modern: a key (SDL scancode) before anyone else sees it; 1 keeps it from the overlay,
+ * DirectInput and the game (Escape cancelling Gamepad's stick recording, not closing the page). */
+extern int (*user32_key_filter)(int scancode, int down);
 /* Set by the addon host: runs once when the player quits (the window closing), before the process
  * ends. */
 extern void (*user32_quit_hook)(void);

@@ -70,6 +70,8 @@ enum { INPUT_XPAD_LT = 0x10000, INPUT_XPAD_RT = 0x20000 };
 int input_pad_dinput(int index, uint8_t state[80], uint32_t xbits[32]);
 
 int input_pad_count(void);
+/* While set, every pad reads as connected and at rest (Config > Controller recording a control). */
+void input_hold_pads(int hold);
 /* The pad (an SDL_JoystickID) the game's pad 0 is while it is connected, the others after it in SDL's
  * order: iOS's touch controls (host/touch.c) over a controller that is connected but not in use.
  * 0: SDL's order. */

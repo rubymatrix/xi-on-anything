@@ -50,6 +50,7 @@
 #ifdef FFXI_MOBILE
 #include "display_fit.h"
 #endif
+#include "padmap.h"
 #include "plat.h"
 #include "thunk.h"
 #include "user32.h"
@@ -246,11 +247,12 @@ static int g_now_w, g_now_h;
  * the game reads them (10005130), each the button that does it: under XInput 0 B, 1 X, 2 Y, 3 A,
  * 4 right, 5 left, 6 up, 7 down, 8 LB, 9 LT, 10 L stick, 11 RB, 12 RT, 13 R stick, 14 Start, 15 Back
  * (the table at 10329810), -1 none; 32 lX, 33 lY, 35 lRx, 36 lRy a stick (negated: its up or left). Config > Gamepad's rows are the functions a button does ("@pad<n>": function n), a list
- * of the buttons each; a button given to one function is taken from the one that had it, which gets
- * this one's. Written at once, and the game told (its window's message 0x800b reads the pad's values
+ * of the buttons each; a button given to one function is taken from the one that had it, which is
+ * left with none. Written at once, and the game told (its window's message 0x800b reads the pad's values
  * again, as the tool's saving does): no restart. */
 static const char PAD_KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI",
-                  PAD_DEFAULT[] = "8,9,13,12,10,0,1,3,2,15,-1,-1,14,-33,-33,32,32,-36,-36,35,35,6,7,5,4,11,-1";
+                  PAD_DEFAULT[] = "8,9,13,12,10,0,1,3,2,15,-1,-1,14,-33,-33,32,32,-36,-36,35,35,6,7,5,4,11,-1",
+                  PAD_MODE_DEFAULT[] = "1,1,0,0,0,1"; /* padmode000, as ffxi.reg has it */
 enum
 {
     PAD_FUNCS = 32,
@@ -270,6 +272,10 @@ enum
     PAD_NBUTTONS = sizeof PAD_BUTTONS / sizeof PAD_BUTTONS[0],
 };
 static List g_pad = { "@pad" };
+/* Config > Gamepad's Sticks: which of the controller's own axes each stick axis is (host/padmap.c),
+ * "@pmap<n>": padmap's control n */
+static List g_pmap_axis = { "@pmapa" };
+static int pmap_ctl(const char* key) { return !strncmp(key, "@pmap", 5) ? atoi(key + 5) : -1; }
 
 /* the map as the registry has it (the game's default when it has none) */
 static void pad_read(int v[PAD_FUNCS])
@@ -306,13 +312,18 @@ static void pad_set(int f, int i)
         return;
     for (int k = 0; k < PAD_FUNCS && code >= 0; ++k)
         if (k != f && v[k] == code)
-            v[k] = v[f] >= 0 && v[f] < 32 ? v[f] : -1; /* the one that had it gets this one's button */
+            v[k] = -1; /* the one that had it: none */
     v[f] = code;
     char s[256];
     size_t n = 0;
     for (int k = 0; k < PAD_FUNCS && n < sizeof s; ++k)
         n += (size_t)snprintf(s + n, sizeof s - n, k ? ",%d" : "%d", v[k]);
     reg_set_string(PAD_KEY, "padsin000", s);
+    /* the reload reads padmode000 first (10002840) and, with none, sets the pad up with nothing: the
+     * gamepad off. A registry without it (no ffxi.reg loaded) gets the game's default, so it stays on. */
+    char mode[64];
+    if (!reg_get_string(PAD_KEY, "padmode000", mode, sizeof mode))
+        reg_set_string(PAD_KEY, "padmode000", PAD_MODE_DEFAULT);
     reg_flush();
     uint32_t hwnd = d3d8_window();
     if (hwnd)
@@ -322,6 +333,8 @@ static void pad_set(int f, int i)
 
 static List* list_of(const char* key)
 {
+    if (pmap_ctl(key) >= 0)
+        return &g_pmap_axis;
     return !strcmp(key, "@res") ? &g_res : !strcmp(key, "@menu") ? &g_scale : !strncmp(key, "@pad", 4) ? &g_pad : NULL;
 }
 
@@ -405,6 +418,8 @@ static int quality_now(void)
 
 static float get(const Row* r)
 {
+    if (pmap_ctl(r->key) >= 0)
+        return (float)padmap_get(pmap_ctl(r->key));
     if (!strncmp(r->key, "@pad", 4))
         return (float)pad_get(atoi(r->key + 4));
     const List* l = list_of(r->key);
@@ -458,7 +473,9 @@ static void fx_put(const char* key, float v)
 static void set(const Row* r, float v)
 {
     List* l = list_of(r->key);
-    if (l == &g_pad)
+    if (pmap_ctl(r->key) >= 0) /* the controller's mapping, applied and saved at once (padmap.c) */
+        padmap_set(pmap_ctl(r->key), (int)v);
+    else if (l == &g_pad)
         pad_set(atoi(r->key + 4), (int)v);
     else if (l || !strcmp(r->key, "@bg") || !strcmp(r->key, "@mode"))
     {
@@ -722,7 +739,9 @@ static const Row WATER_ROWS[] = {
 #endif
 
 /* Config > Gamepad: a row a function of padsin000 a button does, in FFXiPadConfig.exe's words (its
- * slots: the dialog's control ids, 0x6ef318). Not here: the sticks' directions (13-20), the tool's
+ * slots: the dialog's control ids, 0x6ef318). Sticks is not the game's: which of the controller's own
+ * axes each stick axis is (host/padmap.c), for one SDL reads wrong (a handheld's built-in sticks); select
+ * records the stick pushed. Not here: the sticks' directions (13-20), the tool's
  * movement-control toggles (10, 11, 26), Shutdown (27), Jump (30) and the button combination (29,
  * padexsin000). 25 is the tool's Take Screenshot; this game opens its soft keyboard with it (action
  * 0x24), and iOS keeps it at none (host64.c soft_keyboard_off). */
@@ -745,6 +764,11 @@ static const Row GAMEPAD_ROWS[] = {
 #ifndef FFXI_IOS
     PAD_ROW("Soft Keyboard", 25, "The game's on-screen keyboard, to type with the pad."),
 #endif
+    HEADER_ROW("Sticks"),
+    { "Left Stick Across", "@pmap16", PICK, 0, { 0 }, { 0 }, 0, 0, "" },
+    { "Left Stick Up / Down", "@pmap17", PICK, 0, { 0 }, { 0 }, 0, 0, "" },
+    { "Right Stick Across", "@pmap18", PICK, 0, { 0 }, { 0 }, 0, 0, "" },
+    { "Right Stick Up / Down", "@pmap19", PICK, 0, { 0 }, { 0 }, 0, 0, "" },
     HEADER_ROW("Menu Directions"),
     PAD_ROW("Up", 21, "Up in menus."),
     PAD_ROW("Down", 22, "Down in menus."),
@@ -1021,6 +1045,9 @@ static void lists_fill(void)
     if (!g_pad.n)
         for (int i = 0; i < PAD_NBUTTONS; ++i)
             SDL_strlcpy(g_pad.text[g_pad.n++], PAD_BUTTONS[i].name, sizeof g_pad.text[0]);
+    if (!g_pmap_axis.n)
+        for (int i = 0; i < PADMAP_NAXIS_CHOICES; ++i)
+            SDL_strlcpy(g_pmap_axis.text[g_pmap_axis.n++], padmap_choice(1, i), sizeof g_pmap_axis.text[0]);
     if (!g_scale.n)
         for (int i = 0; i <= 10; ++i)
         {
@@ -1359,7 +1386,7 @@ enum
     ROW_H = 22,
     TRACK_W = 150, /* a slider's, from 32 right of its row's controls' column */
     LIST_VALUE_X = 32 + TRACK_W + 12 + 36, /* a list's value's words, from its row's controls' column: after Max */
-    MAX_ROWS = 24,
+    MAX_ROWS = 28,
     MAX_ITEMS = 64,
 };
 
@@ -1448,7 +1475,26 @@ static int g_spr_track, g_spr_fill; /* a slider's hit area (nothing to see) and 
  * (a 4-tall piece each, drawn down its length), and the panel for each count of rows */
 static int g_spr_glyph[95], g_spr_kind[3], g_spr_new, g_spr_bar_track, g_spr_bar_thumb, g_addon_panel[ADDON_VIS + 1];
 static uint32_t g_addon_layout[ADDON_VIS + 1], g_addon_size[ADDON_VIS + 1], g_addon_str[ADDON_VIS + 1];
+
+/* Config > Gamepad scrolls when it is taller than the interface (the Addons page's way): as many rows
+ * as fit, a layout for each count from SCROLL_MIN, every row an item that is only a place for the
+ * cursor. What each shows is drawn each frame (scroll_draw) for the rows from top: a group's name, or
+ * a row's bullet, words, box and value. The cursor steps over the groups' names. */
+enum
+{
+    SCROLL_MIN = 6,
+};
+typedef struct Scroll
+{
+    int vis, top, cursor, dir; /* rows shown (0: all, no scrolling), the first, the cursor's item last frame, its way */
+    uint32_t bar;              /* the window whose scroll bar is the game's */
+    int panel[MAX_ROWS + 1];
+    uint32_t layout[MAX_ROWS + 1], size[MAX_ROWS + 1], str[MAX_ROWS + 1];
+    int spr_bullet, spr_box, spr_rule;
+} Scroll;
+static Scroll g_gp; /* Config > Gamepad's */
 static int g_spr_blank;             /* nothing to see: what a hidden item of the game's draws */
+static int g_spr_listen, g_spr_listen_button; /* a stick or button row's box while it records: what to do */
 /* Config > Advanced: its item in the Config list, and its list's title tab (where its bar is) */
 static int g_spr_main, g_spr_adv_title, g_adv_tab_x, g_adv_tab_w;
 enum
@@ -1555,6 +1601,18 @@ static int panel_sprite(const Page* p, int nrows)
     return i;
 }
 
+/* a scrolling page's panel for nrows rows: its background and title, the rows drawn each frame */
+static int scroll_panel_sprite(const Page* p, int nrows)
+{
+    int i = sprite_begin(), h = TITLE_H + nrows * ROW_H + 8;
+    const uint32_t bg[4] = { WHITE, WHITE, 0x40404040u, 0x40404040u };
+    part4(0, 0, p->w, h, p->w, h, 0, 0, bg, M_PANEL, NEWTEX);
+    const uint32_t strip[4] = { 0x7f7f7f20u, 0x7f404010u, 0x7f7f7f20u, 0x7f404010u };
+    part4(0, 4, p->w - SCROLL_BAR_W, 20, 64, 8, 0, 0, strip, M_ITEM, GAUGE); /* short of the scroll bar */
+    words(8, 6, p->title, 0);
+    return i;
+}
+
 static void page_sprites(Page* p)
 {
     p->spr_panel = panel_sprite(p, p->nrows);
@@ -1592,7 +1650,7 @@ static void list_sprites(List* l)
     for (int i = 0; i < l->n; ++i)
     {
         l->spr[i] = sprite_begin();
-        if (l == &g_pad) /* a PICK row's: centred in its box */
+        if (l == &g_pad || l == &g_pmap_axis) /* a PICK row's: centred in its box */
             words((TRACK_W - text_width(l->text[i])) / 2 - 0x25, 2 - 4, l->text[i], 0);
         else
             words(LIST_VALUE_X - 32 - 0x25, 2 - 4, l->text[i], 0);
@@ -1622,6 +1680,20 @@ static int build_sheet(void)
     for (int k = 1; k < ADDON_VIS; ++k)
         g_addon_panel[k] = panel_sprite(ap, k);
     g_addon_panel[ADDON_VIS] = ap->spr_panel;
+    {
+        const Page* gp = &PAGES[PAGE_GAMEPAD];
+        for (int v = SCROLL_MIN; v < gp->nrows; ++v)
+            g_gp.panel[v] = scroll_panel_sprite(gp, v);
+        g_gp.spr_bullet = sprite_begin();
+        part(20, 4, 28, 12, 8, 8, 0, 8, WHITE, M_GAUGE, GAUGE);
+        g_gp.spr_box = sprite_begin(); /* as panel_sprite's PICK box, at its row's controls */
+        part(0, 0, TRACK_W, 16, 64, 8, 0, 0, SHADOW, M_ITEM, GAUGE);
+        words(4, 2, "<", 0);
+        words(TRACK_W - 4 - text_width(">"), 2, ">", 0);
+        g_gp.spr_rule = sprite_begin();
+        const uint32_t rule[4] = { 0x7f7f7f10u, 0x7f404000u, 0x7f7f7f10u, 0x7f404000u };
+        part4(8, 2, gp->w - 8, 16, 64, 8, 0, 0, rule, M_ITEM, GAUGE);
+    }
     for (int c = 0; c < 95; ++c)
     {
         char one[2] = { (char)(' ' + 1 + c), 0 };
@@ -1643,6 +1715,11 @@ static int build_sheet(void)
     list_sprites(&g_res);
     list_sprites(&g_scale);
     list_sprites(&g_pad);
+    list_sprites(&g_pmap_axis);
+    g_spr_listen = sprite_begin(); /* as a PICK row's value, centred in its box */
+    words((TRACK_W - text_width("Push the stick...")) / 2 - 0x25, 2 - 4, "Push the stick...", 0);
+    g_spr_listen_button = sprite_begin();
+    words((TRACK_W - text_width("Press a button...")) / 2 - 0x25, 2 - 4, "Press a button...", 0);
     g_spr_main = button_sprite("Advanced", 88);
     g_spr_adv_title = title_sprite("Advanced", ADV_W, &g_adv_tab_x, &g_adv_tab_w);
     S.p[count] = (uint8_t)S.sprites, S.p[count + 1] = (uint8_t)(S.sprites >> 8);
@@ -1712,6 +1789,30 @@ static uint8_t* page_layout_rows(const Page* p, int rows, int panel, const char*
 static uint8_t* page_layout(const Page* p, size_t* out_size)
 {
     return page_layout_rows(p, p->nrows, p->spr_panel, p->name, 0, out_size);
+}
+
+/* A scrolling page's layout for vis rows: an item a row at its controls (up from the top one and down
+ * from the bottom one stay: page_input scrolls), nothing to see on any (scroll_draw draws them) */
+static uint8_t* scroll_layout(const Page* p, int vis, int panel, const char* name, size_t* out_size)
+{
+    const Ref window[2] = { { 0, panel, SHEET_NAME }, { 6, 0, "anc     anc_s   " } };
+    uint8_t* dst = calloc(1, 0x20 + 96 + (size_t)vis * 64);
+    if (!dst)
+        return NULL;
+    memcpy(dst, name, 16);
+    dst[0x10] = 1, dst[0x11] = (uint8_t)vis;
+    size_t to = 0x20;
+    to += block(dst + to, PAGE_X, PAGE_Y, p->w, TITLE_H + vis * ROW_H + 8, -1, NULL, window, 2, "-1", "-1", 0);
+    for (int i = 0; i < vis; ++i)
+    {
+        uint8_t self = (uint8_t)(i + 1);
+        const uint8_t links[6] = { (uint8_t)((i + vis - 1) % vis + 1), (uint8_t)((i + 1) % vis + 1),
+            i == 0 ? self : (uint8_t)i, i == vis - 1 ? self : (uint8_t)(i + 2), self, self };
+        Ref ref = { 0, g_spr_track, SHEET_NAME };
+        to += block(dst + to, p->cx + 32, row_top(i), TRACK_W, 16, i + 1, links, &ref, 1, "-1", "-1", 0);
+    }
+    *out_size = to;
+    return dst;
 }
 
 /* The Config list with Advanced after its last item: every block as it is, the window taller, ours
@@ -1879,12 +1980,22 @@ static uint32_t addons_open(void)
     return g_addon_str[rows];
 }
 
-/* page k opened over what is open: the pages' menu table entry named for it (Addons': for the
- * layout that fits) and pointing at its handler, then opened by that name */
+/* Config > Gamepad as tall as the interface leaves room for, over the help line at its foot: all of
+ * it when it fits, else the layout of the rows that do, from the top */
+static uint32_t scroll_open(Page* p)
+{
+    int room = (g_menu_h > 0 ? g_menu_h : 540) - PAGE_Y - TITLE_H - 8 - 72, vis = room / ROW_H;
+    g_gp.top = 0, g_gp.cursor = 0, g_gp.dir = 1, g_gp.bar = 0;
+    g_gp.vis = vis >= p->nrows ? 0 : vis < SCROLL_MIN ? SCROLL_MIN : vis;
+    return g_gp.vis ? g_gp.str[g_gp.vis] : p->str_name;
+}
+
+/* page k opened over what is open: the pages' menu table entry named for it (Addons' and Gamepad's:
+ * for the layout that fits) and pointing at its handler, then opened by that name */
 static void open_page(int k)
 {
     Page* p = &PAGES[k];
-    uint32_t name = k == PAGE_ADDONS ? addons_open() : p->str_name;
+    uint32_t name = k == PAGE_ADDONS ? addons_open() : k == PAGE_GAMEPAD ? scroll_open(p) : p->str_name;
     uint8_t* e = GUEST_PTR(PAGES_ENTRY);
     memcpy(e, GUEST_PTR(name), 16);
     memset(e + 16, 0, 16);
@@ -2029,6 +2140,185 @@ static void addons_wheel(const Page* p, uint32_t window, int ev)
     g_addon_cursor = item;
 }
 
+/* Gamepad's Sticks: the controller's name in their help, what to push while one records, and why
+ * nothing was (guest strings, made at setup) */
+static uint32_t g_pmap_help, g_pmap_prompt[PADMAP_NCTL], g_pmap_none, g_pmap_missed, g_pad_prompt;
+static int g_pmap_missed_ctl = -1; /* the row whose recording was cancelled: a stick's control, or PAD_ROW + its function */
+static int g_pad_listen = -1;      /* the game function whose button is being recorded, or -1 */
+static int g_pmap_nopad_ctl = -1;  /* the row selected to record with no controller connected (rec_key) */
+enum
+{
+    PAD_ROW = 1000,
+};
+
+/* a row's recording key: a stick's control, a button row's PAD_ROW + function, -1 others */
+static int rec_key(const Row* row)
+{
+    int c = pmap_ctl(row->key);
+    if (c >= 0)
+        return c;
+    return !strncmp(row->key, "@pad", 4) && row->key[4] >= '0' && row->key[4] <= '9' ? PAD_ROW + atoi(row->key + 4) : -1;
+}
+
+/* an SDL gamepad button (padmap_button: SDL_GAMEPAD_BUTTON_COUNT and + 1 the triggers) as the game's map
+ * has it (PAD_BUTTONS' codes), -1 none */
+static int pad_code(int b)
+{
+    switch (b)
+    {
+    case SDL_GAMEPAD_BUTTON_SOUTH: return 3;
+    case SDL_GAMEPAD_BUTTON_EAST: return 0;
+    case SDL_GAMEPAD_BUTTON_WEST: return 1;
+    case SDL_GAMEPAD_BUTTON_NORTH: return 2;
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return 8;
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return 11;
+    case SDL_GAMEPAD_BUTTON_LEFT_STICK: return 10;
+    case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return 13;
+    case SDL_GAMEPAD_BUTTON_START: return 14;
+    case SDL_GAMEPAD_BUTTON_BACK: return 15;
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: return 6;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return 7;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return 5;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return 4;
+    case SDL_GAMEPAD_BUTTON_COUNT: return 9;
+    case SDL_GAMEPAD_BUTTON_COUNT + 1: return 12;
+    default: return -1;
+    }
+}
+
+/* the row recording now, as rec_key has it, or -1 */
+static int rec_now(void)
+{
+    int c = padmap_listening();
+    return c < 0 ? -1 : c == PADMAP_BUTTONS ? (g_pad_listen >= 0 ? PAD_ROW + g_pad_listen : -1) : c;
+}
+enum
+{
+    PMAP_HELP_N = 200,
+};
+
+/* ---- a scrolling page (Config > Gamepad) ---- */
+
+static uint32_t row_help(const Page* p, int r, int listening);
+
+/* the cursor to row r (not a group's name), the rows moved to show it */
+static void scroll_to(const Page* p, uint32_t window, int r)
+{
+    Scroll* v = &g_gp;
+    (void)p;
+    if (r < v->top)
+        v->top = r;
+    if (r >= v->top + v->vis)
+        v->top = r - v->vis + 1;
+    int item = r - v->top + 1;
+    if ((int16_t)rd16(window + 0x4c) != item)
+        guest_thiscall(WINDOW_CURSOR, window, 2, (uint32_t[]){ (uint32_t)item, 1 });
+    v->cursor = item;
+}
+
+/* each frame: the rows from top in the page's places - a group's name over its rule, or a row's
+ * bullet, words, box and value - their help, and the list's place (the title strip, a scroll bar) */
+static void scroll_draw(Page* p, uint32_t self, uint32_t window, int listening)
+{
+    Scroll* v = &g_gp;
+    uint32_t sheet = find_sheet(), list = sheet ? rd32(sheet) : 0;
+    if (!list || !window)
+        return;
+    /* the cursor on a group's name: on past it, the way it was going */
+    int id = (int16_t)rd16(window + 0x4c);
+    if (id >= 1 && id <= v->vis && p->rows[v->top + id - 1].kind == HEADER)
+    {
+        int r = v->top + id - 1;
+        do
+            r = (r + v->dir + p->nrows) % p->nrows;
+        while (p->rows[r].kind == HEADER);
+        scroll_to(p, window, r);
+    }
+    /* item 1's place, without the cursor's and a press's offsets: the rows' origin */
+    guest_thiscall(WINDOW_RECT, window, 4, (uint32_t[]){ g_scratch + 48, 1, 0, 0 });
+    int ox = (int16_t)rd16(g_scratch + 48) - (p->cx + 32), oy = (int16_t)rd16(g_scratch + 50) - row_top(0);
+    for (int k = 0; k < v->vis; ++k)
+    {
+        int r = v->top + k, y = oy + row_top(k);
+        const Row* row = &p->rows[r];
+        if (row->kind == HEADER)
+        {
+            draw_at(list, v->spr_rule, ox, y);
+            draw_at(list, p->spr_caption + r, ox, y);
+            continue;
+        }
+        draw_at(list, v->spr_bullet, ox, y);
+        draw_at(list, p->spr_caption + r, ox, y);
+        draw_at(list, v->spr_box, ox + p->cx + 32, y);
+        const List* l = list_of(row->key);
+        int c = rec_key(row);
+        uint32_t value = !l || !l->n ? 0
+                       : sprite(c >= 0 && c == listening ? (c >= PAD_ROW ? g_spr_listen_button : g_spr_listen) : l->spr[(int)get(row)]);
+        if (value)
+        {
+            wr32(self + 0x14, value);
+            guest_thiscall(PAGE_MARK, self, 3, (uint32_t[]){ 0, (uint32_t)k + 1, (uint32_t)k + 1 });
+        }
+        help(window, k + 1, row_help(p, r, listening));
+    }
+    char where[32];
+    SDL_snprintf(where, sizeof where, "%d-%d of %d", v->top + 1, v->top + v->vis, p->nrows);
+    draw_text(list, where, ox + p->w - 14 - text_width(where), oy + 6, 200);
+    if (g_scroll_ok && v->bar != window)
+    {
+        guest_thiscall(WINDOW_SCROLL, window, 2, (uint32_t[]){ (uint32_t)p->nrows, (uint32_t)v->vis });
+        v->bar = rd32(window + 0x88) ? window : 0;
+    }
+    uint32_t bar = v->bar == window ? rd32(window + 0x88) : 0;
+    if (bar)
+        wr32(bar + 0x14, (uint32_t)v->top);
+    else
+    {
+        int x = ox + p->w - 12, top = oy + TITLE_H, h = v->vis * ROW_H - 6, max = p->nrows - v->vis;
+        int th = h * v->vis / p->nrows;
+        th = th < 8 ? 8 : th;
+        int ty = top + (h - th) * v->top / (max > 0 ? max : 1);
+        for (int yy = top; yy < top + h; yy += 4)
+            draw_at(list, yy >= ty && yy < ty + th ? g_spr_bar_thumb : g_spr_bar_track, x, yy);
+    }
+    v->cursor = (int16_t)rd16(window + 0x4c);
+}
+
+/* up on the top row or down on the bottom one, the cursor staying (its links): the rows move one
+ * under it, or round to the other end; a wheel step moves them one, not past either end */
+static void scroll_input(const Page* p, uint32_t window, int id, int ev)
+{
+    Scroll* v = &g_gp;
+    int max = p->nrows - v->vis, k = id - 1;
+    if (ev == EV_UP || ev == EV_DOWN)
+        v->dir = ev == EV_UP ? -1 : 1;
+    if (!window)
+        return;
+    if (ev == EV_WHEEL_UP || ev == EV_WHEEL_DOWN)
+    {
+        int step = ev == EV_WHEEL_DOWN ? 1 : -1;
+        if (v->top + step >= 0 && v->top + step <= max)
+            v->top += step, v->dir = step;
+        return;
+    }
+    if ((int16_t)rd16(window + 0x4c) != id || v->cursor != id)
+        return; /* the cursor moved: not at an edge */
+    if (ev == EV_UP && k == 0)
+    {
+        if (v->top > 0)
+            v->top--;
+        else
+            scroll_to(p, window, p->nrows - 1);
+    }
+    else if (ev == EV_DOWN && k == v->vis - 1)
+    {
+        if (v->top < max)
+            v->top++;
+        else
+            v->top = 0, scroll_to(p, window, 0);
+    }
+}
+
 /* the Config list's select: ours opens the Advanced list, the rest as the game does */
 static void config_input(Guest* g)
 {
@@ -2051,12 +2341,60 @@ static void config_draw(Guest* g)
     RET(0, 0);
 }
 
-static void page_open(Guest* g) { RET(0, 0); }
+/* Escape while a stick row records (the keyboard's, or Android's Back): cancels it, kept from the game,
+ * which would close the page (user32_key_filter); its release too */
+static int g_gp_open;   /* Config > Gamepad is up */
+static SDL_AtomicInt g_gp_want, g_menus_in; /* the touch controls' Pad: Gamepad opened (modern_frame), once the menus are in */
+
+void modern_open_gamepad(void)
+{
+    if (SDL_GetAtomicInt(&g_menus_in))
+        SDL_SetAtomicInt(&g_gp_want, 1);
+}
+static int g_gp_clear;  /* Backspace or Delete on it: the row under the cursor to None (page_draw) */
+
+static int pmap_key(int scancode, int down)
+{
+    static int held;
+    /* Backspace or Delete on Config > Gamepad: the row under the cursor cleared, a recording too */
+    if (g_gp_open && (scancode == SDL_SCANCODE_BACKSPACE || scancode == SDL_SCANCODE_DELETE))
+    {
+        if (down)
+            g_gp_clear = 1;
+        return 1;
+    }
+    if (scancode != SDL_SCANCODE_ESCAPE)
+        return 0;
+    if (down && padmap_listening() >= 0)
+    {
+        g_pmap_missed_ctl = rec_now();
+        padmap_listen(-1), g_pad_listen = -1;
+        return held = 1;
+    }
+    if (!down && held)
+        return held = 0, 1;
+    return 0;
+}
+
+static void page_open(Guest* g)
+{
+    if (page_of(g->ecx) == &PAGES[PAGE_GAMEPAD])
+    {
+        g_pmap_missed_ctl = -1, g_gp_open = 1, g_gp_clear = 0;
+        if (padmap_open() && g_pmap_help)
+            SDL_snprintf((char*)GUEST_PTR(g_pmap_help), PMAP_HELP_N,
+                "%.60s: select, then push that stick. Backspace clears; left and right pick the axis.", padmap_device());
+    }
+    RET(0, 0);
+}
 
 static void page_close(Guest* g)
 {
-    if (page_of(g->ecx) == &PAGES[PAGE_ADDONS] && g_addons)
+    Page* p = page_of(g->ecx);
+    if (p == &PAGES[PAGE_ADDONS] && g_addons)
         g_addons->seen();
+    if (p == &PAGES[PAGE_GAMEPAD])
+        padmap_close(), g_gp_open = 0, g_pad_listen = -1;
     save();
     RET(0, 0);
 }
@@ -2069,6 +2407,46 @@ static void page_draw(Guest* g)
     Page* p = page_of(self);
     if (p == &PAGES[PAGE_ADDONS] && g_addons)
         addons_draw(p, window);
+    int listening = -1;
+    if (p == &PAGES[PAGE_GAMEPAD]) /* a stick being recorded */
+    {
+        /* Backspace or Delete: the row under the cursor to None (a recording on it stopped) */
+        if (g_gp_clear)
+        {
+            g_gp_clear = 0;
+            int id = window ? (int16_t)rd16(window + 0x4c) : 0, r = -1;
+            if (g_gp.vis && id >= 1 && id <= g_gp.vis)
+                r = g_gp.top + id - 1;
+            else if (!g_gp.vis && id >= 1 && id <= p->nitems)
+                r = p->items[id - 1].row;
+            const Row* row = r >= 0 ? &p->rows[r] : NULL;
+            int c = row ? rec_key(row) : -1;
+            if (c >= 0)
+            {
+                padmap_listen(-1), g_pad_listen = -1, g_pmap_missed_ctl = -1, g_pmap_nopad_ctl = -1;
+                if (c >= PAD_ROW)
+                    pad_set(c - PAD_ROW, 0); /* None */
+                else
+                    padmap_set(c, 0);
+            }
+        }
+        /* a button recorded for a game function: into its map (SDL's button to the game's code) */
+        if (padmap_poll() > 0 && g_pad_listen >= 0)
+        {
+            int code = pad_code(padmap_button());
+            for (int i = 1; code >= 0 && i < PAD_NBUTTONS; ++i)
+                if (PAD_BUTTONS[i].code == code)
+                    pad_set(g_pad_listen, i);
+            g_pad_listen = -1;
+        }
+        listening = rec_now();
+        if (g_gp.vis)
+        {
+            scroll_draw(p, self, window, listening);
+            RET(0, 0);
+            return;
+        }
+    }
     for (int r = 0; p && r < p->nrows; ++r)
     {
         const Row* row = &p->rows[r];
@@ -2078,7 +2456,8 @@ static void page_draw(Guest* g)
             continue;
         if (row->kind == PICK && l && l->n)
         {
-            uint32_t value = sprite(l->spr[(int)get(row)]);
+            int c = rec_key(row);
+            uint32_t value = sprite(c >= 0 && c == listening ? (c >= PAD_ROW ? g_spr_listen_button : g_spr_listen) : l->spr[(int)get(row)]);
             if (value)
             {
                 wr32(self + 0x14, value);
@@ -2124,9 +2503,26 @@ static void page_draw(Guest* g)
             }
         }
         for (int i = p->row_item[r]; i < p->row_item[r + 1]; ++i)
-            help(window, i + 1, p->str_help[r]);
+            help(window, i + 1, row_help(p, r, listening));
     }
     RET(0, 0);
+}
+
+/* row r's help: a stick's what to push while it records (listening), else what the row does */
+static uint32_t row_help(const Page* p, int r, int listening)
+{
+    int c = rec_key(&p->rows[r]);
+    if (c < 0)
+        return p->str_help[r];
+    if (c == listening)
+        return c >= PAD_ROW ? g_pad_prompt : g_pmap_prompt[c];
+    if (c == g_pmap_missed_ctl)
+        return g_pmap_missed;
+    if (c == g_pmap_nopad_ctl && !padmap_device())
+        return g_pmap_none;
+    if (c >= PAD_ROW) /* a button row: what it does */
+        return p->str_help[r];
+    return !padmap_device() ? g_pmap_none : g_pmap_help;
 }
 
 /* input on a page: select sets a button's option; a slider's own left and right (it leads to
@@ -2139,12 +2535,36 @@ static void page_input(Guest* g)
         addons_scroll(p, window_of(g->ecx), id, ev);
     else if (p == &PAGES[PAGE_ADDONS] && g_addons && (ev == EV_WHEEL_UP || ev == EV_WHEEL_DOWN))
         addons_wheel(p, window_of(g->ecx), ev);
-    else if (p && id >= 1 && id <= p->nitems)
+    else if (p == &PAGES[PAGE_GAMEPAD] && g_gp.vis && (ev == EV_WHEEL_UP || ev == EV_WHEEL_DOWN || id < 1 || id > g_gp.vis))
+        scroll_input(p, window_of(g->ecx), id, ev);
+    else if (p && id >= 1 && id <= (p == &PAGES[PAGE_GAMEPAD] && g_gp.vis ? g_gp.vis : p->nitems))
     {
-        const Item* it = &p->items[id - 1];
-        const Row* row = &p->rows[it->row];
-        const List* l = list_of(row->key);
-        if (row->kind == PICK && l && l->n)
+        int scrolled = p == &PAGES[PAGE_GAMEPAD] && g_gp.vis;
+        if (scrolled)
+            scroll_input(p, window_of(g->ecx), id, ev);
+        /* a scrolling page's item is a place: the row there now, its one item */
+        const Item* it = scrolled ? &p->items[p->row_item[g_gp.top + id - 1]] : &p->items[id - 1];
+        const Row* row = &p->rows[scrolled ? g_gp.top + id - 1 : it->row];
+        if (scrolled && row->kind == HEADER)
+            it = NULL, row = NULL;
+        const List* l = row ? list_of(row->key) : NULL;
+        if (!row) /* a group's name */
+            ;
+        else if (row->kind == PICK && l && (pmap_ctl(row->key) >= 0 || l == &g_pad) && ev == EV_SELECT)
+        {
+            /* select records (left and right step the list): the stick pushed or the button pressed next;
+             * with no controller, nothing but saying so */
+            g_pmap_missed_ctl = -1, g_pad_listen = -1;
+            g_pmap_nopad_ctl = padmap_device() ? -1 : rec_key(row);
+            if (pmap_ctl(row->key) >= 0)
+                padmap_listen(pmap_ctl(row->key));
+            else
+            {
+                padmap_listen(PADMAP_BUTTONS);
+                g_pad_listen = padmap_listening() == PADMAP_BUTTONS ? atoi(row->key + 4) : -1;
+            }
+        }
+        else if (row->kind == PICK && l && l->n)
         {
             int at = (int)get(row);
             if (ev == EV_LEFT)
@@ -2660,6 +3080,14 @@ static void install(void)
             if (!layout)
                 add(LAYOUT_ADD, MGR, PAGES[k].layout), layout = find_layout(PAGES[k].name);
             title(layout, PAGES[k].str_title);
+            for (int v = SCROLL_MIN; k == PAGE_GAMEPAD && v < PAGES[k].nrows; ++v)
+            {
+                const char* name = (const char*)GUEST_PTR(g_gp.str[v]);
+                uint32_t sl = find_layout(name);
+                if (!sl)
+                    add(LAYOUT_ADD, MGR, g_gp.layout[v]), sl = find_layout(name);
+                title(sl, PAGES[k].str_title);
+            }
         }
     uint32_t adv = find_layout(ADV_NAME);
     if (!adv)
@@ -2767,6 +3195,18 @@ static int setup(void)
                 g_addon_str[r] = gstr(name);
                 free(l);
             }
+        if (k == PAGE_GAMEPAD) /* a layout for each count of rows it may show (scroll_open) */
+            for (int v = SCROLL_MIN; v < p->nrows; ++v)
+            {
+                char name[17];
+                SDL_snprintf(name, sizeof name, "menu    gamepd%02d", v);
+                uint8_t* sl = scroll_layout(p, v, g_gp.panel[v], name, &n);
+                if (!sl)
+                    return 0;
+                g_gp.layout[v] = gbytes(sl, (uint32_t)n), g_gp.size[v] = (uint32_t)n;
+                g_gp.str[v] = gstr(name);
+                free(sl);
+            }
         uint8_t* l = page_layout(p, &n);
         if (!l)
             return 0;
@@ -2775,6 +3215,21 @@ static int setup(void)
         p->str_name = gstr(p->name), p->str_title = gstr(p->title), p->str_config_help = gstr(p->config_help);
         for (int r = 0; r < p->nrows; ++r)
             p->str_help[r] = gstr(p->rows[r].help);
+        if (k == PAGE_GAMEPAD)
+        {
+            g_pmap_help = gheap_alloc(PMAP_HELP_N, 1);
+            SDL_strlcpy((char*)GUEST_PTR(g_pmap_help),
+                "Select, then push that stick. Backspace clears; left and right pick the axis.", PMAP_HELP_N);
+            for (int c = 0; c < PADMAP_NCTL; ++c)
+            {
+                char prompt[160];
+                SDL_snprintf(prompt, sizeof prompt, "%s Escape cancels; Backspace clears.", padmap_prompt(c));
+                g_pmap_prompt[c] = gstr(prompt);
+            }
+            g_pmap_none = gstr("No controller is connected: connect one, and it is taken in a moment.");
+            g_pad_prompt = gstr("Press the button for it on the controller. Escape cancels; Backspace clears.");
+            g_pmap_missed = gstr("Cancelled: it is as it was.");
+        }
         p->global = gheap_alloc(4, 1);
         p->handler = gheap_alloc(0x60, 1);
         guest_thiscall(PAGE_CTOR, p->handler, 0, NULL);
@@ -3035,6 +3490,12 @@ void modern_frame(void)
 {
     static int state; /* 0 waiting for the menus, 1 in, -1 not this build */
     static unsigned frames;
+    if (state == 2 && SDL_GetAtomicInt(&g_gp_want)) /* the touch controls' Pad */
+    {
+        SDL_SetAtomicInt(&g_gp_want, 0);
+        if (!g_gp_open)
+            open_page(PAGE_GAMEPAD);
+    }
     if (state < 0 || ++frames % 30)
         return;
     if (!g_scratch)
@@ -3065,6 +3526,7 @@ void modern_frame(void)
     {
         install();
         state = 2;
+        SDL_SetAtomicInt(&g_menus_in, 1);
     }
     game_shadows_follow();
 }
@@ -3093,6 +3555,8 @@ void modern_init(const ModernSetup* setup)
     g_menu_w = settings_dword("0037", g_win_w), g_menu_h = settings_dword("0038", g_win_h);
     char path[1100], buf[64];
     join(g_data_dir, "modern.cfg", path, sizeof path);
+    padmap_init(g_data_dir); /* the controllers' own mappings (Config > Gamepad's Sticks) */
+    user32_key_filter = pmap_key;
     if (!setup->fps_given && setup->fps_divisor && cfg_value(path, "fps_divisor", buf, sizeof buf))
     {
         long d = strtol(buf, NULL, 10);

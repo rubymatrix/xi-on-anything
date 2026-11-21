@@ -334,6 +334,17 @@ const char* input_pad_name(int index)
     return p ? SDL_GetGamepadName(p) : NULL;
 }
 
+/* Config > Controller recording a control (host/padmap.c): every pad reads as connected and at rest */
+static SDL_AtomicInt g_hold;
+void input_hold_pads(int hold)
+{
+    if (SDL_GetAtomicInt(&g_hold) != (hold != 0))
+        rt_log("[recomp] input: the pads %s\n", hold ? "held at rest (a control being recorded)" : "read again");
+    SDL_SetAtomicInt(&g_hold, hold != 0);
+}
+static Sint16 pad_axis(SDL_Gamepad* p, SDL_GamepadAxis a) { return SDL_GetAtomicInt(&g_hold) ? 0 : SDL_GetGamepadAxis(p, a); }
+static bool pad_button(SDL_Gamepad* p, SDL_GamepadButton b) { return !SDL_GetAtomicInt(&g_hold) && SDL_GetGamepadButton(p, b); }
+
 static int16_t flip(int16_t v) { return v == -32768 ? 32767 : (int16_t)-v; }
 
 int input_xpad(int index, XPad* x)
@@ -356,14 +367,14 @@ int input_xpad(int index, XPad* x)
         { SDL_GAMEPAD_BUTTON_WEST, 0x4000 },         { SDL_GAMEPAD_BUTTON_NORTH, 0x8000 },
     };
     for (size_t i = 0; i < sizeof MAP / sizeof MAP[0]; ++i)
-        if (SDL_GetGamepadButton(p, MAP[i].b))
+        if (pad_button(p, MAP[i].b))
             x->buttons |= MAP[i].bit;
-    x->lt = (uint8_t)(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) >> 7);
-    x->rt = (uint8_t)(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) >> 7);
-    x->lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX);
-    x->ly = flip(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY)); /* SDL: down is positive */
-    x->rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX);
-    x->ry = flip(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY));
+    x->lt = (uint8_t)(pad_axis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) >> 7);
+    x->rt = (uint8_t)(pad_axis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) >> 7);
+    x->lx = pad_axis(p, SDL_GAMEPAD_AXIS_LEFTX);
+    x->ly = flip(pad_axis(p, SDL_GAMEPAD_AXIS_LEFTY)); /* SDL: down is positive */
+    x->rx = pad_axis(p, SDL_GAMEPAD_AXIS_RIGHTX);
+    x->ry = flip(pad_axis(p, SDL_GAMEPAD_AXIS_RIGHTY));
     return 1;
 }
 
@@ -402,8 +413,8 @@ int input_pad_dinput(int index, uint8_t state[80], uint32_t xbits[32])
         order = SWITCH, n = sizeof SWITCH / sizeof *SWITCH;
     else if (SDL_GetGamepadVendor(p) == 0x18D1 && SDL_GetGamepadProduct(p) == 0x9400) /* Stadia */
         order = STADIA, n = sizeof STADIA / sizeof *STADIA;
-    int32_t lt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
-    int32_t rt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    int32_t lt = pad_axis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+    int32_t rt = pad_axis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
     for (size_t i = 0; i < n; ++i)
     {
         int b = order[i];
@@ -411,16 +422,16 @@ int input_pad_dinput(int index, uint8_t state[80], uint32_t xbits[32])
         if (b == LT || b == RT)
             down = (b == LT ? lt : rt) > 8192; /* a quarter of the way down */
         else
-            down = b != NONE && SDL_GetGamepadButton(p, (SDL_GamepadButton)b);
+            down = b != NONE && pad_button(p, (SDL_GamepadButton)b);
         state[48 + i] = down ? 0x80 : 0;
         xbits[i] = b == NONE ? 0 : XBIT[b];
     }
     /* axes 0..65535, centred at 32768; the triggers 0 when up. X Y the left stick; Z Rz the right
      * stick and Rx Ry the triggers, or as the Xbox pad has them: Z both triggers, Rx Ry the right stick */
-    int32_t lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX) + 32768;
-    int32_t ly = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY) + 32768;
-    int32_t rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX) + 32768;
-    int32_t ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY) + 32768;
+    int32_t lx = pad_axis(p, SDL_GAMEPAD_AXIS_LEFTX) + 32768;
+    int32_t ly = pad_axis(p, SDL_GAMEPAD_AXIS_LEFTY) + 32768;
+    int32_t rx = pad_axis(p, SDL_GAMEPAD_AXIS_RIGHTX) + 32768;
+    int32_t ry = pad_axis(p, SDL_GAMEPAD_AXIS_RIGHTY) + 32768;
     int32_t axes[6] = { lx, ly, rx, lt * 2, rt * 2, ry };
     if (order == XBOX)
         axes[2] = 32768 + (lt - rt) / 2, axes[3] = rx, axes[4] = ry, axes[5] = 32768;
@@ -446,19 +457,19 @@ int input_pad_state(int index, PadState* s)
     s->pov = 0xFFFFFFFFu;
     if (!p)
         return 0;
-    s->x = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX);
-    s->y = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
-    s->rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX);
-    s->ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY);
+    s->x = pad_axis(p, SDL_GAMEPAD_AXIS_LEFTX);
+    s->y = pad_axis(p, SDL_GAMEPAD_AXIS_LEFTY);
+    s->rx = pad_axis(p, SDL_GAMEPAD_AXIS_RIGHTX);
+    s->ry = pad_axis(p, SDL_GAMEPAD_AXIS_RIGHTY);
     /* triggers 0..32767 each: one axis, as XInput devices show in DirectInput */
-    s->z = (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) - SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / 2;
+    s->z = (pad_axis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) - pad_axis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / 2;
     static const SDL_GamepadButton order[11] = { SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST,
         SDL_GAMEPAD_BUTTON_NORTH, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, SDL_GAMEPAD_BUTTON_BACK,
         SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK, SDL_GAMEPAD_BUTTON_GUIDE };
     for (int i = 0; i < 11; ++i)
-        s->buttons[i] = SDL_GetGamepadButton(p, order[i]) ? 0x80 : 0;
-    int up = SDL_GetGamepadButton(p, SDL_GAMEPAD_BUTTON_DPAD_UP), down = SDL_GetGamepadButton(p, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
-    int left = SDL_GetGamepadButton(p, SDL_GAMEPAD_BUTTON_DPAD_LEFT), right = SDL_GetGamepadButton(p, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+        s->buttons[i] = pad_button(p, order[i]) ? 0x80 : 0;
+    int up = pad_button(p, SDL_GAMEPAD_BUTTON_DPAD_UP), down = pad_button(p, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    int left = pad_button(p, SDL_GAMEPAD_BUTTON_DPAD_LEFT), right = pad_button(p, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
     int dx = right - left, dy = down - up;
     if (dx || dy)
     {

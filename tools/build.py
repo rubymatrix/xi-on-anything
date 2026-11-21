@@ -252,14 +252,14 @@ GL_SOURCES = ['runtime\\portable\\gfx_gl.c', 'runtime\\portable\\gfx_msl.c', 'ru
 GL_CFLAGS = ['/experimental:c11atomics', '/DGFX_GL']
 HOST_BASE = ['runtime\\portable\\user32.c', 'runtime\\portable\\d3d8.c', 'runtime\\portable\\dsound.c',
              'runtime\\portable\\input.c', 'runtime\\portable\\dinput.c', 'runtime\\portable\\ws2.c', 'host\\host64.c',
-             'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\cexi.c', 'host\\discord.c', 'host\\frame.c', 'host\\scene.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c', 'host\\vicons.c',
+             'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\padmap.c', 'host\\cexi.c', 'host\\discord.c', 'host\\frame.c', 'host\\scene.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c', 'host\\vicons.c',
              'host\\keychain.c', 'host\\appdefaults.c', 'runtime\\portable\\sampler_win.c',
              'runtime\\portable\\geometry_hooks.c']
 HOST_SOURCES = HOST_BASE + GFX_SOURCES
 # the sign-in screen's: stb_image
 HOST_INCLUDES = ['/I', 'third_party\\stb']
 # the sign-in screen itself (host/signin.c), the Modern panel (host/modern.c) and what only they use
-SIGNIN_SCREEN = ['host\\signin.c', 'host\\sewave.c', 'host\\modern.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\ui_art.c']
+SIGNIN_SCREEN = ['host\\signin.c', 'host\\sewave.c', 'host\\modern.c', 'host\\padmap.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\ui_art.c']
 # the LandSandBoat sign-in's TLS is SChannel here (secur32.lib); mbedtls on POSIX hosts
 HOST_LIBS = ['synchronization.lib', 'ws2_32.lib', 'advapi32.lib', 'bcrypt.lib', 'secur32.lib'] + GFX_LIBS
 
