@@ -100,7 +100,13 @@ What the runtime meets in this client
     0x10010d6c, and floors its step at 2.0 (`mov [esi+0x24], 0x40000000` at 0x10010d79).
     meta/builds.json patches.frame60 re-points the four compares at the 1.0 at 0x102bf5fc and
     makes the floor 1.0 (meta/features.json frame60). Forced on at the title it runs at 58 fps
-    against 30; in the world it is untested (no server here speaks this client's protocol).
+    against 30. In the world (tools/staticserver.py does sign this client in, to Port Jeuno) it
+    runs at 58 fps against 29, and walking covers the same ground in the same time.
+  - The entity map (0x103ecdf8) holds 0x800 entities, the player's from 0x400 on (the player index
+    global 0x103efa02 read 1024). The addon layer's entitymap.size pattern (an edi loop over 0x900)
+    does not match; its alternative, the esi loop at 0x10087071 (`inc esi; cmp esi, 0x800; jl;
+    mov [g], edi`), does. Without it the entity count was 0, the player index invalid, login
+    status stuck at 1, and frame60, which waits for the world (status 2), never came on.
   - Draw distance: the drawdistance pattern matches once, at 0x1014fbec, the same code as 2026-09-03's
     0x1018a8dc; world 0x103c3df8, characters 0x103c3de8 (each referenced at the same four kinds of
     place as today's). Nameplates: the hook at 0x1007c909 is right after `fstp [esp+0x50]`, the
