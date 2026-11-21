@@ -46,7 +46,8 @@ typedef struct D3dwBatch
 } D3dwBatch;
 
 #define D3DW_ALIGN16(x) (((x) + 15) & ~(size_t)15)
-#define D3DW_FLUSH_RECS 64             /* a batch goes to the worker after this many records */
+#define D3DW_FLUSH_RECS 256            /* a batch goes to the worker after this many records (64 woke it ~260 times
+                                        * a frame in a town: 0.4 ms of the game's thread in the wake calls) */
 #define D3DW_FLUSH_BYTES (128u << 10) /* or this many bytes */
 #define D3DW_NSLOTS 128u
 #define D3DW_GUEST (16u << 20) /* the guest ring (a power of two) */
@@ -59,6 +60,7 @@ static struct
     D3dwBatch* cur;
     D3dwBatch* volatile slots[D3DW_NSLOTS]; /* game -> worker */
     volatile uint32_t head, tail;
+    volatile uint32_t asleep; /* the worker waits for `head` (d3dw_flush wakes it only then) */
     D3dwBatch* volatile free[D3DW_NSLOTS]; /* worker -> game, for reuse */
     volatile uint32_t fhead, ftail;
     uint32_t gbase, gpos;     /* the guest ring and the game's position in it (bytes, all along) */
@@ -121,7 +123,12 @@ static void d3dw_worker(void* arg)
         uint32_t h = g_w.head;
         if (g_w.tail == h)
         {
-            plat_wait32(&g_w.head, h);
+            /* (asleep first, then head read again: d3dw_flush moves head, then reads asleep - one of the two sees
+             * the other's write, so a batch handed over is never left without a wake) */
+            __atomic_store_n(&g_w.asleep, 1, __ATOMIC_SEQ_CST);
+            if (__atomic_load_n(&g_w.head, __ATOMIC_SEQ_CST) == h)
+                plat_wait32(&g_w.head, h);
+            __atomic_store_n(&g_w.asleep, 0, __ATOMIC_SEQ_CST);
             continue;
         }
         D3dwBatch* b = g_w.slots[g_w.tail % D3DW_NSLOTS];
@@ -219,7 +226,8 @@ static void d3dw_flush(void)
     }
     g_w.slots[g_w.head % D3DW_NSLOTS] = b;
     plat_atomic_add32(&g_w.head, 1);
-    plat_wake_all32(&g_w.head);
+    if (__atomic_load_n(&g_w.asleep, __ATOMIC_SEQ_CST))
+        plat_wake_all32(&g_w.head);
 }
 
 /* n bytes of the guest ring, in one piece, for the record about to be made: its guest address */

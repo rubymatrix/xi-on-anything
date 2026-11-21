@@ -379,6 +379,7 @@ static struct
         resets, draws, probe_locks;
     uint64_t buf_lock_bytes, tex_lock_bytes, unlock_bytes, snap_bytes;
     uint32_t rs_calls, rs_same, tss_calls, tss_same, tex_calls, tex_same; /* same_count */
+    uint32_t applies, applies_forget; /* state blocks applied, and of them ones the front forgot its states at */
 } g_ws = { -1, 1 };
 
 /* the worker's check of the buffers (d3dw_check_buffers) */
@@ -462,9 +463,9 @@ static void ws_frame(void)
             (double)g_w.wait_ns / f * 1e-6, (double)g_w.present_waits / f, (double)g_w.present_wait_ns / f * 1e-6,
             by[0] ? "; waits by call:" : "", by);
         rt_log("[d3d8] worker: per frame, calls that set what was set already (not sent: FFXI_D3D_SKIP): render states %.0f of %.0f, texture "
-               "stages %.0f of %.0f, textures %.0f of %.0f\n",
+               "stages %.0f of %.0f, textures %.0f of %.0f; state blocks applied %.0f, %.0f of them too big to follow\n",
             g_ws.rs_same / f, g_ws.rs_calls / f, g_ws.tss_same / f, g_ws.tss_calls / f, g_ws.tex_same / f,
-            g_ws.tex_calls / f);
+            g_ws.tex_calls / f, g_ws.applies / f, g_ws.applies_forget / f);
         if (g_w.threaded)
             rt_log("[d3d8] worker check: %llu nested buffer locks; %llu buffers checked, %llu written outside a lock "
                    "(%llu KB); %llu checks, %.2f ms and %.0f KB each\n",
@@ -1028,6 +1029,13 @@ typedef struct Block
 {
     State s;
     Mask m;
+    /* the game's thread, at ApplyStateBlock (block_front_list): what its mask holds that the front follows, made at
+     * its first apply (its mask is fixed once it has a token) - render states, texture stage states and textures
+     * (kind << 12 | index: 0 rs, 1 tss stage*32+state, 2 tex, 3 transform); `forget` a block with too many of the
+     * first three to set one by one: the front then forgets them all */
+    uint16_t* fl;
+    uint32_t nfl;
+    uint8_t fl_ok, forget;
 } Block;
 
 /* where each input register comes from: an FVF's, or a vertex shader declaration's */
@@ -1248,6 +1256,7 @@ static void block_free(Block* b)
     for (int i = 0; i < NSTREAMS; ++i)
         bind(&b->s.stream[i], 0);
     bind(&b->s.ib, 0);
+    free(b->fl);
     free(b);
 }
 
@@ -5325,12 +5334,8 @@ static int front_same(Shim fn, Guest* g)
         const char* e = getenv("FFXI_D3D_SKIP");
         skip = !(e && *e == '0');
     }
-    if (fn == IDirect3DDevice8_ApplyStateBlock)
-    {
-        if (!g_dev.rec)
-            memset(&g_fm, 0, sizeof g_fm);
+    if (fn == IDirect3DDevice8_ApplyStateBlock) /* (F_ApplyStateBlock follows what it sets) */
         return 0;
-    }
     if (g_dev.rec)
         return 0;
     uint32_t* v = NULL;
@@ -5499,6 +5504,52 @@ static void F_MultiplyTransform(Guest* g)
     defer(g, IDirect3DDevice8_MultiplyTransform, 3, ba, bb, 1);
 }
 
+/* Block.fl: made at a block's first apply. Most of the game's blocks set a few states; one with more than 96 render
+ * states, texture stage states and textures (a CreateStateBlock one sets all 520) costs more to follow one by one
+ * than it saves - the front forgets them instead, as it did at every apply before. */
+static void block_front_list(Block* b)
+{
+    uint32_t n = 0, nxf = 0;
+    for (int i = 0; i < 256; ++i)
+        n += b->m.rs[i] != 0;
+    for (int t = 0; t < 8; ++t)
+    {
+        n += b->m.tex[t] != 0;
+        for (int s = 0; s < 32; ++s)
+            n += b->m.tss[t][s] != 0;
+    }
+    for (int i = 0; i < NXF; ++i)
+        nxf += b->m.xf[i] != 0;
+    b->forget = n > 96;
+    if (b->forget)
+        n = 0;
+    b->fl = n + nxf ? (uint16_t*)malloc((n + nxf) * sizeof *b->fl) : NULL;
+    if (n + nxf && !b->fl)
+    {
+        fprintf(stderr, "d3d8: out of memory for a state block's list\n");
+        abort();
+    }
+    uint32_t k = 0;
+    if (n)
+    {
+        for (int i = 0; i < 256; ++i)
+            if (b->m.rs[i])
+                b->fl[k++] = (uint16_t)i;
+        for (int t = 0; t < 8; ++t)
+            for (int s = 0; s < 32; ++s)
+                if (b->m.tss[t][s])
+                    b->fl[k++] = (uint16_t)(1u << 12 | (uint32_t)(t * 32 + s));
+        for (int t = 0; t < 8; ++t)
+            if (b->m.tex[t])
+                b->fl[k++] = (uint16_t)(2u << 12 | (uint32_t)t);
+    }
+    for (int i = 0; i < NXF; ++i)
+        if (b->m.xf[i])
+            b->fl[k++] = (uint16_t)(3u << 12 | (uint32_t)i);
+    b->nfl = k;
+    b->fl_ok = 1;
+}
+
 static void F_ApplyStateBlock(Guest* g)
 {
     if (!defer_on())
@@ -5509,10 +5560,32 @@ static void F_ApplyStateBlock(Guest* g)
     Block* b = block_of(ARG(1));
     if (b && !g_dev.rec)
     {
-        for (int i = 0; i < NXF; ++i)
-            if (b->m.xf[i])
-                g_fxf_ok[i] = 0;
         /* (a block is the game's thread's to read: only made, recorded into and captured with the worker idle) */
+        if (!b->fl_ok)
+            block_front_list(b);
+        g_ws.applies++;
+        if (b->forget)
+            memset(&g_fm, 0, sizeof g_fm), g_ws.applies_forget++;
+        /* what it sets, as the worker's ApplyStateBlock will (state_copy): known on the game's thread from here */
+        for (uint32_t k = 0; k < b->nfl; ++k)
+        {
+            uint32_t e = b->fl[k], i = e & 0xFFFu;
+            switch (e >> 12)
+            {
+            case 0:
+                g_fm.rs[i] = b->s.rs[i], g_fm.rs_ok[i] = 1;
+                break;
+            case 1:
+                g_fm.tss[i >> 5][i & 31] = b->s.tss[i >> 5][i & 31], g_fm.tss_ok[i >> 5][i & 31] = 1;
+                break;
+            case 2:
+                g_fm.tex[i] = b->s.tex[i], g_fm.tex_ok[i] = 1;
+                break;
+            default:
+                g_fxf_ok[i] = 0;
+                break;
+            }
+        }
         for (int i = 0; i < NSTREAMS; ++i)
             if (b->m.stream[i])
                 g_fs.stream[i] = b->s.stream[i], g_fs.stride[i] = b->s.stride[i];
