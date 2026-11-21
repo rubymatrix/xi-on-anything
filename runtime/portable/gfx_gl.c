@@ -2048,7 +2048,169 @@ void gfx_world_time(int pass) { (void)pass; }
 void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
 void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
 void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
-int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
+/* --- the scene renderer's characters (gfx.h's GfxCharFrame; gfx_vulkan.c's CHARS_GLSL without the effects) ----------
+ * Skinned here from the game's bone palette and the meshes' bone-space vertices, lit per vertex as the game's fixed
+ * function lights them, then its two texture stages, alpha tested GREATER the reference, table fog; no culling, the
+ * depth tested LESSEQUAL and written. As the generated functions read their streams, every input is a texture buffer
+ * of words (Ryubing doesn't translate Mesa's storage-buffer reads): the vertices (unit 1, GfxCharVertex's 18 words),
+ * the texture coordinates (unit 2), and the batch's palette and states (unit 3, the ring's, at the word offsets in the
+ * draw's uniforms: binding 0, as the generated functions' block). */
+static const char CHARS_GL[] =
+    "#ifdef GFX_GL_CLIP01\n#define gl_clip_z(p) (p).z\n#else\n#define gl_clip_z(p) (2.0 * (p).z - (p).w)\n#endif\n"
+    "#define sat(x) clamp(x, 0.0, 1.0)\n"
+    "layout(std140, binding = 0) uniform CU { vec4 params; uvec4 at; } D;\n" /* alpha ref, pixel; palette, state, mirror */
+    "layout(binding = 3) uniform usamplerBuffer rg;\n"
+    "float rw(int i) { return uintBitsToFloat(texelFetch(rg, i).x); }\n"
+    "vec4 rv(int i) { return vec4(rw(i), rw(i + 1), rw(i + 2), rw(i + 3)); }\n"
+    "mat4 rm(int i) { return mat4(rv(i), rv(i + 4), rv(i + 8), rv(i + 12)); }\n" /* D3D's rows: GLSL's columns */
+    /* GfxCharState in words: wvp 0, world 16, light[k] 32 + 20k (pos, dir, diffuse, ambient, att), ambient 112, md 116,
+     * ma 120, me 124, tf 128, fog 132, fog_col 136 */
+    "int st() { return int(D.at.y); }\n"
+    "#ifdef GFX_VS\n"
+    "layout(binding = 1) uniform usamplerBuffer vbt;\n"
+    "layout(binding = 2) uniform usamplerBuffer uvt;\n"
+    "out vec2 o_uv;\n"
+    "out vec4 o_col;\n"
+    "out float o_z;\n"
+    "const vec3 SIGN[4] = vec3[4](vec3(1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(1.0, 1.0, -1.0));\n"
+    "vec4 vw4(int b) { return uintBitsToFloat(uvec4(texelFetch(vbt, b).x, texelFetch(vbt, b + 1).x, texelFetch(vbt, b + 2).x,"
+    " texelFetch(vbt, b + 3).x)); }\n"
+    "void main() {\n"
+    "  int vid = gl_VertexID, b = vid * 18;\n"
+    "  vec4 va = vw4(b), vb4 = vw4(b + 4);\n"
+    "  vec3 na = vw4(b + 8).xyz, nb = vw4(b + 12).xyz;\n"
+    "  uint bones = texelFetch(vbt, b + 16).x, mir = texelFetch(vbt, b + 17).x;\n"
+    "  uint ba = bones & 0xffu, bb = (bones >> 8) & 0xffu;\n"
+    "  if (D.at.z != 0u) {\n"
+    "    ba = (bones >> 16) & 0xffu, bb = bones >> 24;\n"
+    "    vec3 sa = SIGN[mir & 3u], sb = SIGN[(mir >> 2) & 3u];\n"
+    "    va.xyz *= sa; vb4.xyz *= sb; na *= sa; nb *= sb;\n"
+    "  }\n"
+    "  int pal = int(D.at.x);\n"
+    "  mat4 MA = rm(pal + 16 * int(ba)), MB = rm(pal + 16 * int(bb));\n"
+    "  vec3 n = (MA * vec4(na, 0.0)).xyz + (MB * vec4(nb, 0.0)).xyz;\n"
+    "  vec3 p = (MA * va + MB * vb4).xyz;\n"
+    "  int s = st();\n"
+    "  mat4 W = rm(s + 16);\n"
+    "  vec3 wp = (W * vec4(p, 1.0)).xyz;\n"
+    "  vec3 wn = normalize((W * vec4(n, 0.0)).xyz);\n" /* NORMALIZENORMALS */
+    "  vec4 pos = rm(s) * vec4(p, 1.0);\n"
+    "  o_z = pos.w;\n"
+    "  pos.x += pos.w * D.params.y;\n"
+    "  pos.y -= pos.w * D.params.z;\n"
+    "  gl_Position = vec4(pos.x, -pos.y, gl_clip_z(pos), pos.w);\n" /* (GL's window has D3D's rows: y negated) */
+    "  o_uv = uintBitsToFloat(uvec2(texelFetch(uvt, 2 * vid).x, texelFetch(uvt, 2 * vid + 1).x));\n"
+    "  vec3 amb = rv(s + 112).rgb, dif = vec3(0.0);\n"
+    "  for (int k = 0; k < 4; ++k) {\n"
+    "    int l = s + 32 + 20 * k;\n"
+    "    vec4 lpos = rv(l), ldir = rv(l + 4), ldif = rv(l + 8), lamb = rv(l + 12), latt = rv(l + 16);\n"
+    "    if (ldir.w == 0.0) continue;\n"
+    "    float at = 1.0;\n"
+    "    vec3 Ld = ldir.xyz;\n"
+    "    if (ldir.w > 1.5) {\n"
+    "      vec3 d = lpos.xyz - wp;\n"
+    "      float dist = length(d);\n"
+    "      if (dist > lpos.w) continue;\n"
+    "      Ld = d / max(dist, 1e-6);\n"
+    "      at = 1.0 / max(latt.x + latt.y * dist + latt.z * dist * dist, 1e-6);\n"
+    "    }\n"
+    "    amb += lamb.rgb * at;\n"
+    "    dif += ldif.rgb * at * max(dot(wn, Ld), 0.0);\n"
+    "  }\n"
+    "  vec4 md = rv(s + 116);\n"
+    "  o_col = vec4(sat(rv(s + 120).rgb * amb + md.rgb * dif + rv(s + 124).rgb), md.a);\n"
+    "}\n"
+    "#endif\n"
+    "#ifdef GFX_FS\n"
+    "layout(binding = 8) uniform sampler2D t;\n"
+    "in vec2 o_uv;\n"
+    "in vec4 o_col;\n"
+    "in float o_z;\n"
+    "out vec4 oc;\n"
+    "void main() {\n"
+    "  int s = st();\n"
+    "  vec4 tx = texture(t, o_uv), tf = rv(s + 128);\n"
+    "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * o_col.rgb) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
+    "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"          /* MODULATE2X, then MODULATE4X */
+    "  if (!(a * 255.0 > D.params.x)) discard;\n"
+    "  vec4 fog = rv(s + 132);\n"
+    "  if (fog.z > 0.0) c = mix(rv(s + 136).rgb, c, sat((fog.y - o_z) / max(fog.y - fog.x, 1e-6)));\n"
+    "  oc = vec4(c, a);\n"
+    "}\n"
+    "#endif\n";
+
+static GLuint g_chars_prog;
+static int g_chars_failed;
+
+int gfx_chars_draw(const GfxCharFrame* f)
+{
+    if (!g_up || !f->nitem || !f->nbones || g_chars_failed)
+        return 0;
+    uint64_t t0 = gfx_now_ns();
+    if (!g_chars_prog && !(g_chars_prog = program_from(CHARS_GL)))
+    {
+        g_chars_failed = 1, g_failures++;
+        LOG("[recomp] gfx: the characters' functions failed: they are left to the game\n");
+        return 0;
+    }
+    if (!bind_target() || !set_viewport(f->vp))
+        return 0;
+    /* the palette and states, then a uniform block a draw; all in one segment of the ring */
+    uint32_t psz = f->nbones * 64u, ssz = f->nstate * (uint32_t)sizeof(GfxCharState);
+    uint32_t ublk = ((uint32_t)32 + (uint32_t)g_ubo_align - 1) & ~((uint32_t)g_ubo_align - 1);
+    if (!ring_reserve(psz + ssz + 32u + f->nitem * (ublk + (uint32_t)g_ubo_align)))
+    {
+        gfx_prof_skip(GFX_SKIP_RANGE);
+        return 0;
+    }
+    uint32_t pat = ring_put(f->palette, psz, 16), sat_ = ring_put(f->state, ssz, 16);
+    GfxTex* depth = depth_attachment();
+    st_program(g_chars_prog);
+    st_texture(3, GL_TEXTURE_BUFFER, g_ring_tbo);
+    st_cmask(15);
+    st_cap(GL_BLEND, &S.blend, 0);
+    st_cap(GL_DEPTH_TEST, &S.depth_test, depth != NULL);
+    if (depth)
+    {
+        if (S.depth_func != GL_LEQUAL)
+            gl.DepthFunc(GL_LEQUAL), S.depth_func = GL_LEQUAL;
+        st_depth_write(GL_TRUE);
+    }
+    st_cap(GL_STENCIL_TEST, &S.stencil_test, 0);
+    st_cap(GL_POLYGON_OFFSET_FILL, &S.poly_offset, 0);
+    st_cap(GL_CULL_FACE, &S.cull, 0);
+    if (S.poly_mode != GL_FILL)
+        gl.PolygonMode(GL_FRONT_AND_BACK, GL_FILL), S.poly_mode = GL_FILL;
+    st_scissor(0, 0, 0, 0, 0);
+    int drew = 0;
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        const GfxCharItem* it = &f->item[i];
+        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+            continue;
+        struct
+        {
+            float params[4];
+            uint32_t at[4];
+        } u = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f },
+            { pat / 4u + it->palette * 16u, sat_ / 4u + it->state * (uint32_t)(sizeof(GfxCharState) / 4), it->mirror, 0 } };
+        uint32_t uoff = ring_put(&u, sizeof u, (uint32_t)g_ubo_align);
+        st_buffer(GL_UNIFORM_BUFFER, 0, &S.ubo, g_ring, uoff, (GLsizeiptr)sizeof u);
+        st_texture(1, GL_TEXTURE_BUFFER, buf_texture(it->vb));
+        st_texture(2, GL_TEXTURE_BUFFER, buf_texture(it->uv));
+        GfxTex* t = it->tex == g_rt ? g_dummy2d : it->tex;
+        st_texture(UNIT0, t->target, t->name);
+        st_sampler(UNIT0, sampler(&it->samp));
+        st_ebo(it->ib->name);
+        uint32_t n = vertex_count(it->prim, it->count);
+        gl.DrawElements(it->prim == GFX_TRIANGLESTRIP ? GL_TRIANGLE_STRIP : GL_TRIANGLES, (GLsizei)n,
+            it->index_size == 4 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT, (const void*)(uintptr_t)(it->first * it->index_size));
+        ++drew;
+    }
+    g_prof.draws += (uint64_t)drew;
+    g_prof.render_ns += gfx_now_ns() - t0;
+    return drew > 0;
+}
 void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
 void gfx_set_fixed_light(int fixed) { (void)fixed; }
 void gfx_set_weather(int weather) { (void)weather; }

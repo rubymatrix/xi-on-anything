@@ -28,6 +28,7 @@
 #include "build.h"
 #include "d3d8.h"
 #include "gfx.h"
+#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue (the characters' buffers and draws) */
 #include "gthread.h"
 #include "gwin.h"
 #include "scene.h"
@@ -36,6 +37,14 @@
     defined(FFXI_SCENE_SUN) && defined(FFXI_SCENE_SUN_PAIR) && defined(FFXI_SCENE_AMBIENT) && \
     defined(FFXI_SCENE_ZBIAS_BLEND) && defined(FFXI_SCENE_ZBIAS_OPAQUE) && defined(FFXI_HOOK_LOD_PICK)
 #define HAVE_SCENE 1
+#endif
+/* the characters (below), which also run without the zone's addresses: FFXI_SCENE_CHARS=1 draws them alone, the game
+ * drawing its zone (a build with the characters' addresses but not the zone's: 2025-12-26's) */
+#if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_RES_GET) && defined(FFXI_SCENE_PALETTE) && \
+    defined(FFXI_SCENE_BONES) && defined(FFXI_SCENE_ACTOR_LIGHTS) && defined(FFXI_SCENE_ACTOR_AMBIENT) && \
+    defined(FFXI_SCENE_ACTOR_MATERIAL) && defined(FFXI_SCENE_TINT) && defined(FFXI_SCENE_SHINE) && defined(FFXI_SCENE_SHADOW_MODE) && \
+    defined(FFXI_SCENE_TEX_MGR) && defined(FFXI_SCENE_TEX_FIND) && defined(FFXI_SCENE_DEV) && defined(FFXI_SCENE_LIGHT_FACTOR)
+#define HAVE_CHARS 1
 #endif
 
 /* CTsZoneMap (mgr) and its instances, models and submeshes (2026-09-03) */
@@ -286,6 +295,8 @@ typedef struct EnvLight
     float sun_dir[4], sun_col[4], sun2_dir[4], sun2_col[4], ambient[4], fog[4], fog_col[4];
 } EnvLight;
 
+#endif /* HAVE_SCENE */
+#if defined(HAVE_SCENE) || defined(HAVE_CHARS)
 /* how much it is day, 0..1, eased through dusk and dawn: from the sun's height (the environment's +0xa4, its direction
  * as placed by the clock; the game's y is down and the sun is the main light while that y is at least 0, so it rises
  * through 0). 1 where the zone's lights are fixed (no sky, no night) or there is no environment. */
@@ -321,6 +332,8 @@ static void night_grade(float* c, float day)
         c[i] = (c[i] + (l * cool[i] - c[i]) * w) * e;
 }
 
+#endif
+#ifdef HAVE_SCENE
 static void env_light(EnvLight* e, uint32_t env, uint32_t mgr)
 {
     memset(e, 0, sizeof *e);
@@ -386,7 +399,7 @@ static int32_t frame_light(uint32_t entry, uint32_t* seen, uint32_t* nlights)
     return (int32_t)(*nlights)++;
 }
 
-#if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_TEX_FIND)
+#ifdef HAVE_CHARS
 static int chars_frame_of(GfxCharFrame* f, const uint32_t vp[6], const uint32_t gvp[6]);
 static void chars_reset(void);
 static void chars_shadow_reset(void);
@@ -892,11 +905,8 @@ done:
  * Meshes with an environment map, the shine pass, the silhouette shadows or a fading actor (drawn into its own target)
  * stay the game's; those with an environment map (shiny plate armour) are still recorded, to cast in the scene
  * renderer's shadows (g_soitems), or the shadow had their pieces missing. */
-#if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_RES_GET) && defined(FFXI_SCENE_PALETTE) && \
-    defined(FFXI_SCENE_BONES) && defined(FFXI_SCENE_ACTOR_LIGHTS) && defined(FFXI_SCENE_ACTOR_AMBIENT) && \
-    defined(FFXI_SCENE_ACTOR_MATERIAL) && defined(FFXI_SCENE_TINT) && defined(FFXI_SCENE_SHINE) && defined(FFXI_SCENE_SHADOW_MODE) && \
-    defined(FFXI_SCENE_TEX_MGR) && defined(FFXI_SCENE_TEX_FIND)
-#define HAVE_CHARS 1
+#endif /* HAVE_SCENE */
+#ifdef HAVE_CHARS
 extern GuestFn rt_wrap_mesh_draw;
 extern const GuestFn rt_orig_mesh_draw;
 
@@ -1277,11 +1287,12 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     return 1;
 }
 
-static int g_chars_off; /* FFXI_SCENE_CHARS=0: the zone only */
+static int g_chars_off;  /* FFXI_SCENE_CHARS=0: the zone only */
+static int g_chars_only; /* FFXI_SCENE_CHARS=1: the characters only (chars_flush) */
 
 static void mesh_draw(Guest* g)
 {
-    if (!g_on || g_flushing || g_chars_off)
+    if ((!g_on && !g_chars_only) || g_flushing || g_chars_off)
     {
         rt_orig_mesh_draw(g);
         return;
@@ -1365,7 +1376,50 @@ static void chars_frame(void)
         for (int c = 0; c < 3; ++c)
             g_wf[c] = rdf32(l + 4 + 4u * c) / 0.5f;
 }
+
+/* FFXI_SCENE_CHARS=1 with the scene renderer off (or a build without the zone's addresses): only the characters are
+ * taken, the game drawing everything else. Their batch is drawn at the next of the game's draws that isn't a character's
+ * (the world flush), into the game's targets as they are then, and with nothing of the zone renderer's effects. */
+
+static void chars_flush(void)
+{
+    if (!g_pending || g_flushing)
+        return;
+    g_pending = 0;
+    g_flushing = 1;
+    uint32_t vp[6], gvp[6];
+    GfxCharFrame cf;
+    if (d3d8_world_begin(vp, gvp) && chars_frame_of(&cf, vp, gvp) && cf.nitem)
+        gfx_chars_draw(&cf);
+    chars_reset();
+    g_flushing = 0;
+}
+
+/* a frame of the characters alone (scene_frame's) */
+static void chars_only_frame(void)
+{
+    if (g_pending)
+        chars_flush();
+    chars_reset();
+#if defined(FFXI_SCENE_CHAR_DRAW) && defined(FFXI_SCENE_CHAR_DRAW_END)
+    /* the game's own character draws (the meshes left to it) don't end the batch: it is drawn after them */
+    d3d8_world_ranges(0, 0, FFXI_SCENE_CHAR_DRAW, FFXI_SCENE_CHAR_DRAW_END, 0);
+#endif
+    chars_frame();
+    static uint32_t frames;
+    if (g_log && ++frames >= 120)
+    {
+        rt_log("[recomp] scene: characters alone, %u frames: %.0f mesh draws taken a frame, %.0f left to the game (kind %u, "
+               "buffers %u, state %u, stream %u, vb %u, uv %u, ib %u, palette %u), %.0f draw items a frame, %u meshes built\n",
+            frames, (double)(g_ccount.meshes - g_ccount.left) / frames, (double)g_ccount.left / frames, g_ccount.why[0],
+            g_ccount.why[1], g_ccount.why[2], g_ccount.why[3], g_ccount.why[4], g_ccount.why[5], g_ccount.why[6],
+            g_ccount.why[7], (double)g_ccount.items / frames, g_ccount.built);
+        memset(&g_ccount, 0, sizeof g_ccount);
+        frames = 0;
+    }
+}
 #endif /* characters */
+#ifdef HAVE_SCENE
 
 #ifdef FFXI_HOOK_FX_DRAW
 extern GuestFn rt_hook_fx_draw;
@@ -1386,19 +1440,52 @@ uint32_t scene_zone_pick(uint32_t inst, uint32_t model, uint32_t lights, int mov
 }
 #endif /* HAVE_SCENE */
 
+#if defined(HAVE_SCENE) || defined(HAVE_CHARS)
+/* the world flush (d3d8_set_world_flush): the scene renderer's batch, or the characters' alone */
+static void world_flush(void)
+{
+#ifdef HAVE_SCENE
+#ifdef HAVE_CHARS
+    if (g_on || !g_chars_only)
+#endif
+    {
+        flush();
+        return;
+    }
+#endif
+#ifdef HAVE_CHARS
+    chars_flush();
+#endif
+}
+#endif
+
 void scene_setup(void)
 {
     const char* log = getenv("FFXI_SCENELOG");
     g_log = log && log[0] && log[0] != '0';
-#ifdef HAVE_SCENE
-    g_have = 1;
-    g_scratch = gheap_alloc(0x200, 1);
-    d3d8_set_world_flush(flush);
 #ifdef HAVE_CHARS
-    rt_wrap_mesh_draw = mesh_draw;
     const char* ch = getenv("FFXI_SCENE_CHARS");
     g_chars_off = ch && ch[0] == '0';
+    g_chars_only = ch && ch[0] == '1';
 #endif
+#ifdef HAVE_SCENE
+    g_have = 1;
+#endif
+#if defined(HAVE_CHARS) && !defined(HAVE_SCENE)
+    if (g_chars_only)
+#endif
+#if defined(HAVE_SCENE) || defined(HAVE_CHARS)
+    {
+        g_scratch = gheap_alloc(0x200, 1);
+        d3d8_set_world_flush(world_flush);
+#ifdef HAVE_CHARS
+        rt_wrap_mesh_draw = mesh_draw;
+        if (g_chars_only)
+            rt_log("[recomp] scene: the characters drawn by the scene renderer (FFXI_SCENE_CHARS=1), the zone by the game\n");
+#endif
+    }
+#endif
+#ifdef HAVE_SCENE
 #ifdef FFXI_HOOK_FX_DRAW
     if (g_log)
         rt_hook_fx_draw = fx_draw;
@@ -1411,6 +1498,29 @@ void scene_setup(void)
 
 void scene_frame(void)
 {
+#ifdef HAVE_CHARS
+#ifdef HAVE_SCENE
+    if (g_chars_only && gfx_fx_get("scene") < 0.5f)
+    {
+        if (g_on)
+        {
+            if (g_pending)
+                flush();
+            rt_log("[recomp] scene: the zone drawn by the game\n");
+            g_on = 0;
+        }
+        g_npicks = 0, g_opaque.n = g_blend.n = g_late.n = 0;
+        chars_only_frame();
+        return;
+    }
+#else
+    if (g_chars_only)
+    {
+        chars_only_frame();
+        return;
+    }
+#endif
+#endif
 #ifdef HAVE_SCENE
     if (g_pending)
         flush(); /* (d3d8 flushes before Present; a frame that never drew after its walk) */

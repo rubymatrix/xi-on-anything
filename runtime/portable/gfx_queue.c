@@ -187,6 +187,7 @@ enum
     OP_SET_FOCUS,
     OP_SET_MOGHOUSE,
     OP_CALL,
+    OP_CHARS_DRAW,
 };
 
 /* a call the game's thread waits on (the browser's way to run something where the back end lives) */
@@ -395,6 +396,8 @@ typedef struct DrawRec
      * GfxDraw it was 4 KB a draw, most of it the constants left unused, 6 MB a frame through the queue in a crowd */
     uint8_t head[offsetof(GfxDraw, u)];
 } DrawRec;
+
+static void run_chars(const uint8_t* body);
 
 static void run_draw(const uint8_t* body)
 {
@@ -633,6 +636,7 @@ static void run_batch(Batch* b)
             call->fn(call);
             break;
         }
+        case OP_CHARS_DRAW: run_chars(body); break;
         }
     }
 #if defined(__APPLE__)
@@ -1285,6 +1289,36 @@ void gfxq_scene_done(GfxTex* color, const GfxScene* s)
     *(GfxTex**)p = color;
     memcpy(p + 16, s, sizeof *s);
     done();
+}
+
+/* the scene renderer's characters (gfx_chars_draw): the frame, then its palette, states and items copied after it;
+ * the items' buffers and texture are the game's handles until the render thread runs it */
+void gfxq_chars_draw(const GfxCharFrame* f)
+{
+    if (!f->nitem || !f->nbones)
+        return;
+    size_t hz = ALIGN16(sizeof *f), pz = ALIGN16((size_t)f->nbones * 64), sz = ALIGN16((size_t)f->nstate * sizeof *f->state);
+    size_t iz = (size_t)f->nitem * sizeof *f->item;
+    uint8_t* p = (uint8_t*)rec(OP_CHARS_DRAW, hz + pz + sz + iz);
+    memcpy(p, f, sizeof *f);
+    memcpy(p + hz, f->palette, (size_t)f->nbones * 64);
+    memcpy(p + hz + pz, f->state, (size_t)f->nstate * sizeof *f->state);
+    memcpy(p + hz + pz + sz, f->item, iz);
+    done();
+}
+
+static void run_chars(const uint8_t* body)
+{
+    GfxCharFrame f;
+    memcpy(&f, body, sizeof f);
+    size_t hz = ALIGN16(sizeof f), pz = ALIGN16((size_t)f.nbones * 64), sz = ALIGN16((size_t)f.nstate * sizeof *f.state);
+    f.palette = (const float*)(body + hz);
+    f.state = (const GfxCharState*)(body + hz + pz);
+    GfxCharItem* it = (GfxCharItem*)(uintptr_t)(body + hz + pz + sz); /* (the batch is the queue's own memory) */
+    for (uint32_t i = 0; i < f.nitem; ++i)
+        it[i].vb = real_buf(it[i].vb), it[i].uv = real_buf(it[i].uv), it[i].ib = real_buf(it[i].ib), it[i].tex = real_tex(it[i].tex);
+    f.item = it;
+    gfx_chars_draw(&f);
 }
 
 void gfxq_fx_set(const char* key, float v)
