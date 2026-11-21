@@ -26,8 +26,9 @@
  *
  * --server is where the game's servers are: the lobby and every other host under the game's
  * domain resolve to it instead of through DNS. Default 127.0.0.1 (this machine); --lobby is an
- * older name for it. With --session nothing is redirected: the game's hosts resolve through DNS,
- * as retail's do, and --server is not used.
+ * older name for it. With --session or --pol-status the game's hosts resolve through DNS, as
+ * retail's do, unless --server is given too: then it is a private PlayOnline server, and the game's
+ * hosts go there as they do for a LandSandBoat sign-in.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped;
  * 0 uncapped: the world at its own speed (frame.c) in a build with the frame sites, else as fast as the
@@ -1263,7 +1264,8 @@ int main(int argc, char** argv)
     const char* bundled_tex_env = getenv("FFXI_BUNDLED_TEXTURES");
     if ((bundled_tex_env && bundled_tex_env[0] == '0') || !bundled_path(argv[0], "textures", bundled_tex, sizeof bundled_tex))
         bundled_tex[0] = 0;
-    const char* server_name = NULL; /* --server as given, for the sign-in screen */
+    const char* server_name = NULL; /* --server as given, for the sign-in screen; with a PlayOnline
+                                     * session, a private PlayOnline server the game's hosts go to */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0, lod_given = 0;
     int cexi = CEXI_OFF, cexi_given = 0;
     float ui_aspect = 0.0f;
@@ -1503,6 +1505,10 @@ int main(int argc, char** argv)
         lsb.password = getenv("FFXI_PASSWORD");
     if (!addon_harness)
         discord_init();
+    /* a launcher's PlayOnline session with --server: its PlayOnline server is a private one, and the
+     * game's hosts go there too. Taken before the sign-in screen, whose own PlayOnline sign-in is
+     * retail's whatever --server says. */
+    const int private_pol = have_session && server_name;
     if (!addon_harness && !have_session && !(lsb.user && (lsb.password || lsb.login_token)))
     {
         /* Nothing on the command line signs in: the sign-in screen, in the game's own art. Its
@@ -1652,8 +1658,9 @@ int main(int argc, char** argv)
     dinput_init();
     ws2_init();
     /* the game's hosts: the lobby through gamecore's resolver, every other one through
-     * gethostbyname. With --session none is redirected: they resolve through DNS, as retail's. */
-    if (have_session)
+     * gethostbyname. With a PlayOnline session none is redirected: they resolve through DNS, as
+     * retail's, unless the launcher named a private PlayOnline server with --server. */
+    if (have_session && !private_pol)
     {
         ws2_set_game_server(0);
         gamecore_set_lobby_resolver(ws2_resolve_ipv4);

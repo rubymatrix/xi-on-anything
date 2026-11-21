@@ -14,6 +14,7 @@ Every supported build is listed in `meta/builds.json`, keyed by the SHA-256 of i
 | 2026-11-02 | `d809ebe3…48fb` | `30261102_0` | a retail install after the November update (`patch.ver` present) |
 | 2025-12-26 | `f5ed4c3b…a7f6` | `30251226_0` | loose `FFXiMain.dll`/`FFXi.dll`, an older client than 2026-08-22 (no `patch.ver`) |
 | 2025-11-12 | `bda769e2…0d9a` | `30251101_2` | a private-server install (`patch.ver` present) |
+| 2009-07-09 | `84e66b43…c3c0` | `30090710_2` | the July 2009 PC install, assembled from a Steam install and a 2010 install (`patch.ver` present) |
 
 New labels are the date of the PE timestamp (2026-08-22 predates that rule).
 
