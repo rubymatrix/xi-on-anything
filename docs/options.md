@@ -12,6 +12,14 @@ Sources, as the tables abbreviate them:
 - **App**: an app-bundle default (`app_default`, read when the flag is absent)
 - **Env**: an `FFXI_*` environment variable
 
+Not every addition works on every client build. `meta/features.json` gives each one the builds it
+works on (a first or last build, a list, or the hooks and patches it needs from `meta/builds.json`);
+a build's own entry there can override it. A feature that does not apply to the running build is
+never switched on, whatever the menu, `fx.txt` or the command line say: the log says which and why
+(`[recomp] feature draw_distance off for build 2009-07-09: needs a client from 2025-11-12 or later`),
+`host64 --features` prints the table as JSON, and `runtime.json` beside a build carries it for the
+launcher. See [Features by client build](#features-by-client-build) at the end.
+
 Defaults are the code's. `fx = 0` (the default) turns every scene effect off; the keys below it keep
 their values for when it is on. On Android the rows set through scene effects are not shown, nor
 the Lighting and Atmosphere pages.
@@ -299,3 +307,27 @@ Config
 Set before the game starts, so not in the game's menus: server and sign-in, game data (texture
 packs, DAT overlays, `--cexi`), integrations (Discord) and paths (sections 9, 11, 12 and 13), and
 the developer switches (section 14).
+
+## Features by client build
+
+`meta/features.json` is the list; `tools/buildinfo.py` (`features()`) resolves it for the build
+`tools/prepare.py` chose, and `tools/build.py` writes the result to `generated/build.h` as
+`FFXI_FEATURE_<ID>` (1 or 0) and `FFXI_FEATURE_TABLE`. A feature's rules, all of which must hold:
+
+| key | meaning |
+| --- | --- |
+| `min_build`, `max_build` | the first or last build label (the PE timestamp date `meta/builds.json` is keyed by) it works on |
+| `builds` | only these build labels |
+| `needs` | keys the build's `meta/builds.json` entry must have: `hooks.lod_pick`, `patches.frame60`, `addresses.scene_mgr`, or `modern` (every Config › Modern address) |
+
+A build's entry in `meta/builds.json` may override the result: `"features": {"<id>": true}` turns it
+on (tested on that build), `{"<id>": "<why>"}` turns it off with that reason. To gate a new
+addition, add it to `meta/features.json` and test `FFXI_FEATURE_<ID>` where it switches on; the
+launcher reads `features` from `runtime.json` (or `host64 --features`) to show it as unavailable
+rather than offer it.
+
+The clients from 2009 and 2010 have, of host64's additions: the widescreen view (`aspect`), 60 fps
+in the world (`frame60`: a translated variant of their frame loop, as they have no frame divisor),
+draw distance, nameplates and the modern effects' post-processing (`modern_fx`); the rest need
+hooks those builds don't have.
+
