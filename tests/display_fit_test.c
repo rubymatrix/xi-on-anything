@@ -49,6 +49,15 @@ int main(void)
     display_policy(&tall, &o);
     expect("tall interface h", o.menu_h, 1200);
     expect("tall rect is the window", o.rect_w, 2000);
+    /* the player's UI Scale over the fit's: 1.5 back buffer pixels an interface pixel */
+    DisplayIn thor = { 1920, 1080, 1.0f, 0, 0, 0, 0, 1.0f, 0, 1.5f };
+    display_policy(&thor, &o);
+    expect("scale 1.5 interface w", o.menu_w, 1280);
+    expect("scale 1.5 interface h", o.menu_h, 720);
+    /* one that leaves the interface under 480 lines: the fit's */
+    thor.ui_scale = 3.0f;
+    display_policy(&thor, &o);
+    expect("scale 3 too small: the fit's", o.menu_h, 1080);
     if (!failed)
         printf("display_fit_test: ok\n");
     return failed;

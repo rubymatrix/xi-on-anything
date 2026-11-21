@@ -193,7 +193,12 @@ static uint32_t com_call(uint32_t obj, unsigned slot, unsigned nargs, const uint
  * the object, and the divisor is at +0x30. The game may reset it (zoning), so every frame puts
  * it back: the player's (g_fps_divisor, Config > Display > Frame Rate), or an addon's for the
  * session (g_fps_addon: Ashita's fps addon, FastCS through a cutscene), until the player picks one. */
+/* Android starts at 30 (a phone runs hot and on battery) until the player picks another (modern.cfg) */
+#ifdef __ANDROID__
+static uint32_t g_fps_divisor = 2, g_fps_global;
+#else
 static uint32_t g_fps_divisor = 1, g_fps_global;
+#endif
 static uint32_t g_fps_limit; /* uncapped, held to this many frames a second (Frame Rate 120, 144); 0 none */
 static int g_fps_addon = -1; /* an addon's divisor (fps_request); -1 none */
 
@@ -1678,7 +1683,7 @@ int main(int argc, char** argv)
     upscale_background();
 #endif
 #ifdef FFXI_MOBILE
-    display_fit_start(g_signin_window); /* the game's size from the screen, whatever the file says */
+    display_fit_start(g_signin_window, data_dir); /* the game's size from the screen, whatever the file says (its UI Scale the player's) */
     soft_keyboard_off();
 #endif
     {

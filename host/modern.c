@@ -47,6 +47,9 @@
 #include "gwin.h"
 #include "k32.h"
 #include "modern.h"
+#ifdef FFXI_MOBILE
+#include "display_fit.h"
+#endif
 #include "plat.h"
 #include "thunk.h"
 #include "user32.h"
@@ -181,6 +184,10 @@ static float g_addon_px = 1.0f; /* Addon Scale: back buffer pixels an addon's pi
 static void hide_apply(void);
 static int g_own_shadows = -1; /* the player's Config > Shadows while host64 holds it at Off (game_shadows_follow) */
 static int g_fx_touched, g_host_touched;
+/* UI Scale as the player picked it (modern.cfg's ui_scale), 0 before any pick. A phone's interface is
+ * fitted to its screen at every start (display_fit.c), which keeps this instead of its own. */
+static float g_ui_scale;
+static void save(void);
 static char g_fx_keys[64][24]; /* the scene settings changed, to write */
 static int g_nfx_keys;
 
@@ -353,7 +360,13 @@ static void list_set(List* l, int i)
     if (l == &g_res)
         g_win_w = l->w[i], g_win_h = l->h[i];
     else
+    {
         scale = l->v[i];
+        g_ui_scale = scale, g_host_touched = 1;
+#ifdef FFXI_MOBILE
+        display_fit_scale(scale);
+#endif
+    }
     menu_size(g_win_w, g_win_h, scale, &g_menu_w, &g_menu_h);
 }
 
@@ -459,6 +472,8 @@ static void set(const Row* r, float v)
             g_display_live = 1, g_now_w = 0; /* at once (display_apply), the size chosen asked again */
         /* written at once: a window closed other than by its close (the lobby's) still keeps it */
         save_display();
+        if (l == &g_scale) /* and the pick itself, which a phone's next start keeps (modern.cfg) */
+            save();
     }
     else if (!strcmp(r->key, "@fps"))
     {
@@ -907,6 +922,8 @@ static void save(void)
                 fprintf(f, "game_shadows=%d\n", g_own_shadows);
             fprintf(f, "cmd_ctrl=%d\n", user32_cmd_as_ctrl());
             fprintf(f, "addon_scale=%g\n", (double)g_addon_px);
+            if (g_ui_scale > 0.0f)
+                fprintf(f, "ui_scale=%g\n", (double)g_ui_scale);
             if (g_setup.nameplate_fix && g_setup.nameplate_sx && g_setup.nameplate_sy)
                 fprintf(f, "nameplates=%d\nnameplate_scale=%gx%g\n", *g_setup.nameplate_fix,
                     (double)*g_setup.nameplate_sx, (double)*g_setup.nameplate_sy);
@@ -936,6 +953,23 @@ static const char* cfg_value(const char* path, const char* key, char* buf, size_
         }
     fclose(f);
     return found;
+}
+
+/* modern.cfg's UI Scale in data_dir: 0 if the player has picked none */
+static float saved_ui_scale(const char* path)
+{
+    char buf[64];
+    float v = cfg_value(path, "ui_scale", buf, sizeof buf) ? (float)atof(buf) : 0.0f;
+    return v >= 0.5f && v <= 4.0f ? v : 0.0f;
+}
+
+float modern_saved_ui_scale(const char* data_dir)
+{
+    char path[1100];
+    if (!data_dir || !data_dir[0])
+        return 0.0f;
+    join(data_dir, "modern.cfg", path, sizeof path);
+    return saved_ui_scale(path);
 }
 
 /* a DWORD of the settings file ("name"=dword:hex); else what the game runs with (the registry as
@@ -3070,6 +3104,7 @@ void modern_init(const ModernSetup* setup)
             *setup->fps_limit = n >= 30 && n <= 1000 ? (uint32_t)n : 0u;
         }
     }
+    g_ui_scale = saved_ui_scale(path);
     if (!setup->ui_aspect_given && cfg_value(path, "ui_aspect", buf, sizeof buf))
     {
         float v = (float)atof(buf);
