@@ -329,5 +329,9 @@ rather than offer it.
 The clients from 2009 and 2010 have, of host64's additions: the widescreen view (`aspect`), 60 fps
 in the world (`frame60`: a translated variant of their frame loop, as they have no frame divisor),
 draw distance, nameplates and the modern effects' post-processing (`modern_fx`); the rest need
-hooks those builds don't have.
+hooks those builds don't have. They have no addons (`addons`): Ashita's and Windower's libraries
+read today's packets, resources and memory, and on those clients they get them wrong (battlemod
+read the 2009 client's action packets with today's field widths and named Gust Slash "Viruna").
+The addon host still runs for host64's own parts (the control port, the 60 fps login check), but
+no addon or startup script (`boot`, `default`, `init`) is loaded.
 

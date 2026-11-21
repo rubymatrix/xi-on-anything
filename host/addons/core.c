@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "build.h"
 #include "host.h"
 #include "addons.h"
 #include "gui_lua.h"
@@ -763,6 +764,18 @@ int xi_addon_load(const char* name, int kind)
     if (!name || !*name || strchr(name, '/') || strchr(name, '\\') || strstr(name, ".."))
     {
         chatf("addon: bad name");
+        return 0;
+    }
+    /* meta/features.json addons: Ashita's and Windower's libraries assume today's client (its packets,
+     * resources and memory), so on older builds only the host's own built-in addons load */
+    if (!FFXI_FEATURE_ADDONS && !g_builtin)
+    {
+        static int told;
+        if (!told++)
+        {
+            xi_log("addons are off for build %s (meta/features.json): %s is not loaded, nor any after it", FFXI_BUILD, name);
+            chatf("addon: addons don't work with this client (build %s)", FFXI_BUILD);
+        }
         return 0;
     }
     if (xi_addon_find(name))
