@@ -510,6 +510,9 @@ def carry_section(old_entry, new_label, section, main_old, main_new, put, report
 def write_verdicts(label, ts, verdicts, old_label, unmapped):
     with open(VERDICTS, newline='') as f:
         src = f.read()
+    # a Windows checkout (core.autocrlf) has CRLF; edit as LF and write it back as it was
+    crlf = '\r\n' in src
+    src = src.replace('\r\n', '\n')
 
     def insert_before_close(src, opener, text):
         i = src.index(opener)
@@ -536,6 +539,8 @@ def write_verdicts(label, ts, verdicts, old_label, unmapped):
         body += "        'SWITCHES': {%s},\n" % sw
         body += '    },\n'
     src = insert_before_close(src, 'VERDICTS = {', body)
+    if crlf:
+        src = src.replace('\n', '\r\n')
     with open(VERDICTS, 'w', newline='') as f:
         f.write(src)
 
