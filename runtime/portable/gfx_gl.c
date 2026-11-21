@@ -2051,22 +2051,20 @@ void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
 /* --- the scene renderer's characters (gfx.h's GfxCharFrame; gfx_vulkan.c's CHARS_GLSL without the effects) ----------
  * Skinned here from the game's bone palette and the meshes' bone-space vertices, lit per vertex as the game's fixed
  * function lights them, then its two texture stages, alpha tested GREATER the reference, table fog; no culling, the
- * depth tested LESSEQUAL and written. As the generated functions read their streams, every input is a texture buffer
- * of words (Ryubing doesn't translate Mesa's storage-buffer reads): the vertices (unit 1, GfxCharVertex's 18 words),
- * the texture coordinates (unit 2), and the batch's palette and states (unit 3, the ring's, at the word offsets in the
- * draw's uniforms: binding 0, as the generated functions' block). */
+ * depth tested LESSEQUAL and written. The vertices (unit 1, GfxCharVertex's 18 words) and texture coordinates (unit 2)
+ * are texture buffers of words, as the generated functions read their streams (Ryubing doesn't translate Mesa's
+ * storage-buffer reads); a draw's state (GfxCharState: std140's layout as it is) and its actor's palette (up to 128
+ * bones) are uniform blocks in the ring (bindings 1 and 2), the alpha reference, pixel offset and mirror the draw's own
+ * block (binding 0). Read per vertex from a texture buffer instead, the state cost ~130 fetches a vertex: the GPU went
+ * from ~47% to ~77% busy in a town at 614 MHz. */
 static const char CHARS_GL[] =
     "#ifdef GFX_GL_CLIP01\n#define gl_clip_z(p) (p).z\n#else\n#define gl_clip_z(p) (2.0 * (p).z - (p).w)\n#endif\n"
     "#define sat(x) clamp(x, 0.0, 1.0)\n"
-    "layout(std140, binding = 0) uniform CU { vec4 params; uvec4 at; } D;\n" /* alpha ref, pixel; palette, state, mirror */
-    "layout(binding = 3) uniform usamplerBuffer rg;\n"
-    "float rw(int i) { return uintBitsToFloat(texelFetch(rg, i).x); }\n"
-    "vec4 rv(int i) { return vec4(rw(i), rw(i + 1), rw(i + 2), rw(i + 3)); }\n"
-    "mat4 rm(int i) { return mat4(rv(i), rv(i + 4), rv(i + 8), rv(i + 12)); }\n" /* D3D's rows: GLSL's columns */
-    /* GfxCharState in words: wvp 0, world 16, light[k] 32 + 20k (pos, dir, diffuse, ambient, att), ambient 112, md 116,
-     * ma 120, me 124, tf 128, fog 132, fog_col 136 */
-    "int st() { return int(D.at.y); }\n"
+    "layout(std140, binding = 0) uniform CU { vec4 params; uvec4 at; } D;\n" /* alpha ref, pixel; -, -, mirror */
+    "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
+    "layout(std140, binding = 1) uniform CSB { mat4 wvp, world; CL light[4]; vec4 ambient, md, ma, me, tf, fog, fog_col; } S;\n"
     "#ifdef GFX_VS\n"
+    "layout(std140, binding = 2) uniform CPB { mat4 P[128]; } B;\n" /* D3D's rows: GLSL's columns */
     "layout(binding = 1) uniform usamplerBuffer vbt;\n"
     "layout(binding = 2) uniform usamplerBuffer uvt;\n"
     "out vec2 o_uv;\n"
@@ -2086,39 +2084,34 @@ static const char CHARS_GL[] =
     "    vec3 sa = SIGN[mir & 3u], sb = SIGN[(mir >> 2) & 3u];\n"
     "    va.xyz *= sa; vb4.xyz *= sb; na *= sa; nb *= sb;\n"
     "  }\n"
-    "  int pal = int(D.at.x);\n"
-    "  mat4 MA = rm(pal + 16 * int(ba)), MB = rm(pal + 16 * int(bb));\n"
+    "  mat4 MA = B.P[ba & 127u], MB = B.P[bb & 127u];\n"
     "  vec3 n = (MA * vec4(na, 0.0)).xyz + (MB * vec4(nb, 0.0)).xyz;\n"
     "  vec3 p = (MA * va + MB * vb4).xyz;\n"
-    "  int s = st();\n"
-    "  mat4 W = rm(s + 16);\n"
-    "  vec3 wp = (W * vec4(p, 1.0)).xyz;\n"
-    "  vec3 wn = normalize((W * vec4(n, 0.0)).xyz);\n" /* NORMALIZENORMALS */
-    "  vec4 pos = rm(s) * vec4(p, 1.0);\n"
+    "  vec3 wp = (S.world * vec4(p, 1.0)).xyz;\n"
+    "  vec3 wn = normalize((S.world * vec4(n, 0.0)).xyz);\n" /* NORMALIZENORMALS */
+    "  vec4 pos = S.wvp * vec4(p, 1.0);\n"
     "  o_z = pos.w;\n"
     "  pos.x += pos.w * D.params.y;\n"
     "  pos.y -= pos.w * D.params.z;\n"
     "  gl_Position = vec4(pos.x, -pos.y, gl_clip_z(pos), pos.w);\n" /* (GL's window has D3D's rows: y negated) */
     "  o_uv = uintBitsToFloat(uvec2(texelFetch(uvt, 2 * vid).x, texelFetch(uvt, 2 * vid + 1).x));\n"
-    "  vec3 amb = rv(s + 112).rgb, dif = vec3(0.0);\n"
+    "  vec3 amb = S.ambient.rgb, dif = vec3(0.0);\n"
     "  for (int k = 0; k < 4; ++k) {\n"
-    "    int l = s + 32 + 20 * k;\n"
-    "    vec4 lpos = rv(l), ldir = rv(l + 4), ldif = rv(l + 8), lamb = rv(l + 12), latt = rv(l + 16);\n"
-    "    if (ldir.w == 0.0) continue;\n"
+    "    CL l = S.light[k];\n"
+    "    if (l.dir.w == 0.0) continue;\n"
     "    float at = 1.0;\n"
-    "    vec3 Ld = ldir.xyz;\n"
-    "    if (ldir.w > 1.5) {\n"
-    "      vec3 d = lpos.xyz - wp;\n"
+    "    vec3 Ld = l.dir.xyz;\n"
+    "    if (l.dir.w > 1.5) {\n"
+    "      vec3 d = l.pos.xyz - wp;\n"
     "      float dist = length(d);\n"
-    "      if (dist > lpos.w) continue;\n"
+    "      if (dist > l.pos.w) continue;\n"
     "      Ld = d / max(dist, 1e-6);\n"
-    "      at = 1.0 / max(latt.x + latt.y * dist + latt.z * dist * dist, 1e-6);\n"
+    "      at = 1.0 / max(l.att.x + l.att.y * dist + l.att.z * dist * dist, 1e-6);\n"
     "    }\n"
-    "    amb += lamb.rgb * at;\n"
-    "    dif += ldif.rgb * at * max(dot(wn, Ld), 0.0);\n"
+    "    amb += l.ambient.rgb * at;\n"
+    "    dif += l.diffuse.rgb * at * max(dot(wn, Ld), 0.0);\n"
     "  }\n"
-    "  vec4 md = rv(s + 116);\n"
-    "  o_col = vec4(sat(rv(s + 120).rgb * amb + md.rgb * dif + rv(s + 124).rgb), md.a);\n"
+    "  o_col = vec4(sat(S.ma.rgb * amb + S.md.rgb * dif + S.me.rgb), S.md.a);\n"
     "}\n"
     "#endif\n"
     "#ifdef GFX_FS\n"
@@ -2128,13 +2121,11 @@ static const char CHARS_GL[] =
     "in float o_z;\n"
     "out vec4 oc;\n"
     "void main() {\n"
-    "  int s = st();\n"
-    "  vec4 tx = texture(t, o_uv), tf = rv(s + 128);\n"
+    "  vec4 tx = texture(t, o_uv), tf = S.tf;\n"
     "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * o_col.rgb) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
     "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"          /* MODULATE2X, then MODULATE4X */
     "  if (!(a * 255.0 > D.params.x)) discard;\n"
-    "  vec4 fog = rv(s + 132);\n"
-    "  if (fog.z > 0.0) c = mix(rv(s + 136).rgb, c, sat((fog.y - o_z) / max(fog.y - fog.x, 1e-6)));\n"
+    "  if (S.fog.z > 0.0) c = mix(S.fog_col.rgb, c, sat((S.fog.y - o_z) / max(S.fog.y - S.fog.x, 1e-6)));\n"
     "  oc = vec4(c, a);\n"
     "}\n"
     "#endif\n";
@@ -2155,18 +2146,23 @@ int gfx_chars_draw(const GfxCharFrame* f)
     }
     if (!bind_target() || !set_viewport(f->vp))
         return 0;
-    /* the palette and states, then a uniform block a draw; all in one segment of the ring */
-    uint32_t psz = f->nbones * 64u, ssz = f->nstate * (uint32_t)sizeof(GfxCharState);
-    uint32_t ublk = ((uint32_t)32 + (uint32_t)g_ubo_align - 1) & ~((uint32_t)g_ubo_align - 1);
-    if (!ring_reserve(psz + ssz + 32u + f->nitem * (ublk + (uint32_t)g_ubo_align)))
+    /* the room in one segment of the ring: a state and a palette each time they change along the items (an actor's
+     * items are in a run, as are a material's), a block a draw, every one aligned as a uniform block's range is */
+    const uint32_t al = (uint32_t)g_ubo_align, st_sz = (uint32_t)sizeof(GfxCharState), pal_max = 128u * 64u;
+    uint32_t nst = 0, npal = 0, ls = ~0u, lp = ~0u;
+    for (uint32_t i = 0; i < f->nitem; ++i)
+    {
+        nst += f->item[i].state != ls, ls = f->item[i].state;
+        npal += f->item[i].palette != lp, lp = f->item[i].palette;
+    }
+    uint64_t need = (uint64_t)nst * (st_sz + al) + (uint64_t)npal * (pal_max + al) + (uint64_t)f->nitem * (32u + al);
+    if (need > RING_SEG || !ring_reserve((uint32_t)need))
     {
         gfx_prof_skip(GFX_SKIP_RANGE);
         return 0;
     }
-    uint32_t pat = ring_put(f->palette, psz, 16), sat_ = ring_put(f->state, ssz, 16);
     GfxTex* depth = depth_attachment();
     st_program(g_chars_prog);
-    st_texture(3, GL_TEXTURE_BUFFER, g_ring_tbo);
     st_cmask(15);
     st_cap(GL_BLEND, &S.blend, 0);
     st_cap(GL_DEPTH_TEST, &S.depth_test, depth != NULL);
@@ -2182,20 +2178,34 @@ int gfx_chars_draw(const GfxCharFrame* f)
     if (S.poly_mode != GL_FILL)
         gl.PolygonMode(GL_FRONT_AND_BACK, GL_FILL), S.poly_mode = GL_FILL;
     st_scissor(0, 0, 0, 0, 0);
+    BufBind b1, b2; /* bindings 1 and 2 as set here (nothing else binds them) */
+    memset(&b1, 0xFF, sizeof b1), memset(&b2, 0xFF, sizeof b2);
+    uint32_t last_state = ~0u, state_at = 0, last_pal = ~0u, pal_at = 0, pal_size = 0;
     int drew = 0;
     for (uint32_t i = 0; i < f->nitem; ++i)
     {
         const GfxCharItem* it = &f->item[i];
-        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D)
+        if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D || it->state >= f->nstate ||
+            it->palette >= f->nbones)
             continue;
+        if (it->state != last_state)
+            state_at = ring_put(&f->state[it->state], st_sz, al), last_state = it->state;
+        if (it->palette != last_pal)
+        {
+            uint32_t nb = f->nbones - it->palette;
+            pal_size = (nb < 128u ? nb : 128u) * 64u;
+            pal_at = ring_put(f->palette + 16u * it->palette, pal_size, al), last_pal = it->palette;
+        }
         struct
         {
             float params[4];
             uint32_t at[4];
-        } u = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f },
-            { pat / 4u + it->palette * 16u, sat_ / 4u + it->state * (uint32_t)(sizeof(GfxCharState) / 4), it->mirror, 0 } };
-        uint32_t uoff = ring_put(&u, sizeof u, (uint32_t)g_ubo_align);
+        } u = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f }, { 0, 0, it->mirror, 0 } };
+        uint32_t uoff = ring_put(&u, sizeof u, al);
         st_buffer(GL_UNIFORM_BUFFER, 0, &S.ubo, g_ring, uoff, (GLsizeiptr)sizeof u);
+        st_buffer(GL_UNIFORM_BUFFER, 1, &b1, g_ring, state_at, st_sz);
+        /* (the block's whole size bound, as GL wants it backed: the room after a short palette is the segment's) */
+        st_buffer(GL_UNIFORM_BUFFER, 2, &b2, g_ring, pal_at, pal_max);
         st_texture(1, GL_TEXTURE_BUFFER, buf_texture(it->vb));
         st_texture(2, GL_TEXTURE_BUFFER, buf_texture(it->uv));
         GfxTex* t = it->tex == g_rt ? g_dummy2d : it->tex;
