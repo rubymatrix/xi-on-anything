@@ -47,9 +47,16 @@ app's `CFBundleShortVersionString` and `CFBundleVersion`.
 
 Without `run.args`, the app runs the game in its external files folder
 (`/sdcard/Android/data/com.rubymatrix.xionanything/files/FINAL FANTASY XI`, the
-PlayOnline viewer beside it; an older `game` folder there still works), with
-the base registry the APK carries (`ffxi.reg`) and no `--server`, so the
-sign-in screen's server is used. The launcher copies the game there with
+PlayOnline viewer beside it; an older `game` folder there still works), or in
+the folder `game-dir.txt` there names (one line: the folder holding `FINAL
+FANTASY XI`), with the base registry the APK carries (`ffxi.reg`) and no
+`--server`, so the sign-in screen's server is used. The launcher's Game Location
+picks that folder: the app's own (removed with the app), `XI on Anything` on
+internal storage, or on an SD card, which outlive the app and show in file
+managers. The game reads it with plain paths, so for a folder outside its own
+the app asks for All files access (`MANAGE_EXTERNAL_STORAGE`; the storage
+permission before Android 11) and waits for it before the game starts. The
+launcher copies the game there with
 `adb push` and updates it with only the files changed since the phone's
 `patch.ver`, `patch.cfg` and then `patch.ver` last. An account sent from the
 launcher goes into the app's private files (`adb shell run-as`, its stdin, which needs

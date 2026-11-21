@@ -1,6 +1,14 @@
 package com.rubymatrix.xionanything;
 
+import android.Manifest;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.Settings;
+import android.widget.Toast;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BlurMaskFilter;
@@ -362,10 +370,65 @@ public final class MainActivity extends SDLActivity {
         return new String[] {"SDL3", "main"};
     }
 
+    /* The folder the launcher's phone page put the game in when the player chose one (its Game Location:
+     * internal storage or an SD card, outside this app's own files, so it outlives the app and file
+     * managers see it): game-dir.txt in this app's files, one line, the folder holding "FINAL FANTASY
+     * XI" and "PlayOnlineViewer". null: none chosen, the game is in this app's files. */
+    private static File chosenGameDir(File base) {
+        File note = new File(base, "game-dir.txt");
+        if (!note.isFile())
+            return null;
+        try (BufferedReader in = new BufferedReader(new FileReader(note))) {
+            String line = in.readLine();
+            return line == null || line.trim().isEmpty() ? null : new File(line.trim());
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private boolean canReadAnywhere() {
+        if (Build.VERSION.SDK_INT >= 30)
+            return Environment.isExternalStorageManager();
+        return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /* From the game's thread (getArguments): a game folder outside this app's files needs All files access
+     * (Android 11+) or the storage permission (before it). Asked for once on the UI thread - the Settings
+     * switch for this app, or the permission dialog - and waited for here, so the game starts with it. */
+    private void waitForStorageAccess() {
+        if (canReadAnywhere())
+            return;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(MainActivity.this, "Allow All files access so XI on Anything can read the game in the folder you chose.",
+                        Toast.LENGTH_LONG).show();
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:" + getPackageName())));
+                    } catch (RuntimeException e) { // a device without that screen: the list of all apps
+                        startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                    }
+                } else
+                    requestPermissions(new String[] {Manifest.permission.READ_EXTERNAL_STORAGE,
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
+            }
+        });
+        while (!canReadAnywhere()) {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+        Log.i("xi", "storage access granted");
+    }
+
     // run.args (one argument per line) replaces the default command line below. The game is the
     // "FINAL FANTASY XI" folder the launcher's phone page copies here (the PlayOnline viewer beside
-    // it), else an older setup's "game"; the base registry is the APK's own. No --server: the sign-in
-    // screen's (or an account the launcher sent) is used.
+    // it), or into the folder it chose (game-dir.txt), else an older setup's "game"; the base registry
+    // is the APK's own. No --server: the sign-in screen's (or an account the launcher sent) is used.
     @Override
     protected String[] getArguments() {
         File base = getExternalFilesDir(null);
@@ -387,7 +450,11 @@ public final class MainActivity extends SDLActivity {
             }
         }
         File game = new File(base, "FINAL FANTASY XI");
-        if (!game.isDirectory())
+        File chosen = chosenGameDir(base);
+        if (chosen != null) {
+            waitForStorageAccess();
+            game = new File(chosen, "FINAL FANTASY XI");
+        } else if (!game.isDirectory())
             game = new File(base, "game");
         File reg = new File(getFilesDir(), "ffxi.reg");
         try (InputStream in = getAssets().open("ffxi.reg"); OutputStream out = new FileOutputStream(reg)) {
