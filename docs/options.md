@@ -154,16 +154,31 @@ The game's own button map, registry `padsin000`, which on Windows only `FFXiPadC
 Gamepad buttons in the title screen's Config window and in Config (item 13) open **Config › Gamepad**
 in its place; it is also in the Advanced list. Each row is a function, set to a button (None, A, B, X,
 Y, LB, RB, LT, RT, L Stick, R Stick, Start, Back, the D-pad). A button given to one function is taken
-from the function that had it, which gets the old one's. A change is written at once and the game
+from the function that had it, which is left with none. A change is written at once and the game
 reads the map again (window message `0x800b`), so it applies without a restart. Button names are an
 Xbox pad's; SDL lays every pad out as one (A is the bottom face button).
 
 | Rows | Default |
 |---|---|
 | [Buttons] Select / Confirm, Cancel, Active Window, Main Menu, Autorun, Macro Palette (Ctrl), Macro Palette (Alt), Heal / Lock Target, Change View, Target Nearby NPC, Map, Hide Menus, Logout, Soft Keyboard (not on iOS) | A, B, Y, X, LB, LT, RT, L Stick, R Stick, none, none, Back, Start, RB |
+| [Sticks] Left Stick Across, Left Stick Up / Down, Right Stick Across, Right Stick Up / Down | what SDL reads them as |
 | [Menu Directions] Up, Down, Left, Right | the D-pad |
 
-The sticks (movement and camera) and the button combinations (`padexsin000`) are not on the page.
+Select (a click, Enter, or the pad's confirm) on a row listens: its box says what to do, and the next
+button pressed on the controller (a trigger too) is that function's; Escape cancels and Backspace or
+Delete clears the row to None. The game ignores the controller while a row listens. Left and right
+still step through the list.
+
+Sticks is not the game's map but the controller's own: which of its axes each stick axis is
+(`host/padmap.c`), for a controller SDL reads wrong (a handheld's built-in sticks). Select a row and
+push that stick right or down (pushed the other way, the axis is saved reversed), or step through Axis
+0-7 and each reversed with left and right. It is an SDL gamepad mapping for that controller (its
+GUID), applied at once and kept in `gamepads.txt` in the data folder, which is read at the next start.
+The page scrolls when it is taller than the interface (as Config › Addons does): up from its top row
+or down from its bottom one, or the mouse wheel.
+
+What the game's sticks do (movement and camera) and the button combinations (`padexsin000`) are not
+on the page.
 
 ## 9. Textures & game data
 

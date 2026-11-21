@@ -51,3 +51,7 @@ typedef struct ModernAddons
 
 /* Before the menus are in (modern_frame's first): with NULL or never called, no Addons page. */
 void modern_set_addons(const ModernAddons* ops);
+
+/* Config > Gamepad opened at the next frame, over whatever is up (the touch controls' Pad; any thread).
+ * Nothing before the game's menus are in (the sign-in screen). */
+void modern_open_gamepad(void);

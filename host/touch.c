@@ -34,6 +34,7 @@
 #include "gfx.h"
 #include "gwin.h"
 #include "input.h"
+#include "modern.h"
 
 void touch_init(void);
 void touch_frame(int in_game);
@@ -81,6 +82,7 @@ enum Ctl
     C_KEY,    /* a keyboard key: btn the scancode */
     C_TOGGLE, /* the controls shown or hidden; held: the layout edited */
     C_LOCK,   /* the layout locked, or being edited */
+    C_PADCFG, /* Config > Gamepad (host/modern.c): the buttons' and sticks' mapping */
     C_RESET,  /* editing: every group back in its place */
     C_DONE,   /* editing: the layout kept */
     C_DRAG,   /* editing: a finger moving a group */
@@ -423,10 +425,13 @@ static void layout(SDL_Window* win, int controls)
     /* the lock beside it: under it in a phone's bar, right of it on an iPad */
     add(C_LOCK, 0, GFX_TOUCH_BUTTON, g_editing ? GFX_SYM_UNLOCK : GFX_SYM_LOCK, NULL, bar ? tx : tx + TOGGLE + 10,
         bar ? ty + TOGGLE + 10 : ty, TOGGLE * 0.5f, TOGGLE * 0.5f);
+    /* past the lock, Config > Gamepad: put away with the rest */
+    add(C_PADCFG, 0, GFX_TOUCH_BUTTON, GFX_SYM_NONE, "Pad", bar ? tx : tx + 2 * (TOGGLE + 10),
+        bar ? ty + 2 * (TOGGLE + 10) : ty, TOGGLE * 0.5f, TOGGLE * 0.5f);
     /* where each group goes. A phone: the top row along the top, the D-pad upper left, the stick and
      * the face buttons in the lower corners. A tall screen (an iPad): everything gathered by the thumbs
      * at its foot, the stick and the face buttons TALL_FOOT of its height up, the rest above them */
-    float left = sx + (bar ? 0.0f : 2 * TOGGLE + 10 + TOGGLE_MARGIN); /* the top row right of an iPad's toggle and lock */
+    float left = sx + (bar ? 0.0f : 3 * TOGGLE + 20 + TOGGLE_MARGIN); /* the top row right of an iPad's toggle, lock and Pad */
     float top = sy + PILL_H + 10.0f;
     float fx, fy, dx, dy, ly, l2x, l1x, ry, r2x, r1x, sel_y;
     if (sh > 600)
@@ -680,6 +685,12 @@ static void finger_up(const SDL_TouchFingerEvent* e, Finger* f, float x, float y
             g_hidden = !g_hidden;
         memset(f, 0, sizeof *f);
         refresh(SDL_GetWindowFromID(e->windowID));
+        return;
+    }
+    if (f->what == C_PADCFG && over && !g_editing)
+    {
+        modern_open_gamepad();
+        memset(f, 0, sizeof *f);
         return;
     }
     if (f->what == C_LOCK && over) /* unlocked: the layout edited; locked again: kept */

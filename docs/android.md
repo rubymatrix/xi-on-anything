@@ -16,8 +16,9 @@ contains no password, game files, captures or generated game code: bring your
 own compatible client installation and server. The C++ back end does not
 implement the Modern FX extensions; the game's own D3D8 lighting, fog, textures
 and shadows work. Config > Advanced shows only the pages that apply here: Display
-(Frame Rate, Interface Shape and the window and resolution settings), Interface
-and Addons. It plays with the touch controls below, a controller, or a keyboard.
+(Frame Rate, Interface Shape and the window and resolution settings), Interface,
+Gamepad and Addons. It plays with the touch controls below, a
+controller, or a keyboard.
 
 ## From the launcher
 
@@ -121,8 +122,18 @@ These are the iPhone build's (docs/ios.md), shared through `FFXI_MOBILE`:
   SELECT/START and Target (F8); a quick tap off the controls is a click. The
   gamepad toggle hides them; the lock beside it (or a long press on the toggle)
   unlocks the layout, to drag each group where it suits, kept per window shape
-  in `touch-layout.txt` beside `run.args`. A real controller in use hides them,
-  and a touch brings them back. On a tall screen they gather at its foot.
+  in `touch-layout.txt` beside `run.args`. Pad, past the lock, opens Config >
+  Gamepad (the buttons' and sticks' mapping) over whatever is up, once the game's
+  menus are in; it is put away with the rest. A real controller in use hides
+  them, and a touch brings them back. On a tall screen they gather at its foot.
+- **Controller sticks:** Config > Gamepad's Sticks rows say which of the
+  controller's own axes each stick axis is (`host/padmap.c`), for a controller
+  SDL reads wrong (a handheld's built-in sticks): select a row and push that
+  stick right or down, or pick the axis with left and right; Back cancels. The
+  button rows record the same way, from the next button pressed. The game
+  ignores the controller while a row records. It is an SDL gamepad mapping for that
+  controller, applied at once and kept in `gamepads.txt` in the data folder.
+  The page scrolls when it is taller than the interface, as Config > Addons does.
 - **Drawing:** the controls are drawn by a view over the game's surface
   (`MainActivity.Overlay`, fed by `host/android_overlay.c`), not by the Vulkan
   back end: they keep the display's rate when the game runs slower, and their
