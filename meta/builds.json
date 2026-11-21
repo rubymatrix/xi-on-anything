@@ -2276,6 +2276,61 @@
         "0x10246dc5"
       ],
       "frame_net_clock": "0x10493fc0"
+    },
+    "2009-07-09": {
+      "FFXiMain.dll": {
+        "sha256": "84e66b4313aecc9dc12e9448fd7987eaa4a74edbca383401674e8df01acbc3c0",
+        "meta": "FFXiMain.2009-07-09.meta.json"
+      },
+      "FFXi.dll": {
+        "sha256": "7569626903e9b03d3e760b66fe87f5c645612dbec2977c8a11407eed1932633d",
+        "meta": "FFXi.2009-07-09.meta.json"
+      },
+      "version": "30090710_2",
+      "addresses": {
+        "chars_ptr": "0x10444228",
+        "present_site": "0x100031db"
+      },
+      "offsets": {
+        "chars_table": "0x12eb0"
+      },
+      "hooks": {
+        "nameplate_scale": "0x1007c909"
+      },
+      "wraps": {
+        "parse_input": "0x10078080",
+        "packet_decrypt": "0x100c20e0",
+        "packet_encrypt": "0x100c1fb0",
+        "geometry_parent": "0x1002c0c0",
+        "geometry_feature_sse": "0x1000bde0",
+        "geometry_feature_sse2": "0x1000be10",
+        "geometry_rigid": "0x1002d8a0",
+        "geometry_weighted": "0x1002d930"
+      },
+      "modern": {},
+      "crt": {
+        "strlen": "0x102aeb60",
+        "strncmp": "0x102aa3c0",
+        "strncpy": "0x102a9ad0",
+        "memcmp": "0x102ae950",
+        "memset": "0x102ae4b0",
+        "memcpy": "0x102ae0c0",
+        "allmul": "0x102ad290",
+        "alldiv": "0x102adf20",
+        "aulldiv": "0x102ae050",
+        "aullrem": "0x102adfd0",
+        "allshl": "0x102aa4a0",
+        "aullshr": "0x102aca40",
+        "ftol": "0x102a971c",
+        "strrchr": "0x102aa240",
+        "strpbrk": "0x102b9700"
+      },
+      "geometry": {
+        "info": "0x103c3a4c",
+        "callback": "0x103c89a0",
+        "palette": "0x103c4778",
+        "counts": "0x103c8840"
+      }
     }
   }
 }

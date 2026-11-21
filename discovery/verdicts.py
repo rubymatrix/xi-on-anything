@@ -23,6 +23,8 @@ BUILDS = {
     0x6ac37846: '2026-10-05',  # FFXiMain.dll
     0x4b9fcd53: '2010-03-16',  # FFXiMain.dll
     0x4b9fcd7a: '2010-03-16',  # FFXi.dll
+    0x4a55f863: '2009-07-09',  # FFXiMain.dll
+    0x4a55f89d: '2009-07-09',  # FFXi.dll
 }
 
 # NOT_CODE: false function starts (data records decoded as code, or aligned starts inside a real
@@ -152,6 +154,32 @@ VERDICTS = {
     },
     ('ffxi', '2010-03-16'): {'NOT_CODE': [0x10006680],  # inside the 11-byte stub at 0x10006678 (jmp [eax+0xe90])
                              'REDECODE': [0x10006678], 'SWITCHES': {}},
+    # 2009-07-09: the July 2009 PC install (patch.ver 30090710_2), carried from 2010-03-16. The one site
+    # carry could not place is the first of the two `mov al,[g]; push esi; test al,al; mov esi,ecx;
+    # jne +0x1f; mov eax,[g2]` functions, which both builds have in the same order (2010-03-16 at
+    # 0x101cc480 and 0x101cda90, here at 0x101cb260 and 0x101cc9e0).
+    ('ffximain', '2009-07-09'): {
+        'NOT_CODE': [0x10006610,                          # 21-case table of the switch at 0x10005c39, after a ret
+                     0x100d76e0,                          # 4-entry jump table after `ret; nop`
+                     0x10127c50,                          # 4-entry jump table after a ret
+                     0x102a6a40, 0x102a6ab0,              # 16-byte records {ptr, int, flags, 0} in .text
+                     0x102a89f0,                          # inside the 11-byte `mov eax,[g]; jmp [eax+off]` stub
+                     0x102a5a40,                          # 256 16-byte records up to 0x102a6a40
+                     0x1016c02a,                          # inside `mov ecx,[eax+0x18]` at 0x1016c028
+                     0x10255d30,                          # inside `or ah,1` (80 cc 01) at 0x10255d2e
+                     0x101cb263,                          # inside `mov al,[0x103ec9f7]` at 0x101cb260, a function start
+                     # New in this build (its own gate):
+                     0x1004bd10, 0x1004c010,              # inside `je` (0f 84 90 ..) at 0x1004bd0d / 0x1004c00d, the 0x90 read as padding
+                     0x1004e660,                          # jump table of the switch above it, after `ret 4; nop`
+                     0x1008f2b0],                         # 2-entry jump table {0x1008f25b, 0x1008f25f} and its index bytes, after a ret
+        'REDECODE': [0x102a89e8, 0x1016c028, 0x10255d2e, 0x101cb260, 0x1004bd0d, 0x1004c00d],
+        'SWITCHES': {0x10005c39: 21, 0x101c4ced: 9, 0x1023eda8: 4},
+    },
+    ('ffxi', '2009-07-09'): {
+        'NOT_CODE': [0x10006680],
+        'REDECODE': [0x10006678],
+        'SWITCHES': {},
+    },
 }
 
 
