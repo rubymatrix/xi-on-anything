@@ -193,6 +193,17 @@ void input_sdl_event(const void* ev)
         else
             rt_log("[recomp] input: gamepad %s\n", SDL_GetGamepadNameForID(e->gdevice.which));
         break;
+    case SDL_EVENT_JOYSTICK_ADDED:
+        /* one SDL has no gamepad mapping for: its sticks and buttons are never read (no
+         * SDL_EVENT_GAMEPAD_ADDED), so the log says what it is */
+        if (!SDL_IsGamepad(e->jdevice.which))
+        {
+            char guid[64];
+            SDL_GUIDToString(SDL_GetJoystickGUIDForID(e->jdevice.which), guid, sizeof guid);
+            rt_log("[recomp] input: joystick %s (%s) is not a gamepad SDL knows\n",
+                SDL_GetJoystickNameForID(e->jdevice.which), guid);
+        }
+        break;
     case SDL_EVENT_GAMEPAD_REMOVED:
     {
         SDL_Gamepad* p = SDL_GetGamepadFromID(e->gdevice.which);
