@@ -364,6 +364,9 @@ typedef struct Obj
     uint32_t fmem, lk_off, lk_n; /* (lk_*: what the locks since the last send wrote, as one range) */
     uint8_t lk_write, lk_depth;  /* ... and the locks not yet unlocked: it goes over at the last unlock */
     uint8_t loose;               /* written outside its locks (d3dw_check_buffers found it): sent at the draws */
+    /* the occlusion probe's 16x16 surface with the worker on (probe_lock_now): the sky probe's answers, apart from
+     * mem - which the game reads at once and the other probes' answers (fully visible) fill */
+    uint32_t sky_mem;
 } Obj;
 static uint32_t g_buf_serial; /* Obj.serial's last */
 
@@ -557,6 +560,8 @@ static void obj_destroy(Obj* o)
         gheap_free(o->mem);
     if (o->fmem)
         gheap_free(o->fmem);
+    if (o->sky_mem)
+        gheap_free(o->sky_mem);
     uint32_t idx = rd32(o->guest + 4);
     wr32(o->guest, 0);
     gheap_free(o->guest);
@@ -1086,6 +1091,8 @@ static void raise_top(int* top, uint32_t n)
 /* A 16x16 occlusion probe tests a quad at the sky's depth (z 0x3f7ffffe, 1 - 2^-23: the game's
  * probe for the sun and its lens flare) since the last probe was read; see lock_rect. */
 static int g_probe_sky;
+/* ... as the game's thread sees its draws, with the worker on (defer, probe_lock_now) */
+static int g_fprobe_sky;
 static int g_probe_wrapped; /* d3d8_probe_test installed: render targets' unread is kept */
 static int g_fade_scissor; /* fade_scissor on (d3d8_setup; FFXI_FADE_SCISSOR=0: off) */
 static Obj* wr_target(void);
@@ -5024,6 +5031,10 @@ static void lock_rect(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags AND
             int mode = forced ? forced : g_occlusion;
             if (probe)
                 g_probe_sky = 0;
+            /* (the worker running a probe's lock the game's thread answered: the sky's late read goes to its own memory,
+             * where the game reads it - probe_lock_now) */
+            if (sky && s->sky_mem && d3dw_on_worker())
+                bits = s->sky_mem;
 #if defined(FFXI_ANDROID_VULKAN)
             if (probe)
                 gfx_android_probe_read(probe_key != 0, mode == 1);
@@ -5442,6 +5453,11 @@ static int front_same(Shim fn, Guest* g)
 
 static void defer(Guest* g, Shim fn, uint32_t nwords, const uint32_t* barg, const uint32_t* bbytes, unsigned nblobs)
 {
+    /* the sky's occlusion probe, as IDirect3DDevice8_DrawPrimitiveUP sees it (transformed vertices at the sky's depth),
+     * for probe_lock_now */
+    if (fn == IDirect3DDevice8_DrawPrimitiveUP && !(g_fs.vs & 1) && (g_fs.vs & 0xE) == 4 && ARG(3) &&
+        rd32(ARG(3) + 8) == 0x3f7ffffeu)
+        g_fprobe_sky = 1;
     /* the scene renderer's batch before the work after it (WORLD_FLUSH's calls; a character's draw isn't: world_site on
      * the game's own stack) */
     if (g_front_pending)
@@ -5772,15 +5788,28 @@ static int probe_lock_now(Obj* s, uint32_t locked, uint32_t rect, uint32_t flags
     (void)s, (void)locked, (void)rect, (void)flags;
     return 0;
 #else
+    /* (the sky probe as the game's thread saw its draw: lock_rect's g_probe_sky, consumed by any probe's lock) */
+    int probe = s && (flags & LOCK_READONLY) && s->width == 16 && s->height == 16, sky = probe && g_fprobe_sky;
+    if (probe)
+        g_fprobe_sky = 0;
     if (!s || !(flags & LOCK_READONLY) || s->width != 16 || s->height != 16 || !gpu_owned(s) || surface_scaled(s) ||
         (s->usage & USAGE_DEPTHSTENCIL) || g_occlusion != 0 || probe_forced() || !locked)
         return 0;
-    int fresh = !s->mem;
-    uint32_t pitch = fmt_pitch(s->format, s->width), bits = obj_mem(s);
+    /* What the game reads now. The others' answer is fully visible: written here, at once. The sky probe's is a late
+     * read, which the worker writes when it runs the lock - into memory of the sky's own (sky_mem): in mem, the other
+     * probes' answers, written in between, were what the sun's flare read (it showed through walls), and the sky's
+     * late answer what the others read (characters went missing where the sun was hidden). */
+    uint32_t pitch = fmt_pitch(s->format, s->width), size = pitch * s->height, bits;
+    if (sky)
+    {
+        if (!s->sky_mem && (s->sky_mem = gheap_alloc(size, 1)) != 0)
+            memset(GUEST_PTR(s->sky_mem), 0xFF, size); /* (none read yet: visible, as the first late read is) */
+        bits = s->sky_mem;
+    }
+    else if ((bits = obj_mem(s)) != 0)
+        memset(GUEST_PTR(bits), 0xFF, size);
     if (!bits)
         return 0;
-    if (fresh)
-        memset(GUEST_PTR(bits), 0xFF, (size_t)pitch * s->height);
     if (rect)
     {
         uint32_t l = rd32(rect), t = rd32(rect + 4), blk = fmt_block(s->format);
