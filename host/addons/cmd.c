@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "build.h"
 #include "gfx_queue.h" /* gfx.h, through the render queue where the build has one (the OpenGL host's) */
 #include "host.h"
 #include "plat.h"
@@ -234,6 +235,8 @@ static double wait_of(const char* line)
 void xi_cmd_frame(void)
 {
     static int booted;
+    if (!booted && !FFXI_FEATURE_ADDONS)
+        booted = 1; /* older builds: no addons, so not their startup scripts either (meta/features.json) */
     if (!booted)
     {
         booted = 1;

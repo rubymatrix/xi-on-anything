@@ -72,6 +72,12 @@
       "code": "host/cexi.c",
       "needs": ["addresses.cexi_item_ranges"]
     },
+    "addons": {
+      "title": "Addons (Ashita, Windower, xi)",
+      "what": "Loads the player's Lua addons and their startup scripts. Ashita's and Windower's libraries, resources and packet layouts are today's: on older clients addons misread the packets and print wrong names (battlemod's action messages), so they are not loaded. The addon host itself still runs for the host's own parts (the control port, the 60 fps login check).",
+      "code": "host/addons/core.c xi_addon_load, host/addons/cmd.c xi_cmd_frame",
+      "min_build": "2025-11-12"
+    },
     "modern_fx": {
       "title": "Modern effects (post-processing)",
       "what": "Grading, saturation, contrast, sharpening and anisotropic filtering over the game's own picture. Works on the finished frame, not the game's data, so every build has it.",
