@@ -15,7 +15,9 @@ import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Bundle;
+import android.view.InputDevice;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 
@@ -42,6 +44,7 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLControllerManager;
 
 /* The app's activity: SDL runs libmain.so (host/android_main.c) with the arguments from
  * getArguments(). Over the game's surface, Overlay draws the touch controls host/touch.c lays out
@@ -74,6 +77,18 @@ public final class MainActivity extends SDLActivity {
     public void setPresentRect(int x, int y, int w, int h) {
         if (overlay != null)
             overlay.setPresentRect(new Rect(x, y, x + w, y + h));
+    }
+
+    /* A controller's sticks and hats, to SDL before any view. SDL takes them only in its surface's
+     * listener, from a view with the focus and an event whose source is exactly SOURCE_JOYSTICK; one
+     * it misses (a handheld's built-in controller, as the AYN Thor's) is left unhandled, and Android
+     * makes the left stick d-pad keys of it and drops the right one. */
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (!mBrokenLibraries && event.isFromSource(InputDevice.SOURCE_CLASS_JOYSTICK)
+                && SDLControllerManager.isDeviceSDLJoystick(event.getDeviceId()))
+            return SDLControllerManager.handleJoystickMotionEvent(event);
+        return super.dispatchGenericMotionEvent(event);
     }
 
     /* Back that SDL did not take as a key (SDL_ANDROID_TRAP_BACK_BUTTON): Escape, as touch.c makes of it */
@@ -384,7 +399,7 @@ public final class MainActivity extends SDLActivity {
         }
         return new String[] {"--game", game.getPath(), "--data-dir", data.getPath(), "--reg", reg.getPath(),
                 "--reg-overlay", new File(data, "settings.reg").getPath(), "--user-dir",
-                new File(data, "USER").getPath(), "--fps-divisor", "2", "--aspect", "off"};
+                new File(data, "USER").getPath(), "--aspect", "off"};
     }
 
     /* Saved sign-in passwords (host/keychain.c, from any thread): each one encrypted with an AES key

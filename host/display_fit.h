@@ -10,6 +10,7 @@ typedef struct DisplayIn
     int safe_x, safe_y, safe_w, safe_h; /* the safe area, in points */
     float ui_points;            /* points an interface pixel the player wants */
     double max_pixels;          /* the back buffer's budget */
+    float ui_scale;             /* the player's UI Scale (back buffer pixels an interface pixel); 0 the fit's */
 } DisplayIn;
 
 typedef struct DisplayOut
@@ -23,8 +24,12 @@ typedef struct DisplayOut
 void display_policy(const DisplayIn* in, DisplayOut* out);
 
 /* The sign-in's window, before the registry is read: the game's first size, put in the registry
- * (0001/0002 the back buffer, 0037/0038 the interface), so it starts at it. */
-void display_fit_start(void* sdl_window);
+ * (0001/0002 the back buffer, 0037/0038 the interface, at the UI Scale data_dir's modern.cfg keeps
+ * when the player has picked one), so it starts at it. */
+void display_fit_start(void* sdl_window, const char* data_dir);
 /* Each frame (host64's present hook): when the window's size or safe area changed, the game follows
  * (modern_window_size), presented into the safe area, the pointer mapped to match. */
 void display_fit_frame(void);
+/* The player's UI Scale (Config > Display), kept over the fit's interface from now on; 0 the fit's.
+ * display_fit_start reads the saved one (modern.cfg), the Display page gives a new pick. */
+void display_fit_scale(float scale);
