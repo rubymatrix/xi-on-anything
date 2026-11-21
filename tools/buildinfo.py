@@ -15,6 +15,7 @@ import subprocess
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 METADIR = os.path.join(ROOT, 'meta')
 BUILDS = os.path.join(METADIR, 'builds.json')
+FEATURES = os.path.join(METADIR, 'features.json')
 CHOSEN = os.path.join(ROOT, 'generated', 'build.json')
 RUNTIME = os.path.join(ROOT, 'runtime.json')
 
@@ -45,7 +46,7 @@ def record(label, game):
 
 def current(required=True):
     """{'build', 'game', 'ffximain_meta', 'ffxi_meta', 'ffximain_sha', 'ffxi_sha', 'addresses', 'offsets', 'hooks', 'crt',
-    'modern', 'modern_keys'}, ('modern_keys': every name a build's modern section has, so build.h
+    'modern', 'modern_keys', 'features'}, ('features': buildinfo.features; 'modern_keys': every name a build's modern section has, so build.h
     names them all whichever this build is)
     or None if tools/prepare.py has not run and not required."""
     try:
@@ -78,12 +79,55 @@ def current(required=True):
         'crt': b['crt'],
         'modern': b.get('modern', {}),
         'modern_keys': sorted({k for other in known().values() for k in other.get('modern', {})}),
+        'features': features(chosen['build']),
     }
 
 
+def catalog():
+    """meta/features.json's features, in its order: {id: {title, what, code, min_build, ...}}."""
+    with open(FEATURES) as f:
+        return json.load(f)['features']
+
+
+def features(label):
+    """Which of meta/features.json's features the build labelled so has: [{'id', 'title', 'on', 'why'}],
+    why being '' when on, else the first rule that failed (or the build's own override)."""
+    builds = known()
+    b = builds[label]
+    every_modern = {k for other in builds.values() for k in other.get('modern', {})}
+    out = []
+    for fid, f in catalog().items():
+        why = ''
+        if f.get('min_build') and label < f['min_build']:
+            why = 'needs a client from %s or later' % f['min_build']
+        elif f.get('max_build') and label > f['max_build']:
+            why = 'needs a client from %s or earlier' % f['max_build']
+        elif f.get('builds') and label not in f['builds']:
+            why = 'only on builds %s' % ', '.join(f['builds'])
+        else:
+            for need in f.get('needs', []):
+                if need == 'modern':
+                    have = bool(every_modern) and all(str(b.get('modern', {}).get(k, '')).startswith('0x')
+                                                      for k in every_modern)
+                else:
+                    section, _, key = need.partition('.')
+                    have = key in (b.get(section) or {})
+                if not have:
+                    why = 'not found in this client build (%s)' % need
+                    break
+        override = b.get('features', {}).get(fid)
+        if override is True:
+            why = ''
+        elif isinstance(override, str):
+            why = override
+        out.append({'id': fid, 'title': f['title'], 'on': not why, 'why': why})
+    return out
+
+
 def runtime():
-    """{'version', 'commit', 'build'}: what a client built from this checkout is. commit is None
-    outside a git checkout, build None before tools/prepare.py."""
+    """{'version', 'commit', 'build', 'features'}: what a client built from this checkout is, and which of
+    meta/features.json's features it has (buildinfo.features). commit is None outside a git checkout,
+    build None (and features empty) before tools/prepare.py."""
     with open(RUNTIME) as f:
         version = json.load(f)['version']
     try:
@@ -92,7 +136,8 @@ def runtime():
     except (OSError, subprocess.CalledProcessError):
         commit = None
     chosen = current(required=False)
-    return {'version': version, 'commit': commit, 'build': chosen['build'] if chosen else None}
+    return {'version': version, 'commit': commit, 'build': chosen['build'] if chosen else None,
+            'features': chosen['features'] if chosen else []}
 
 
 def stamp(path):

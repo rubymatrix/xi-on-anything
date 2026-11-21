@@ -125,6 +125,45 @@ void touch_frame(int in_game); /* touch.c: the touch controls, each frame of the
 #include <SDL3/SDL.h> /* the chat line's keyboard */
 #endif
 #include "build.h" /* FFXI_VERSION */
+
+/* --- features by client build ----------------------------------------------------------------------
+ * meta/features.json says which of host64's additions work on which client builds; tools/build.py
+ * resolves it for this build into FFXI_FEATURE_<ID> (1 or 0) and this table. A feature that is 0
+ * is never switched on, whatever the command line or settings ask; the log and --features say why. */
+typedef struct Feature
+{
+    const char* id;
+    const char* title;
+    int on;
+    const char* why; /* "" when on */
+} Feature;
+static const Feature g_features[FFXI_FEATURE_COUNT] = { FFXI_FEATURE_TABLE };
+
+static const char* feature_why(const char* id)
+{
+    for (int i = 0; i < FFXI_FEATURE_COUNT; ++i)
+        if (!strcmp(g_features[i].id, id))
+            return g_features[i].why;
+    return "";
+}
+
+/* host64 --features: the table as JSON, for a launcher to show what this build can't do */
+static void print_features(void)
+{
+    printf("{\"format\": \"xi-features/1\", \"build\": \"%s\", \"version\": \"%s\", \"features\": [", FFXI_BUILD,
+        FFXI_VERSION);
+    for (int i = 0; i < FFXI_FEATURE_COUNT; ++i)
+        printf("%s\n  {\"id\": \"%s\", \"title\": \"%s\", \"on\": %s, \"why\": \"%s\"}", i ? "," : "", g_features[i].id,
+            g_features[i].title, g_features[i].on ? "true" : "false", g_features[i].why);
+    printf("\n]}\n");
+}
+
+static void log_features(void)
+{
+    for (int i = 0; i < FFXI_FEATURE_COUNT; ++i)
+        if (!g_features[i].on)
+            rt_log("[recomp] feature %s off for build %s: %s\n", g_features[i].id, FFXI_BUILD, g_features[i].why);
+}
 #if defined(FFXI_ANDROID_VULKAN)
 #include "benchmark.h"
 #endif
@@ -205,6 +244,11 @@ static int g_fps_addon = -1; /* an addon's divisor (fps_request); -1 none */
 
 static void find_fps_global(void)
 {
+    if (!FFXI_FEATURE_FRAME_DIVISOR)
+    {
+        g_fps_global = 0xFFFFFFFFu; /* frame60 (below) gives the old clients their 60 */
+        return;
+    }
     static const uint8_t PAT[] = { 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, 0x3B, 0xC1, 0x74, 0x21, 0x8B, 0x0D };
     uint32_t start = rt_image_base + rt_image_text_rva, end = start + rt_image_text_size;
     for (uint32_t a = start; a + sizeof PAT + 4 <= end; ++a)
@@ -242,14 +286,66 @@ static void fps_request(int divisor)
 /* Config > Display > Frame Rate picked (modern.c), the one it showed too: an addon's ends */
 static void fps_chosen(void) { fps_request(-1); }
 
+/* --- 60 fps on clients with no frame divisor (meta/features.json frame60) ---------------------------
+ * The 2009 and 2010 clients' frame loop (0x10010c40 on) waits for, and steps the world by, a fixed two
+ * sixtieths: it compares the elapsed time with the float 2.0 four times and floors its step at 2.0.
+ * meta/builds.json "patches" frame60 re-points those compares at a 1.0 and makes the floor 1.0;
+ * recomp.py translates the loop a second time with those bytes, and the variant runs while its
+ * rt_patches flag is set (the game's code bytes stay as they are). It is set in the world with a
+ * divisor of 1 (--fps-divisor 1, the default): the title and the lobby count frames made for 30 a
+ * second and would run fast. FFXI_FRAME60=always sets it everywhere (testing), 0 never. */
+static int g_addons_on; /* (defined again below, with the addon host) */
+static volatile int* g_frame60[8];
+static int g_frame60_n = -1, g_frame60_on;
+
+static void frame60_frame(void)
+{
+    if (!FFXI_FEATURE_FRAME60)
+        return;
+    if (g_frame60_n < 0)
+    {
+        g_frame60_n = 0;
+        for (unsigned i = 0; i < rt_patch_count && g_frame60_n < 8; ++i)
+            if (rt_patches[i].group && !strcmp(rt_patches[i].group, "frame60"))
+            {
+                int seen = 0;
+                for (int j = 0; j < g_frame60_n; ++j)
+                    seen |= g_frame60[j] == rt_patches[i].on;
+                if (!seen)
+                    g_frame60[g_frame60_n++] = rt_patches[i].on;
+            }
+        rt_log("[recomp] frame60: %s\n", g_frame60_n ? "60 fps in the world with --fps-divisor 1"
+                                                       : "no translated variant (meta/builds.json patches.frame60)");
+    }
+    if (!g_frame60_n)
+        return;
+    const char* env = getenv("FFXI_FRAME60");
+    uint32_t want = g_fps_addon >= 0 ? (uint32_t)g_fps_addon : g_fps_divisor;
+    int on = env && !strcmp(env, "always") ? 1
+           : env && !strcmp(env, "0")      ? 0
+                                            : want == 1 && g_addons_on && xi_game_login_status() == 2;
+    for (int i = 0; i < g_frame60_n; ++i)
+        if (*g_frame60[i] != on)
+            *g_frame60[i] = on; /* every frame: host/addons/patch.c turns it off if an addon writes there */
+    if (on != g_frame60_on)
+    {
+        g_frame60_on = on;
+        rt_log("[recomp] frame60: %s\n", on ? "on (60 fps)" : "off (the game's 30)");
+    }
+}
+
 /* --- the aspect ratio ---------------------------------------------------------------------------------
- * FFXiMain's projection takes its shape from a float at +0x2F0 of its camera object, which the game
+ * FFXiMain's projection takes its shape from a float of its camera object, which the game
  * sets from the configured resolution as h / (w * 0.25 * 3): 1 for 4:3, and a window of another
  * shape stretches the scene. Ashita's aspect addon finds the setter by its code,
- * `mov eax, [global]; test eax, eax; je; fld [esp+4]; fmul [0.25]; fmul [3.0]`, where the global
- * points at the object; every frame puts the value back from the shape the frame is shown at. */
+ * `mov eax, [global]; test eax, eax; je; fld [esp+4]; fmul [0.25]; fmul [3.0]; fdivr [esp+8];
+ * fstp [eax+field]`, where the global points at the object; every frame puts the value back from
+ * the shape the frame is shown at. The field is read from the setter's own fstp: +0x2F0 in today's
+ * builds, +0x2E8 in 2009-07-09 and 2010-03-16, where writing +0x2F0 clobbered another camera field
+ * every frame and wrecked the title screen's scene. */
 static float g_aspect;          /* width / height to project for; 0 follows the window, < 0 off */
 static uint32_t g_aspect_global; /* 0 not looked for yet, 0xFFFFFFFF not found */
+static uint32_t g_aspect_field;  /* the float's offset in the camera object, from the setter's fstp */
 
 static void find_aspect_global(void)
 {
@@ -265,8 +361,19 @@ static void find_aspect_global(void)
             ++i;
         if (i == sizeof PAT)
         {
+            /* the fstp [eax+disp32] (d9 98) that stores the result, a few instructions on */
+            uint32_t field = 0;
+            for (uint32_t b = a + sizeof PAT + 4; b + 6 <= end && b < a + sizeof PAT + 4 + 16; ++b)
+                if (rd8(b) == 0xD9 && rd8(b + 1) == 0x98)
+                {
+                    field = rd32(b + 2);
+                    break;
+                }
+            if (!field || field > 0x10000)
+                continue; /* not the setter's shape: don't write a guessed field */
             g_aspect_global = rd32(a + 1);
-            rt_log("[recomp] aspect ratio: global %08x (code at %08x), %s\n", g_aspect_global, a,
+            g_aspect_field = field;
+            rt_log("[recomp] aspect ratio: global %08x +%x (code at %08x), %s\n", g_aspect_global, field, a,
                 g_aspect > 0 ? "fixed" : "following the window");
             return;
         }
@@ -277,7 +384,7 @@ static void find_aspect_global(void)
 
 static void fix_aspect(void)
 {
-    if (g_aspect < 0)
+    if (g_aspect < 0 || !FFXI_FEATURE_ASPECT)
         return;
     if (!g_aspect_global)
         find_aspect_global();
@@ -298,8 +405,8 @@ static void fix_aspect(void)
     float v = 4.0f / 3.0f / ratio; /* the game's h / (w * 0.75) */
     uint32_t bits;
     memcpy(&bits, &v, 4);
-    if (rd32(object + 0x2F0) != bits)
-        wr32(object + 0x2F0, bits);
+    if (rd32(object + g_aspect_field) != bits)
+        wr32(object + g_aspect_field, bits);
 }
 
 /* --- draw distance -------------------------------------------------------------------------------------
@@ -339,6 +446,8 @@ static void find_draw_globals(void)
 static void fix_draw_distance(void)
 {
     static uint32_t game[2] = { 0x3F800000u, 0x3F800000u }, ours[2]; /* the game's last value, what we wrote */
+    if (!FFXI_FEATURE_DRAW_DISTANCE)
+        return;
     float live[2] = { gfx_fx_get("draw"), gfx_fx_get("draw_entities") };
     float k[2] = { live[0] > 0 ? live[0] : g_draw_world, live[1] > 0 ? live[1] : g_draw_entities };
     if (!g_draw_global[0])
@@ -576,6 +685,14 @@ static void nameplate_scale(Guest* g)
 static void setup_nameplates(void)
 {
     int wanted = g_nameplate_fix || g_nameplate_sx != 1.0f || g_nameplate_sy != 1.0f;
+    if (!FFXI_FEATURE_NAMEPLATES)
+    {
+        (void)nameplate_scale;
+        if (wanted)
+            rt_log("[recomp] nameplates: off for build %s (%s); they stay as the game draws them\n", FFXI_BUILD,
+                feature_why("nameplates"));
+        return;
+    }
 #ifdef FFXI_HOOK_NAMEPLATE_SCALE
     (void)wanted;
     rt_hook_nameplate_scale = nameplate_scale;
@@ -645,6 +762,11 @@ static void setup_water(void)
 {
     const char* log = getenv("FFXI_WATERLOG");
     g_water_log = log && log[0] && log[0] != '0';
+    if (!FFXI_FEATURE_WATER)
+    {
+        (void)water_model_load, (void)water_model_loaded;
+        return;
+    }
 #if defined(FFXI_HOOK_WATER_MODEL_LOAD) && defined(FFXI_HOOK_WATER_MODEL_LOADED)
     rt_hook_water_model_load = water_model_load;
     rt_hook_water_model_loaded = water_model_loaded;
@@ -721,6 +843,11 @@ static void setup_lod(void)
 {
     const char* log = getenv("FFXI_LODLOG");
     g_lod_log = log && log[0] && log[0] != '0';
+    if (!FFXI_FEATURE_LOD)
+    {
+        (void)lod_pick, (void)lod_pick2;
+        return;
+    }
 #if defined(FFXI_HOOK_LOD_PICK) && defined(FFXI_HOOK_LOD_PICK2)
     rt_hook_lod_pick = lod_pick;
     rt_hook_lod_pick2 = lod_pick2;
@@ -822,6 +949,8 @@ static void cull_test(Guest* g)
 static void setup_cull_prime(void)
 {
 #ifdef HAVE_CULL_PRIME
+    if (!FFXI_FEATURE_SUN_PRIME)
+        return;
     const char* log = getenv("FFXI_PRIMELOG");
     g_prime_log = log && log[0] && log[0] != '0';
     g_cull_pass = gwin_alloc(64);
@@ -1134,6 +1263,7 @@ static void present_hook(void)
             modern_window_size(w, h, mw, mh);
     }
 #endif
+    frame60_frame();
     if (!g_fps_global)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
@@ -1204,6 +1334,12 @@ static void log_flusher(void* unused)
 
 int main(int argc, char** argv)
 {
+    for (int i = 1; i < argc; ++i)
+        if (!strcmp(argv[i], "--features"))
+        {
+            print_features();
+            return 0;
+        }
 #if defined(_WIN32) && !defined(_MSC_VER)
     setvbuf(stdout, NULL, _IOFBF, 1 << 16);
     setvbuf(stderr, NULL, _IOFBF, 1 << 16);
@@ -1792,6 +1928,7 @@ int main(int argc, char** argv)
     ole_register_class(CLSID_GameMain, rt_image_base);
     ole_register_class(CLSID_FxFileManager, FFXI_BASE);
     ole_register_class(CLSID_FFXiEntry, FFXI_BASE);
+    log_features();
     gamecore_init();
     geometry_hooks_init();
     probe_hooks_init();

@@ -93,6 +93,14 @@ def write_build_h():
     lines.append('#define FFXI_MODERN %d /* Config > Modern and Config > Menus */' % whole)
     for k in BUILD['modern_keys']:
         lines.append('#define FFXI_MODERN_%s 0x%08xu' % (k.upper(), int(modern[k], 16) if whole else 0))
+    # meta/features.json resolved for this build (buildinfo.features): FFXI_FEATURE_<ID> 1 or 0, and
+    # the whole table for host64 --features and its log
+    feats = BUILD['features']
+    for f in feats:
+        lines.append('#define FFXI_FEATURE_%s %d%s' % (f['id'].upper(), f['on'], ' /* %s */' % f['why'] if f['why'] else ''))
+    lines.append('#define FFXI_FEATURE_COUNT %d' % len(feats))
+    lines.append('#define FFXI_FEATURE_TABLE ' + ', '.join(
+        '{ %s, %s, %d, %s }' % (json.dumps(f['id']), json.dumps(f['title']), f['on'], json.dumps(f['why'])) for f in feats))
     text = '\n'.join(lines) + '\n'
     try:
         with open(BUILD_H) as f:
