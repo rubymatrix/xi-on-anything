@@ -103,3 +103,8 @@ What the runtime meets in a client this old
     +0x9868, ...), taken from today's client. Most are likely different or missing in 2010; a
     pattern that does not match only turns that getter off. Not checked for this build.
   - Neither fix has been run in game yet: host64 builds and boot64 passes (BOOT64 OK).
+  - (Added with the 2009-07-09 work, not rebuilt against this build here.) The camera's aspect
+    float is at +0x2e8, as in 2009-07-09; host/host64.c reads it from the setter. patches.frame60:
+    the same four compares and floor as 2009-07-09 at the same addresses, re-pointed at the 1.0 at
+    0x102c05fc (the 2.0 is at 0x102c0664), from earlier 2010 work checked by bytes.
+

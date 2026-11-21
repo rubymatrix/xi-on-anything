@@ -90,3 +90,17 @@ What the runtime meets in this client
     other slot 2010-03-16 does not.
   - The same known gaps: no write_line, chat_add left out, the addon game layer unchecked, no
     host/modern.c addresses.
+  - The camera's aspect float is at +0x2e8, not +0x2f0: the setter at 0x10013450 ends
+    `fdivr [esp+8]; fstp [eax+0x2e8]` (2026-09-03: +0x2f0 at 0x100153a0). host64 wrote +0x2f0 every
+    frame and wrecked the title screen's scene (smeared ground, a flat blue polygon, the horizon
+    torn). host/host64.c now reads the field from the setter's fstp. Checked in game: the title
+    and character select draw cleanly.
+  - No frame divisor (the Ashita fps pattern does not match). The frame loop at 0x1000fc70 compares
+    the elapsed time with the float 2.0 at 0x102bf664 at 0x10010c64, 0x10010c8a, 0x10010cd3 and
+    0x10010d6c, and floors its step at 2.0 (`mov [esi+0x24], 0x40000000` at 0x10010d79).
+    meta/builds.json patches.frame60 re-points the four compares at the 1.0 at 0x102bf5fc and
+    makes the floor 1.0 (meta/features.json frame60). Forced on at the title it runs at 58 fps
+    against 30; in the world it is untested (no server here speaks this client's protocol).
+  - meta/features.json keeps draw distance and nameplates (the nameplate_scale hook was carried
+    but never checked in game) to 2025 builds and later.
+

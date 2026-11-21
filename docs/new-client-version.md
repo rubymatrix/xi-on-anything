@@ -103,5 +103,8 @@ install folder. By hand:
    what remains is a real gap: add the function to the metadata and rebuild.
 
 6. **Record it.** Add the build to the [Supported builds](#supported-builds) table above, write
-   its discovery notes in `discovery/notes/`, and commit the metadata, `builds.json` and
+   its discovery notes in `discovery/notes/`, and check `meta/features.json` against it: an
+   addition that misbehaves on this build gets a `min_build`/`max_build` there, or an override in
+   its own `builds.json` entry ([Features by client build](options.md#features-by-client-build));
+   `host64 --features` shows the result. Commit the metadata, `builds.json` and
    `discovery/verdicts.py` together. Never commit anything from `generated/`.
