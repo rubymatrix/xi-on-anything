@@ -327,7 +327,7 @@ launcher reads `features` from `runtime.json` (or `host64 --features`) to show i
 rather than offer it.
 
 The clients from 2009 and 2010 have, of host64's additions: the widescreen view (`aspect`), 60 fps
-in the world (`frame60`: a translated variant of their frame loop, as they have no frame divisor)
-and the modern effects' post-processing (`modern_fx`). Draw distance and nameplates are kept to
-2025 and later until they are checked on them; the rest need hooks those builds don't have.
+in the world (`frame60`: a translated variant of their frame loop, as they have no frame divisor),
+draw distance, nameplates and the modern effects' post-processing (`modern_fx`); the rest need
+hooks those builds don't have.
 

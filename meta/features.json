@@ -10,8 +10,7 @@
     "draw_distance": {
       "title": "Draw distance",
       "what": "Scales the world's and characters' draw distance (--draw-distance, fx draw / draw_entities), through the globals Ashita's drawdistance addon finds.",
-      "code": "host/host64.c fix_draw_distance",
-      "min_build": "2025-11-12"
+      "code": "host/host64.c fix_draw_distance"
     },
     "frame_divisor": {
       "title": "Frame rate (30 / 60)",
@@ -35,8 +34,7 @@
       "title": "Nameplate shape and size",
       "what": "Keeps the names over characters' heads at their 4:3 shape and scales them (--nameplates, --nameplate-scale).",
       "code": "host/host64.c setup_nameplates",
-      "needs": ["hooks.nameplate_scale"],
-      "min_build": "2025-11-12"
+      "needs": ["hooks.nameplate_scale"]
     },
     "lod": {
       "title": "Near models at every distance",
