@@ -933,6 +933,15 @@ static struct
     uint32_t stale; /* draws where the game's current palette was another actor's (theirs used) */
 } g_ccount;
 
+/* a batch to draw before the work after it: d3d8's world flush finds it, or with the worker on d3d8 calls the front
+ * flush for it (chars_send) */
+static void chars_pending(void)
+{
+    g_pending = 1;
+    if (d3d8_world_front())
+        d3d8_world_front_mark();
+}
+
 /* the hide flags a mesh's header byte (+0x33) sets on its model (CYyModel +0xa8 + class), as 1002dc10's jump table */
 static void hide_set(uint32_t model, uint8_t v)
 {
@@ -1150,7 +1159,12 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     GfxBuf* uv = NULL;
     GfxBuf* vb = mesh_vb(res, vbuf, total, &uv);
     uint32_t uvsize = total * 8, ibsize = 0, isize = 2;
-    GfxBuf* ib = d3d8_world_ibuf(rd32(vbuf + 0x40), &ibsize, &isize);
+    /* with the worker on, the batch is sent from here (d3d8_world_front): its index buffer and textures are the game's
+     * interfaces until the worker resolves them (chars_run), carried in the items' pointers */
+    int front = d3d8_world_front();
+    uint32_t ib_iface = rd32(vbuf + 0x40);
+    GfxBuf* ib = !front ? d3d8_world_ibuf(ib_iface, &ibsize, &isize)
+                        : d3d8_world_ibuf_info(ib_iface, &ibsize, &isize) ? (GfxBuf*)(uintptr_t)ib_iface : NULL;
     /* the mesh's own skeleton: the part of its model whose mesh list holds it (CYyModel +0x44 -> CYyModelBase, next +4;
      * meshes at +0x20, next +4; the CYySkl at +8: Sk2 handle +0xc, palette +0x14). The game's current palette
      * ([0x1045ec20]) is the last actor it posed: in a crowd its animation level of detail skips posing some actors
@@ -1237,7 +1251,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                 if (o) /* none found: the game sets none, and draws on with the texture set before it */
                 {
                     tex_iface = rd32(o + 0x40) ? rd32(o + 0x40) : rd32(o + 0x44);
-                    tex = tex_iface ? d3d8_world_texture(tex_iface) : NULL;
+                    tex = !tex_iface ? NULL : front ? (GfxTex*)(uintptr_t)tex_iface : d3d8_world_texture(tex_iface);
                 }
                 p += 0x12;
             }
@@ -1263,7 +1277,10 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                     it->vb = vb, it->uv = uv, it->ib = ib, it->index_size = isize;
                     it->first = idx, it->count = n, it->prim = op == 0x54 ? GFX_TRIANGLELIST : GFX_TRIANGLESTRIP;
                     it->palette = palbase, it->state = cur_state, it->mirror = (uint32_t)m, it->tex = tex;
-                    d3d8_world_sampler(tex_iface, &it->samp);
+                    if (front)
+                        d3d8_world_sampler_front(&it->samp); /* (the texture's part on the worker) */
+                    else
+                        d3d8_world_sampler(tex_iface, &it->samp);
                     ++g_ccount.items;
                 }
             idx += nidx, drawn += nidx;
@@ -1275,7 +1292,10 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
             p += 0xc + n * 2;
     }
     if (envmap)
-        return g_pending = 1, 0; /* the game draws it (a batch to hand its shadow on) */
+    {
+        chars_pending();
+        return 0; /* the game draws it (a batch to hand its shadow on) */
+    }
     /* what 1002dc10 leaves behind: the model skinned this frame, the index count in its fifth argument */
     wr8(model + 0xb8, 1);
     uint32_t a5 = rt_arg(g, 4), a6 = rt_arg(g, 5);
@@ -1283,12 +1303,16 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         wr32(a5, drawn);
     if (a6)
         wr32(a6, 0);
-    g_pending = 1;
+    chars_pending();
     return 1;
 }
 
 static int g_chars_off;  /* FFXI_SCENE_CHARS=0: the zone only */
 static int g_chars_only; /* FFXI_SCENE_CHARS=1: the characters only (chars_flush) */
+/* a take running (its game calls - the resource and texture lookups - may reach d3d8's front flush, which waits for it
+ * to end: the take's items point into the arrays it would send and empty) */
+static int g_taking, g_send_put_off;
+static void chars_send(void);
 
 static void mesh_draw(Guest* g)
 {
@@ -1301,7 +1325,12 @@ static void mesh_draw(Guest* g)
     uint32_t mgr = rd32(FFXI_SCENE_RES_MGR);
     uint32_t res = mgr && handle ? guest_thiscall(FFXI_SCENE_RES_GET, mgr, 1, (uint32_t[]){ handle }) : 0;
     ++g_ccount.meshes;
-    if (!chars_take(g, res, model))
+    ++g_taking;
+    int took = chars_take(g, res, model);
+    --g_taking;
+    if (g_send_put_off)
+        g_send_put_off = 0, chars_send(); /* (a flush that came during the take, from the game's own calls in it) */
+    if (!took)
     {
         ++g_ccount.left;
         rt_orig_mesh_draw(g);
@@ -1395,11 +1424,88 @@ static void chars_flush(void)
     g_flushing = 0;
 }
 
+/* With the worker on (d3d8_world_front): the batch from the game's thread, sent to the worker with its palette, states
+ * and items copied (d3d8_host_call), before the call after it (d3d8 calls this then); the worker resolves the items'
+ * index buffers and textures (their interfaces until then), the texture's part of each sampler, and the targets as they
+ * are at that point of the frame, and draws. */
+typedef struct CharsRec
+{
+    uint32_t nbones, nstate, nitem, pad;
+} CharsRec;
+
+/* FFXI_SCENELOG: what the worker made of the batches (counted there, logged from the game's thread: a thread's stdio
+ * other than the main one's breaks it on the Switch) */
+static volatile uint32_t g_cr_batches, g_cr_items, g_cr_no_ib, g_cr_no_tex, g_cr_no_begin;
+static uint32_t g_cs_sends, g_cs_items;
+
+static void chars_run(const void* data)
+{
+    const CharsRec* h = (const CharsRec*)data;
+    const uint8_t* p = (const uint8_t*)(h + 1);
+    const float* pal = (const float*)p;
+    p += (size_t)h->nbones * 64;
+    const GfxCharState* st = (const GfxCharState*)p;
+    p += (size_t)h->nstate * sizeof *st;
+    GfxCharItem* it = (GfxCharItem*)(uintptr_t)p; /* (the record is the worker's to change) */
+    for (uint32_t i = 0; i < h->nitem; ++i)
+    {
+        uint32_t ib_iface = (uint32_t)(uintptr_t)it[i].ib, tex_iface = (uint32_t)(uintptr_t)it[i].tex, size = 0, isize = 2;
+        it[i].ib = d3d8_world_ibuf(ib_iface, &size, &isize);
+        it[i].tex = d3d8_world_texture(tex_iface);
+        d3d8_world_sampler_fix(tex_iface, &it[i].samp);
+        g_cr_no_ib += !it[i].ib, g_cr_no_tex += !it[i].tex;
+    }
+    g_cr_batches++, g_cr_items += h->nitem;
+    uint32_t vp[6], gvp[6];
+    if (!d3d8_world_begin(vp, gvp))
+    {
+        g_cr_no_begin++;
+        return;
+    }
+    GfxCharFrame f;
+    memset(&f, 0, sizeof f);
+    memcpy(f.vp, vp, sizeof f.vp);
+    f.pixel[0] = gvp[2] ? 1.0f / (float)gvp[2] : 0.0f, f.pixel[1] = gvp[3] ? 1.0f / (float)gvp[3] : 0.0f;
+    f.alpha_ref = 69.0f; /* the model state's ALPHAREF 0x45, GREATER (chars_frame_of's) */
+    f.palette = pal, f.nbones = h->nbones, f.state = st, f.nstate = h->nstate, f.item = it, f.nitem = h->nitem;
+    gfx_chars_draw(&f);
+}
+
+static void chars_send(void)
+{
+    if (g_taking)
+    {
+        g_send_put_off = 1;
+        return;
+    }
+    if (!g_pending || g_flushing)
+        return;
+    g_pending = 0;
+    if (g_ncitems && g_npal)
+    {
+        static uint8_t* buf;
+        static size_t cap;
+        size_t n = sizeof(CharsRec) + (size_t)g_npal * 64 + (size_t)g_ncstates * sizeof *g_cstates +
+            (size_t)g_ncitems * sizeof *g_citems;
+        if (n > cap)
+            cap = n * 2, buf = (uint8_t*)realloc(buf, cap);
+        CharsRec* h = (CharsRec*)buf;
+        h->nbones = g_npal, h->nstate = g_ncstates, h->nitem = g_ncitems, h->pad = 0;
+        uint8_t* p = (uint8_t*)(h + 1);
+        memcpy(p, g_pal, (size_t)g_npal * 64), p += (size_t)g_npal * 64;
+        memcpy(p, g_cstates, (size_t)g_ncstates * sizeof *g_cstates), p += (size_t)g_ncstates * sizeof *g_cstates;
+        memcpy(p, g_citems, (size_t)g_ncitems * sizeof *g_citems);
+        d3d8_host_call(chars_run, buf, (uint32_t)n);
+        g_cs_sends++, g_cs_items += g_ncitems;
+    }
+    chars_reset();
+}
+
 /* a frame of the characters alone (scene_frame's) */
 static void chars_only_frame(void)
 {
     if (g_pending)
-        chars_flush();
+        d3d8_world_front() ? chars_send() : chars_flush();
     chars_reset();
 #if defined(FFXI_SCENE_CHAR_DRAW) && defined(FFXI_SCENE_CHAR_DRAW_END)
     /* the game's own character draws (the meshes left to it) don't end the batch: it is drawn after them */
@@ -1414,6 +1520,12 @@ static void chars_only_frame(void)
             frames, (double)(g_ccount.meshes - g_ccount.left) / frames, (double)g_ccount.left / frames, g_ccount.why[0],
             g_ccount.why[1], g_ccount.why[2], g_ccount.why[3], g_ccount.why[4], g_ccount.why[5], g_ccount.why[6],
             g_ccount.why[7], (double)g_ccount.items / frames, g_ccount.built);
+        if (d3d8_world_front())
+            rt_log("[recomp] scene: characters sent to the worker: %.1f batches a frame, %.0f items; it ran %.1f batches, %.0f "
+                   "items, of them %.1f without their index buffer, %.1f without their texture; %u batches with no target\n",
+                (double)g_cs_sends / 120, (double)g_cs_items / 120, (double)g_cr_batches / 120, (double)g_cr_items / 120,
+                (double)g_cr_no_ib / 120, (double)g_cr_no_tex / 120, g_cr_no_begin);
+        g_cs_sends = g_cs_items = 0, g_cr_batches = g_cr_items = g_cr_no_ib = g_cr_no_tex = g_cr_no_begin = 0;
         memset(&g_ccount, 0, sizeof g_ccount);
         frames = 0;
     }
@@ -1480,6 +1592,8 @@ void scene_setup(void)
         d3d8_set_world_flush(world_flush);
 #ifdef HAVE_CHARS
         rt_wrap_mesh_draw = mesh_draw;
+        if (g_chars_only) /* (with the worker on, sent from the game's thread: chars_send) */
+            d3d8_set_world_front_flush(chars_send);
         if (g_chars_only)
             rt_log("[recomp] scene: the characters drawn by the scene renderer (FFXI_SCENE_CHARS=1), the zone by the game\n");
 #endif

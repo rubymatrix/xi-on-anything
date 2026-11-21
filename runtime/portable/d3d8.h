@@ -82,5 +82,19 @@ GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size);
 /* a vertex or index buffer's guest memory (what the game wrote into it), 0 before its first lock */
 uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size);
 int d3d8_world_begin(uint32_t vp[6], uint32_t game_vp[6]);
+/* With the worker on (FFXI_D3D_WORKER=1) the work after a batch is the worker's, so the batch is sent from the game's
+ * thread instead: fn runs there before the call that would come after it (the same calls; a character draw - returning
+ * into the ranges above - doesn't), once d3d8_world_front_mark said one is pending. d3d8_world_front: whether that is how
+ * it goes (the worker runs, and fn was given); otherwise the world flush above. fn sends the batch with d3d8_host_call,
+ * and there (the worker) resolves what only the worker may: the index buffers and textures (d3d8_world_ibuf, _texture)
+ * and the texture's part of the sampler (d3d8_world_sampler_fix). On the game's thread: an index buffer's size
+ * (d3d8_world_ibuf_info) and stage 0's sampler state (d3d8_world_sampler_front, as the game's thread knows it; it waits
+ * for the worker when it doesn't). d3d8_get_transform and _render_state answer from what the game's thread knows too. */
+void d3d8_set_world_front_flush(void (*fn)(void));
+int d3d8_world_front(void);
+void d3d8_world_front_mark(void);
+int d3d8_world_ibuf_info(uint32_t iface, uint32_t* size, uint32_t* index_size);
+int d3d8_world_sampler_front(GfxSampler* out);
+void d3d8_world_sampler_fix(uint32_t iface, GfxSampler* s);
 /* the scene renderer drew the world into the current target with this camera: a scene for the effects (scene.c) */
 void d3d8_world_scene(const float view[16], const float proj[16], const uint32_t vp[6]);

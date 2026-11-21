@@ -1633,6 +1633,18 @@ void d3d8_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
  * changes the targets, copies from them or shows them */
 static void (*g_world_flush)(void);
 void d3d8_set_world_flush(void (*fn)(void)) { g_world_flush = fn; }
+/* the game's thread's: the batch sent before the call after it, with the worker on (d3d8.h) */
+static void (*g_front_flush)(void);
+static int g_front_pending;
+void d3d8_set_world_front_flush(void (*fn)(void)) { g_front_flush = fn; }
+int d3d8_world_front(void) { return g_w.threaded && g_front_flush; }
+void d3d8_world_front_mark(void) { g_front_pending = 1; }
+#define FRONT_FLUSH()                                                                                                 \
+    do                                                                                                                \
+    {                                                                                                                 \
+        if (g_front_pending)                                                                                          \
+            g_front_pending = 0, g_front_flush();                                                                     \
+    } while (0)
 /* the game's own draws inside its zone walk and its character mesh draws (what the scene renderer leaves to the game)
  * don't send the batch out: told apart by where they return to (d3d8_world_ranges: the drawing functions' code).
  * Timing the game's own draws of those for comparison (scene = -1): each run of them goes into a timed pass of its own
@@ -1788,7 +1800,7 @@ void d3d8_set_after_present(void (*fn)(void)) { g_after_present = fn; }
  * had (gfxq_record_hook) - else at once. data is copied. From the game's threads, under the guest lock. */
 void d3d8_host_call(void (*fn)(const void* data), const void* data, uint32_t bytes)
 {
-    if (g_w.threaded && !d3dw_on_worker() && bytes <= 4096)
+    if (g_w.threaded && !d3dw_on_worker() && bytes <= (4u << 20)) /* (the characters' batch: ~100 KB in a town) */
     {
         WHost* h = (WHost*)d3dw_rec(W_HOST, (uint32_t)sizeof *h + bytes);
         h->fn = fn, h->n = bytes, h->pad = 0;
@@ -1811,10 +1823,19 @@ void d3d8_backbuffer_size(uint32_t* w, uint32_t* h)
 
 uint32_t d3d8_window(void) { return g_dev.hwnd; }
 
+/* the game's thread with the worker on: what it knows of the device's state (g_fxf, g_fm) is the state as the game set
+ * it, which the worker reaches only later; what it doesn't know waits for the worker */
+static int front_side(void) { return g_w.threaded && !d3dw_on_worker() && !g_dev.rec; }
+
 int d3d8_get_transform(uint32_t ts, float m[16])
 {
-    d3dw_sync_at("d3d8_get_transform"); /* (the device's state is the worker's while it runs) */
     int i = xf_index(ts);
+    if (front_side() && i >= 0 && g_fxf_ok[i] && g_dev.guest)
+    {
+        memcpy(m, g_fxf[i], 16 * sizeof(float));
+        return 1;
+    }
+    d3dw_sync_at("d3d8_get_transform"); /* (the device's state is the worker's while it runs) */
     if (!g_dev.guest || i < 0)
         return 0;
     memcpy(m, g_dev.cur.xf[i], 16 * sizeof(float));
@@ -1823,10 +1844,66 @@ int d3d8_get_transform(uint32_t ts, float m[16])
 
 int d3d8_get_render_state(uint32_t rs, uint32_t* v)
 {
+    if (front_side() && rs < 256 && g_fm.rs_ok[rs] && g_dev.guest)
+    {
+        *v = g_fm.rs[rs];
+        return 1;
+    }
     d3dw_sync_at("d3d8_get_render_state"); /* (the device's state is the worker's while it runs) */
     if (!g_dev.guest || rs >= 256)
         return 0;
     *v = g_dev.cur.rs[rs];
+    if (front_side()) /* (the worker idle: known from now on, d3d8_world_sampler_front's) */
+        g_fm.rs[rs] = *v, g_fm.rs_ok[rs] = 1;
+    return 1;
+}
+
+/* stage 0's sampler state as the game's thread knows it (d3d8_world_sampler's, without the texture's part) */
+int d3d8_world_sampler_front(GfxSampler* out)
+{
+    static const uint8_t used[] = { 13, 14, 15, 16, 17, 18, 20, 21, 25 };
+    uint32_t t[32] = { 0 };
+    int known = front_side();
+    for (size_t k = 0; known && k < sizeof used; ++k)
+        if (g_fm.tss_ok[0][used[k]])
+            t[used[k]] = g_fm.tss[0][used[k]];
+        else
+            known = 0;
+    if (!known)
+    {
+        d3dw_sync_at("d3d8_world_sampler_front");
+        memcpy(t, g_dev.cur.tss[0], sizeof t);
+        /* (the worker idle: the device's state is all the game has set - known here from now on, as a set would make
+         * it; states never set since the device was made were never known, and waited every time) */
+        if (front_side())
+            for (size_t k = 0; k < sizeof used; ++k)
+                g_fm.tss[0][used[k]] = t[used[k]], g_fm.tss_ok[0][used[k]] = 1;
+    }
+    *out = (GfxSampler){ (uint8_t)t[13], (uint8_t)t[14], (uint8_t)t[25], (uint8_t)t[16], (uint8_t)t[17], (uint8_t)t[18],
+        (uint8_t)t[21], (uint8_t)t[20], 0, { 0 }, t[15] };
+    return 1;
+}
+
+/* ... and the texture's part, where the texture is known (the worker) */
+void d3d8_world_sampler_fix(uint32_t iface, GfxSampler* s)
+{
+    Obj* to = obj(iface);
+    if (!to)
+        return;
+    if (to->lod > s->max_level)
+        s->max_level = (uint8_t)to->lod;
+    if (to->repl) /* a texture pack's: as build_draw draws it */
+        s->mag = s->min = s->mip = 2, s->max_level = 0, s->lod_cap = to->repl_mips ? 0 : 2;
+}
+
+/* an index buffer's size and index size: set only when it is made (never by the worker) */
+int d3d8_world_ibuf_info(uint32_t iface, uint32_t* size, uint32_t* index_size)
+{
+    Obj* b = obj(iface);
+    if (!b || b->kind != O_IB)
+        return 0;
+    *size = b->size;
+    *index_size = b->format == FMT_INDEX32 ? 4 : 2;
     return 1;
 }
 
@@ -5305,7 +5382,11 @@ static int defer_on(void)
 {
     if (g_w.mode < 0)
     {
-        d3dw_start(!g_world_flush); /* (the scene renderer's flush reads the game's memory where it draws) */
+        /* (the scene renderer's flush reads the game's memory where it draws: with the worker, it is sent from the game's
+         * thread instead, where there is a front flush - and the worker's draws then send none) */
+        d3dw_start(!g_world_flush || g_front_flush);
+        if (g_w.threaded && g_front_flush)
+            g_world_flush = NULL;
 #if defined(GFX_QUEUE)
         if (g_w.threaded)
             gfxq_record_hook = d3dw_gfx_hook;
@@ -5361,6 +5442,16 @@ static int front_same(Shim fn, Guest* g)
 
 static void defer(Guest* g, Shim fn, uint32_t nwords, const uint32_t* barg, const uint32_t* bbytes, unsigned nblobs)
 {
+    /* the scene renderer's batch before the work after it (WORLD_FLUSH's calls; a character's draw isn't: world_site on
+     * the game's own stack) */
+    if (g_front_pending)
+    {
+        int draw = fn == IDirect3DDevice8_DrawPrimitive || fn == IDirect3DDevice8_DrawIndexedPrimitive ||
+            fn == IDirect3DDevice8_DrawPrimitiveUP || fn == IDirect3DDevice8_DrawIndexedPrimitiveUP;
+        if ((draw && world_site(g) == 0) || fn == IDirect3DDevice8_Clear || fn == IDirect3DDevice8_SetRenderTarget ||
+            fn == IDirect3DDevice8_CopyRects || fn == present_back || fn == Surface_LockRect || fn == Texture_LockRect)
+            FRONT_FLUSH();
+    }
     if (front_same(fn, g))
     {
         g->eax = D3D_OK;
@@ -5623,6 +5714,8 @@ static void F_CopyRects(Guest* g)
     Obj* d = obj(ARG(4));
     if (!defer_on() || !g_w.threaded || !s || !d || !gpu_owned(s) || !gpu_owned(d))
     {
+        if (g_w.threaded)
+            FRONT_FLUSH();
         d3dw_sync_at("F_CopyRects");
         IDirect3DDevice8_CopyRects(g);
         return;
@@ -5710,6 +5803,7 @@ static void F_SurfaceLockRect(Guest* g)
     }
     if (!probe_lock_now(obj(ARG(0)), ARG(1), ARG(2), ARG(3)))
     {
+        FRONT_FLUSH();
         d3dw_sync_at("LockRect");
         Surface_LockRect(g);
         return;
@@ -5728,6 +5822,7 @@ static void F_TextureLockRect(Guest* g)
     }
     if (!probe_lock_now(sub(ARG(0), 0, ARG(1)), ARG(2), ARG(3), ARG(4)))
     {
+        FRONT_FLUSH();
         d3dw_sync_at("LockRect");
         Texture_LockRect(g);
         return;
@@ -5924,6 +6019,8 @@ static int d3dw_exempt(const char* name)
 
 static void d3dw_pre(uint32_t thunk)
 {
+    if (g_w.threaded)
+        FRONT_FLUSH(); /* (a call that waits: the scene renderer's batch goes first, as WORLD_FLUSH would send it) */
     if (g_w.threaded && d3dw_sync() && thunk < 4096)
         g_wait_by[thunk]++;
 }
@@ -6190,13 +6287,17 @@ GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size)
 
 uint32_t d3d8_world_vmem(uint32_t iface, uint32_t* size)
 {
-    d3dw_sync_at("d3d8_world_vmem"); /* (the device's state is the worker's while it runs) */
+    /* (the game's thread with the worker on: the game's own copy, as it wrote it; the worker's until its first lock) */
+    int front = g_w.threaded && !d3dw_on_worker();
+    if (!front)
+        d3dw_sync_at("d3d8_world_vmem"); /* (the device's state is the worker's while it runs) */
     Obj* b = obj(iface);
-    if (!b || (b->kind != O_VB && b->kind != O_IB) || !b->mem)
+    uint32_t mem = b ? (front && b->fmem ? b->fmem : b->mem) : 0;
+    if (!b || (b->kind != O_VB && b->kind != O_IB) || !mem)
         return 0;
     if (size)
         *size = b->size;
-    return b->mem;
+    return mem;
 }
 
 GfxBuf* d3d8_world_ibuf(uint32_t iface, uint32_t* size, uint32_t* index_size)
