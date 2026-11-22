@@ -142,6 +142,11 @@ def main():
         assets.mkdir()
         if (ROOT / 'assets' / 'ffxi.reg').is_file():
             shutil.copyfile(ROOT / 'assets' / 'ffxi.reg', assets / 'ffxi.reg')
+        # a host built with --split-game: what the phone translates and builds the game with
+        # (BuildActivity): the compiler's kit, the translator and its metadata, and its Python
+        for part in ('kit', 'phone', 'pyhome'):
+            if (directory / part).is_dir():
+                shutil.copytree(directory / part, assets / part)
         run(
             [
                 BT / 'aapt',
@@ -158,6 +163,9 @@ def main():
                 ROOT / 'platforms/android/app/src/main/res',
                 '-A',
                 assets,
+                # aapt's default also drops directories named _*, which the Python library has
+                '--ignore-assets',
+                '!.svn:!.git:!.DS_Store:!__pycache__',
                 '-I',
                 ANDROID_JAR,
                 '-F',
@@ -171,6 +179,10 @@ def main():
             archive.write(dex / 'classes.dex', 'classes.dex')
             archive.write(CACHE / 'sdl-build/libSDL3.so', 'lib/arm64-v8a/libSDL3.so')
             archive.write(library, 'lib/arm64-v8a/libmain.so')
+            # a host built with --split-game: the compiler the phone builds libgame.so with (BuildActivity)
+            for extra in ('lib_llvm.so', 'lib_python.so', 'libpython3.14.so'):
+                if (directory / extra).is_file():
+                    archive.write(directory / extra, 'lib/arm64-v8a/' + extra)
 
         if args.keystore:
             if not args.keystore.is_file() or 'XI_ANDROID_KEYSTORE_PASS' not in os.environ:

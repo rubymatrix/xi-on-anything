@@ -18,17 +18,24 @@
         android:requestLegacyExternalStorage="true"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <!-- the entry: builds the game on the phone (libgame.so) when a kit is there, then MainActivity -->
         <activity
-            android:name=".MainActivity"
+            android:name=".BuildActivity"
             android:exported="true"
             android:screenOrientation="landscape"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale"
-            android:launchMode="singleTask"
-            android:windowSoftInputMode="adjustPan|stateAlwaysHidden">
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustPan|stateAlwaysHidden">
         </activity>
     </application>
 </manifest>

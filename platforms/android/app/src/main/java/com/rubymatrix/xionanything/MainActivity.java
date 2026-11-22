@@ -370,6 +370,19 @@ public final class MainActivity extends SDLActivity {
         return new String[] {"SDL3", "main"};
     }
 
+    /* A game built on this phone (BuildActivity) is libgame.so in this app's files, and libmain.so
+     * (the host) is built without it. libgame.so needs libmain.so, whose game symbols it holds: loading
+     * libgame.so first loads libmain.so as its dependency, in one group, so each resolves the other's.
+     * SDL's own load of libmain.so then finds it loaded. Without libgame.so, libmain.so has the game. */
+    @Override
+    public void loadLibraries() {
+        File game = BuildActivity.gameLibrary(getFilesDir());
+        System.loadLibrary("SDL3");
+        if (game.isFile())
+            System.load(game.getAbsolutePath());
+        System.loadLibrary("main");
+    }
+
     /* The folder the launcher's phone page put the game in when the player chose one (its Game Location:
      * internal storage or an SD card, outside this app's own files, so it outlives the app and file
      * managers see it): game-dir.txt in this app's files, one line, the folder holding "FINAL FANTASY
