@@ -398,6 +398,18 @@ int plat_thread_start_core(void (*fn)(void*), void* arg, int core)
 #endif
 }
 
+/* the render thread (gfx_queue.c): one that never ends, on the Switch on core 1 at the main thread's priority, the
+ * core's only thread (the pool's threads go to core 2: nx_thread_new) */
+int plat_thread_start_render(void (*fn)(void*), void* arg)
+{
+#if defined(__SWITCH__)
+    mutexLock(&g_pool_lock);
+    return nx_thread_new(fn, arg, 1, 2);
+#else
+    return plat_thread_start(fn, arg);
+#endif
+}
+
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
 #if defined(__SWITCH__)
@@ -420,21 +432,29 @@ int plat_thread_start(void (*fn)(void*), void* arg)
 }
 
 #if defined(__SWITCH__)
-/* (called with g_pool_lock held; unlocks it) core -1: the pool's turn */
+/* (called with g_pool_lock held; unlocks it) core -1: the pool's choice. pooled: 1 the pool's (main's priority, back
+ * to the pool when its job ends), 0 one of its own a step below, 2 one of its own at the main thread's priority */
 static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled)
 {
     NxWorker* w;
     /* Horizon doesn't share a core between threads of one priority: a thread runs until it waits. The
-     * application's main thread (the game's) has core 0; the threads made here take cores 1 and 2 in
-     * turn - the first, the render thread (gfx_queue.c), core 1 - at the main thread's priority. libnx's
-     * pthread_create can't choose a core. A reused thread keeps its core. */
-    int core = core_want >= 0 ? core_want : 1 + (int)(g_workers % 2);
+     * application's main thread (the game's) has core 0, the render thread core 1 (plat_thread_start_render), and
+     * the pool's threads core 2 - a game thread on core 1 took it whenever the render thread waited for its next
+     * batch, and kept it until it waited itself. FFXI_SWITCH_RENDER_CORE=0: the pool takes cores 1 and 2 in turn,
+     * as before. libnx's pthread_create can't choose a core. A reused thread keeps its core. */
+    static int alone = -1;
+    if (alone < 0)
+    {
+        const char* e = getenv("FFXI_SWITCH_RENDER_CORE");
+        alone = !(e && e[0] == '0');
+    }
+    int core = core_want >= 0 ? core_want : alone ? 2 : 1 + (int)(g_workers % 2);
     s32 prio = 0x2C;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     /* one of its own core's (plat_thread_start_core: the d3d8 worker) a step below the game's threads: on a core it
      * shares with them it would otherwise run until it waits, while one of them with a ticket for the guest lock
      * couldn't run - and the game's main thread waited behind that ticket (8% of its time) */
-    if (!pooled && prio < 0x3F)
+    if (pooled == 0 && prio < 0x3F)
         prio += 1;
     /* the stack page-aligned and whole pages (libnx carves the TLS and reent out of its top) */
     const size_t stack_sz = 8u << 20; /* translated frames are large */
@@ -456,7 +476,7 @@ static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled
         mutexUnlock(&g_pool_lock);
         return 0;
     }
-    if (pooled)
+    if (pooled == 1)
         g_workers++;
     tlog(fn, core, prio);
     mutexUnlock(&g_pool_lock);

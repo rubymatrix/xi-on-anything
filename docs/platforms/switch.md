@@ -263,6 +263,21 @@ With both, the GPU was ~41-53% busy at 614 MHz in that town, and the render thre
 frame become what limits the rate above 30. At the stock
 handheld 307 MHz the GPU is the tighter: hold it at 614 (`FFXI_SWITCH_GPU`, or the overclocking tool's profile).
 
+### The cores
+
+Horizon doesn't share a core between threads of one priority: a thread runs until it waits. A thread of a higher
+priority takes the core at once. So each core holds:
+
+| Core | Threads |
+| --- | --- |
+| 0 | The game's main thread. |
+| 1 | The render thread alone (`plat_thread_start_render`). `FFXI_SWITCH_RENDER_CORE=0`: the pool's threads take cores 1 and 2 in turn again. |
+| 2 | The d3d8 worker, a step below the game's priority; the audio thread, a step above it (`FFXI_SWITCH_AUDIO_CORE`: another core, `-1` the pool's); the game's other threads and the pool's jobs, at its priority. |
+
+On core 1, the audio thread stopped the render thread inside its GL calls for 1-15 ms a few times a frame, and the
+game's other threads took the core whenever it waited for its next batch. `FFXI_PROFILE` logs each thread's job (its
+offset in the .nro), core and priority as they start.
+
 ## Controls
 
 The controller works the way an Xbox controller does on the PC builds (the game's own gamepad support),

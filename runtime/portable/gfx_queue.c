@@ -780,7 +780,7 @@ int gfxq_init(void* sdl_window, int vsync)
     if (!g_threaded)
     {
         const char* e = getenv("FFXI_RENDER_THREAD");
-        if (!(e && *e == '0') && plat_thread_start(render_thread, NULL))
+        if (!(e && *e == '0') && plat_thread_start_render(render_thread, NULL))
         {
             g_threaded = 1;
             rt_log("[recomp] gfx: render thread on, the device's (FFXI_RENDER_THREAD=0 draws on the game's threads)\n");
@@ -796,7 +796,7 @@ int gfxq_init(void* sdl_window, int vsync)
     if (!g_threaded)
     {
         const char* e = getenv("FFXI_RENDER_THREAD");
-        if (!(e && *e == '0') && plat_thread_start(render_thread, NULL))
+        if (!(e && *e == '0') && plat_thread_start_render(render_thread, NULL))
         {
             g_threaded = 1;
             rt_log("[recomp] gfx: render thread on (FFXI_RENDER_THREAD=0 turns it off)\n");
