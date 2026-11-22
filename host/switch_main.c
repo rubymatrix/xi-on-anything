@@ -319,6 +319,13 @@ static void idle_report(void)
             snprintf(s[c], sizeof s[c], "%u.%u%% idle", g_idle_pm[c] / 10u, g_idle_pm[c] % 10u);
     }
     fprintf(stderr, "[switch] cores (last second): 0 %s, 1 %s, 2 %s\n", s[0], s[1], s[2]);
+    /* the threads' jobs when they change (here: stdio from the main thread alone) */
+    extern uint32_t plat_thread_list(char* out, size_t n);
+    static uint32_t said_threads;
+    static char tl[2048];
+    uint32_t nt = plat_thread_list(tl, sizeof tl);
+    if (nt != said_threads)
+        said_threads = nt, fprintf(stderr, "[switch] threads (job's offset in the .nro, core, priority): %s\n", tl);
     uint32_t n = __atomic_exchange_n(&g_gpu_n, 0, __ATOMIC_ACQUIRE);
     uint32_t sum = __atomic_exchange_n(&g_gpu_sum, 0, __ATOMIC_RELAXED);
     if (n)

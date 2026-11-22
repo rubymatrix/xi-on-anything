@@ -1013,6 +1013,15 @@ static void audio_thread(void* arg)
     s32 prio = 0;
     if (R_SUCCEEDED(svcGetThreadPriority(&prio, CUR_THREAD_HANDLE)) && prio > 0x1C)
         svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)(prio - 1));
+    /* on core 2 (FFXI_SWITCH_AUDIO_CORE: another, -1 where the pool put it): above the game's priority it takes
+     * the core from whatever runs there each block, and on core 1, the render thread's, that stopped it inside its
+     * GL calls for a millisecond, a few times a frame. Core 2's d3d8 worker is below the game's threads. */
+    {
+        const char* e = getenv("FFXI_SWITCH_AUDIO_CORE");
+        int core = e && *e ? atoi(e) : 2;
+        if (core >= 0 && core <= 2)
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+    }
     audout_start();
     uint64_t start = now_ns(), done = 0; /* without the device: paced to the clock */
     for (;;)

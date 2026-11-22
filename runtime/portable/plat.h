@@ -33,6 +33,8 @@ int plat_thread_start(void (*fn)(void*), void* arg);
 int plat_thread_start_core(void (*fn)(void*), void* arg, int core); /* one that never ends, on that core where it can */
 #if defined(__SWITCH__)
 void plat_thread_counts(uint32_t* made, uint32_t* idle); /* the thread pool: threads made, those waiting for a job */
+/* (the Switch) the jobs given to threads so far, as text (each one's offset in the .nro, core, priority): how many */
+uint32_t plat_thread_list(char* out, size_t n);
 int plat_read_report(char* out, size_t n); /* FFXI_PROFILE: file reads since the last report, by size; 0 when off */
 #endif
 void plat_sleep_ms(uint32_t ms);

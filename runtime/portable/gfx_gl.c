@@ -114,6 +114,11 @@ typedef struct RProf
                           * [5] the program's lookup, [6] the ring's room, [7] the target, in the setup */
     uint64_t rd_first_ns, rd_take_ns, rd_poll_ns, rd_queue_ns, rd_first; /* (rd_poll_ns: the fence polls, in the pick-up) */ /* gfx_tex_read_async: a first read, the pick-up, the queuing */
     uint64_t fence_ns, mid_segs; /* the present's ring switch; the segments switched mid-frame */
+    /* gfx_chars_draw: its whole time, its setup (program, target, ring room, state), the items' ring writes, binds and
+     * draws; the slowest item's part (ch_max_kind 0 ring, 1 binds, 2 draw) and the items over 0.5 ms; the counts */
+    uint64_t ch_ns, ch_setup_ns, ch_ring_ns, ch_bind_ns, ch_draw_ns, ch_max_ns, ch_max_kind, ch_slow;
+    uint64_t ch_items, ch_pals, ch_pal_bytes, ch_states, ch_new_tbo, ch_tex;
+    uint64_t ch_k_ns[9], ch_k_max[9], ch_k_slow[9]; /* the binds by kind: blocks 0-2, vb, uv, texture, sampler, EBO; 8 none */
     uint64_t ring_bytes, units, tex_stream, tex_stage, tex_other, samps, ubos, ebos, progs, fixed, waits;
 } RProf;
 
@@ -226,7 +231,9 @@ static void prof_frame(uint64_t present_start)
         snprintf(line, sizeof line,
             "[gfx]   render thread, ms/frame: draws %.2f (decoding %.2f, preparing %.2f of it %.2f waiting for the ring and "
             "%.2f writing %.0f KB into it, the GL draw calls %.2f; preparing: setup %.2f (the ring's room %.2f, the target %.2f, the program's lookup %.2f), streams %.2f, uniforms %.2f, "
-            "textures %.2f, state %.2f), characters %.2f, clears %.2f, uploads %.2f, copies %.2f, "
+            "textures %.2f, state %.2f), characters %.2f (of it drawing %.2f: setup %.2f, ring %.2f, binds %.2f, draws %.2f; "
+            "slowest %.2f in its %s, %.1f over 0.5 ms; %.0f items, %.1f palettes %.0f KB, %.1f states, %.1f new TBOs, "
+            "%.0f texture changes), clears %.2f, uploads %.2f, copies %.2f, "
             "reads %.2f (first reads %.1f taking %.2f, picking up %.2f of it polling %.2f, queuing %.2f), calls %.2f, other %.2f, present: "
             "blit %.2f, swap %.2f, the ring's fence %.2f | per frame: active units %.0f, stream "
             "textures %.0f, stage textures %.0f, other textures %.0f, samplers %.0f, uniform ranges %.0f, index buffers %.0f, "
@@ -236,7 +243,11 @@ static void prof_frame(uint64_t present_start)
             (double)r->ring_bytes / f / 1024.0, (double)r->call_ns * ms, (double)r->part_ns[0] * ms, (double)r->part_ns[6] * ms, (double)r->part_ns[7] * ms,
             (double)r->part_ns[5] * ms,
             (double)r->part_ns[1] * ms, (double)r->part_ns[2] * ms, (double)r->part_ns[3] * ms, (double)r->part_ns[4] * ms,
-            (double)r->op_ns[GFX_RT_CHARS] * ms, (double)r->op_ns[GFX_RT_CLEAR] * ms, (double)r->op_ns[GFX_RT_UPLOAD] * ms,
+            (double)r->op_ns[GFX_RT_CHARS] * ms, (double)r->ch_ns * ms, (double)r->ch_setup_ns * ms, (double)r->ch_ring_ns * ms,
+            (double)r->ch_bind_ns * ms, (double)r->ch_draw_ns * ms, (double)r->ch_max_ns * 1e-6,
+            r->ch_max_kind == 0 ? "ring" : r->ch_max_kind == 1 ? "binds" : "draw", (double)r->ch_slow / f, (double)r->ch_items / f,
+            (double)r->ch_pals / f, (double)r->ch_pal_bytes / f / 1024.0, (double)r->ch_states / f, (double)r->ch_new_tbo / f,
+            (double)r->ch_tex / f, (double)r->op_ns[GFX_RT_CLEAR] * ms, (double)r->op_ns[GFX_RT_UPLOAD] * ms,
             (double)r->op_ns[GFX_RT_COPY] * ms, (double)r->op_ns[GFX_RT_READ] * ms, (double)r->rd_first / f,
             (double)r->rd_first_ns * ms, (double)r->rd_take_ns * ms, (double)r->rd_poll_ns * ms, (double)r->rd_queue_ns * ms, (double)r->op_ns[GFX_RT_CALL] * ms,
             (double)r->op_ns[GFX_RT_OTHER] * ms, (double)r->blit_ns * ms, (double)r->swap_ns * ms, (double)r->fence_ns * ms, (double)r->units / f,
@@ -244,6 +255,17 @@ static void prof_frame(uint64_t present_start)
             (double)r->ubos / f, (double)r->ebos / f, (double)r->progs / f, (double)r->fixed / f, (double)r->waits / f, (double)r->mid_segs / f,
             (double)g_tf_reads / f, (double)g_pack_reads / f, g_ring_mbs, g_mem_mbs);
         g_tf_reads = g_pack_reads = 0;
+        /* the characters' binds by kind: ms a frame / the slowest one's ms / how many a frame over 0.5 ms */
+        static const char* const kn[9] = { "item block", "state", "palette", "vb", "uv", "texture", "sampler", "EBO", "none" };
+        size_t at = strlen(line);
+        if (at && line[at - 1] == '\n')
+            --at;
+        at += (size_t)snprintf(line + at, sizeof line - at, " | the characters' binds, ms a frame/slowest/over 0.5 ms a frame:");
+        for (int k = 0; k < 9 && at < sizeof line; ++k)
+            at += (size_t)snprintf(line + at, sizeof line - at, " %s %.2f/%.2f/%.2f", kn[k], (double)r->ch_k_ns[k] * ms,
+                (double)r->ch_k_max[k] * 1e-6, (double)r->ch_k_slow[k] / f);
+        if (at < sizeof line)
+            snprintf(line + at, sizeof line - at, "\n");
         PROF_LOG2(line);
     }
 #endif
@@ -2465,6 +2487,17 @@ static const char CHARS_GL[] =
     "}\n"
     "#endif\n";
 
+/* FFXI_PROFILE: the time since *t into the bind kind k's count, and *t moved on */
+static void ch_kind(uint64_t* t, int k)
+{
+    if (!*t)
+        return;
+    uint64_t now = gfx_now_ns(), d = now - *t;
+    g_rp.ch_k_ns[k] += d, g_rp.ch_k_slow[k] += d > 500000u, *t = now;
+    if (d > g_rp.ch_k_max[k])
+        g_rp.ch_k_max[k] = d;
+}
+
 static GLuint g_chars_prog;
 static int g_chars_failed;
 
@@ -2517,19 +2550,25 @@ int gfx_chars_draw(const GfxCharFrame* f)
     memset(&b1, 0xFF, sizeof b1), memset(&b2, 0xFF, sizeof b2);
     uint32_t last_state = ~0u, state_at = 0, last_pal = ~0u, pal_at = 0, pal_size = 0;
     int drew = 0;
+    GfxTex* last_tex = NULL;
+    uint64_t tl = rp_now();
+    if (tl)
+        g_rp.ch_setup_ns += tl - t0;
     for (uint32_t i = 0; i < f->nitem; ++i)
     {
         const GfxCharItem* it = &f->item[i];
         if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D || it->state >= f->nstate ||
             it->palette >= f->nbones)
             continue;
+        uint64_t ta = rp_now();
         if (it->state != last_state)
-            state_at = ring_put(&f->state[it->state], st_sz, al), last_state = it->state;
+            state_at = ring_put(&f->state[it->state], st_sz, al), last_state = it->state, g_rp.ch_states++;
         if (it->palette != last_pal)
         {
             uint32_t nb = f->nbones - it->palette;
             pal_size = (nb < 128u ? nb : 128u) * 64u;
             pal_at = ring_put(f->palette + 16u * it->palette, pal_size, al), last_pal = it->palette;
+            g_rp.ch_pals++, g_rp.ch_pal_bytes += pal_size;
         }
         struct
         {
@@ -2537,23 +2576,50 @@ int gfx_chars_draw(const GfxCharFrame* f)
             uint32_t at[4];
         } u = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f }, { 0, 0, it->mirror, 0 } };
         uint32_t uoff = ring_put(&u, sizeof u, al);
+        uint64_t tb = rp_now();
+        g_rp.ch_new_tbo += !it->vb->tbo + !it->uv->tbo;
+        /* (FFXI_PROFILE: each kind of bind timed, and an empty interval, where the thread being stopped would show) */
+        uint64_t tk = tb;
+        ch_kind(&tk, 8);
         st_buffer(GL_UNIFORM_BUFFER, 0, &S.ubo, g_ring, uoff, (GLsizeiptr)sizeof u);
+        ch_kind(&tk, 0);
         st_buffer(GL_UNIFORM_BUFFER, 1, &b1, g_ring, state_at, st_sz);
+        ch_kind(&tk, 1);
         /* (the block's whole size bound, as GL wants it backed: the room after a short palette is the segment's) */
         st_buffer(GL_UNIFORM_BUFFER, 2, &b2, g_ring, pal_at, pal_max);
+        ch_kind(&tk, 2);
         st_texture(1, GL_TEXTURE_BUFFER, buf_texture(it->vb));
+        ch_kind(&tk, 3);
         st_texture(2, GL_TEXTURE_BUFFER, buf_texture(it->uv));
+        ch_kind(&tk, 4);
         GfxTex* t = it->tex == g_rt ? g_dummy2d : it->tex;
+        g_rp.ch_tex += t != last_tex, last_tex = t;
         st_texture(UNIT0, t->target, t->name);
+        ch_kind(&tk, 5);
         st_sampler(UNIT0, sampler(&it->samp));
+        ch_kind(&tk, 6);
         st_ebo(it->ib->name);
+        ch_kind(&tk, 7);
         uint32_t n = vertex_count(it->prim, it->count);
+        uint64_t tc = rp_now();
         gl.DrawElements(it->prim == GFX_TRIANGLESTRIP ? GL_TRIANGLE_STRIP : GL_TRIANGLES, (GLsizei)n,
             it->index_size == 4 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT, (const void*)(uintptr_t)(it->first * it->index_size));
         ++drew;
+        if (ta)
+        {
+            uint64_t td = gfx_now_ns(), part[3] = { tb - ta, tc - tb, td - tc };
+            g_rp.ch_ring_ns += part[0], g_rp.ch_bind_ns += part[1], g_rp.ch_draw_ns += part[2], g_rp.ch_items++;
+            g_rp.ch_slow += td - ta > 500000u;
+            for (int k = 0; k < 3; ++k)
+                if (part[k] > g_rp.ch_max_ns)
+                    g_rp.ch_max_ns = part[k], g_rp.ch_max_kind = (uint64_t)k;
+        }
     }
     g_prof.draws += (uint64_t)drew;
-    g_prof.render_ns += gfx_now_ns() - t0;
+    uint64_t te = gfx_now_ns();
+    g_prof.render_ns += te - t0;
+    if (gfx_profiling)
+        g_rp.ch_ns += te - t0;
     return drew > 0;
 }
 void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }

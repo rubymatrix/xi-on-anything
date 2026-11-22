@@ -312,12 +312,46 @@ typedef struct NxWorker
     void (*fn)(void*);
     void* arg;
     s32 prio;
+    int core;
     CondVar cv;
     volatile uint32_t started;
 } NxWorker;
 static Mutex g_pool_lock;
 static NxWorker* g_idle;
 static uint32_t g_workers, g_idle_n;
+
+/* the jobs the threads were given, in order (g_pool_lock): plat_thread_list, for the main thread to print */
+#define NX_TLOG 48
+static struct
+{
+    void (*fn)(void*);
+    int core, prio;
+} g_tlog[NX_TLOG];
+static uint32_t g_tlog_n;
+static void tlog(void (*fn)(void*), int core, int prio)
+{
+    if (g_tlog_n < NX_TLOG)
+        g_tlog[g_tlog_n].fn = fn, g_tlog[g_tlog_n].core = core, g_tlog[g_tlog_n].prio = prio;
+    __atomic_store_n(&g_tlog_n, g_tlog_n + 1, __ATOMIC_RELEASE);
+}
+uint32_t plat_thread_list(char* out, size_t n)
+{
+    extern void _start(void); /* the .nro's base: the jobs as offsets, for aarch64-none-elf-nm of the .elf */
+    mutexLock(&g_pool_lock);
+    uint32_t count = g_tlog_n;
+    size_t at = 0;
+    out[0] = 0;
+    for (uint32_t i = 0; i < count && i < NX_TLOG && at + 1 < n; ++i)
+    {
+        int w = snprintf(out + at, n - at, "%s0x%lx core %d prio 0x%x", i ? "; " : "",
+            (unsigned long)((uintptr_t)g_tlog[i].fn - (uintptr_t)_start), g_tlog[i].core, g_tlog[i].prio);
+        if (w < 0)
+            break;
+        at += (size_t)w;
+    }
+    mutexUnlock(&g_pool_lock);
+    return count;
+}
 
 static void worker_main(void* p)
 {
@@ -374,6 +408,7 @@ int plat_thread_start(void (*fn)(void*), void* arg)
         g_idle = w->next;
         g_idle_n--;
         w->fn = fn, w->arg = arg;
+        tlog(fn, w->core, w->prio);
         condvarWakeOne(&w->cv);
         mutexUnlock(&g_pool_lock);
         return 1;
@@ -412,7 +447,7 @@ static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled
         mutexUnlock(&g_pool_lock);
         return 0;
     }
-    w->fn = fn, w->arg = arg, w->prio = prio;
+    w->fn = fn, w->arg = arg, w->prio = prio, w->core = core;
     condvarInit(&w->cv);
     if (R_FAILED(threadCreate(&w->t, worker_main, w, stack, stack_sz, prio, core)) || R_FAILED(threadStart(&w->t)))
     {
@@ -423,6 +458,7 @@ static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled
     }
     if (pooled)
         g_workers++;
+    tlog(fn, core, prio);
     mutexUnlock(&g_pool_lock);
     /* until it has started (as libnx's pthread_create waits) */
     while (!__atomic_load_n(&w->started, __ATOMIC_SEQ_CST))
