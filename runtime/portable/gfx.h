@@ -583,6 +583,10 @@ void gfx_pass_timing(int on);
 int gfx_pass_report(char (*out)[96], int max);
 uint64_t gfx_now_ns(void);
 void gfx_prof_front(uint64_t ns);
+/* The render thread's time by kind of recorded call (gfx_queue.c, FFXI_PROFILE on the Switch; gfx_gl.c alone has it
+ * and logs it under its frame line). The present is timed by the back end itself. */
+enum { GFX_RT_DRAW, GFX_RT_CHARS, GFX_RT_CLEAR, GFX_RT_UPLOAD, GFX_RT_COPY, GFX_RT_READ, GFX_RT_CALL, GFX_RT_OTHER, GFX_RT_N };
+void gfx_prof_rt(int kind, uint64_t ns);
 /* A draw dropped, and why (the profile line counts each reason). */
 enum
 {

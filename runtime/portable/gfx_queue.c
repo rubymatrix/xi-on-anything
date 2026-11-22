@@ -505,6 +505,9 @@ static void run_batch(Batch* b)
         const uint8_t* body = (const uint8_t*)(c + 1);
         o += c->size;
         g_cur_op = c->op, g_ops_run++;
+#if defined(__SWITCH__)
+        uint64_t t_op = gfx_profiling && c->op != OP_PRESENT ? gfx_now_ns() : 0;
+#endif
         switch (c->op)
         {
         case OP_RESIZE:
@@ -638,6 +641,25 @@ static void run_batch(Batch* b)
         }
         case OP_CHARS_DRAW: run_chars(body); break;
         }
+#if defined(__SWITCH__)
+        if (t_op)
+        {
+            int k = GFX_RT_OTHER;
+            switch (c->op)
+            {
+            case OP_DRAW: k = GFX_RT_DRAW; break;
+            case OP_CHARS_DRAW: k = GFX_RT_CHARS; break;
+            case OP_CLEAR: k = GFX_RT_CLEAR; break;
+            case OP_BUF_UPLOAD:
+            case OP_TEX_UPLOAD:
+            case OP_TEX_UPLOAD_RECT: k = GFX_RT_UPLOAD; break;
+            case OP_COPY: k = GFX_RT_COPY; break;
+            case OP_TEX_READ_ASYNC: k = GFX_RT_READ; break;
+            case OP_CALL: k = GFX_RT_CALL; break;
+            }
+            gfx_prof_rt(k, gfx_now_ns() - t_op);
+        }
+#endif
     }
 #if defined(__APPLE__)
     objc_autoreleasePoolPop(pool);

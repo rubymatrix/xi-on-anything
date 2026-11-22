@@ -135,6 +135,7 @@ enum
     GL_RED = 0x1903,
     GL_GREEN = 0x1904,
     GL_BLUE = 0x1905,
+    GL_ALPHA = 0x1906,
     GL_RG = 0x8227,
     GL_RGB = 0x1907,
     GL_RGBA = 0x1908,
@@ -199,6 +200,9 @@ enum
     GL_PIXEL_UNPACK_BUFFER = 0x88EC,
     GL_UNIFORM_BUFFER = 0x8A11,
     GL_SHADER_STORAGE_BUFFER = 0x90D2,
+    GL_TRANSFORM_FEEDBACK_BUFFER = 0x8C8E,
+    GL_INTERLEAVED_ATTRIBS = 0x8C8C,
+    GL_RASTERIZER_DISCARD = 0x8C89,
     GL_COPY_READ_BUFFER = 0x8F36,
     GL_COPY_WRITE_BUFFER = 0x8F37,
     GL_STREAM_DRAW = 0x88E0,
@@ -348,6 +352,9 @@ enum
     X(GetProgramBinary, void, (GLuint, GLsizei, GLsizei*, GLenum*, void*), 1)                                         \
     X(ProgramBinary, void, (GLuint, GLenum, const void*, GLsizei), 1)                                                 \
     X(ProgramParameteri, void, (GLuint, GLenum, GLint), 1)                                                         \
+    X(TransformFeedbackVaryings, void, (GLuint, GLsizei, const GLchar* const*, GLenum), 1)                            \
+    X(BeginTransformFeedback, void, (GLenum), 1)                                                                      \
+    X(EndTransformFeedback, void, (void), 1)                                                                          \
     X(IsBuffer, GLboolean, (GLuint), 1)
 
 #define GL_DECLARE(name, ret, params, optional) typedef ret(GLAPI_CALL* PFN_gl##name) params;
