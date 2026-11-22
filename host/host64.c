@@ -1098,6 +1098,20 @@ static void upscale_background(void)
 }
 #endif
 
+#if defined(FFXI_SAVE_USER_DATA) && defined(FFXI_MOBILE)
+/* The app going to the background (a phone's home button, the app switcher): the game writes the
+ * character's files - cnf.dat's settings, the macros, the item lists - only at logout and shutdown, and
+ * Android ends a backgrounded app without either, so what changed since was lost. The same save
+ * (logout's, 101acda0: three null-checked saves through globals), once the game runs (its window). */
+static void save_user_data(void)
+{
+    if (!d3d8_window())
+        return;
+    rt_log("[recomp] to the background: the character's settings and macros saved\n");
+    guest_call(FFXI_SAVE_USER_DATA, 0, NULL);
+}
+#endif
+
 #ifdef FFXI_MOBILE
 static void* g_signin_window; /* the window the game takes over: display_fit_start */
 
@@ -1827,6 +1841,9 @@ int main(int argc, char** argv)
     upscale_background();
 #endif
 #ifdef FFXI_MOBILE
+#ifdef FFXI_SAVE_USER_DATA
+    user32_background_hook = save_user_data;
+#endif
     display_fit_start(g_signin_window, data_dir); /* the game's size from the screen, whatever the file says (its UI Scale the player's) */
     soft_keyboard_off();
 #endif

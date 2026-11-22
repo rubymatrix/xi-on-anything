@@ -50,6 +50,10 @@ extern int (*user32_ui_hit)(float fx, float fy);
 extern int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h);
 /* Called on the window's thread each time it pumps (dsound.c's report) */
 extern void (*user32_pump_hook)(void);
+/* Set by host64: the app is going to the background (SDL_EVENT_WILL_ENTER_BACKGROUND: Android, iOS),
+ * called from the pump on the game's thread before SDL pauses it, where Android may then end the app
+ * without a logout: the game's own save of the character's files. */
+extern void (*user32_background_hook)(void);
 /* Set by Config > Modern: a key (SDL scancode) before anyone else sees it; 1 keeps it from the overlay,
  * DirectInput and the game (Escape cancelling Gamepad's stick recording, not closing the page). */
 extern int (*user32_key_filter)(int scancode, int down);

@@ -57,6 +57,9 @@ python tools/newbuild.py carry --from <old> --to <label> --write  # builds.json 
 The report maps these onto the new image:
 - `chars_ptr`: a global, found by voting over the code sites that reference it.
 - `present_site`: the return address after `call [ecx+0x3c]`, IDirect3DDevice8::Present.
+- `save_user_data`: the function logout and shutdown call to write the character's files (cnf.dat,
+  the macros...): three null-checked saves through globals and a `ret`. Phones call it when the app
+  goes to the background. Optional: a build without it just doesn't save then.
 - the 15 CRT functions that difftest compares.
 - the manual verdicts (NOT_CODE, REDECODE, SWITCHES).
 - the skinning kernels' five `geometry_*` wraps and four `geometry` globals, all or none, and
