@@ -78,6 +78,12 @@
       "code": "host/addons/core.c xi_addon_load, host/addons/cmd.c xi_cmd_frame",
       "min_build": "2025-11-12"
     },
+    "dinput_pad": {
+      "title": "Gamepad map on DirectInput-only clients",
+      "what": "For clients that read the gamepad only through DirectInput (no XInput; the 2009 one), the pad's buttons are numbered as the game's XInput codes are, the triggers and the D-pad as buttons too, so padsin000 (ffxi.reg's map, Config > Gamepad's) means the same buttons as on today's clients. Without it the shipped map is scrambled there: Confirm on Y, Cancel on A, the menus on Back, Start and the shoulders.",
+      "code": "runtime/portable/dinput.c dinput_xinput_order",
+      "builds": ["2009-07-09"]
+    },
     "modern_fx": {
       "title": "Modern effects (post-processing)",
       "what": "Grading, saturation, contrast, sharpening and anisotropic filtering over the game's own picture. Works on the finished frame, not the game's data, so every build has it.",

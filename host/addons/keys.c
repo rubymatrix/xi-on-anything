@@ -87,6 +87,66 @@ void xi_key_inject(uint32_t dik, int down)
         input_inject_key((uint8_t)dik, down);
 }
 
+/* --- a test gamepad: an SDL virtual Xbox 360 pad the control port presses (control.lua's pad) -- */
+
+static SDL_JoystickID g_test_pad_id;
+static SDL_Joystick* g_test_pad;
+
+static void test_pad_attach(void)
+{
+    if (g_test_pad)
+        return;
+    SDL_VirtualJoystickDesc d;
+    SDL_INIT_INTERFACE(&d);
+    d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    d.vendor_id = 0x045E, d.product_id = 0x028E;
+    d.naxes = SDL_GAMEPAD_AXIS_COUNT, d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    d.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
+    d.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1; /* the indices are SDL's */
+    d.name = "Test gamepad";
+    g_test_pad_id = SDL_AttachVirtualJoystick(&d);
+    g_test_pad = g_test_pad_id ? SDL_OpenJoystick(g_test_pad_id) : NULL;
+    if (!g_test_pad)
+    {
+        fprintf(stderr, "[xi] test gamepad: %s\n", SDL_GetError());
+        return;
+    }
+    SDL_SetJoystickVirtualAxis(g_test_pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+    SDL_SetJoystickVirtualAxis(g_test_pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+    fprintf(stderr, "[xi] test gamepad attached\n");
+}
+
+int xi_pad_inject(const char* name, int down)
+{
+    static const struct
+    {
+        const char* name;
+        int button; /* an SDL_GamepadButton, or -1 - an SDL_GamepadAxis (a trigger) */
+    } NAMES[] = {
+        { "a", SDL_GAMEPAD_BUTTON_SOUTH }, { "b", SDL_GAMEPAD_BUTTON_EAST }, { "x", SDL_GAMEPAD_BUTTON_WEST },
+        { "y", SDL_GAMEPAD_BUTTON_NORTH }, { "lb", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER },
+        { "rb", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER }, { "back", SDL_GAMEPAD_BUTTON_BACK },
+        { "start", SDL_GAMEPAD_BUTTON_START }, { "guide", SDL_GAMEPAD_BUTTON_GUIDE },
+        { "ls", SDL_GAMEPAD_BUTTON_LEFT_STICK }, { "rs", SDL_GAMEPAD_BUTTON_RIGHT_STICK },
+        { "up", SDL_GAMEPAD_BUTTON_DPAD_UP }, { "down", SDL_GAMEPAD_BUTTON_DPAD_DOWN },
+        { "left", SDL_GAMEPAD_BUTTON_DPAD_LEFT }, { "right", SDL_GAMEPAD_BUTTON_DPAD_RIGHT },
+        { "lt", -1 - SDL_GAMEPAD_AXIS_LEFT_TRIGGER }, { "rt", -1 - SDL_GAMEPAD_AXIS_RIGHT_TRIGGER },
+    };
+    for (size_t i = 0; i < sizeof NAMES / sizeof NAMES[0]; ++i)
+        if (!SDL_strcasecmp(name, NAMES[i].name))
+        {
+            test_pad_attach();
+            if (!g_test_pad)
+                return 0;
+            if (NAMES[i].button >= 0)
+                SDL_SetJoystickVirtualButton(g_test_pad, NAMES[i].button, down != 0);
+            else
+                SDL_SetJoystickVirtualAxis(g_test_pad, -1 - NAMES[i].button, down ? SDL_JOYSTICK_AXIS_MAX : SDL_JOYSTICK_AXIS_MIN);
+            return 1;
+        }
+    return 0;
+}
+
 /* --- binds ------------------------------------------------------------------------------------ */
 
 enum
@@ -449,6 +509,8 @@ static void quit(void) { addons_shutdown(); }
 
 void xi_input_init(void)
 {
+    if (SDL_getenv("FFXI_TEST_PAD")) /* the test gamepad there from the start, before the game looks */
+        test_pad_attach();
     user32_event_hook = hook;
     user32_quit_hook = quit;
     dinput_xpad_hook = xpad;

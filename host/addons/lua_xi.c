@@ -24,6 +24,7 @@
 #include "gthread.h"
 #include "gwin.h"
 #include "host.h"
+#include "../modern.h"
 #include "res.h"
 #include "plat.h"
 
@@ -691,8 +692,48 @@ static int i_inject(lua_State* L)
     xi_key_inject((uint32_t)d, lua_toboolean(L, 2));
     return 0;
 }
+/* pad(button, down): the test gamepad's button (keys.c xi_pad_inject) */
+static int i_pad(lua_State* L)
+{
+    if (!xi_pad_inject(luaL_checkstring(L, 1), lua_toboolean(L, 2)))
+        return luaL_error(L, "pad: no button %s", lua_tostring(L, 1));
+    return 0;
+}
+/* pad_window(open | nil) -> open; pad_row(i) -> label, kind, choice name, recording; pad_row_set(i, choice);
+ * pad_row_record(i | -1): the Gamepad window (F12, host/modern.c), for the control port's tests */
+static int i_pad_window(lua_State* L)
+{
+    if (!lua_isnoneornil(L, 1))
+        modern_pad_window_set(lua_toboolean(L, 1));
+    lua_pushboolean(L, modern_pad_window());
+    return 1;
+}
+static int i_pad_row(lua_State* L)
+{
+    int i = (int)luaL_checkinteger(L, 1), kind;
+    const char* help;
+    const char* label = modern_pad_row(i, &kind, &help);
+    if (!label)
+        return 0;
+    lua_pushstring(L, label);
+    lua_pushinteger(L, kind);
+    lua_pushstring(L, kind ? modern_pad_choice(i, modern_pad_get(i)) : "");
+    lua_pushboolean(L, modern_pad_recording() == i);
+    return 4;
+}
+static int i_pad_row_set(lua_State* L)
+{
+    modern_pad_set((int)luaL_checkinteger(L, 1), (int)luaL_checkinteger(L, 2));
+    return 0;
+}
+static int i_pad_row_record(lua_State* L)
+{
+    modern_pad_record((int)luaL_checkinteger(L, 1));
+    return 0;
+}
 static const luaL_Reg INPUT_FNS[] = { { "bind", i_bind }, { "unbind", i_unbind }, { "key_down", i_key_down },
-    { "code", i_code }, { "inject", i_inject }, { NULL, NULL } };
+    { "code", i_code }, { "inject", i_inject }, { "pad", i_pad }, { "pad_window", i_pad_window },
+    { "pad_row", i_pad_row }, { "pad_row_set", i_pad_row_set }, { "pad_row_record", i_pad_row_record }, { NULL, NULL } };
 
 /* --- xi.addons -------------------------------------------------------------------------------- */
 

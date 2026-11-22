@@ -325,9 +325,17 @@ static void pad_set(int f, int i)
     if (!reg_get_string(PAD_KEY, "padmode000", mode, sizeof mode))
         reg_set_string(PAD_KEY, "padmode000", PAD_MODE_DEFAULT);
     reg_flush();
+#if defined(FFXI_PAD_CONFIG) && defined(FFXI_PAD_RELOAD)
+    /* a client whose window has no 0x800b (2009's): its pad settings' own reader (the one its ctor
+     * runs), on the object holding them; from the game's thread, between its frames */
+    uint32_t pad_config = rd32(FFXI_PAD_CONFIG);
+    if (pad_config)
+        guest_thiscall(FFXI_PAD_RELOAD, pad_config, 0, NULL);
+#else
     uint32_t hwnd = d3d8_window();
     if (hwnd)
         user32_post(hwnd, PAD_RELOAD, 0, 0);
+#endif
     fprintf(stderr, "[modern] gamepad: padsin000 %s\n", s);
 }
 
@@ -2353,9 +2361,21 @@ void modern_open_gamepad(void)
 }
 static int g_gp_clear;  /* Backspace or Delete on it: the row under the cursor to None (page_draw) */
 
+static int g_pw_open; /* the Gamepad window (F12) is up: builds without Config > Advanced */
+void modern_pad_window_set(int open);
+
 static int pmap_key(int scancode, int down)
 {
     static int held;
+    /* F12: the Gamepad window, on a client with no Config > Advanced to hold Config > Gamepad. Escape
+     * closes it when no button is being recorded (one being recorded: cancelled, below). */
+    if (!FFXI_MODERN && (scancode == SDL_SCANCODE_F12 || (scancode == SDL_SCANCODE_ESCAPE && g_pw_open && padmap_listening() < 0)))
+    {
+        if (down && !held)
+            modern_pad_window_set(scancode == SDL_SCANCODE_F12 ? !g_pw_open : 0);
+        held = down;
+        return 1;
+    }
     /* Backspace or Delete on Config > Gamepad: the row under the cursor cleared, a recording too */
     if (g_gp_open && (scancode == SDL_SCANCODE_BACKSPACE || scancode == SDL_SCANCODE_DELETE))
     {
@@ -2375,6 +2395,113 @@ static int pmap_key(int scancode, int down)
         return held = 0, 1;
     return 0;
 }
+
+/* ---- the Gamepad window (F12), for builds without Config > Advanced: Config > Gamepad's rows,
+ * drawn by the overlay (host/addons/gui.cpp xi_gui_gamepad) ---- */
+int modern_pad_window(void) { return g_pw_open; }
+
+void modern_pad_window_set(int open)
+{
+    open = open != 0;
+    if (open == g_pw_open)
+        return;
+    g_pw_open = open;
+    padmap_listen(-1), g_pad_listen = -1;
+    if (open)
+        padmap_open();
+    else
+        padmap_close();
+}
+
+enum
+{
+    PAD_NROWS = (int)(sizeof GAMEPAD_ROWS / sizeof GAMEPAD_ROWS[0]),
+};
+
+const char* modern_pad_row(int i, int* kind, const char** help)
+{
+    if (i < 0 || i >= PAD_NROWS)
+        return NULL;
+    const Row* r = &GAMEPAD_ROWS[i];
+    int c = rec_key(r);
+    *kind = r->kind == HEADER ? 0 : c >= PAD_ROW ? 1 : 2;
+    *help = r->help;
+    return r->label;
+}
+
+int modern_pad_choices(int i)
+{
+    int kind;
+    const char* help;
+    if (!modern_pad_row(i, &kind, &help) || !kind)
+        return 0;
+    return kind == 1 ? PAD_NBUTTONS : PADMAP_NAXIS_CHOICES;
+}
+
+const char* modern_pad_choice(int i, int c)
+{
+    int kind;
+    const char* help;
+    if (!modern_pad_row(i, &kind, &help) || !kind || c < 0 || c >= modern_pad_choices(i))
+        return "";
+    return kind == 1 ? PAD_BUTTONS[c].name : padmap_choice(1, c);
+}
+
+int modern_pad_get(int i)
+{
+    int c = i >= 0 && i < PAD_NROWS ? rec_key(&GAMEPAD_ROWS[i]) : -1;
+    return c < 0 ? 0 : c >= PAD_ROW ? pad_get(c - PAD_ROW) : padmap_get(c);
+}
+
+void modern_pad_set(int i, int choice)
+{
+    int c = i >= 0 && i < PAD_NROWS ? rec_key(&GAMEPAD_ROWS[i]) : -1;
+    if (c < 0)
+        return;
+    if (rec_now() == c)
+        padmap_listen(-1), g_pad_listen = -1;
+    if (c >= PAD_ROW)
+        pad_set(c - PAD_ROW, choice);
+    else
+        padmap_set(c, choice);
+}
+
+/* row i recorded from the next button pressed (a stick's row: the stick pushed); -1 stops */
+void modern_pad_record(int i)
+{
+    int c = i >= 0 && i < PAD_NROWS ? rec_key(&GAMEPAD_ROWS[i]) : -1;
+    padmap_listen(-1), g_pad_listen = -1;
+    if (c < 0 || !padmap_open())
+        return;
+    if (c >= PAD_ROW)
+        g_pad_listen = c - PAD_ROW, padmap_listen(PADMAP_BUTTONS);
+    else
+        padmap_listen(c);
+}
+
+int modern_pad_recording(void)
+{
+    int c = rec_now();
+    for (int i = 0; c >= 0 && i < PAD_NROWS; ++i)
+        if (rec_key(&GAMEPAD_ROWS[i]) == c)
+            return i;
+    return -1;
+}
+
+/* each frame the window is up: a recorded button into the game's map (a stick's is applied by padmap) */
+void modern_pad_window_frame(void)
+{
+    if (padmap_poll() > 0 && g_pad_listen >= 0)
+    {
+        int code = pad_code(padmap_button());
+        for (int i = 1; code >= 0 && i < PAD_NBUTTONS; ++i)
+            if (PAD_BUTTONS[i].code == code)
+                pad_set(g_pad_listen, i);
+        g_pad_listen = -1;
+    }
+}
+
+const char* modern_pad_device(void) { return padmap_open() ? padmap_device() : NULL; }
 
 static void page_open(Guest* g)
 {
