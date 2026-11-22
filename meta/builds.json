@@ -1791,6 +1791,7 @@
         "ffximain": "0x74f0058f"
       },
       "addresses": {
+        "save_user_data": "0x101acda0",
         "chars_ptr": "0x104e0920",
         "present_site": "0x100035cb",
         "cexi_item_ranges": "0x10373198",

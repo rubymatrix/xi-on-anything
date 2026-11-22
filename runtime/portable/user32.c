@@ -580,6 +580,7 @@ static uint16_t scan_of_vk(uint32_t vk)
 
 int (*user32_event_hook)(const void* sdl_event, int window_w, int window_h);
 int (*user32_key_filter)(int scancode, int down);
+void (*user32_background_hook)(void);
 void (*user32_pump_hook)(void);
 void (*user32_quit_hook)(void);
 
@@ -694,6 +695,10 @@ static void pump(void)
     SDL_Event e;
     while (SDL_PollEvent(&e))
     {
+        /* SDL handles Android's pause on this thread and returns once to have these handled before it
+         * blocks: the last moment to save before the app may be ended */
+        if (e.type == SDL_EVENT_WILL_ENTER_BACKGROUND && user32_background_hook)
+            user32_background_hook();
         if (user32_key_filter && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
             user32_key_filter((int)e.key.scancode, e.type == SDL_EVENT_KEY_DOWN))
             continue;
