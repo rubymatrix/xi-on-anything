@@ -60,6 +60,7 @@ static void pad_guid(int i, uint8_t out[16])
 /* the gamepad's objects: 5 axes, 1 POV, 10 buttons (the Xbox controller's DirectInput view) */
 #define PAD_AXES 5
 #define PAD_BUTTONS 10
+#define PAD_XBUTTONS 16
 static const uint8_t* const AXIS_GUIDS[PAD_AXES] = { GUID_XAxis, GUID_YAxis, GUID_ZAxis, GUID_RxAxis, GUID_RyAxis };
 static const char* const AXIS_NAMES[PAD_AXES] = { "X Axis", "Y Axis", "Z Axis", "X Rotation", "Y Rotation" };
 
@@ -97,6 +98,27 @@ typedef struct Dev
 static Dev g_devs[MAX_DEVS];
 static uint32_t g_di, g_vtbl_di, g_vtbl_dev, g_vtbl_eff, g_effect;
 static int32_t g_di_refs;
+
+/* 1: the gamepad's buttons numbered as the game's XInput codes are (padsin000: 0 B, 1 X, 2 Y, 3 A,
+ * 4-7 the D-pad right, left, up, down, 8 LB, 9 LT, 10 L stick, 11 RB, 12 RT, 13 R stick, 14 Start,
+ * 15 Back), 16 of them, the triggers and the D-pad buttons too. For clients that read pads only
+ * through DirectInput (the 2009 one), where a padsin000 value below 32 is a DirectInput button:
+ * the map ffxi.reg and Config > Gamepad write means the same buttons there as under XInput. */
+static int g_xorder;
+void dinput_xinput_order(int on) { g_xorder = on; }
+static int pad_buttons(void) { return g_xorder ? PAD_XBUTTONS : PAD_BUTTONS; }
+
+/* the pad's buttons in that order (0x80 down) */
+static void pad_xbuttons(int pad, uint8_t out[PAD_XBUTTONS])
+{
+    static const uint16_t BIT[PAD_XBUTTONS] = { 0x2000, 0x4000, 0x8000, 0x1000, 0x0008, 0x0004, 0x0001, 0x0002,
+                                                0x0100, 0,      0x0040, 0x0200, 0,      0x0080, 0x0010, 0x0020 };
+    enum { TRIGGER = 30 }; /* XINPUT_GAMEPAD_TRIGGER_THRESHOLD */
+    XPad x;
+    input_xpad(pad, &x);
+    for (int b = 0; b < PAD_XBUTTONS; ++b)
+        out[b] = (BIT[b] ? (x.buttons & BIT[b]) : (b == 9 ? x.lt : x.rt) > TRIGGER) ? 0x80 : 0;
+}
 
 static Dev* dev(uint32_t p)
 {
@@ -278,7 +300,7 @@ static void DD_GetCapabilities(Guest* g)
     else if (d->kind == D_MOUSE)
         wr32(p + 8, 0x0112), wr32(p + 12, 3), wr32(p + 16, 5);
     else
-        wr32(p + 8, 0x00010215), wr32(p + 12, PAD_AXES), wr32(p + 16, PAD_BUTTONS), wr32(p + 20, 1);
+        wr32(p + 8, 0x00010215), wr32(p + 12, PAD_AXES), wr32(p + 16, (uint32_t)pad_buttons()), wr32(p + 20, 1);
     RET(DI_OK, 2);
 }
 
@@ -340,7 +362,7 @@ static void DD_EnumObjects(Guest* g)
         uint32_t args[2] = { o, ARG(2) };
         stop = !guest_call(ARG(1), 2, args);
     }
-    for (int b = 0; b < PAD_BUTTONS && !stop && (!flags || (flags & 0xC)); ++b)
+    for (int b = 0; b < pad_buttons() && !stop && (!flags || (flags & 0xC)); ++b)
     {
         write_object(o, SRC_BUTTON, b, object_ofs(d, SRC_BUTTON, b));
         uint32_t args[2] = { o, ARG(2) };
@@ -451,8 +473,11 @@ static void DD_Unacquire(Guest* g)
 static void pad_format(Dev* d, uint8_t* out)
 {
     PadState s;
+    uint8_t xb[PAD_XBUTTONS];
     memset(out, 0, d->data_size);
     input_pad_state(d->pad, &s);
+    if (g_xorder)
+        pad_xbuttons(d->pad, xb);
     int32_t axes[PAD_AXES] = { s.x, s.y, s.z, s.rx, s.ry };
     for (uint32_t i = 0; i < d->nmap; ++i)
     {
@@ -472,7 +497,7 @@ static void pad_format(Dev* d, uint8_t* out)
         else if (m->src == SRC_POV)
             memcpy(out + m->ofs, m->index == 0 ? &s.pov : &(uint32_t){ 0xFFFFFFFFu }, 4);
         else
-            out[m->ofs] = m->index < 11 ? s.buttons[m->index] : 0;
+            out[m->ofs] = g_xorder ? (m->index < PAD_XBUTTONS ? xb[m->index] : 0) : m->index < 11 ? s.buttons[m->index] : 0;
     }
 }
 
@@ -619,7 +644,7 @@ static void DD_SetDataFormat(Guest* g)
             else if ((guid && !memcmp(guid, GUID_Button, 16)) || (!guid && (type & 0xC)))
             {
                 int idx = any ? next_button++ : (int)inst;
-                if (idx < PAD_BUTTONS)
+                if (idx < pad_buttons())
                     m.src = SRC_BUTTON, m.index = (uint8_t)idx;
             }
             else if (!guid && (type & 3))

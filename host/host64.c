@@ -1792,6 +1792,7 @@ int main(int argc, char** argv)
     d3d8_init();
     dsound_init();
     dinput_init();
+    dinput_xinput_order(FFXI_FEATURE_DINPUT_PAD); /* padsin000's codes on a DirectInput-only client */
     ws2_init();
     /* the game's hosts: the lobby through gamecore's resolver, every other one through
      * gethostbyname. With a PlayOnline session none is redirected: they resolve through DNS, as

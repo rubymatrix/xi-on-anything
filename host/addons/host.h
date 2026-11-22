@@ -206,6 +206,10 @@ int xi_key_down(uint32_t dik);
 int xi_key_code(const char* name);
 /* Presses (down 1) or releases a key for the game, as the keyboard would (focus or not). */
 void xi_key_inject(uint32_t dik, int down);
+/* a test gamepad's button (a b x y lb rb lt rt back start guide ls rs up down left right) down or
+ * up: an SDL virtual Xbox pad, attached the first time (or at start with FFXI_TEST_PAD set); 0 for
+ * no such button */
+int xi_pad_inject(const char* name, int down);
 
 /* --- the overlay (gui.cpp) ------------------------------------------------------------------- */
 
@@ -213,6 +217,8 @@ void xi_gui_init(void);
 /* Between the addons' frame events and the frame going out. */
 void xi_gui_begin(uint32_t w, uint32_t h);
 void xi_gui_end(void);
+/* the Gamepad window (F12, host/modern.c), inside the overlay's frame */
+void xi_gui_gamepad(void);
 int xi_gui_in_frame(void);
 /* Around one addon's drawing event: what it leaves open in ImGui is closed (and logged). */
 void xi_gui_addon_begin(void);

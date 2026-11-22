@@ -28,6 +28,7 @@ extern "C" {
 #include "gfx_queue.h" /* gfx.h, through the render queue where the build has one (the OpenGL host's) */
 #include "host.h"
 #include "d3d_ffi.h"
+#include "../modern.h"
 #include "plat.h"
 }
 
@@ -1194,6 +1195,81 @@ static void build_objects(void)
             draw_text(g_objects, it.t);
         else
             draw_prim(g_objects, it.p);
+}
+
+/* The Gamepad window (F12 on a client without Config > Advanced: host/modern.c): a row a game
+ * function and a stick axis, each with its button (or axis) to pick from a list, or Record: the next
+ * button pressed on the controller. Every change written and applied at once. */
+extern "C" void xi_gui_gamepad(void)
+{
+    if (!g_in_frame || !modern_pad_window())
+        return;
+    modern_pad_window_frame();
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    bool open = true;
+    if (ImGui::Begin("Gamepad##xi_gamepad", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        const char* dev = modern_pad_device();
+        int rec = modern_pad_recording();
+        if (!dev)
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "No controller connected.");
+        else
+            ImGui::TextDisabled("%s", dev);
+        int kind;
+        const char* help;
+        if (rec >= 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "%s: press it on the controller. Escape cancels.",
+                modern_pad_row(rec, &kind, &help));
+        else
+            ImGui::TextDisabled("Record, then press the button. F12 or Escape closes.");
+        if (ImGui::BeginTable("rows", 3, ImGuiTableFlags_SizingFixedFit))
+        {
+            ImGui::TableSetupColumn("function", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+            ImGui::TableSetupColumn("button", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+            ImGui::TableSetupColumn("actions", ImGuiTableColumnFlags_WidthFixed);
+            for (int i = 0;; ++i)
+            {
+                const char* label = modern_pad_row(i, &kind, &help);
+                if (!label)
+                    break;
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (!kind)
+                {
+                    ImGui::Dummy(ImVec2(0, 4));
+                    ImGui::TextColored(ImVec4(0.6f, 0.75f, 1.0f, 1.0f), "%s", label);
+                    continue;
+                }
+                ImGui::PushID(i);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(label);
+                if (help && *help && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", help);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                int cur = modern_pad_get(i);
+                if (ImGui::BeginCombo("##v", rec == i ? "..." : modern_pad_choice(i, cur)))
+                {
+                    for (int c = 0, n = modern_pad_choices(i); c < n; ++c)
+                        if (ImGui::Selectable(modern_pad_choice(i, c), c == cur))
+                            modern_pad_set(i, c);
+                    ImGui::EndCombo();
+                }
+                ImGui::TableSetColumnIndex(2);
+                if (ImGui::Button(rec == i ? "Cancel" : "Record"))
+                    modern_pad_record(rec == i ? -1 : i);
+                ImGui::SameLine();
+                if (ImGui::Button("Clear"))
+                    modern_pad_set(i, 0);
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::End();
+    if (!open)
+        modern_pad_window_set(0);
 }
 
 extern "C" void xi_gui_end(void)

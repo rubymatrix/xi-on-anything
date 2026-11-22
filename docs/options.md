@@ -188,6 +188,16 @@ or down from its bottom one, or the mouse wheel.
 What the game's sticks do (movement and camera) and the button combinations (`padexsin000`) are not
 on the page.
 
+**The 2009 client** has no Config › Advanced (its menu addresses aren't found), so **F12** opens the
+same rows in an overlay window instead (`host/addons/gui.cpp` `xi_gui_gamepad`, `host/modern.c`): pick a
+button from each row's list, or Record and press it on the controller; Clear sets None; F12 or Escape
+closes it (Escape first cancels a recording). Its window has no `0x800b` message, so a change is
+applied by running the game's own pad-settings reader again (`meta/builds.json` `pad_config`,
+`pad_reload`). That client reads the pad only through DirectInput, where a `padsin000` value is a
+DirectInput button: there host64's DirectInput pad numbers its 16 buttons as the XInput codes above
+(`dinput_pad`, `runtime/portable/dinput.c`), so ffxi.reg's map and this window's mean the same buttons
+as on today's clients.
+
 ## 9. Textures & game data
 
 | Setting | CLI | App / Env | Notes |
@@ -328,7 +338,8 @@ rather than offer it.
 
 The clients from 2009 and 2010 have, of host64's additions: the widescreen view (`aspect`), 60 fps
 in the world (`frame60`: a translated variant of their frame loop, as they have no frame divisor),
-draw distance, nameplates and the modern effects' post-processing (`modern_fx`); the rest need
+draw distance, nameplates and the modern effects' post-processing (`modern_fx`); the 2009 one also
+`dinput_pad` (the gamepad's buttons in XInput's numbering, and Config › Gamepad's rows on F12); the rest need
 hooks those builds don't have. They have no addons (`addons`): Ashita's and Windower's libraries
 read today's packets, resources and memory, and on those clients they get them wrong (battlemod
 read the 2009 client's action packets with today's field widths and named Gust Slash "Viruna").

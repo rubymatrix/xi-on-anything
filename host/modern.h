@@ -57,3 +57,19 @@ void modern_set_addons(const ModernAddons* ops);
 /* Config > Gamepad opened at the next frame, over whatever is up (the touch controls' Pad; any thread).
  * Nothing before the game's menus are in (the sign-in screen). */
 void modern_open_gamepad(void);
+
+/* The Gamepad window: F12 on a client without Config > Advanced (the 2009 one), Config > Gamepad's
+ * rows in the overlay (host/addons/gui.cpp). On the game's thread. */
+int modern_pad_window(void);          /* it is up */
+void modern_pad_window_set(int open);
+void modern_pad_window_frame(void);   /* each frame it is up, before it is drawn */
+/* Row i (0 up): its label, NULL past the last; kind 0 a heading, 1 a game function (its button),
+ * 2 a stick axis (the controller's own, host/padmap.c); help its line. */
+const char* modern_pad_row(int i, int* kind, const char** help);
+int modern_pad_choices(int i);
+const char* modern_pad_choice(int i, int c);
+int modern_pad_get(int i);
+void modern_pad_set(int i, int choice); /* written and applied at once */
+void modern_pad_record(int i);          /* the next button pressed (a stick pushed) becomes it; -1 stops */
+int modern_pad_recording(void);         /* the row being recorded, or -1 */
+const char* modern_pad_device(void);    /* the controller's name, NULL with none */

@@ -2298,7 +2298,9 @@
       "version": "30090710_2",
       "addresses": {
         "chars_ptr": "0x10444228",
-        "present_site": "0x100031db"
+        "present_site": "0x100031db",
+        "pad_config": "0x10353294",
+        "pad_reload": "0x10002620"
       },
       "offsets": {
         "chars_table": "0x12eb0"

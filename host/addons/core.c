@@ -1233,6 +1233,7 @@ void addons_frame(void)
     {
         xi_gui_begin(w, h);
         xi_frame_draw("present");
+        xi_gui_gamepad();
         xi_gui_end();
         xi_frame_draw("postrender");
     }
