@@ -20,9 +20,9 @@ never switched on, whatever the menu, `fx.txt` or the command line say: the log 
 `host64 --features` prints the table as JSON, and `runtime.json` beside a build carries it for the
 launcher. See [Features by client build](#features-by-client-build) at the end.
 
-Defaults are the code's. `fx = 0` (the default) turns every scene effect off; the keys below it keep
-their values for when it is on. On Android the rows set through scene effects are not shown, nor
-the Lighting and Atmosphere pages.
+Defaults are the code's. `fx` is on (1); `FFXI_FX=0` turns every scene effect off, and the keys below it keep
+their values for when it is on. Android builds have no Graphics, Shadows, Lighting, Atmosphere or
+Water page and no Display › FPS Counter row; Addons shows only with `--android-addons 1`.
 
 ---
 

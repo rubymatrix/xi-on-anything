@@ -55,7 +55,7 @@ install folder. By hand:
    global the character list hangs from, read by gamecore), `present_site` (the return address of
    the game's `IDirect3DDevice8::Present` call, used on Windows), the CRT functions the
    differential test compares, host/modern.c's menu addresses (the `modern` section; a build
-   without all of them builds with Config > Modern and Config > Menus off), the skinning kernels'
+   without all of them builds with Config > Advanced and Config > Menus off), the skinning kernels'
    functions and globals (the `geometry` section, all or none, without its layout; see step 4),
    and the manual verdicts in `discovery/verdicts.py`. `--only modern --write` or
    `--only geometry --write` carries just that section into a build `meta/builds.json` already

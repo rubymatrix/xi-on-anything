@@ -46,7 +46,7 @@ Find your device, then follow its guide. Each guide goes from nothing to the tit
 | **Windows PC** (x64) | Ready | Launcher installer, or build it yourself (Visual Studio or llvm-mingw) | [Windows](docs/platforms/windows.md) |
 | **Web browser** | Experimental, host it yourself | Build and host it yourself | [Web browser](docs/platforms/web.md) |
 | **Xbox One / Series** | Experimental | Developer Mode, sideloaded | [Xbox](docs/platforms/xbox-one.md) |
-| **Android** (ARM64) | Experimental, tested on a Pixel Fold | Debug APK | [Android](docs/android.md) |
+| **Android** (ARM64) | Experimental, tested on a Pixel Fold | Debug APK | [Android](docs/platforms/android.md) |
 | **PS4** | Experimental | Jailbroken console, fake PKG (branch `port/ps4`) | [PS4](docs/platforms/ps4.md) |
 | **Nintendo Switch** | Experimental | Homebrew `.nro` for a console running Atmosphère | [Switch](docs/platforms/switch.md) |
 
