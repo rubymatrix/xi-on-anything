@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""runtime/portable/gfx_visibility_storage.inc's SPIR-V arrays from their GLSL sources beside it
+"""runtime/portable/gfx/gfx_visibility_storage.inc's SPIR-V arrays from their GLSL sources beside it
 (gfx_visibility_storage_*.vert/.frag), compiled with glslang for Vulkan 1.1 (SPIR-V 1.3). The arrays
 were made with glslang 16.5.0, the version tools/android_deps.py pins; another version may emit
 different words.
@@ -18,7 +18,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-INC = ROOT / 'runtime/portable/gfx_visibility_storage.inc'
+INC = ROOT / 'runtime/portable/gfx/gfx_visibility_storage.inc'
 ARRAYS = {  # array: source
     'visibilityQuadSpv': 'gfx_visibility_storage_quad.vert',
     'visibilitySampleSpv': 'gfx_visibility_storage_sample.vert',

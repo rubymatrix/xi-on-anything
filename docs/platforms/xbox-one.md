@@ -4,8 +4,8 @@ The recompiled game as a UWP app on a console in Developer Mode, drawn with Dire
 CoreWindow, with the native sign-in screen driven by the controller. Developed on an Xbox One X; the
 Series X|S run the same build.
 
-The app and its tools are in [`xbox/`](../../xbox/README.md); every quirk is in
-[`xbox/docs/xbox-install.md`](../../xbox/docs/xbox-install.md).
+The app and its tools are in [`platforms/xbox/`](../../platforms/xbox/README.md); every quirk is in
+[`platforms/xbox/docs/xbox-install.md`](../../platforms/xbox/docs/xbox-install.md).
 
 Developer Mode builds are sideloaded to your own console only, not distributed.
 
@@ -18,7 +18,7 @@ Developer Mode builds are sideloaded to your own console only, not distributed.
   its headers (`SDL3_DIR`, default `C:\Dev\SDL3\SDL3-3.4.16`). Optional: the Windows SDK's `dxc` on
   `PATH`, for the ray-traced effects.
 - **Any computer** (Mac, Linux or the same PC) with Python 3 and a checkout of this repo, to install
-  onto the console. `xbox/tools/xbox.py` needs only the standard library; it writes to `build/xbox/`.
+  onto the console. `platforms/xbox/tools/xbox.py` needs only the standard library; it writes to `build/xbox/`.
 - Your `FINAL FANTASY XI` folder (about 15 GB). The PlayOnline viewer folder isn't needed.
 - Performance: an Xbox One's CPU is several times slower than a current PC's; expect 24 to 30 fps
   in busy scenes. The Series consoles have headroom.
@@ -41,7 +41,7 @@ Retail games don't run in Developer Mode; switch back to Retail Mode in Dev Home
 ```bat
 python tools\prepare.py --game "<...>\FINAL FANTASY XI"      & rem once per game version
 python tools\build.py uwp-lib                               & rem build\uwp\ffxi_uwp.lib
-powershell -File xbox\tools\deploy-xbox.ps1 -PackageOnly     & rem build\xbox\XIonXbox-xbox.msix
+powershell -File platforms\xbox\tools\deploy-xbox.ps1 -PackageOnly     & rem build\xbox\XIonXbox-xbox.msix
 ```
 
 The package is signed with a self-signed test certificate made on first use
@@ -49,7 +49,7 @@ The package is signed with a self-signed test certificate made on first use
 (about 17 MB) to the computer you'll install from, if it's another one.
 
 To try the app on the PC first (Windows Developer Mode on):
-`powershell -File xbox\tools\deploy.ps1 -Launch`. To reach a server on the same PC, run the
+`powershell -File platforms\xbox\tools\deploy.ps1 -Launch`. To reach a server on the same PC, run the
 `CheckNetIsolation LoopbackExempt` command it prints, once, as administrator.
 
 ## 3. Install on the console (once)
@@ -60,24 +60,24 @@ updates replace only the app.
 
 ```bash
 export XBOX=<console address>                 # remembered after the first use
-python3 xbox/tools/xbox.py status             # what's there now
-python3 -u xbox/tools/xbox.py setup build/xbox/XIonXbox-xbox.msix "<...>/FINAL FANTASY XI"
+python3 platforms/xbox/tools/xbox.py status             # what's there now
+python3 -u platforms/xbox/tools/xbox.py setup build/xbox/XIonXbox-xbox.msix "<...>/FINAL FANTASY XI"
 ```
 
 - It sends the app's files, registers the folder, then uploads the game: about 65,000 files and
   15 GB, about 40 minutes on a good wired LAN. Progress looks like
   `12000/65252 files, 3.10/15.04 GB, 14.2 MB/s`.
 - **Don't move the game folder until it finishes.** If the upload stops, run
-  `python3 xbox/tools/xbox.py game "<...>/FINAL FANTASY XI"`: it sends only what's missing.
+  `python3 platforms/xbox/tools/xbox.py game "<...>/FINAL FANTASY XI"`: it sends only what's missing.
 - If `status` says **installed from a package**, a loose app can't replace it (`0x80073CFB`). Run
-  `python3 xbox/tools/xbox.py uninstall` first; it backs up LocalState to `build/xbox/`.
+  `python3 platforms/xbox/tools/xbox.py uninstall` first; it backs up LocalState to `build/xbox/`.
 
 Then:
 
-1. `python3 xbox/tools/xbox.py launch`.
+1. `python3 platforms/xbox/tools/xbox.py launch`.
 2. In Dev Home, select **XI on Xbox**, **View details**, and set its type to **Game**. As an App it
    gets about 1 GB of RAM, too little.
-3. Check it found the game: `python3 xbox/tools/xbox.py logs build/xbox/logs-check`, and look in
+3. Check it found the game: `python3 platforms/xbox/tools/xbox.py logs build/xbox/logs-check`, and look in
    `host64.log` for `[app] starting the game: D:\DevelopmentFiles\LooseApps\XIonXbox\...`.
 
 ## 4. Play
@@ -102,7 +102,7 @@ settings are in Config > Advanced.
 ## Updating
 
 ```bash
-python3 xbox/tools/xbox.py deploy build/xbox/XIonXbox-xbox.msix
+python3 platforms/xbox/tools/xbox.py deploy build/xbox/XIonXbox-xbox.msix
 ```
 
 It stops the app, sends about 45 MB, registers it again and launches it. The game stays put. It
@@ -110,11 +110,11 @@ refuses an app installed from a package.
 
 A new game version: `prepare`, `uwp-lib`, the package, `deploy`, then `game`. `game` skips files already there at the same size, so a changed file that kept its size
 isn't sent. To send every file again (all 15 GB):
-`python3 xbox/tools/xbox.py push "<...>/FINAL FANTASY XI" 'dev:\LooseApps\XIonXbox\SquareEnix\FINAL FANTASY XI' --all`.
+`python3 platforms/xbox/tools/xbox.py push "<...>/FINAL FANTASY XI" 'dev:\LooseApps\XIonXbox\SquareEnix\FINAL FANTASY XI' --all`.
 
 ## Files on the console
 
-In the app's LocalState (`python3 xbox/tools/xbox.py logs <folder>` copies the logs):
+In the app's LocalState (`python3 platforms/xbox/tools/xbox.py logs <folder>` copies the logs):
 
 | File | What |
 | --- | --- |

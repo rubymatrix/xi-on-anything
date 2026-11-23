@@ -94,7 +94,7 @@ def stale(src, obj, headers):
 
 def newest_header():
     newest = os.path.getmtime(build.BUILD_H)
-    for d in ('runtime', 'runtime/portable', 'host', 'host/addons'):
+    for d in ('runtime', 'runtime/portable', 'runtime/portable/gfx', 'runtime/portable/winapi', 'runtime/portable/gamecore', 'runtime/portable/geometry', 'host', 'host/ui', 'host/signin', 'host/addons'):
         full = os.path.join(ROOT, d)
         for f in os.listdir(full):
             if f.endswith('.h'):
@@ -187,7 +187,7 @@ def host64(env, out):
     objs += compile_stale(env, build.PORTABLE + build.HOST_SOURCES, OBJ + '/host64', sdl_inc + gnu(build.HOST_INCLUDES))
     objs += addon_objects(env, sdl_inc)
     res = os.path.join(OBJ, 'host64.res.o')
-    run(env, ['llvm-windres', '-O', 'coff', '-o', res, 'host/host64.rc'])
+    run(env, ['llvm-windres', '-O', 'coff', '-o', res, 'platforms/windows/host64.rc'])
     objs.append(res)
     os.makedirs(os.path.join(ROOT, out), exist_ok=True)
     exe = os.path.join(out, 'host64.exe')

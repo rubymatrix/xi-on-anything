@@ -57,7 +57,7 @@ const char* padmap_short(int c);
 /* What to ask for while control c is recorded ("Press the button for A.") */
 const char* padmap_prompt(int c);
 
-/* For tests/padmap_test.c: control c's value in the mapping ("b3", "a1~"), and the mapping as it
+/* For tests/host/padmap_test.c: control c's value in the mapping ("b3", "a1~"), and the mapping as it
  * would be given to SDL. */
 const char* padmap_value(int c);
 int padmap_mapping(char* out, int n);

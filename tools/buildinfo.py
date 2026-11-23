@@ -1,6 +1,6 @@
 """Which retail build this checkout is working on, and which version of the client it makes.
 
-meta/builds.json lists every build the recompiler knows. tools/prepare.py matches the install's
+recomp/meta/builds.json lists every build the recompiler knows. tools/prepare.py matches the install's
 FFXiMain.dll against it and records the choice in generated/build.json; everything after that
 (build.py, install.py) reads the choice from there, so nothing depends on the install again.
 
@@ -13,7 +13,7 @@ import os
 import subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-METADIR = os.path.join(ROOT, 'meta')
+METADIR = os.path.join(ROOT, 'recomp', 'meta')
 BUILDS = os.path.join(METADIR, 'builds.json')
 FEATURES = os.path.join(METADIR, 'features.json')
 CHOSEN = os.path.join(ROOT, 'generated', 'build.json')
@@ -84,13 +84,13 @@ def current(required=True):
 
 
 def catalog():
-    """meta/features.json's features, in its order: {id: {title, what, code, min_build, ...}}."""
+    """recomp/meta/features.json's features, in its order: {id: {title, what, code, min_build, ...}}."""
     with open(FEATURES) as f:
         return json.load(f)['features']
 
 
 def features(label):
-    """Which of meta/features.json's features the build labelled so has: [{'id', 'title', 'on', 'why'}],
+    """Which of recomp/meta/features.json's features the build labelled so has: [{'id', 'title', 'on', 'why'}],
     why being '' when on, else the first rule that failed (or the build's own override)."""
     builds = known()
     b = builds[label]
@@ -126,7 +126,7 @@ def features(label):
 
 def runtime():
     """{'version', 'commit', 'build', 'features'}: what a client built from this checkout is, and which of
-    meta/features.json's features it has (buildinfo.features). commit is None outside a git checkout,
+    recomp/meta/features.json's features it has (buildinfo.features). commit is None outside a git checkout,
     build None (and features empty) before tools/prepare.py."""
     with open(RUNTIME) as f:
         version = json.load(f)['version']

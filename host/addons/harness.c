@@ -3,7 +3,7 @@
  * The game's image is mapped and its DLLs initialised (patterns, the guest heap and guest calls
  * work), but GameStart never runs: no window, no GPU, no server, and the game's structures are
  * empty. Chat lines go to stdout as "[chat <mode>] text"; lines the game would run as
- * "[game] line". For testing the Lua layers against real addons (tools/addon_survey.py).
+ * "[game] line". For testing the Lua layers against real addons (tools/addons/addon_survey.py).
  *
  * Script lines ('#' starts a comment):
  *   load <name> [xi|ashita|windower]    unload <name>
@@ -30,11 +30,11 @@
 #include <SDL3/SDL.h>
 
 #include "addons.h"
-#include "dinput.h"
+#include "../../runtime/portable/winapi/dinput.h"
 #include "gthread.h"
 #include "host.h"
 #include "plat.h"
-#include "user32.h"
+#include "../../runtime/portable/winapi/user32.h"
 
 #include "lauxlib.h"
 #include "lua.h"

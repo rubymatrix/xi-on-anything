@@ -95,7 +95,7 @@ and the window theme. Cmd+Q, the Dock's Quit and Ctrl+C quit at any time.
 
 ## Troubleshooting
 
-- **"is build &lt;sha&gt;, which meta/builds.json does not know"**: your client version isn't
+- **"is build &lt;sha&gt;, which recomp/meta/builds.json does not know"**: your client version isn't
   supported yet. See [Supporting a new client version](../new-client-version.md#supporting-a-new-client-version).
 - **The app asks for Keychain access after every update**: it is signed ad hoc. Make the
   `FFXI Local Code Signing` certificate (above) and rebuild.

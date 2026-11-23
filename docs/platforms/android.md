@@ -1,7 +1,7 @@
 # Android (experimental)
 
 The recompiled game as a native ARM64 Android app, drawn with Vulkan. No emulator, Wine or DXVK.
-Developer notes are in [../android.md](../android.md).
+Developer notes are in [android-dev.md](android-dev.md).
 
 > [!IMPORTANT]
 > **Status**: experimental, tested on a Pixel Fold. The APK is a debug build. The scene effects
@@ -22,7 +22,7 @@ Developer notes are in [../android.md](../android.md).
 sees, then builds the app, signs it and installs it. It makes a signing key for you: back it up.
 Android accepts an update only when it is signed with the same key. Updates keep the app's files.
 
-**From source:** see [Build from source](../android.md#build-from-source).
+**From source:** see [Build from source](android-dev.md#build-from-source).
 
 ## The game on the phone
 
@@ -66,7 +66,7 @@ The log and settings are in `/sdcard/Android/data/com.rubymatrix.xionanything/fi
 Beside `data`, in `files`, you can add `run.args` (one argument per line) and `wallpaper.png` or
 `wallpaper.jpg` to fill the bars beside the game. Your touch layout is kept there too, in
 `touch-layout.txt`. `run.args` replaces the app's whole command line, so copy the defaults from
-[the developer notes](../android.md#build-from-source) and keep `--data-dir`.
+[the developer notes](android-dev.md#build-from-source) and keep `--data-dir`.
 
 ## Troubleshooting
 

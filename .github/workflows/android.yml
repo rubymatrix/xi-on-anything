@@ -34,9 +34,9 @@ jobs:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
         run: |
-          python3 tests/android_policy_test.py
-          python3 tests/android_build_test.py
-          python3 tests/android_entry_test.py
+          python3 platforms/android/tests/android_policy_test.py
+          python3 platforms/android/tests/android_build_test.py
+          python3 platforms/android/tests/android_entry_test.py
 
   android-build:
     runs-on: ubuntu-24.04

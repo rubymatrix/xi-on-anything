@@ -35,18 +35,18 @@ Both the still run (no input) and your camera-sweep run must pass.
 
 Read `tools/replay/README.md` first; it is the reference for everything below.
 
-- `tools/replayserver.py` plays a suite of scenes (`tools/replay/default.txt` is every scene).
-- `tools/replay.py run <suite>` runs the scenes unattended and writes `report.txt`/`report.json`
-  under `generated/runs/<date>-<suite>/`. `tools/replay.py play <suite>` starts a session that waits
+- `tools/replay/replayserver.py` plays a suite of scenes (`tools/replay/default.txt` is every scene).
+- `tools/replay/replay.py run <suite>` runs the scenes unattended and writes `report.txt`/`report.json`
+  under `generated/runs/<date>-<suite>/`. `tools/replay/replay.py play <suite>` starts a session that waits
   in the home scene for `!replay <#|name|group|all|list|stop>` in chat. `shots` captures each READY.
-- `tools/replayreport.py <frames.csv> [--json]` gives fps, mean, p50/p95/p99, max and frames over
+- `tools/replay/replayreport.py <frames.csv> [--json]` gives fps, mean, p50/p95/p99, max and frames over
   33 ms per scene and per phase from the xireplay addon's frame log (`/xireplay frames on`).
 - The game's control port (`FFXI_CONTROL`, 127.0.0.1:54300; `replay.py` turns it on) drives the game
   in-process without its window having focus. Use the `xi` MCP tools when they are available
   (`game_state`, `game_screenshot`, `game_keys`, `game_key`, `game_release_keys`, `game_chat_send`,
   `game_chat_log`, `game_wait`, `game_lua`, `game_quit`); otherwise talk to the port directly, one
   JSON line per request (`{"id":1,"cmd":"key","args":{"key":"right","down":true}}`; commands: state,
-  keys, key, release_keys, capture, chat_send, chat_log, wait, lua), as `tools/replay.py`'s `Control`
+  keys, key, release_keys, capture, chat_send, chat_log, wait, lua), as `tools/replay/replay.py`'s `Control`
   class does. Never use osascript or other desktop key injection: it steals the user's focus.
 - Scene events come back as chat lines from "xireplay" (BEGIN, READY, END with fps/p99/max, DONE,
   HOME) and the latest one in `state.json` beside the recordings.
@@ -54,13 +54,13 @@ Read `tools/replay/README.md` first; it is the reference for everything below.
 ## Signing in
 
 The client never waits at a login screen for you: it signs in to the local fake server on its own,
-the way `tools/replay.py` does (`session()`, `launch()`, `through_lobby()`; import them rather than
+the way `tools/replay/replay.py` does (`session()`, `launch()`, `through_lobby()`; import them rather than
 re-implementing them). Start host64 with `FFXI_CONTROL=<port>` and `FFXI_DISCORD=0`, and the args
 
     --game <game> --data-dir <data> --server 127.0.0.1 --user replay --pass replay
     --authport <auth> --dataport <data port> --viewport <view>
 
-where the ports are the ones the server you started listens on (`tools/replayserver.py`: 55231
+where the ports are the ones the server you started listens on (`tools/replay/replayserver.py`: 55231
 auth, 55230 data, 55001 lobby, 55232 zone). The fake server takes any sign-in; `replay`/`replay` are
 throwaway values for it, never a real account. Then press Enter through the control port every ~2 s
 until `state` reports a zone id. A client already stuck at the login screen can't take `/shutdown`:
@@ -93,7 +93,7 @@ user's own settings are never touched. Say in the report what you used.
   dir (`FFXI_CACHE_DIR`, default `~/Library/Caches/FFXI`), not the data dir: set
   `FFXI_CACHE_DIR=<data>` so `<data>/fx.txt` is the one used and the user's own is untouched.
   `<data>/fx.txt` (`key = value`, one per line; the keys and defaults are in
-  `runtime/portable/gfx_fx.c`):
+  `runtime/portable/gfx/gfx_fx.c`):
 
       fx = 1
       light = 2
@@ -105,7 +105,7 @@ user's own settings are never touched. Say in the report what you used.
   The rest stay at their defaults, which are on. Change a slider (like `sun`) only when the test calls
   for it, and name it in the report.
 
-To stand somewhere no scene goes (a zone, a spot) without recordings, `tools/staticserver.py
+To stand somewhere no scene goes (a zone, a spot) without recordings, `tools/replay/staticserver.py
 --huffman <res> --zone Z --pos x,y,z,rot` is the same server with no recordings; give it the replay
 ports (`--auth-port 55231 --data-port 55230 --view-port 55001 --zone-port 55232`) and sign in the
 same way.
@@ -136,7 +136,7 @@ re-record them: a new set needs the user's server (`tools/replay/README.md`, "A 
    tilt, still or moving, and how bad (blocker / major / minor), with the capture paths.
 
 Turn the frame log on (`/xireplay frames on`) before the sweeps so every frame is timed, and run
-`tools/replayreport.py` on it afterwards. Also run `tools/replay.py run tools/replay/default.txt`
+`tools/replay/replayreport.py` on it afterwards. Also run `tools/replay/replay.py run tools/replay/default.txt`
 (no input) for the still numbers. Lighting scenes (dawn, noon, dusk, midnight) and weather scenes
 matter most for shadows and lighting; crowd and effects scenes matter most for frame rate.
 

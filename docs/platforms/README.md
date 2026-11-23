@@ -32,9 +32,9 @@ merged. Check it out before following its guide.
 - Python 3 with `capstone` and `pefile`: `pip3 install capstone pefile`. Where pip refuses
   (Ubuntu 24.04 and other PEP 668 systems), add `--break-system-packages`. On macOS Apple's
   `/usr/bin/python3` will do; on Windows, see [windows.md](windows.md).
-- Run `prepare` once per client version. It identifies your build (`meta/builds.json`) and unpacks
+- Run `prepare` once per client version. It identifies your build (`recomp/meta/builds.json`) and unpacks
   `FFXiMain.dll` and `FFXi.dll` into `generated/`. Run it again when your server hands out a new
-  game version. An unknown DLL stops here with "is build &lt;sha&gt;, which meta/builds.json does
+  game version. An unknown DLL stops here with "is build &lt;sha&gt;, which recomp/meta/builds.json does
   not know": that build needs metadata first
   ([Supporting a new client version](../new-client-version.md#supporting-a-new-client-version)).
 - `generated/` and `build/` hold code and files derived from the game. They are gitignored. Never

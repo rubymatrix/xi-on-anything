@@ -26,7 +26,7 @@
 #include "host.h"
 #include "addons.h"
 #include "gui_lua.h"
-#include "d3d8.h"
+#include "../../runtime/portable/winapi/d3d8.h"
 #include "gthread.h"
 #include "gwin.h"
 #include "plat.h"
@@ -766,14 +766,14 @@ int xi_addon_load(const char* name, int kind)
         chatf("addon: bad name");
         return 0;
     }
-    /* meta/features.json addons: Ashita's and Windower's libraries assume today's client (its packets,
+    /* recomp/meta/features.json addons: Ashita's and Windower's libraries assume today's client (its packets,
      * resources and memory), so on older builds only the host's own built-in addons load */
     if (!FFXI_FEATURE_ADDONS && !g_builtin)
     {
         static int told;
         if (!told++)
         {
-            xi_log("addons are off for build %s (meta/features.json): %s is not loaded, nor any after it", FFXI_BUILD, name);
+            xi_log("addons are off for build %s (recomp/meta/features.json): %s is not loaded, nor any after it", FFXI_BUILD, name);
             chatf("addon: addons don't work with this client (build %s)", FFXI_BUILD);
         }
         return 0;
@@ -1206,7 +1206,7 @@ void addons_frame(void)
         return;
     if (!g_started)
     {
-        /* FFXI_CONTROL=<port> (1: the default): the control port (lua/control.lua, tools/xi_mcp.py) */
+        /* FFXI_CONTROL=<port> (1: the default): the control port (lua/control.lua, tools/debug/xi_mcp.py) */
         const char* c = getenv("FFXI_CONTROL");
         if (c && *c && strcmp(c, "0"))
             xi_addon_load_builtin("control");

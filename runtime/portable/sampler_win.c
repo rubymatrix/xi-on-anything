@@ -5,7 +5,7 @@
  * context and walks its stack with the unwinder (every frame of the host executable carries unwind
  * data: recompiled functions, runtime and CRT alike), and resumes it. Each sample is written as up to
  * SAMPLE_DEPTH return addresses, relative to the host executable's base; a frame outside it (a
- * system DLL, the driver) is written as 0xFFFFFFFF. tools/sample_report.py resolves them against the
+ * system DLL, the driver) is written as 0xFFFFFFFF. tools/debug/sample_report.py resolves them against the
  * linker's map file.
  *
  * File: "FXSAMPL1", then records { u32 count; u32 rva[count]; }. */

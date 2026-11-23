@@ -5,7 +5,7 @@
 
 #include <SDL3/SDL.h>
 
-#include "input.h"
+#include "../runtime/portable/winapi/input.h"
 #include "padmap.h"
 
 enum

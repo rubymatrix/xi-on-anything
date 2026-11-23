@@ -11,13 +11,13 @@ Everything the build reads is in this repository.
 
 | input | here |
 | --- | --- |
-| per-build metadata `ffxi-recomp-meta/1` (addresses and shapes, no bytes) | `meta/<module>.<build>.meta.json` |
-| the builds, their hashes, and the few addresses the runtime and tests name | `meta/builds.json` (written to `generated/build.h`) |
+| per-build metadata `ffxi-recomp-meta/1` (addresses and shapes, no bytes) | `recomp/meta/<module>.<build>.meta.json` |
+| the builds, their hashes, and the few addresses the runtime and tests name | `recomp/meta/builds.json` (written to `generated/build.h`) |
 | static unpacker for the packed `.text` | `tools/unpack.py` |
-| the specifications the runtime implements: gamecore slots, the gamecore and D3D8 surfaces | `specs/` |
+| the specifications the runtime implements: gamecore slots, the gamecore and D3D8 surfaces | `runtime/specs/` |
 
-The metadata comes from a Ghidra discovery pass over each build's unpacked DLLs: `discovery/`
-(Ghidra post-scripts and per-build manual verdicts), run by `tools/discover.py`. The build uses the
+The metadata comes from a Ghidra discovery pass over each build's unpacked DLLs: `recomp/discovery/`
+(Ghidra post-scripts and per-build manual verdicts), run by `tools/version/discover.py`. The build uses the
 committed metadata; you need the pass only for a [new build](new-client-version.md).
 
 ## macOS (arm64)
@@ -83,12 +83,12 @@ rm key.pem cs.p12
 
 ## Linux (x86_64)
 
-Needs Vulkan 1.3 (`runtime/portable/gfx_vulkan.c`), the system's SDL3 (3.2 or later, through
-pkg-config) and glslang. `tools/linux/Dockerfile` has all of it, plus Mesa's software Vulkan for the
+Needs Vulkan 1.3 (`runtime/portable/gfx/gfx_vulkan.c`), the system's SDL3 (3.2 or later, through
+pkg-config) and glslang. `platforms/linux/Dockerfile` has all of it, plus Mesa's software Vulkan for the
 tests:
 
 ```
-docker build -t xi-linux tools/linux
+docker build -t xi-linux platforms/linux
 docker run --rm -v "$PWD":/src -w /src xi-linux python3 tools/build_posix.py gfxtest
 docker run --rm -v "$PWD":/src -v "<FINAL FANTASY XI>":/game:ro -w /src xi-linux \
     sh -c 'python3 tools/build_posix.py prepare --game /game && python3 tools/build_posix.py host64 --game /game'
@@ -99,7 +99,7 @@ docker run --rm -v "$PWD":/src -v "<FINAL FANTASY XI>":/game:ro -w /src xi-linux
 applications menu (`~/.local/share/applications/xi-on-anything.desktop`, named for host64's app
 id), so docks and window switchers show the game's icon.
 
-The launcher builds the Steam Deck's client from a kit, `tools/linux/kit.sh` (zig, static SDL3 and
+The launcher builds the Steam Deck's client from a kit, `platforms/linux/kit.sh` (zig, static SDL3 and
 glslang; CI publishes it as the `kit-linux` pre-release). It holds everything but the game,
 prebuilt, so the player needs only zig and python3 to build `host64` (`build_posix.py host64 --kit`).
 
@@ -113,7 +113,7 @@ python tools\build.py difftest   # x86: translate the CRT slice, differential te
 python tools\build.py host       # x86: the stand-in FFXiMain.dll + boot test
 python tools\build.py boot64     # x64: the portable runtime + boot test
 python tools\install.py install  # put the stand-in in the game folder (status, restore)
-python tools\trace_report.py <FFXiMain.trace.txt> [--seq <FFXiMain.seq.txt>]   # resolve a boundary trace
+python tools\debug\trace_report.py <FFXiMain.trace.txt> [--seq <FFXiMain.seq.txt>]   # resolve a boundary trace
 python tools\build.py host64     # x64: the game host (SDL3 at C:\Dev\SDL3\SDL3-3.4.16, or SDL3_DIR)
 python tools\build_mingw.py host64 [--out <folder>]   # the same with llvm-mingw (PATH or LLVM_MINGW)
 ```
@@ -125,7 +125,7 @@ FSR DLLs (about 57 MB); offline, it uses FSR 1.
 
 ## Android (experimental)
 
-See [android.md](android.md).
+See [platforms/android-dev.md](platforms/android-dev.md).
 
 ## PlayOnline sign-in on iPhone, iPad and Android
 
@@ -133,7 +133,7 @@ With no launcher to sign in first, the game's own sign-in screen can sign in to 
 it updates the install, as the launcher and the PlayOnline Viewer do, because PlayOnline's lobby
 takes only the newest client. That sign-in and update are not in this repository. A build includes
 them when `XI_POL` names their folder. Its `xi-build.json` lists the C sources to compile (one
-implements [`host/signin_pol.h`](../host/signin_pol.h)) and a Rust crate to link.
+implements [`host/signin/signin_pol.h`](../host/signin/signin_pol.h)) and a Rust crate to link.
 
 ```sh
 XI_POL=/path/to/pol python3 tools/build_ios.py app

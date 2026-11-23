@@ -24,7 +24,7 @@
 #include <SDL3/SDL.h>
 
 #include "host.h"
-#include "input.h"
+#include "../../runtime/portable/winapi/input.h"
 
 #include "lauxlib.h"
 #include "lua.h"

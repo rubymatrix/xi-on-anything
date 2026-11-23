@@ -1,18 +1,18 @@
 """Build driver for POSIX hosts (clang): arm64 macOS for R3, Linux as a by-product.
 
   python3 tools/build_posix.py prepare --game <FINAL FANTASY XI folder>
-        identify the player's build (meta/builds.json) and unpack FFXiMain.dll and FFXi.dll into
+        identify the player's build (recomp/meta/builds.json) and unpack FFXiMain.dll and FFXi.dll into
         generated/ (Square Enix code: generated/ is gitignored, never committed)
   python3 tools/build_posix.py boot64 --game <folder>    the boot test (R3.1)
   python3 tools/build_posix.py host64 --game <folder>    the game host, with SDL3
   python3 tools/build_posix.py gfxtest                   the graphics back end and the D3D8 front end,
-        offscreen, without the game (tests/gfx_test.c, tests/d3d8_test.c)
+        offscreen, without the game (tests/gfx/gfx_test.c, tests/gfx/d3d8_test.c)
   python3 tools/build_posix.py vfstest                   the game's paths to host paths (runtime/portable/vfs.c),
-        without the game (tests/vfs_test.c)
+        without the game (tests/runtime/vfs_test.c)
   python3 tools/build_posix.py keytest                   the graphics back ends' map hash and compare
-        (runtime/portable/gfx_key.h), without a GPU (tests/gfx_key_test.c)
-  python3 tools/build_posix.py datuitest --game <folder>  the game's UI art read from its DATs (host/datui.c):
-        parse checks, and renders in build/datui/ (tests/datui_test.c)
+        (runtime/portable/gfx/gfx_key.h), without a GPU (tests/gfx/gfx_key_test.c)
+  python3 tools/build_posix.py datuitest --game <folder>  the game's UI art read from its DATs (host/ui/datui.c):
+        parse checks, and renders in build/datui/ (tests/host/datui_test.c)
   python3 tools/build_posix.py app --game <folder> [--server name] [--resolution WxH]
         [--menu-resolution WxH] [--window-mode 0-3] [--background picture] [--fullscreen-space 0|1]
         [--nameplates fix|off] [--nameplate-scale s] [--ui-aspect w:h|off] [--draw-distance k] [--lod near|game] [--cexi off|items|full] [--dats folder]
@@ -27,7 +27,7 @@
 
   python3 tools/build_posix.py kit --out <dir>     (Linux) the kit: every library and every source that
         does not name a game build's addresses (build.h), built into static archives, and kit.json.
-        tools/linux/kit.sh makes it with zig for the Steam Deck and other x86_64 Linux.
+        platforms/linux/kit.sh makes it with zig for the Steam Deck and other x86_64 Linux.
   python3 tools/build_posix.py host64 --game <folder> --kit <dir>
         host64 from a kit: translates the player's DLLs and compiles only that and the sources that
         include build.h, then links against the kit. What the launcher runs on a Steam Deck, where
@@ -71,33 +71,33 @@ GEN_WARNINGS = ['-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-se
                 '-Wno-parentheses-equality', '-Wno-unreachable-code']
 # the graphics back end: Metal on macOS (R3.2), Vulkan elsewhere
 if sys.platform == 'darwin':
-    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_scene.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
-                   'runtime/portable/gfx_metal.m']
+    GFX_SOURCES = ['runtime/portable/gfx/gfx_fx.c', 'runtime/portable/gfx/gfx_scene.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
+                   'runtime/portable/gfx/gfx_metal.m']
     GFX_LIBS = ['-framework', 'Metal', '-framework', 'QuartzCore', '-framework', 'Foundation',
                 '-weak_framework', 'MetalFX',  # MetalFX: the upscaler (macOS 13 on)
                 '-framework', 'Security']  # Security: the sign-in screen's saved passwords
 else:
     # Vulkan 1.3 (gfx_vulkan.c), its shaders compiled with glslang, memory through VMA (third_party/vma)
-    GFX_SOURCES = ['runtime/portable/gfx_fx.c', 'runtime/portable/gfx_scene.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
-                   'runtime/portable/gfx_vulkan.c', 'runtime/portable/gfx_vma.cpp', 'third_party/volk/volk.c']
+    GFX_SOURCES = ['runtime/portable/gfx/gfx_fx.c', 'runtime/portable/gfx/gfx_scene.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
+                   'runtime/portable/gfx/gfx_vulkan.c', 'runtime/portable/gfx/gfx_vma.cpp', 'third_party/volk/volk.c']
     GFX_LIBS = ['-Wl,--start-group', '-lglslang-default-resource-limits', '-lglslang', '-lSPIRV',
                 '-lMachineIndependent', '-lGenericCodeGen', '-lOSDependent', '-lSPIRV-Tools-opt', '-lSPIRV-Tools',
                 '-Wl,--end-group', '-lstdc++', '-lpthread', '-ldl', '-lm']
     CFLAGS += ['-I', 'third_party/vma', '-I', 'third_party/volk']
-    # XI_DEPS: a prefix with SDL3 and glslang built for the kit (tools/linux/kit.sh), else the system's
+    # XI_DEPS: a prefix with SDL3 and glslang built for the kit (platforms/linux/kit.sh), else the system's
     if os.environ.get('XI_DEPS'):
         CFLAGS += ['-I', os.path.join(os.environ['XI_DEPS'], 'include')]
         GFX_LIBS = ['-L' + os.path.join(os.environ['XI_DEPS'], 'lib')] + GFX_LIBS
-HOST_SOURCES = ['runtime/portable/user32.c', 'runtime/portable/d3d8.c', 'runtime/portable/dsound.c',
-                'runtime/portable/input.c', 'runtime/portable/dinput.c', 'runtime/portable/ws2.c', 'host/host64.c',
-                'host/lsb_login.c', 'host/datui.c', 'host/uidraw.c', 'host/modern.c', 'host/padmap.c', 'host/cexi.c', 'host/discord.c', 'host/frame.c', 'host/scene.c', 'host/ps2fix.c', 'host/signin.c', 'host/sewave.c', 'host/ui_art.c', 'host/vicons.c', 'host/keychain.c', 'host/appdefaults.c',
-                'runtime/portable/geometry_hooks.c'] + GFX_SOURCES
+HOST_SOURCES = ['runtime/portable/winapi/user32.c', 'runtime/portable/winapi/d3d8.c', 'runtime/portable/winapi/dsound.c',
+                'runtime/portable/winapi/input.c', 'runtime/portable/winapi/dinput.c', 'runtime/portable/winapi/ws2.c', 'host/host64.c',
+                'host/signin/lsb_login.c', 'host/ui/datui.c', 'host/ui/uidraw.c', 'host/modern.c', 'host/padmap.c', 'host/cexi.c', 'host/discord.c', 'host/frame.c', 'host/scene.c', 'host/ps2fix.c', 'host/signin/signin.c', 'host/sewave.c', 'host/ui/ui_art.c', 'host/ui/vicons.c', 'host/signin/keychain.c', 'host/appdefaults.c',
+                'runtime/portable/geometry/geometry_hooks.c'] + GFX_SOURCES
 # the addon host (host/addons/, docs/addons.md): C, C++ (ImGui) and its embedded Lua
 ADDON_SOURCES = sorted('host/addons/' + f for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'host', 'addons'))
                        if f.endswith('.c') or f.endswith('.cpp')) + ['generated/addons_lua.c']
 ADDON_LIBS = ('luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
 # The PlayOnline sign-in, which is not in this repository: XI_POL names a folder whose
-# xi-build.json lists the C sources to compile (one of them implements host/signin_pol.h) and the
+# xi-build.json lists the C sources to compile (one of them implements host/signin/signin_pol.h) and the
 # Rust crate to link, and the sign-in screen gets PlayOnline as a method.
 def pol(rust_target=None, out=None, env=None):
     """The PlayOnline sign-in's sources, the flags for them and for ours, and the archives to link
@@ -178,7 +178,7 @@ def sdl():
 
 
 def tls():
-    """mbedtls from third_party/mbedtls (the LandSandBoat sign-in's TLS, host/lsb_login.c)."""
+    """mbedtls from third_party/mbedtls (the LandSandBoat sign-in's TLS, host/signin/lsb_login.c)."""
     thirdparty.build('mbedtls')
     return thirdparty.flags('mbedtls'), thirdparty.libs('mbedtls')
 
@@ -187,7 +187,8 @@ def newest_header():
     """The newest runtime/host header: a changed struct must rebuild everything that may include it
     (no per-file dependency tracking; the generated code has its own headers, which it rebuilds with)."""
     newest = 0
-    for d in ('runtime', 'runtime/portable', 'runtime/win32', 'host'):
+    for d in ('runtime', 'runtime/portable', 'runtime/portable/gfx', 'runtime/portable/winapi', 'runtime/portable/gamecore', 'runtime/portable/geometry', 'runtime/win32',
+              'host', 'host/ui', 'host/signin'):
         full = os.path.join(ROOT, d)
         if os.path.isdir(full):
             for f in os.listdir(full):
@@ -292,7 +293,7 @@ def boot64(game):
     # objects live apart from the binaries (build/boot64 is the program); the translation's are
     # shared with host64
     objs = compile_stale(generated('all'), 'build/all64', ['-I', 'generated/all'])
-    objs += compile_stale(PORTABLE + ['tests/boot64.c'], 'build/obj/boot64', [])
+    objs += compile_stale(PORTABLE + ['tests/runtime/boot64.c'], 'build/obj/boot64', [])
     run(CC + ['-o', 'build/boot64'] + objs + ['-lm', '-lpthread'])
     run(['build/boot64', build.RETAIL, game])
 
@@ -422,27 +423,27 @@ def host64(game):
 def gfxtest():
     """The back end alone (gfx_test), then the D3D8 front end on it through its COM thunks (d3d8_test)."""
     sdl_cflags, sdl_libs = sdl()
-    objs = compile_stale(GFX_SOURCES + ['tests/gfx_test.c'], 'build/gfxtest', sdl_cflags)
+    objs = compile_stale(GFX_SOURCES + ['tests/gfx/gfx_test.c'], 'build/gfxtest', sdl_cflags)
     run(CC + ['-o', 'build/gfx_test'] + objs + sdl_libs + GFX_LIBS)
     run(['build/gfx_test'])
-    objs = compile_stale(PORTABLE + GFX_SOURCES + ['runtime/portable/user32.c', 'runtime/portable/input.c',
-                                                   'runtime/portable/d3d8.c', 'tests/d3d8_test.c'], 'build/d3d8test', sdl_cflags)
+    objs = compile_stale(PORTABLE + GFX_SOURCES + ['runtime/portable/winapi/user32.c', 'runtime/portable/winapi/input.c',
+                                                   'runtime/portable/winapi/d3d8.c', 'tests/gfx/d3d8_test.c'], 'build/d3d8test', sdl_cflags)
     run(CC + ['-o', 'build/d3d8_test'] + objs + sdl_libs + GFX_LIBS + ['-lm', '-lpthread'])
     run(['build/d3d8_test'])
 
 
 def vfstest():
-    """runtime/portable/vfs.c on this host, with plat_posix.c: tests/vfs_test.c."""
+    """runtime/portable/vfs.c on this host, with plat_posix.c: tests/runtime/vfs_test.c."""
     os.makedirs(os.path.join(ROOT, 'build'), exist_ok=True)
-    run(CC + CFLAGS + ['-o', 'build/vfs_test', 'tests/vfs_test.c', 'runtime/portable/vfs.c', 'runtime/portable/plat_posix.c',
+    run(CC + CFLAGS + ['-o', 'build/vfs_test', 'tests/runtime/vfs_test.c', 'runtime/portable/vfs.c', 'runtime/portable/plat_posix.c',
                        '-lpthread'])
     run(['build/vfs_test'])
 
 
 def keytest():
-    """runtime/portable/gfx_key.h on this host: tests/gfx_key_test.c."""
+    """runtime/portable/gfx/gfx_key.h on this host: tests/gfx/gfx_key_test.c."""
     os.makedirs(os.path.join(ROOT, 'build'), exist_ok=True)
-    run(CC + CFLAGS + ['-o', 'build/gfx_key_test', 'tests/gfx_key_test.c'])
+    run(CC + CFLAGS + ['-o', 'build/gfx_key_test', 'tests/gfx/gfx_key_test.c'])
     run(['build/gfx_key_test'])
 
 
@@ -491,10 +492,10 @@ def desktop(game, server):
 
 
 def datuitest(game):
-    """host/datui.c against the install's DATs; renders the windows and lobby into build/datui/."""
+    """host/ui/datui.c against the install's DATs; renders the windows and lobby into build/datui/."""
     os.makedirs(os.path.join(ROOT, 'build', 'datui'), exist_ok=True)
-    run(['clang', '-O2', '-std=c11', '-Wall', '-I', 'host', '-o', 'build/datui_test', 'tests/datui_test.c',
-         'host/datui.c', '-lm'])
+    run(['clang', '-O2', '-std=c11', '-Wall', '-I', 'host', '-o', 'build/datui_test', 'tests/host/datui_test.c',
+         'host/ui/datui.c', '-lm'])
     run(['build/datui_test', '--game', game, '--out', 'build/datui'])
 
 
@@ -557,8 +558,8 @@ def app(game, a):
     os.makedirs(res)
     exe = os.path.join(macos, APP_NAME)
     shutil.copy(os.path.join(ROOT, 'build', 'host64'), exe)
-    shutil.copy(os.path.join(ROOT, 'ffxi.reg'), res)
-    shutil.copy(os.path.join(ROOT, 'assets', 'icon.icns'), res)
+    shutil.copy(os.path.join(ROOT, 'assets', 'ffxi.reg'), res)
+    shutil.copy(os.path.join(ROOT, 'platforms', 'macos', 'icon.icns'), res)
     shutil.copy(os.path.join(ROOT, 'build', 'runtime.json'), res)  # the launcher's rebuild check
     shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(res, 'textures'))  # bundled hi-res packs
     keys = {'FFXIGameFolder': game}

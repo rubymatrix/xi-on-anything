@@ -9,7 +9,7 @@
  *
  * While the player's frame rate is Uncapped, the getters' callers get the real delta instead
  * (wall-clock time since the last frame, in sixtieths, at most 20 as the game keeps it), except
- * the callers tools/frame_sites.py found truncating it into integer state (a countdown
+ * the callers tools/version/frame_sites.py found truncating it into integer state (a countdown
  * t = (int)(t - dt), a step count n = (int)dt): a fraction there loses or gains a whole step every
  * frame, so they get the frame's whole sixtieths, the remainder carried to the next frame. Over
  * time both add up to the wall clock, as at 60 fps. The frame counter's getter ("frame_count",
@@ -458,7 +458,7 @@ void frame_setup(void)
 #if defined(FFXI_WRAP_FRAME_NET_WAIT)
     rt_wrap_frame_net_wait = frame_net_wait;
 #elif HAVE_FRAME
-    rt_log("[recomp] frame: build %s has no wait-for-the-server site (tools/frame_sites.py); an uncapped zone change "
+    rt_log("[recomp] frame: build %s has no wait-for-the-server site (tools/version/frame_sites.py); an uncapped zone change "
            "can time out (FFXI-3001)\n", FFXI_BUILD);
 #endif
 #if HAVE_FRAME
@@ -475,7 +475,7 @@ void frame_setup(void)
     rt_wrap_frame_yield = frame_yield;
     rt_wrap_frame_net = frame_net;
 #else
-    rt_log("[recomp] frame: build %s has no frame delta sites (tools/frame_sites.py); uncapped runs as the game does\n",
+    rt_log("[recomp] frame: build %s has no frame delta sites (tools/version/frame_sites.py); uncapped runs as the game does\n",
         FFXI_BUILD);
 #endif
 }

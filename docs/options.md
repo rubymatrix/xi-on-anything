@@ -7,13 +7,13 @@ Graphics, Shadows, Lighting, Atmosphere, Water, Interface, Gamepad and Addons. T
 Sources, as the tables abbreviate them:
 
 - **Menu**: its row under Config › Advanced, as *page › row* (a group heading in brackets)
-- **fx**: its key in `fx.txt` (`runtime/portable/gfx_fx.c`), also `FFXI_FX_<KEY>` in the environment; read again while the game runs
+- **fx**: its key in `fx.txt` (`runtime/portable/gfx/gfx_fx.c`), also `FFXI_FX_<KEY>` in the environment; read again while the game runs
 - **CLI**: a `host64` flag (`host/host64.c`)
 - **App**: an app-bundle default (`app_default`, read when the flag is absent)
 - **Env**: an `FFXI_*` environment variable
 
-Not every addition works on every client build. `meta/features.json` gives each one the builds it
-works on (a first or last build, a list, or the hooks and patches it needs from `meta/builds.json`);
+Not every addition works on every client build. `recomp/meta/features.json` gives each one the builds it
+works on (a first or last build, a list, or the hooks and patches it needs from `recomp/meta/builds.json`);
 a build's own entry there can override it. A feature that does not apply to the running build is
 never switched on, whatever the menu, `fx.txt` or the command line say: the log says which and why
 (`[recomp] feature draw_distance off for build 2009-07-09: needs a client from 2025-11-12 or later`),
@@ -36,7 +36,7 @@ Water page and no Display › FPS Counter row; Addons shows only with `--android
 | UI scale | Display › [Scaling] UI Scale | | | `FFXIMenuResolution` | list |
 | Interface shape | Display › [Scaling] Interface Shape | | `--ui-aspect` | `FFXIUIAspect` | off; Full / 16:9 / 4:3 |
 | Background (render) resolution | Display › [Scaling] Background Resolution | | | `FFXIBackground` | 2048 / 4096 / 6144 / 8192, next start |
-| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped (the last three only in game builds with frame sites in `meta/builds.json`, from `tools/frame_sites.py`; in others `--fps-divisor 0` is the game's own uncapped pacing, the world as fast as the frames). 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
+| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped (the last three only in game builds with frame sites in `recomp/meta/builds.json`, from `tools/version/frame_sites.py`; in others `--fps-divisor 0` is the game's own uncapped pacing, the world as fast as the frames). 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
 | FPS counter | Display › [Performance] FPS Counter | `fps` | | | 1 shown |
 | GPU pick (Vulkan) | | | | | `FFXI_GPU` env |
 
@@ -199,10 +199,10 @@ on the page.
 same rows in an overlay window instead (`host/addons/gui.cpp` `xi_gui_gamepad`, `host/modern.c`): pick a
 button from each row's list, or Record and press it on the controller; Clear sets None; F12 or Escape
 closes it (Escape first cancels a recording). Its window has no `0x800b` message, so a change is
-applied by running the game's own pad-settings reader again (`meta/builds.json` `pad_config`,
+applied by running the game's own pad-settings reader again (`recomp/meta/builds.json` `pad_config`,
 `pad_reload`). That client reads the pad only through DirectInput, where a `padsin000` value is a
 DirectInput button: there host64's DirectInput pad numbers its 16 buttons as the XInput codes above
-(`dinput_pad`, `runtime/portable/dinput.c`), so ffxi.reg's map and this window's mean the same buttons
+(`dinput_pad`, `runtime/portable/winapi/dinput.c`), so ffxi.reg's map and this window's mean the same buttons
 as on today's clients.
 
 ## 9. Textures & game data
@@ -210,7 +210,7 @@ as on today's clients.
 | Setting | CLI | App / Env | Notes |
 |---|---|---|---|
 | Texture packs | `--textures <dir>` (×8) | `FFXI_BUNDLED_TEXTURES` | default `<data dir>/textures`, then bundled `assets/textures` (font, slot bar) |
-| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/vicons.c`). A texture pack's entry for the same icon wins |
+| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/ui/vicons.c`). A texture pack's entry for the same icon wins |
 | DAT overlays (XIPivot-style) | `--dats <dir>` (×8) | `FFXIDats` | first folder wins |
 | Custom server items | `--cexi off\|items\|full` | `FFXICexi` | CatsEyeXI-style ids |
 
@@ -329,19 +329,19 @@ the developer switches (section 14).
 
 ## Features by client build
 
-`meta/features.json` is the list; `tools/buildinfo.py` (`features()`) resolves it for the build
+`recomp/meta/features.json` is the list; `tools/buildinfo.py` (`features()`) resolves it for the build
 `tools/prepare.py` chose, and `tools/build.py` writes the result to `generated/build.h` as
 `FFXI_FEATURE_<ID>` (1 or 0) and `FFXI_FEATURE_TABLE`. A feature's rules, all of which must hold:
 
 | key | meaning |
 | --- | --- |
-| `min_build`, `max_build` | the first or last build label (the PE timestamp date `meta/builds.json` is keyed by) it works on |
+| `min_build`, `max_build` | the first or last build label (the PE timestamp date `recomp/meta/builds.json` is keyed by) it works on |
 | `builds` | only these build labels |
-| `needs` | keys the build's `meta/builds.json` entry must have: `hooks.lod_pick`, `patches.frame60`, `addresses.scene_mgr`, or `modern` (every Config › Modern address) |
+| `needs` | keys the build's `recomp/meta/builds.json` entry must have: `hooks.lod_pick`, `patches.frame60`, `addresses.scene_mgr`, or `modern` (every Config › Modern address) |
 
-A build's entry in `meta/builds.json` may override the result: `"features": {"<id>": true}` turns it
+A build's entry in `recomp/meta/builds.json` may override the result: `"features": {"<id>": true}` turns it
 on (tested on that build), `{"<id>": "<why>"}` turns it off with that reason. To gate a new
-addition, add it to `meta/features.json` and test `FFXI_FEATURE_<ID>` where it switches on; the
+addition, add it to `recomp/meta/features.json` and test `FFXI_FEATURE_<ID>` where it switches on; the
 launcher reads `features` from `runtime.json` (or `host64 --features`) to show it as unavailable
 rather than offer it.
 

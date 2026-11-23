@@ -1,4 +1,4 @@
--- The addon host's core, exercised through our own xi.* API (tests/addon_core_test.sh).
+-- The addon host's core, exercised through our own xi.* API (tests/addons/addon_core_test.sh).
 local ffi = require('ffi')
 
 xi.events.on('load', function() print('coretest loaded, build ' .. xi.build) end)

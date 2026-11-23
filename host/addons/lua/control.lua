@@ -1,7 +1,7 @@
 --[==[
 The control port: a built-in addon (xi kind) that lets another program drive the game. host64 loads
 it on the first frame when FFXI_CONTROL is set (core.c): FFXI_CONTROL=1 listens on 127.0.0.1:54300,
-FFXI_CONTROL=<port> on that port. tools/xi_mcp.py speaks it for MCP clients.
+FFXI_CONTROL=<port> on that port. tools/debug/xi_mcp.py speaks it for MCP clients.
 
 The protocol is JSON, one object per line each way:
 

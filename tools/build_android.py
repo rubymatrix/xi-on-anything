@@ -6,7 +6,7 @@
         game prepared by tools/build_posix.py prepare
   python3 tools/build_android.py gfxtest --test <name> [--native-tls]   one offscreen GPU fixture
         (tests/<name>_test.c), without the game
-  python3 tools/build_android.py tls-test [--native-tls]   the ELF TLS check (tests/android_tls_test.c)
+  python3 tools/build_android.py tls-test [--native-tls]   the ELF TLS check (platforms/android/tests/android_tls_test.c)
   python3 tools/build_android.py install --device SERIAL [--keystore file.p12 --key-alias xi]
         everything the app needs, from the dependencies (android_deps.py, once) to the API 29 host and
         its APK (build_android_apk.py, signed with --keystore, its password in
@@ -237,7 +237,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / 'generated').mkdir(exist_ok=True)
     if a.target == 'tls-test':
-        source = ['tests/android_tls_test.c']
+        source = ['platforms/android/tests/android_tls_test.c']
         module = compile_many(source, 'tls-module', ['-DXI_TLS_TEST_MODULE'])
         runner = compile_many(source, 'tls-runner', ['-DXI_TLS_TEST_DRIVER'])
         run([CC, '-shared', '-Wl,-z,max-page-size=16384', '-o', OUT / 'libtls-test.so'] + module)
@@ -255,11 +255,11 @@ def main():
     spv = json.loads((CACHE / 'spirv-build.json').read_text())
     extra += spv['cflags']
     gfx = [
-        'runtime/portable/gfx_hlsl.c',
-        'runtime/portable/gfx_hlsl_shaders.c',
-        'runtime/portable/gfx_spirv.c',
-        'runtime/portable/gfx_vulkan.cpp',
-        'runtime/portable/gfx_worker.cpp',
+        'runtime/portable/gfx/gfx_hlsl.c',
+        'runtime/portable/gfx/gfx_hlsl_shaders.c',
+        'runtime/portable/gfx/gfx_spirv.c',
+        'runtime/portable/gfx/gfx_vulkan.cpp',
+        'runtime/portable/gfx/gfx_worker.cpp',
     ]
     extra += ['-DFFXI_RENDER_WORKER_BUILD']
     sdl_lib = CACHE / 'sdl-build/libSDL3.so'
@@ -271,7 +271,7 @@ def main():
     )
     if a.target == 'gfxtest':
         objs = compile_many(
-            gfx + ['tests/' + a.test + '_test.' + ('cpp' if a.test == 'gfx_visibility_storage' else 'c')],
+            gfx + ['tests/gfx/' + a.test + '_test.' + ('cpp' if a.test == 'gfx_visibility_storage' else 'c')],
             'gfxtest',
             extra,
         )
@@ -300,7 +300,7 @@ def main():
         + HOST
         + ADDONS
         + gfx
-        + ['host/android_main.c', 'host/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c'],
+        + ['platforms/android/android_main.c', 'platforms/android/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c'],
         'host',
         extra + pol_flags + ['-Dmain=xi_host_main'],
     )
@@ -313,7 +313,7 @@ def main():
         ('gfx_pass_plan_gpu_test.c', 'xi_pass_plan_test_main'),
         ('gfx_visibility_storage_test.cpp', 'xi_visibility_storage_test_main'),
     ]:
-        objs += compile_many(['tests/' + source], 'host-' + entry, extra + ['-Dmain=' + entry])
+        objs += compile_many(['tests/gfx/' + source], 'host-' + entry, extra + ['-Dmain=' + entry])
     library_path = OUT / 'libmain.so'
     run(
         [

@@ -192,7 +192,7 @@ void rt_call_indirect(Guest* g, uint32_t target)
 }
 
 /* Nonzero while a guest thread waits for the guest lock; the platform bridge maintains it and
- * installs the yield. Without a bridge (tests/difftest.c) there is one thread and no lock. */
+ * installs the yield. Without a bridge (tests/runtime/difftest.c) there is one thread and no lock. */
 volatile uint32_t rt_lock_contended;
 static void (*g_yield)(void);
 

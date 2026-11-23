@@ -64,7 +64,7 @@ python tools\build_mingw.py host64
 `host64.exe`, `SDL3.dll`, `runtime.json` and the FSR DLLs land in `build\mingw` (`--out` to change
 it). This build opens no console window.
 
-`build.cmd host64` is a shorthand for `python tools\build.py host64`. Builds are incremental; run
+Builds are incremental; run
 `prepare` again when your server hands out a new game version.
 
 ## Run

@@ -1,4 +1,4 @@
--- Two ImGui windows for the overlay's input capture (tests/overlay_input_test.sh): a HUD-like window
+-- Two ImGui windows for the overlay's input capture (tests/addons/overlay_input_test.sh): a HUD-like window
 -- at (10, 10) that hides while hud is false, and a form at (400, 400) whose text field is at its top;
 -- pop = true opens a popup from the form (menu_open: whether it was drawn in the last frame).
 local imgui = xi.ui.imgui()

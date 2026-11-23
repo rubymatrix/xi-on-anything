@@ -37,7 +37,7 @@ installs in your home folder, on an SD card and in Proton prefixes. It builds th
 files (a while, once per game update), keeps itself up to date and starts the game full screen.
 
 The launcher fetches its compiler (zig) and the prebuilt rest of the client (the Linux kit,
-`tools/linux/kit.sh`) itself. You need python3 (the installer uses it for the Steam shortcut),
+`platforms/linux/kit.sh`) itself. You need python3 (the installer uses it for the Steam shortcut),
 glibc 2.35 or later and Vulkan 1.3. A Deck and any current distribution with Mesa or NVIDIA's
 driver have all three.
 
@@ -77,7 +77,7 @@ There is no source installer on Linux or Windows: see [Building](building.md).
 ### Testing the installer
 
 These test the installer from a clone, uncommitted changes included, without touching your own app
-or settings. `python3 tests/setup_test.py` checks the questions and the saved files they update.
+or settings. `python3 tests/tools/setup_test.py` checks the questions and the saved files they update.
 `tools/test_install.sh` runs `tools/install-source.sh` piped to bash, as a player would, inside a
 sandbox folder. It stops after the questions unless given `--full` (build and install into the
 sandbox). `--saved` starts from copies of your saved settings (an update), `--sandbox <folder>`

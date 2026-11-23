@@ -1,7 +1,7 @@
 # Browser (experimental, self-hosted only)
 
 The browser build runs the recompiled client in a browser tab: the game as 32-bit WebAssembly, drawn
-with WebGPU. A small server you run yourself, `tools/webserve.py`, serves the page and your game
+with WebGPU. A small server you run yourself, `platforms/web/webserve.py`, serves the page and your game
 files, and carries the game's network traffic to your LandSandBoat server over a WebSocket.
 
 **There is no public instance, and there must never be one.** The WebAssembly is translated from your
@@ -39,7 +39,7 @@ requested with the build's own id, so a browser never mixes an old page with a n
 ## Run it on your own machine
 
 ```sh
-python3 tools/webserve.py --server <your server, by name or IP> --game /path/to/"FINAL FANTASY XI"
+python3 platforms/web/webserve.py --server <your server, by name or IP> --game /path/to/"FINAL FANTASY XI"
 ```
 
 It prints the address to open, `http://127.0.0.1:8417/#t=<token>`; open it and a sign-in form for the
@@ -70,7 +70,7 @@ for the network. Put `webserve.py` behind something that gives you both and only
 
 ```sh
 tailscale serve --bg 8417
-python3 tools/webserve.py --server … --game … --origin https://<machine>.<tailnet>.ts.net --token <your token>
+python3 platforms/web/webserve.py --server … --game … --origin https://<machine>.<tailnet>.ts.net --token <your token>
 ```
 
 Open `https://<machine>.<tailnet>.ts.net/#t=<your token>` on any device in your tailnet.
@@ -109,14 +109,14 @@ expects Spaces addresses, so other S3-compatible stores may need changes.
    and `Content-Length`, max age 86400):
 
    ```sh
-   python3 tools/bucket.py cors --bucket https://<bucket>.<region>.digitaloceanspaces.com --origin https://xi.example.com
+   python3 platforms/web/bucket.py cors --bucket https://<bucket>.<region>.digitaloceanspaces.com --origin https://xi.example.com
    ```
 
 4. Upload the files as gzipped 1 MB blocks, with the small files in 8 MB packs (about half the size
    of the install; run it again after the files change and it uploads only what changed):
 
    ```sh
-   python3 tools/bucket.py blocks --bucket https://<bucket>.<region>.digitaloceanspaces.com \
+   python3 platforms/web/bucket.py blocks --bucket https://<bucket>.<region>.digitaloceanspaces.com \
        --prefix <folder>/blocks --game /path/to/"FINAL FANTASY XI" [--dats /path/to/overlay]
    ```
 
@@ -126,13 +126,13 @@ expects Spaces addresses, so other S3-compatible stores may need changes.
 5. Start `webserve.py` with the bucket. A CDN address works as well as the bucket's own:
 
    ```sh
-   python3 tools/webserve.py --server … --game … [--dats …] --origin https://xi.example.com \
+   python3 platforms/web/webserve.py --server … --game … [--dats …] --origin https://xi.example.com \
        --bucket https://<bucket>.<region>.cdn.digitaloceanspaces.com \
        --bucket-blocks <folder>/blocks [--bucket-game <folder>/game --bucket-dats <folder>/dats-0]
    ```
 
    It prints `file reads from the bucket at …` and how many files and packs the bucket has.
-   `python3 tools/bucket.py check --bucket … --object <some object> --origin …` shows a signed read
+   `python3 platforms/web/bucket.py check --bucket … --object <some object> --origin …` shows a signed read
    working and an unsigned one refused.
 
 In the page, **Download all game data** (under the gear at the top right, while the file cache is

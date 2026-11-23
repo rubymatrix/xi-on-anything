@@ -1,5 +1,5 @@
-# Game-free checks of the shared geometry kernels and their guarded adapters (tests/geometry_simd_test.py,
-# tests/geometry_guest_test.py) with macOS Clang, Linux GCC and Clang, and Windows MSVC, and under the
+# Game-free checks of the shared geometry kernels and their guarded adapters (tests/geometry/geometry_simd_test.py,
+# tests/geometry/geometry_guest_test.py) with macOS Clang, Linux GCC and Clang, and Windows MSVC, and under the
 # sanitizers on macOS and Linux.
 name: Shared geometry
 
@@ -38,8 +38,8 @@ jobs:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
         run: |
-          python3 tests/geometry_simd_test.py
-          python3 tests/geometry_guest_test.py
+          python3 tests/geometry/geometry_simd_test.py
+          python3 tests/geometry/geometry_guest_test.py
       - name: Address and undefined-behavior checks
         if: runner.os != 'Windows'
         env:
@@ -47,8 +47,8 @@ jobs:
           CXX: ${{ matrix.cxx }}
           CFLAGS: '-fsanitize=address,undefined -fno-omit-frame-pointer'
         run: |
-          python3 tests/geometry_simd_test.py
-          python3 tests/geometry_guest_test.py
+          python3 tests/geometry/geometry_simd_test.py
+          python3 tests/geometry/geometry_guest_test.py
       - name: MSVC x64 differential checks
         if: runner.os == 'Windows'
         shell: pwsh
@@ -58,5 +58,5 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$vs) { throw 'Visual Studio x64 tools unavailable' }
-          & cmd.exe /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && python tests/geometry_simd_test.py && python tests/geometry_guest_test.py"
+          & cmd.exe /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && python tests/geometry/geometry_simd_test.py && python tests/geometry/geometry_guest_test.py"
           exit $LASTEXITCODE

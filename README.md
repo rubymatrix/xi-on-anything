@@ -1,4 +1,4 @@
-<a href="https://discord.gg/4vUKPgyvEp"><img src="screenshots/discord_banner.webp" alt="XI on Anything: join the community on Discord"></a>
+<a href="https://discord.gg/4vUKPgyvEp"><img src="docs/images/discord_banner.webp" alt="XI on Anything: join the community on Discord"></a>
 
 # XI on Anything
 
@@ -86,22 +86,22 @@ Every setting, in game and out, is in the [options catalog](docs/options.md).
 
 <table>
   <tr>
-    <td colspan="2"><img src="screenshots/titlescreen_uw.jpg" alt="Title screen at 3440x1440"></td>
+    <td colspan="2"><img src="docs/images/titlescreen_uw.jpg" alt="Title screen at 3440x1440"></td>
   </tr>
   <tr>
-    <td width="50%"><img src="screenshots/login.jpg" alt="Sign-in screen"></td>
-    <td width="50%"><img src="screenshots/login_config.jpg" alt="Sign-in settings"></td>
+    <td width="50%"><img src="docs/images/login.jpg" alt="Sign-in screen"></td>
+    <td width="50%"><img src="docs/images/login_config.jpg" alt="Sign-in settings"></td>
   </tr>
   <tr>
-    <td colspan="2"><img src="screenshots/graphics_options.jpg" alt="Config &gt; Modern graphics options"></td>
+    <td colspan="2"><img src="docs/images/graphics_options.jpg" alt="Config &gt; Modern graphics options"></td>
   </tr>
   <tr>
-    <td width="50%"><img src="screenshots/godrays.jpg" alt="God rays in Bastok Mines"></td>
-    <td width="50%"><img src="screenshots/shadows_ao.jpg" alt="Sun shadows and ambient occlusion"></td>
+    <td width="50%"><img src="docs/images/godrays.jpg" alt="God rays in Bastok Mines"></td>
+    <td width="50%"><img src="docs/images/shadows_ao.jpg" alt="Sun shadows and ambient occlusion"></td>
   </tr>
   <tr>
-    <td width="50%"><img src="screenshots/lighting.jpg" alt="Per-pixel lighting"></td>
-    <td width="50%"><img src="screenshots/lighting2.jpg" alt="Per-pixel lighting and shadows"></td>
+    <td width="50%"><img src="docs/images/lighting.jpg" alt="Per-pixel lighting"></td>
+    <td width="50%"><img src="docs/images/lighting2.jpg" alt="Per-pixel lighting and shadows"></td>
   </tr>
 </table>
 
@@ -145,7 +145,7 @@ code, or a server launcher's token. Start with [Building](docs/building.md) and 
 | [Options catalog](docs/options.md) | Every setting, in game and out |
 | [Addons](docs/addons.md) | Ashita and Windower addons |
 | [Game versions](docs/new-client-version.md) | Which versions of the game work, and adding a new one |
-| [iPhone and iPad](docs/ios.md), [Web](docs/web.md), [Xbox](xbox/README.md), [Android](docs/android.md), [Switch](docs/switch.md) | Developer notes for each port |
+| [iPhone and iPad](docs/platforms/ios-dev.md), [Web](docs/web.md), [Xbox](platforms/xbox/README.md), [Android](docs/platforms/android-dev.md), [Switch](docs/platforms/switch-dev.md) | Developer notes for each port |
 | [Replay scenes](tools/replay/README.md) | Recorded scenes for performance testing |
 | [Repository layout](docs/layout.md) | What lives where |
 

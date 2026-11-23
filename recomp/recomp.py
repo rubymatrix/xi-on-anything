@@ -9,18 +9,18 @@
 metadata. Output: funcs.h (prototypes), funcs_NNN.c (translations), table.c (address -> function
 table for indirect calls), and with --stats a coverage report of unimplemented instructions.
 
---hooks names instructions where the host may step in (meta/builds.json "hooks"): before each, the
+--hooks names instructions where the host may step in (recomp/meta/builds.json "hooks"): before each, the
 translation calls the host function pointer rt_hook_<name> (GuestFn, defined in table.c, NULL until
 the host sets it) with the guest's registers stored, and reloads them after.
 
---wraps names whole functions the host may replace (meta/builds.json "wraps"): the translation of
+--wraps names whole functions the host may replace (recomp/meta/builds.json "wraps"): the translation of
 f_XXXXXXXX becomes f_XXXXXXXX_body, and f_XXXXXXXX calls the host's rt_wrap_<name> (NULL until the
 host sets it) instead of it when set. The host runs at the function's entry (esp at the return
 address) and either calls rt_orig_<name> (the body) or returns for it (runtime.h rt_return).
 Every call reaches the wrap: direct calls, tail jumps and rt_table (indirect calls, vtables).
 
 --patches names code patches addons make ({"group": {"0xADDR": "hexbytes", ...}, ...}, from
-meta/builds.json "patches"): the bytes an addon writes over the game's code, which the recompiled C
+recomp/meta/builds.json "patches"): the bytes an addon writes over the game's code, which the recompiled C
 would otherwise never run. Each function a group touches is translated a second time with the
 group's bytes in place (f_XXXXXXXX_p_<group>), and runs instead of the original while the host sets
 rt_patch_<group> (host/addons/patch.c: while those bytes are in guest memory). table.c lists the

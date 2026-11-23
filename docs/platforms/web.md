@@ -1,7 +1,7 @@
 # Web browser (experimental, self-hosted only)
 
 The game as 32-bit WebAssembly, drawn with WebGPU, in a browser tab. A small server you run yourself,
-`tools/webserve.py`, serves the page and your game files, and carries the game's traffic to your
+`platforms/web/webserve.py`, serves the page and your game files, and carries the game's traffic to your
 LandSandBoat server over a WebSocket.
 
 > [!WARNING]
@@ -44,7 +44,7 @@ The page and the WebAssembly go to `build/web/` (about 33 MB).
 ## 3. Run it on this machine
 
 ```bash
-python3 tools/webserve.py --server <your server, name or IP> --game /path/to/"FINAL FANTASY XI"
+python3 platforms/web/webserve.py --server <your server, name or IP> --game /path/to/"FINAL FANTASY XI"
 ```
 
 It prints an address like `http://127.0.0.1:8417/#t=<token>`. Open it in Chrome or Edge; a sign-in
@@ -71,7 +71,7 @@ Use a fixed `--token` and set `--origin` to the address you'll open.
 
 ```bash
 tailscale serve --bg 8417
-python3 tools/webserve.py --server ... --game ... \
+python3 platforms/web/webserve.py --server ... --game ... \
     --origin https://<machine>.<tailnet>.ts.net --token <your token>
 ```
 
@@ -86,7 +86,7 @@ keep the `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers
 in front. Never expose `webserve.py` with only the token in front of it.
 
 For faster loading far from home, files can come from a private S3-compatible bucket
-(`tools/bucket.py`); see [../web.md](../web.md). In the page, **Download all game data** (the
+(`platforms/web/bucket.py`); see [../web.md](../web.md). In the page, **Download all game data** (the
 gear, top right) fills the browser's storage so zoning reads nothing over the network. It is there
 only while the file cache is on (not with `cache=0`).
 
