@@ -1,6 +1,6 @@
 // Runs the Node build (tools/build_web.py --node) headless, for tests: the game's arguments as given,
-// the network through XI_NET_URL (tools/webserve.py's /net), and XI_ENTER=<seconds>: press Enter every
-// 2 s for that long (through the lobby to the zone, as tools/replay.py does with the control port), and
+// the network through XI_NET_URL (platforms/web/webserve.py's /net), and XI_ENTER=<seconds>: press Enter every
+// 2 s for that long (through the lobby to the zone, as tools/replay/replay.py does with the control port), and
 // XI_QUIT=<seconds>: close the window then.
 //   XI_NET_URL='ws://127.0.0.1:8417/net?t=...' node platforms/web/node_run.js build/web-node/host64.js --game ...
 const path = require('path');

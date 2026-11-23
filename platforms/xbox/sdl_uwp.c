@@ -1,4 +1,4 @@
-/* The SDL3 calls the runtime and the sign-in screen make (user32.c, input.c, dsound.c, host/signin.c
+/* The SDL3 calls the runtime and the sign-in screen make (user32.c, input.c, dsound.c, host/signin/signin.c
  * and what it uses), for the UWP build, where SDL3 has no back end. Compiled against SDL3's headers for its types, linked instead of SDL3.lib. There is one
  * window, the app's view; its input arrives through uwp_bridge.h and leaves here as SDL events. Audio
  * is a thread that pulls the mix every 10 ms, as SDL's device would - dsound.c moves the DirectSound
@@ -303,7 +303,7 @@ void uwp_set_text_input(UwpTextInput cb) { g_text_input = cb; }
 /* Text events arrive with or without this; it only asks for nothing to be shown. */
 bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; }
 
-/* host/signin.c asks for the keyboard over a field, with the field's text so far ("xi.textinput.text":
+/* host/signin/signin.c asks for the keyboard over a field, with the field's text so far ("xi.textinput.text":
  * the app's keyboard edits the whole of it) */
 bool SDL_StartTextInputWithProperties(SDL_Window* w, SDL_PropertiesID props)
 {
@@ -435,7 +435,7 @@ void uwp_text(const char* utf8)
 }
 
 /* The on-screen keyboard's text, all of it, for the field it was opened over: the sign-in screen's
- * SDL_EVENT_USER (host/signin.h's SIGNIN_KEYBOARD_TEXT), the text malloc'd for it to free. Setting
+ * SDL_EVENT_USER (host/signin/signin.h's SIGNIN_KEYBOARD_TEXT), the text malloc'd for it to free. Setting
  * the whole text each time, rather than typing the change, cannot type anything twice. */
 #define SIGNIN_KEYBOARD_TEXT 0x5849
 void uwp_replace_text(const char* utf8)

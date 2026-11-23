@@ -469,7 +469,7 @@ public final class MainActivity extends SDLActivity {
                 new File(data, "USER").getPath(), "--aspect", "off"};
     }
 
-    /* Saved sign-in passwords (host/keychain.c, from any thread): each one encrypted with an AES key
+    /* Saved sign-in passwords (host/signin/keychain.c, from any thread): each one encrypted with an AES key
      * that the Android Keystore makes and keeps (it never leaves the Keystore, and with a secure lock
      * screen it is in the device's hardware), the ciphertext in this app's private preferences. No
      * password is written anywhere in the clear. Keys are the sign-in's ("lsb:server:user"). */

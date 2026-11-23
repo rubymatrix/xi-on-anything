@@ -1,4 +1,4 @@
-/* What mbedtls (the LandSandBoat sign-in's TLS, host/lsb_login.c) needs from the platform on the Switch
+/* What mbedtls (the LandSandBoat sign-in's TLS, host/signin/lsb_login.c) needs from the platform on the Switch
  * (platforms/switch/mbedtls_config.h): a millisecond clock and an entropy source. */
 #include <time.h>
 

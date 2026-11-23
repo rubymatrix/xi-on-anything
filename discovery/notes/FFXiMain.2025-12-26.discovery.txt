@@ -21,7 +21,7 @@ call site, is unchanged), -0x16 around 0x10006400, -0x1f0 at 0x100863d6, -0x410 
 
 Carrying addresses over
 -----------------------
-Carried from 2026-09-03 (tools/newbuild.py carry); a dry run from 2026-08-22 lands every shared
+Carried from 2026-09-03 (tools/version/newbuild.py carry); a dry run from 2026-08-22 lands every shared
 address on the same new address.
   character table pointer       0x104df770 -> 0x104dd600 (votes 1521 of 1521)
   Present call site             0x100035cb (unchanged)
@@ -36,7 +36,7 @@ address on the same new address.
 
 Method
 ------
-Ghidra 11.3.2 headless, as for 2026-09-03 (tools/discover.py). The first run's gate failed on
+Ghidra 11.3.2 headless, as for 2026-09-03 (tools/version/discover.py). The first run's gate failed on
 one conflict, the verdict below was added, and two --reuse runs followed (the first with the
 verdict at the wrong address, 0x100076a0).
 

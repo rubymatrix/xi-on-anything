@@ -48,7 +48,7 @@ Left out on purpose:
 
 Method
 ------
-Ghidra 11.3.2 headless (tools/discover.py), JDK 21. The carried verdicts were each read by
+Ghidra 11.3.2 headless (tools/version/discover.py), JDK 21. The carried verdicts were each read by
 disassembly first. One was wrong and was replaced: the 21-case table of the signed switch mapped
 to 0x100065d0, which is code (a window made only of relocated table entries); the real table is
 0x10006610. Two 2025-11-12 sites have no counterpart here: the 11-case switch (cmp edx,-5) and the

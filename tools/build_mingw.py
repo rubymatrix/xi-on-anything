@@ -94,7 +94,7 @@ def stale(src, obj, headers):
 
 def newest_header():
     newest = os.path.getmtime(build.BUILD_H)
-    for d in ('runtime', 'runtime/portable', 'host', 'host/addons'):
+    for d in ('runtime', 'runtime/portable', 'runtime/portable/gfx', 'runtime/portable/winapi', 'runtime/portable/gamecore', 'runtime/portable/geometry', 'host', 'host/ui', 'host/signin', 'host/addons'):
         full = os.path.join(ROOT, d)
         for f in os.listdir(full):
             if f.endswith('.h'):

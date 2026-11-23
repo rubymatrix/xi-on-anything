@@ -1,5 +1,5 @@
 #!/bin/sh
-# Every shader key pair the game has used, as WGSL (tests/wgsl_corpus.c), checked with naga:
+# Every shader key pair the game has used, as WGSL (tests/gfx/wgsl_corpus.c), checked with naga:
 #   platforms/web/wgsl_check.sh [pipelines.v1] [naga]
 # The keys come from the Metal back end's pipeline cache (~/Library/Caches/FFXI/pipelines.v1); naga is
 # the WGSL validator from `cargo install naga-cli`.
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 CACHE=${1:-$HOME/Library/Caches/FFXI/pipelines.v1}
 NAGA=${2:-naga}
 mkdir -p build
-clang -O1 -I runtime -I runtime/portable tests/wgsl_corpus.c runtime/portable/gfx_msl.c runtime/portable/gfx_msl_shaders.c \
+clang -O1 -I runtime -I runtime/portable tests/gfx/wgsl_corpus.c runtime/portable/gfx/gfx_msl.c runtime/portable/gfx/gfx_msl_shaders.c \
     -o build/wgsl_corpus
 rm -rf build/wgsl
 build/wgsl_corpus "$CACHE" build/wgsl

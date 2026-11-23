@@ -9,7 +9,7 @@ hosts; the desktop Metal, D3D12 and C Vulkan back ends keep their own build path
 The APK is a debug client. It opens on the sign-in screen, as the desktop and iPhone builds do, or
 signs in to a LandSandBoat server with `--user` and `--pass` from `run.args`. `--session` and
 `--auth` are refused. Remember Password encrypts each password with an AES key that the Android
-Keystore makes and holds (`MainActivity.keychainSet`, `host/keychain.c`). Only the ciphertext is
+Keystore makes and holds (`MainActivity.keychainSet`, `host/signin/keychain.c`). Only the ciphertext is
 stored, in the app's private preferences; no password is written in the clear.
 
 The APK contains no password, game files, captures or generated game code: bring your own client
@@ -56,7 +56,7 @@ game starts.
 The launcher copies the game there with `adb push`. Updates copy only the files changed since the
 phone's `patch.ver`, with `patch.cfg` and then `patch.ver` last. An account sent from the launcher
 goes into the app's private files through `adb shell run-as` and its stdin (this needs the
-debuggable APK), never into shared storage. `host/signin.c` reads that `import.json` once at start,
+debuggable APK), never into shared storage. `host/signin/signin.c` reads that `import.json` once at start,
 puts its passwords in the Keystore, removes it and fills in the sign-in screen. Phones never sign in
 by themselves: the player taps Sign in. An account that needs a one-time password gets its code
 field focused.
@@ -181,7 +181,7 @@ consumes these arguments before the portable host starts.
 | `--android-probe-query-diag FILE` | One-frame occlusion-probe query diagnostics, as JSON lines, to FILE. Create `FILE.arm` once. |
 | `--android-bench-dir PATH` | Writes frame times and markers (`frames.csv`, `markers.jsonl`) to PATH; refuses to overwrite either file. One branch per frame when off. |
 | `--android-control 54300` | Enables the existing control port, loopback only; default 0. |
-| `--fps-divisor 0` | Uncapped, the world kept at its speed where the game build has frame sites (`tools/frame_sites.py`), else as fast as the frames (for measurements); divisor 2 is 30 FPS. |
+| `--fps-divisor 0` | Uncapped, the world kept at its speed where the game build has frame sites (`tools/version/frame_sites.py`), else as fast as the frames (for measurements); divisor 2 is 30 FPS. |
 
 The diagnostic statistics (`--android-worker-stats`, `--android-visibility-storage-stats`), pass
 traces and query diagnostics add overhead; leave them out of performance comparisons. The older
@@ -205,8 +205,8 @@ characters flicker.
 Without the game or a device:
 
 ```sh
-python3 tests/geometry_simd_test.py
-python3 tests/geometry_guest_test.py
+python3 tests/geometry/geometry_simd_test.py
+python3 tests/geometry/geometry_guest_test.py
 python3 platforms/android/tests/android_policy_test.py
 python3 platforms/android/tests/android_build_test.py
 python3 platforms/android/tests/android_entry_test.py

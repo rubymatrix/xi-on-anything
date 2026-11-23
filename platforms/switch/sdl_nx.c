@@ -1,4 +1,4 @@
-/* The SDL3 calls the runtime and the sign-in screen make (user32.c, input.c, dsound.c, host/signin.c and
+/* The SDL3 calls the runtime and the sign-in screen make (user32.c, input.c, dsound.c, host/signin/signin.c and
  * what it uses), for the Nintendo Switch build, where SDL3 has no back end: the port of sdl_web.c (itself
  * sdl_uwp.c's, the Xbox's) to libnx. Compiled against SDL3's headers for its types, linked instead of SDL3.
  *
@@ -29,7 +29,7 @@
 #include "nx_bridge.h"
 #include "../../runtime/portable/plat.h"
 #include "runtime.h"
-#include "../../runtime/portable/user32.h"
+#include "../../runtime/portable/winapi/user32.h"
 
 typedef pthread_mutex_t Lock;
 #define LOCK_INIT PTHREAD_MUTEX_INITIALIZER
@@ -350,7 +350,7 @@ void* SDL_GetPointerProperty(SDL_PropertiesID id, const char* name, void* defaul
 }
 
 /* --- text input: the system keyboard ----------------------------------------------------------------- */
-/* The sign-in screen's SDL_EVENT_USER (host/signin.h's SIGNIN_KEYBOARD_TEXT): the field's whole text,
+/* The sign-in screen's SDL_EVENT_USER (host/signin/signin.h's SIGNIN_KEYBOARD_TEXT): the field's whole text,
  * malloc'd for it to free, as the Xbox's keyboard hands it back. */
 #define SIGNIN_KEYBOARD_TEXT 0x5849
 
@@ -387,7 +387,7 @@ static int keyboard(Sint64 type, const char* initial, char* out, size_t outn)
 
 bool SDL_StartTextInput(SDL_Window* w) { (void)w; return true; } /* text arrives only with a field (below) */
 
-/* host/signin.c asks for the keyboard over a field, with its text so far; the game's chat line (host64.c)
+/* host/signin/signin.c asks for the keyboard over a field, with its text so far; the game's chat line (host64.c)
  * asks with none: its text is typed into the line and Enter sends it */
 bool SDL_StartTextInputWithProperties(SDL_Window* w, SDL_PropertiesID id)
 {

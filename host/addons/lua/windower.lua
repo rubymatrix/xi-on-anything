@@ -93,7 +93,7 @@ do
         f:close()
     elseif not xi.__res_warned then
         xi.__res_warned = true
-        native.chat.write(("[%s] Windower's resources are missing (%sres/): run tools/addons_fetch.py --only windower-resources"):format(info.name, info.root), 207)
+        native.chat.write(("[%s] Windower's resources are missing (%sres/): run tools/addons/addons_fetch.py --only windower-resources"):format(info.name, info.root), 207)
     end
 end
 windower.ffxi_path = slash(xi.paths.game)

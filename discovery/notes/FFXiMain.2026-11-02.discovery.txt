@@ -14,7 +14,7 @@ Version       30261102_0, read from patch.ver
 What changed from 2026-10-05
 ----------------------------
 FFXi.dll: rebuilt, but its unpacked .text is byte-identical to 2026-10-05's (and 2026-09-03's).
-Its metadata is 2026-10-05's with the new hash and label (tools/newbuild.py meta).
+Its metadata is 2026-10-05's with the new hash and label (tools/version/newbuild.py meta).
 
 FFXiMain.dll: a larger update than 2026-10-05. .text is 0x1600 bytes longer (0x32762e ->
 0x328c2e). Code below ~0x100a9000 mostly keeps its address (the Present call site, the frame
@@ -26,14 +26,14 @@ getters, the file-sum loop 0x100185a0 and its caller); above that it moves by +0
 
 Carrying addresses over
 -----------------------
-tools/newbuild.py carry --from 2026-10-05 --to 2026-11-02 --write mapped everything except 14,
+tools/version/newbuild.py carry --from 2026-10-05 --to 2026-11-02 --write mapped everything except 14,
 read by hand with newbuild.py dis in both builds:
   cexi_region          not an image address: cexi_sites.py's fixed REGION (0xfe000000), kept
   cexi_fx_spell_edi    no unique byte window; `add edi,0xaf0 ; push 0x34 ; mov [esp+0x18],edi ;
                        call <malloc>` at the same address in both builds -> 0x100a8e9c
   frame_net            `sub esp,0x10c ; push ebx/esi/edi ; xor bl,bl ; call 0x100dc120 ; ...
                        mov [cexi_player],esi`: same body, +0x150 (neighbours +0x140) -> 0x100fa2d0;
-                       tools/frame_sites.py later found the same address on its own
+                       tools/version/frame_sites.py later found the same address on its own
   page_ctor            `push esi ; mov esi,ecx ; lea ecx,[esi+4] ; call ...` -> 0x10197f50 (+0x15d0)
   patches (bytes unchanged; the address is where the same instruction now sits):
     ahcolors           the imm32 of `mov ebp,0x80808080` after `mov eax,[esi+0x14d0]`
@@ -64,7 +64,7 @@ offset 0x20. The loop sums each byte sign-extended and shifted left by (i mod 20
 that reproduces 2026-10-05's recorded 0x43fa0718 from its retail file, and gives 0x74f0058f for
 this build's retail FFXiMain.dll.
 
-After prepare, tools/frame_sites.py and tools/cexi_sites.py (without --slots) found their sites
+After prepare, tools/version/frame_sites.py and tools/version/cexi_sites.py (without --slots) found their sites
 by shape. Every hook, wrap and cexi address they report equals the carried one; they added
 frame_look_once (2), frame_cam_once (2), frame_int_sites (123), frame_wait_sites (9) and
 frame_net_clock 0x10493fc0, the same counts as 2026-10-05. The cexi_slots patches (91) are carry's
@@ -73,7 +73,7 @@ with --slots.
 
 Method
 ------
-Ghidra 11.3.2 headless (JDK 21), tools/discover.py, as for 2026-10-05.
+Ghidra 11.3.2 headless (JDK 21), tools/version/discover.py, as for 2026-10-05.
 The carried verdicts were enough: round 1 and round 2 both ended with 0 conflicts, 0 suspect
 functions, switch review 0. No new verdicts.
 

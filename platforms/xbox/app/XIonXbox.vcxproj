@@ -58,7 +58,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <!-- tools/sample_report.py resolves FFXI_SAMPLE's addresses with it -->
+      <!-- tools/debug/sample_report.py resolves FFXI_SAMPLE's addresses with it -->
       <GenerateMapFile>true</GenerateMapFile>
       <MapFileName>$(OutDir)$(TargetName).map</MapFileName>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>

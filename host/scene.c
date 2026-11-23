@@ -26,7 +26,7 @@
 #include <string.h>
 
 #include "build.h"
-#include "d3d8.h"
+#include "../runtime/portable/winapi/d3d8.h"
 #include "gfx.h"
 #include "gthread.h"
 #include "gwin.h"

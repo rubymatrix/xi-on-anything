@@ -69,7 +69,7 @@ what was mapped:
 
 Method
 ------
-Ghidra 11.3.2 headless (tools/discover.py), JDK 21. The first run's gate failed with 4 conflicts,
+Ghidra 11.3.2 headless (tools/version/discover.py), JDK 21. The first run's gate failed with 4 conflicts,
 3 suspect functions and 4 switches to review; FFXi.dll's with 1 suspect function. Each site was
 read by disassembly and matched to a class the earlier builds record; one --reuse run each passed.
 

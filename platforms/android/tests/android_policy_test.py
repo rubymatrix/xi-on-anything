@@ -19,10 +19,10 @@ def main():
             ('gfx_visibility_storage_lifecycle_test.cpp', [], [[]]),
             ('gfx_worker_test.cpp', [], [[]]),
             ('gfx_probe_mailbox_test.cpp', [], [[]]),
-            ('gfx_worker_api_test.cpp', ['runtime/portable/gfx_worker.cpp'], [['off'], ['on']]),
+            ('gfx_worker_api_test.cpp', ['runtime/portable/gfx/gfx_worker.cpp'], [['off'], ['on']]),
             (
                 'gfx_worker_mailbox_test.cpp',
-                ['runtime/portable/gfx_worker.cpp'],
+                ['runtime/portable/gfx/gfx_worker.cpp'],
                 [
                     [m]
                     for m in (
@@ -58,7 +58,7 @@ def main():
                 cc
                 + args
                 + shlex.split(os.environ.get('CFLAGS', ''))
-                + [str(ROOT / 'tests' / name)]
+                + [str(ROOT / 'tests' / 'gfx' / name)]
                 + [str(ROOT / s) for s in extra]
                 + ['-o', str(exe)],
                 check=True,
@@ -76,7 +76,7 @@ def main():
                 '-I' + str(ROOT / 'runtime'),
                 '-I' + str(ROOT / 'runtime/portable'),
                 '-I' + str(ROOT / 'host'),
-                str(ROOT / 'tests/benchmark_test.c'),
+                str(ROOT / 'tests/host/benchmark_test.c'),
                 str(ROOT / 'host/benchmark.c'),
                 '-o',
                 str(exe),

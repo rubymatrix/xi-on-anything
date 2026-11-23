@@ -101,7 +101,7 @@ It can't set environment variables. The log goes to `Documents/host64.log`, or t
     phone's 120. Frame Rate choices above 60 stay capped. Only the simulator can set the variable
     (`SIMCTL_CHILD_FFXI_MAX_FPS`).
 
-`tests/display_fit_test.c` checks the sizes for phones and iPads.
+`tests/host/display_fit_test.c` checks the sizes for phones and iPads.
 
 ## Touch controls
 

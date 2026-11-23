@@ -1,5 +1,5 @@
 /* Files over HTTP for the browser build: the game install and host64's own files, read from the local
- * server (tools/webserve.py) as the game asks for them. plat_posix.c sends paths under the mounts
+ * server (platforms/web/webserve.py) as the game asks for them. plat_posix.c sends paths under the mounts
  * here when XI_HTTP_URL is set (the page sets it; the Node build reads the disk instead):
  *
  *   /game/...  the install (the server's /dat/), read only

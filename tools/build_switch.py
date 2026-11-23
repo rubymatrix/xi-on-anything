@@ -4,7 +4,7 @@
   python tools/build_switch.py plat-test
         the platform layer's self-test (platforms/switch/tests/switch_plat_test.c) as build/switch/plat-test.nro
   python tools/build_switch.py gfx-test
-        the graphics back end's test (tests/gfx_test.c on OpenGL, through EGL) as build/switch/gfx-test.nro:
+        the graphics back end's test (tests/gfx/gfx_test.c on OpenGL, through EGL) as build/switch/gfx-test.nro:
         its lines to gfx-test.log on the card, then green on the screen when every check passed, red when not
   python tools/build_switch.py setup --sd <SD root> [--nro file.nro] [--game "<FINAL FANTASY XI folder>"]
         [--server <name or IP>] [--fps-divisor N] [--dats <folder>] [--layout nintendo|xbox] [--arg ...]
@@ -167,13 +167,13 @@ def plat_test(_a):
 
 
 def gfx_test(_a):
-    """tests/gfx_test.c on the OpenGL back end, through EGL (platforms/switch/tests/switch_gfx_test.c): build/switch/gfx-test.nro"""
+    """tests/gfx/gfx_test.c on the OpenGL back end, through EGL (platforms/switch/tests/switch_gfx_test.c): build/switch/gfx-test.nro"""
     tc.require()
     OUT.mkdir(parents=True, exist_ok=True)
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
     objs = compile_many(GFX + ['platforms/switch/sdl_nx.c', 'runtime/portable/plat_posix.c', 'runtime/portable/gwin.c',
                                'platforms/switch/tests/switch_gfx_test.c'], 'gfx-test', sdl)
-    objs += compile_many(['tests/gfx_test.c'], 'gfx-test-main', sdl + ['-DGFX_GL', '-Dmain=gfx_test_main'])
+    objs += compile_many(['tests/gfx/gfx_test.c'], 'gfx-test-main', sdl + ['-DGFX_GL', '-Dmain=gfx_test_main'])
     return link_nro(objs, 'gfx-test', GFX_LIBS + ['-lnx', '-lm'], title='XI on Anything graphics test')
 
 
@@ -200,8 +200,8 @@ def desktop_tools():
 
 
 # the graphics: OpenGL 4.3 core (gfx_gl.c) on Mesa's nouveau, through EGL (switch-mesa, switch-libdrm_nouveau)
-GFX = ['runtime/portable/gfx_gl.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
-       'runtime/portable/gfx_fx.c']
+GFX = ['runtime/portable/gfx/gfx_gl.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
+       'runtime/portable/gfx/gfx_fx.c']
 GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
 
 
@@ -227,7 +227,7 @@ def host(a):
         'platforms/switch/sdl_nx.c', 'platforms/switch/tls_nx.c', 'host/addons_none.c']
     # the render queue: GL's context is its render thread's, and the game calls from several threads
     queue = ['-DGFX_GL', '-DGFX_QUEUE']
-    objs = compile_many(bp.PORTABLE + hosts + ['runtime/portable/gfx_queue.c'], 'host',
+    objs = compile_many(bp.PORTABLE + hosts + ['runtime/portable/gfx/gfx_queue.c'], 'host',
                         sdl + tls + queue + ['-Dmain=xi_host_main'])
     objs += compile_many(['platforms/switch/switch_main.c'], 'entry', sdl)
     # GCC's names for the generated C's warnings (GEN_WARNINGS is clang's)

@@ -50,11 +50,11 @@ void display_policy(const DisplayIn* in, DisplayOut* out)
 #ifndef DISPLAY_FIT_POLICY_ONLY
 #include <SDL3/SDL.h>
 
-#include "d3d8.h"
+#include "../runtime/portable/winapi/d3d8.h"
 #include "gfx.h"
-#include "k32.h"
+#include "../runtime/portable/winapi/k32.h"
 #include "modern.h"
-#include "user32.h"
+#include "../runtime/portable/winapi/user32.h"
 #ifdef __ANDROID__
 void android_overlay_present_rect(int x, int y, int w, int h); /* android_overlay.c */
 #endif

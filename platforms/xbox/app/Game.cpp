@@ -143,7 +143,7 @@ void Game::Start()
     bool profile = Option("Profile") == "1";
     _putenv_s("FFXI_PROFILE", profile ? "1" : "0");
     _putenv_s("FFXI_CACHE_DIR", utf8(local).c_str()); // the D3D12 pipeline cache
-    if (profile) // where the game thread's time goes (tools/sample_report.py)
+    if (profile) // where the game thread's time goes (tools/debug/sample_report.py)
         _putenv_s("FFXI_SAMPLE", utf8(local + L"\\samples.bin").c_str());
     fprintf(stderr, "[app] starting the game: %s at %dx%d (%s)\n", utf8(game).c_str(), res.first, res.second,
         chosen.first ? "xbox.cfg" : "the screen's");

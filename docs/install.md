@@ -77,7 +77,7 @@ There is no source installer on Linux or Windows: see [Building](building.md).
 ### Testing the installer
 
 These test the installer from a clone, uncommitted changes included, without touching your own app
-or settings. `python3 tests/setup_test.py` checks the questions and the saved files they update.
+or settings. `python3 tests/tools/setup_test.py` checks the questions and the saved files they update.
 `tools/test_install.sh` runs `tools/install-source.sh` piped to bash, as a player would, inside a
 sandbox folder. It stops after the questions unless given `--full` (build and install into the
 sandbox). `--saved` starts from copies of your saved settings (an update), `--sandbox <folder>`

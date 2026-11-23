@@ -1,4 +1,4 @@
-/* tests/gfx_test.c on the Switch (build_switch.py gfx-test): the OpenGL back end (gfx_gl.c) through EGL on
+/* tests/gfx/gfx_test.c on the Switch (build_switch.py gfx-test): the OpenGL back end (gfx_gl.c) through EGL on
  * Mesa's nouveau, as the game will draw. The checks' lines go to sdmc:/switch/xi-on-anything/gfx-test.log
  * (libnx's console can't share the screen with EGL); then gfx_test's frames to the window (--window), and
  * the verdict for three seconds as the whole screen's color: green when every check passed, red when one
@@ -14,7 +14,7 @@
 
 #define DIR_ROOT "sdmc:/switch/xi-on-anything"
 
-int gfx_test_main(int argc, char** argv); /* tests/gfx_test.c's main */
+int gfx_test_main(int argc, char** argv); /* tests/gfx/gfx_test.c's main */
 
 static void verdict(int ok)
 {

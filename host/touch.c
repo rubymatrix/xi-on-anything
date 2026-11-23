@@ -33,7 +33,7 @@
 
 #include "gfx.h"
 #include "gwin.h"
-#include "input.h"
+#include "../runtime/portable/winapi/input.h"
 #include "modern.h"
 
 void touch_init(void);

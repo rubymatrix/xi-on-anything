@@ -34,8 +34,8 @@ install folder. By hand:
 1. **Identify and unpack.**
 
    ```
-   python tools/newbuild.py identify --game "<FINAL FANTASY XI>"   # hashes, label, version
-   python tools/newbuild.py unpack   --game "<FINAL FANTASY XI>"   # into generated/images/<label>/
+   python tools/version/newbuild.py identify --game "<FINAL FANTASY XI>"   # hashes, label, version
+   python tools/version/newbuild.py unpack   --game "<FINAL FANTASY XI>"   # into generated/images/<label>/
    ```
 
    The label is the date of `FFXiMain.dll`'s PE timestamp. The version is decrypted from the
@@ -48,7 +48,7 @@ install folder. By hand:
 2. **Carry the previous build over.**
 
    ```
-   python tools/newbuild.py carry --from <previous> --to <label> [--write]
+   python tools/version/newbuild.py carry --from <previous> --to <label> [--write]
    ```
 
    Maps every address the previous build's entry names onto the new image: `chars_ptr` (the
@@ -61,13 +61,13 @@ install folder. By hand:
    `--only geometry --write` carries just that section into a build `meta/builds.json` already
    has. `--write` adds the build to `meta/builds.json` and `discovery/verdicts.py`. Addresses it
    cannot map come with a hint (how their neighbours moved); check each with
-   `python tools/newbuild.py dis --label <build> --at <addr>` in both builds and fill it in.
+   `python tools/version/newbuild.py dis --label <build> --at <addr>` in both builds and fill it in.
 
 3. **Metadata.** A DLL whose `.text` is identical to the previous build's carries its metadata
-   over (`python tools/newbuild.py meta --from <previous> --to <label> --module FFXi.dll`). Otherwise:
+   over (`python tools/version/newbuild.py meta --from <previous> --to <label> --module FFXi.dll`). Otherwise:
 
    ```
-   python tools/discover.py --label <label> --module FFXiMain.dll   # Ghidra headless; minutes
+   python tools/version/discover.py --label <label> --module FFXiMain.dll   # Ghidra headless; minutes
    ```
 
    It stops before exporting if a decode conflict, a function that looks like data, or an
@@ -86,7 +86,7 @@ install folder. By hand:
    On Windows also run `python tools\build.py difftest` (expect 0 mismatches) and
    `python tools\build.py host`.
 
-   If `carry` wrote a `geometry` section, run `python3 tests/geometry_replay_test.py` (needs
+   If `carry` wrote a `geometry` section, run `python3 tests/geometry/geometry_replay_test.py` (needs
    `pefile` and `unicorn`). It compares `FFXI_NATIVE_GEOMETRY`'s kernels with the new build's own
    SSE code; when it passes, set `"layout": 1` in the section and rebuild. Without a layout the
    build keeps the translated skinning.

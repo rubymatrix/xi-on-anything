@@ -18,7 +18,7 @@ Globals it sets:
   struct, utf8           Ashita's built-in libraries               (ashita_struct.lua, ashita_utf8.lua)
 
 Anything Ashita has that isn't here fails loudly: "<Class>.<Member> is not supported yet", and the
-host log gets one "unsupported: <Class>.<Member>" line per member (tools/addon_survey.py counts them).
+host log gets one "unsupported: <Class>.<Member>" line per member (tools/addons/addon_survey.py counts them).
 --]]
 
 local hooks = ...

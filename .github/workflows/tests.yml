@@ -1,5 +1,5 @@
-# The tests that need no game files: the replay tools and their recordings (tests/replay_test.py),
-# the game's paths on a case-sensitive host (tests/vfs_test.c), and the graphics maps' hash (tests/gfx_key_test.c).
+# The tests that need no game files: the replay tools and their recordings (tests/tools/replay_test.py),
+# the game's paths on a case-sensitive host (tests/runtime/vfs_test.c), and the graphics maps' hash (tests/gfx/gfx_key_test.c).
 name: tests
 # Only a published release runs it (the launcher's release workflow publishes them here): no pull
 # requests, no pushes to main, no runs by hand.
@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Replay tools and reference set
-        run: python3 tests/replay_test.py -v
+        run: python3 tests/tools/replay_test.py -v
       - name: Guest paths (vfs.c)
         run: python3 tools/build_posix.py vfstest
       - name: Graphics map keys (gfx_key.h)

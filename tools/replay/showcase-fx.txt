@@ -1,6 +1,6 @@
 # Every scene-renderer feature on at once, at its tuned strength (README, "Everything on"), as host64's
 # settings file in place of the machine's own:
-#   FFXI_FX=0 FFXI_FX_FILE="$PWD/tools/replay/showcase-fx.txt" python3 tools/replay.py play tools/replay/default.txt
+#   FFXI_FX=0 FFXI_FX_FILE="$PWD/tools/replay/showcase-fx.txt" python3 tools/replay/replay.py play tools/replay/default.txt
 # FFXI_FX=0 turns the older effects path off (the scene renderer, its shadows and the post effects replace
 # it); fx is read only at start, from the environment, so this file can't set it.
 

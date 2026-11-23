@@ -42,7 +42,7 @@ Found by hand (no unique window):
 
 Method
 ------
-Ghidra 11.3.2 headless (tools/discover.py), JDK 21. The first run's gate failed with 2 conflicts and
+Ghidra 11.3.2 headless (tools/version/discover.py), JDK 21. The first run's gate failed with 2 conflicts and
 2 suspect functions. A --reuse run with their verdicts then showed one switch for review: removing
 the false functions at 0x1004bd10 and 0x1004c010 clears their whole bodies, which in a reused
 project had grown over real case code (including the nested switch at 0x1004cf64). The switch's
@@ -100,7 +100,7 @@ What the runtime meets in this client
     0x10010d6c, and floors its step at 2.0 (`mov [esi+0x24], 0x40000000` at 0x10010d79).
     meta/builds.json patches.frame60 re-points the four compares at the 1.0 at 0x102bf5fc and
     makes the floor 1.0 (meta/features.json frame60). Forced on at the title it runs at 58 fps
-    against 30. In the world (tools/staticserver.py does sign this client in, to Port Jeuno) it
+    against 30. In the world (tools/replay/staticserver.py does sign this client in, to Port Jeuno) it
     runs at 58 fps against 29, and walking covers the same ground in the same time.
   - The entity map (0x103ecdf8) holds 0x800 entities, the player's from 0x400 on (the player index
     global 0x103efa02 read 1024). The addon layer's entitymap.size pattern (an edi loop over 0x900)

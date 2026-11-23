@@ -4,7 +4,7 @@
  * FFXiMain.dll and FFXi.dll are mapped into the guest window (FFXiMain at its preferred
  * 0x10000000, FFXi.dll - which prefers the same base - relocated), both CRTs start, FFXi.dll's
  * FFXiEntry is created through its class factory, and IFFXiEntry::GameStart runs the game with
- * our own gamecore (runtime/portable/gamecore.c) in place of the retail core library.
+ * our own gamecore (runtime/portable/gamecore/gamecore.c) in place of the retail core library.
  *
  * usage: host64 --game <FINAL FANTASY XI folder> [--reg <file.reg>]... [--reg-overlay <file.reg>]
  *               [--reg-final <file.reg>]...   loaded after the overlay: a launcher's settings
@@ -64,14 +64,14 @@
  *     and keeps that sign-in open while the game runs. --auth is the 0x34-byte authCode block the
  *     game sends its lobby with it (the core's slot 936), as that launcher made it; host64 only
  *     carries the bytes. Without it the block is zeros, which LandSandBoat's lobby accepts.
- *   - a LandSandBoat server (host/lsb_login.c): --user signs in on the server's auth port first.
+ *   - a LandSandBoat server (host/signin/lsb_login.c): --user signs in on the server's auth port first.
  *     The password comes from --pass, else FFXI_PASSWORD, else the sign-in screen; --otp is the
  *     two-factor code, if the account has one. --login-token is a launch token from the server's
  *     own launcher, in place of the password and code. --trust on is xiloader's "trust this
  *     computer": signing in with the code then saves the token the server hands out (keychain.h,
  *     per --server name and user), which stands in for the code for 30 days.
  *
- * With neither, the sign-in screen (host/signin.c) comes first, in the game's own UI art, with the
+ * With neither, the sign-in screen (host/signin/signin.c) comes first, in the game's own UI art, with the
  * LandSandBoat server in its Settings; it remembers them in <data dir>/signin.cfg
  * (--data-dir, else the user's app data), the password in the keychain, and writes display
  * defaults to <data dir>/settings.reg, loaded when no --reg-final is given. Its window becomes the
@@ -83,18 +83,18 @@
 
 #include "gthread.h"
 #include "gwin.h"
-#include "k32.h"
-#include "pe.h"
-#include "gamecore.h"
-#include "gamecore_config.h"
-#include "lsb_login.h"
-#include "signin.h"
+#include "../runtime/portable/winapi/k32.h"
+#include "../runtime/portable/winapi/pe.h"
+#include "../runtime/portable/gamecore/gamecore.h"
+#include "../runtime/portable/gamecore/gamecore_config.h"
+#include "signin/lsb_login.h"
+#include "signin/signin.h"
 #ifdef FFXI_POL
-#include "signin_pol.h"
+#include "signin/signin_pol.h"
 #endif
 #include "appdefaults.h"
 #include "modern.h"
-#include "vicons.h"
+#include "ui/vicons.h"
 #include "cexi.h"
 #include "discord.h"
 #include "frame.h"
@@ -104,17 +104,17 @@
 #if defined(_WIN32)
 #include "sampler.h"
 #endif
-#include "thunk.h"
-#include "user32.h"
-#include "d3d8.h"
+#include "../runtime/portable/winapi/thunk.h"
+#include "../runtime/portable/winapi/user32.h"
+#include "../runtime/portable/winapi/d3d8.h"
 #include "gfx.h"
-#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
-#include "dsound.h"
-#include "dinput.h"
-#include "ws2.h"
+#include "../runtime/portable/gfx/gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
+#include "../runtime/portable/winapi/dsound.h"
+#include "../runtime/portable/winapi/dinput.h"
+#include "../runtime/portable/winapi/ws2.h"
 #include "plat.h"
 #include "vfs.h"
-#include "geometry_guest.h"
+#include "../runtime/portable/geometry/geometry_guest.h"
 #include "watermark.h"
 #include "scene.h"
 #include "ps2fix.h"
@@ -1220,7 +1220,7 @@ static void chat_keyboard(void)
 }
 #endif
 
-/* host/vicons.c reads the install through the DAT overlays, as the game would */
+/* host/ui/vicons.c reads the install through the DAT overlays, as the game would */
 static char g_vicons_game[1024];
 
 static uint8_t* vicons_read(const char* rel, size_t* size)
@@ -1552,7 +1552,7 @@ int main(int argc, char** argv)
             if (!frame_supported())
             {
                 /* the game's own uncapped pacing would run the world as fast as the frames, unheld */
-                fprintf(stderr, "--fps-limit: game build %s cannot run uncapped at the game's speed (tools/frame_sites.py)\n",
+                fprintf(stderr, "--fps-limit: game build %s cannot run uncapped at the game's speed (tools/version/frame_sites.py)\n",
                     FFXI_BUILD);
                 return 2;
             }
@@ -1956,7 +1956,7 @@ int main(int argc, char** argv)
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
         &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen, &g_fps_limit };
     modern_init(&ms);
-    /* status icons drawn from vectors (host/vicons.c); FFXI_VECTOR_ICONS=0 keeps the game's */
+    /* status icons drawn from vectors (host/ui/vicons.c); FFXI_VECTOR_ICONS=0 keeps the game's */
     if (!getenv("FFXI_VECTOR_ICONS") || strcmp(getenv("FFXI_VECTOR_ICONS"), "0"))
     {
         snprintf(g_vicons_game, sizeof g_vicons_game, "%s", game);
@@ -2047,7 +2047,7 @@ int main(int argc, char** argv)
     /* IFFXiEntry::GameStart(pCore, &pFFXiMessage): the game runs inside this call */
     rt_log("[recomp] GameStart\n");
 #if defined(_WIN32)
-    /* FFXI_SAMPLE=<file>: where this thread's time goes, sampled (tools/sample_report.py) */
+    /* FFXI_SAMPLE=<file>: where this thread's time goes, sampled (tools/debug/sample_report.py) */
     if (getenv("FFXI_SAMPLE") && getenv("FFXI_SAMPLE")[0])
         rt_log("[recomp] sampling the game thread to %s: %s\n", getenv("FFXI_SAMPLE"),
             sampler_start(getenv("FFXI_SAMPLE")) ? "on" : "cannot write it");

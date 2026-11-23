@@ -1,5 +1,5 @@
 // XI on Xbox: the UWP app. A bare CoreWindow, no XAML: the game host draws everything on it with
-// Direct3D 12, from its own sign-in screen (host/signin.c, in the game's UI art) into the game. The
+// Direct3D 12, from its own sign-in screen (host/signin/signin.c, in the game's UI art) into the game. The
 // app gives it the window and its input, sound, the on-screen keyboard, the sign-in's TLS and the
 // credential locker (uwp_bridge.h, keychain.h).
 #include "pch.h"

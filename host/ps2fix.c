@@ -1,4 +1,4 @@
-/* The PS2 fixes that work in the game's own code; runtime/portable/d3d8.c draws the rest. After portfix
+/* The PS2 fixes that work in the game's own code; runtime/portable/winapi/d3d8.c draws the rest. After portfix
  * (github.com/voetre/portfix, MIT License, Copyright (c) 2026 voetre), which found and measured them.
  *
  * Shine batches (with fix_shine). Some of the PC's weapon and armour files lost batch boundaries in conversion: the
@@ -42,7 +42,7 @@
 #include <string.h>
 
 #include "build.h"
-#include "d3d8.h"
+#include "../runtime/portable/winapi/d3d8.h"
 #include "gthread.h"
 #include "gwin.h"
 #include "runtime.h"

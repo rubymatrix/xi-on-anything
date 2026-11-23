@@ -9,7 +9,7 @@ Metadata      FFXi.2025-11-12.meta.json (ffxi-recomp-meta/1): 374 functions, 42 
 
 Method
 ------
-tools/discover.py, Ghidra 11.3.2 headless. Its .text differs from every known build and no
+tools/version/discover.py, Ghidra 11.3.2 headless. Its .text differs from every known build and no
 earlier build's images were at hand, so the pass ran in full rather than `newbuild.py meta`.
 The gate failed on one suspect function, the false start every build has:
   NOT_CODE 0x100067d0, REDECODE 0x100067c8. An aligned start inside the 11-byte stub at

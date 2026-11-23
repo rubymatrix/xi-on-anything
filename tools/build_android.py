@@ -255,11 +255,11 @@ def main():
     spv = json.loads((CACHE / 'spirv-build.json').read_text())
     extra += spv['cflags']
     gfx = [
-        'runtime/portable/gfx_hlsl.c',
-        'runtime/portable/gfx_hlsl_shaders.c',
-        'runtime/portable/gfx_spirv.c',
-        'runtime/portable/gfx_vulkan.cpp',
-        'runtime/portable/gfx_worker.cpp',
+        'runtime/portable/gfx/gfx_hlsl.c',
+        'runtime/portable/gfx/gfx_hlsl_shaders.c',
+        'runtime/portable/gfx/gfx_spirv.c',
+        'runtime/portable/gfx/gfx_vulkan.cpp',
+        'runtime/portable/gfx/gfx_worker.cpp',
     ]
     extra += ['-DFFXI_RENDER_WORKER_BUILD']
     sdl_lib = CACHE / 'sdl-build/libSDL3.so'

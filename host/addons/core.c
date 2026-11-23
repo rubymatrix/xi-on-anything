@@ -26,7 +26,7 @@
 #include "host.h"
 #include "addons.h"
 #include "gui_lua.h"
-#include "d3d8.h"
+#include "../../runtime/portable/winapi/d3d8.h"
 #include "gthread.h"
 #include "gwin.h"
 #include "plat.h"
@@ -1206,7 +1206,7 @@ void addons_frame(void)
         return;
     if (!g_started)
     {
-        /* FFXI_CONTROL=<port> (1: the default): the control port (lua/control.lua, tools/xi_mcp.py) */
+        /* FFXI_CONTROL=<port> (1: the default): the control port (lua/control.lua, tools/debug/xi_mcp.py) */
         const char* c = getenv("FFXI_CONTROL");
         if (c && *c && strcmp(c, "0"))
             xi_addon_load_builtin("control");

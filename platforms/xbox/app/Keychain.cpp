@@ -1,10 +1,10 @@
-// host/keychain.h for the UWP build: the sign-in screen's remembered passwords and the server's trust
+// host/signin/keychain.h for the UWP build: the sign-in screen's remembered passwords and the server's trust
 // tokens, in the Windows credential locker (PasswordVault), one entry per key under one resource.
 // Called from the sign-in's worker threads, never the UI thread.
 #include "pch.h"
 
 extern "C" {
-#include "keychain.h"
+#include "../../../host/signin/keychain.h"
 }
 
 using namespace winrt;

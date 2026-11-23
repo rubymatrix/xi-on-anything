@@ -60,7 +60,7 @@ function log(text) {
   logEl.textContent = lines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
 }
-if (!crossOriginIsolated) statusEl.textContent = 'This page needs cross-origin isolation (open it from tools/webserve.py).';
+if (!crossOriginIsolated) statusEl.textContent = 'This page needs cross-origin isolation (open it from platforms/web/webserve.py).';
 const args = ['--game', '/game', '--data-dir', '/xi-data', '--reg', '/app/ffxi.reg', '--reg-final', '/xi-data/settings.reg'];
 let password = '';
 for (const k of ['server', 'user', 'pass', 'authport', 'dataport', 'viewport'])
@@ -116,7 +116,7 @@ var Module = {
     // the overlays (hud.js): each made, and shown or not as the gear's switches say
     xiHud.gauge(Module);
     xiHud.overlays(xiHud.downloads(Module.fileCache));
-    // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay.py does)
+    // development: Enter every 2 s for a minute, through the lobby to the zone (as tools/replay/replay.py does)
     if (hash.get('enter')) {
       const until = Date.now() + Number(hash.get('enter')) * 1000;
       const t = setInterval(() => {

@@ -1,6 +1,6 @@
 /* BSD sockets over the local server's WebSocket (net_web.h): the browser build's network.
  *
- * Every socket is a channel on one WebSocket to tools/webserve.py's /net, which opens the real TCP
+ * Every socket is a channel on one WebSocket to platforms/web/webserve.py's /net, which opens the real TCP
  * or UDP socket on the player's machine, to the game server the player configured and nothing else.
  * The WebSocket lives on the page's main thread (platforms/web/net.js); this side keeps each socket's
  * state and received data, so the game's threads block, poll and select here exactly as on a host

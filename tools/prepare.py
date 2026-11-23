@@ -59,7 +59,7 @@ def main():
     subprocess.check_call([sys.executable, unpack, dll, out])
     subprocess.check_call([sys.executable, unpack, ffxi, os.path.join(args.out, 'FFXi.unpacked.dll')])
     # One copy per build too: the next game update maps its addresses from this one
-    # (tools/newbuild.py carry).
+    # (tools/version/newbuild.py carry).
     keep = os.path.join(args.out, 'images', label)
     os.makedirs(keep, exist_ok=True)
     for name in ('FFXiMain.retail.dll', 'FFXiMain.unpacked.dll', 'FFXi.retail.dll', 'FFXi.unpacked.dll'):

@@ -7,7 +7,7 @@ tools. The game, the runtime and the sign-in screen build from the repo as `buil
 The second version, after [xi-on-xbox](https://github.com/rubymatrix/xi-on-xbox):
 
 - **No XAML.** The app is a bare CoreWindow, with the Direct3D 12 swap chain straight on it.
-- **The native sign-in screen** (`host/signin.c`), the same as on the Mac. Its Settings: server,
+- **The native sign-in screen** (`host/signin/signin.c`), the same as on the Mac. Its Settings: server,
   Remember Password, Trust This Computer, Window Theme, Full Screen. The D-pad or left stick moves,
   A picks or opens the on-screen keyboard over a field (a `CoreTextEditContext`), B goes back, Start
   signs in. Saved passwords and trust tokens go in the Windows credential locker.

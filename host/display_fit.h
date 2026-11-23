@@ -20,7 +20,7 @@ typedef struct DisplayOut
     int rect_x, rect_y, rect_w, rect_h; /* where it is presented, in the drawable's pixels */
 } DisplayOut;
 
-/* The sizes for a screen (no SDL: tests/display_fit_test.c). */
+/* The sizes for a screen (no SDL: tests/host/display_fit_test.c). */
 void display_policy(const DisplayIn* in, DisplayOut* out);
 
 /* The sign-in's window, before the registry is read: the game's first size, put in the registry

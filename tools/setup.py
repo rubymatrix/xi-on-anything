@@ -509,9 +509,9 @@ def fetch_addons():
     runs them; they aren't ours to ship). Not fatal: the game runs without them."""
     note('Addons: fetching Ashita and Windower addons and libraries into %s' % user_path(DATA_DIR))
     try:
-        run([sys.executable, os.path.join(HERE, 'addons_fetch.py'), '--data-dir', DATA_DIR])
+        run([sys.executable, os.path.join(HERE, 'addons', 'addons_fetch.py'), '--data-dir', DATA_DIR])
     except Exception as e:  # noqa: BLE001 - offline, or GitHub unreachable
-        note('Addons: not fetched (%s); run tools/addons_fetch.py later' % e)
+        note('Addons: not fetched (%s); run tools/addons/addons_fetch.py later' % e)
 
 
 def main():
@@ -530,7 +530,7 @@ def main():
                     help='ask the questions, print what the build would get, and stop (nothing built or saved)')
     ap.add_argument('--no-open', action='store_true', help='do not start the game, even with --open')
     ap.add_argument('--no-addons', action='store_true',
-                    help="don't fetch Ashita's and Windower's addons and libraries (tools/addons_fetch.py)")
+                    help="don't fetch Ashita's and Windower's addons and libraries (tools/addons/addons_fetch.py)")
     a = ap.parse_args()
     if a.find:
         for c in candidates():

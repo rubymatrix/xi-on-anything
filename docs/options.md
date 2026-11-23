@@ -7,7 +7,7 @@ Graphics, Shadows, Lighting, Atmosphere, Water, Interface, Gamepad and Addons. T
 Sources, as the tables abbreviate them:
 
 - **Menu**: its row under Config › Advanced, as *page › row* (a group heading in brackets)
-- **fx**: its key in `fx.txt` (`runtime/portable/gfx_fx.c`), also `FFXI_FX_<KEY>` in the environment; read again while the game runs
+- **fx**: its key in `fx.txt` (`runtime/portable/gfx/gfx_fx.c`), also `FFXI_FX_<KEY>` in the environment; read again while the game runs
 - **CLI**: a `host64` flag (`host/host64.c`)
 - **App**: an app-bundle default (`app_default`, read when the flag is absent)
 - **Env**: an `FFXI_*` environment variable
@@ -36,7 +36,7 @@ Water page and no Display › FPS Counter row; Addons shows only with `--android
 | UI scale | Display › [Scaling] UI Scale | | | `FFXIMenuResolution` | list |
 | Interface shape | Display › [Scaling] Interface Shape | | `--ui-aspect` | `FFXIUIAspect` | off; Full / 16:9 / 4:3 |
 | Background (render) resolution | Display › [Scaling] Background Resolution | | | `FFXIBackground` | 2048 / 4096 / 6144 / 8192, next start |
-| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped (the last three only in game builds with frame sites in `meta/builds.json`, from `tools/frame_sites.py`; in others `--fps-divisor 0` is the game's own uncapped pacing, the world as fast as the frames). 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
+| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped (the last three only in game builds with frame sites in `meta/builds.json`, from `tools/version/frame_sites.py`; in others `--fps-divisor 0` is the game's own uncapped pacing, the world as fast as the frames). 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
 | FPS counter | Display › [Performance] FPS Counter | `fps` | | | 1 shown |
 | GPU pick (Vulkan) | | | | | `FFXI_GPU` env |
 
@@ -202,7 +202,7 @@ closes it (Escape first cancels a recording). Its window has no `0x800b` message
 applied by running the game's own pad-settings reader again (`meta/builds.json` `pad_config`,
 `pad_reload`). That client reads the pad only through DirectInput, where a `padsin000` value is a
 DirectInput button: there host64's DirectInput pad numbers its 16 buttons as the XInput codes above
-(`dinput_pad`, `runtime/portable/dinput.c`), so ffxi.reg's map and this window's mean the same buttons
+(`dinput_pad`, `runtime/portable/winapi/dinput.c`), so ffxi.reg's map and this window's mean the same buttons
 as on today's clients.
 
 ## 9. Textures & game data
@@ -210,7 +210,7 @@ as on today's clients.
 | Setting | CLI | App / Env | Notes |
 |---|---|---|---|
 | Texture packs | `--textures <dir>` (×8) | `FFXI_BUNDLED_TEXTURES` | default `<data dir>/textures`, then bundled `assets/textures` (font, slot bar) |
-| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/vicons.c`). A texture pack's entry for the same icon wins |
+| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/ui/vicons.c`). A texture pack's entry for the same icon wins |
 | DAT overlays (XIPivot-style) | `--dats <dir>` (×8) | `FFXIDats` | first folder wins |
 | Custom server items | `--cexi off\|items\|full` | `FFXICexi` | CatsEyeXI-style ids |
 

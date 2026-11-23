@@ -1,5 +1,5 @@
 """The browser build (docs/web.md): the same translation and runtime, compiled to wasm32
-with Emscripten, for the local web server (tools/webserve.py) to serve to the player's own browser.
+with Emscripten, for the local web server (platforms/web/webserve.py) to serve to the player's own browser.
 
   python3 tools/build_web.py --game <FINAL FANTASY XI> [--node]
 
@@ -39,7 +39,7 @@ CFLAGS = ['-O2', '-std=c11', '-g2', '-pthread', '-fno-strict-aliasing', '-I', 'r
           '-I', 'generated', '-I', 'third_party/stb', '-I', 'third_party/sdl3/include', '-DXI_WEB=1', '-D_GNU_SOURCE', '-DGFX_QUEUE']
 # host64 without the native graphics back ends, SDL3, Discord and the addon host
 HOST = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + [
-    'runtime/portable/gfx_queue.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c', 'platforms/web/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
+    'runtime/portable/gfx/gfx_queue.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c', 'platforms/web/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
     'host/addons_none.c']
 LINK = ['-pthread', '-sPROXY_TO_PTHREAD', '-sALLOW_MEMORY_GROWTH', '-sMAXIMUM_MEMORY=4GB', '-sINITIAL_MEMORY=64MB',
         '-sSTACK_SIZE=1MB', '-sDEFAULT_PTHREAD_STACK_SIZE=1MB', '-sPTHREAD_POOL_SIZE=24', '-sEXIT_RUNTIME',
@@ -69,8 +69,8 @@ def main():
     objs = bp.compile_stale(bp.generated('all'), 'build/web-obj/all', ['-I', 'generated/all'])
     objs += bp.compile_stale(bp.generated('ffxi'), 'build/web-obj/ffxi', ['-I', 'generated/ffxi'])
     # the graphics back end: none in Node (headless), WebGPU in the page (Dawn's webgpu.h, emdawnwebgpu)
-    gfx = ['runtime/portable/gfx_null.c'] if a.node else ['runtime/portable/gfx_webgpu.c', 'runtime/portable/gfx_fx.c',
-                                                          'runtime/portable/gfx_scene.c']
+    gfx = ['runtime/portable/gfx/gfx_null.c'] if a.node else ['runtime/portable/gfx/gfx_webgpu.c', 'runtime/portable/gfx/gfx_fx.c',
+                                                          'runtime/portable/gfx/gfx_scene.c']
     port = [] if a.node else ['--use-port=emdawnwebgpu']
     objdir = 'build/web-obj/' + ('host-node' if a.node else 'host')
     objs += bp.compile_stale(bp.PORTABLE + HOST + gfx, objdir, tls_flags + port)

@@ -4,7 +4,7 @@
  * ids (its MAX_ITEMID is 0xE000); the player's DAT overlay (--dats) carries the extended Monstrosity
  * item DAT (ROM/288/80.DAT English, 79.DAT Japanese: 0xC00-byte records, record n is id 0x7400 + n,
  * the custom ones from record 1024) and the expanded FTABLE/VTABLE with the gear files. Four changes,
- * found in each build by tools/cexi_sites.py (meta/builds.json, 2026-09-03's in the comments):
+ * found in each build by tools/version/cexi_sites.py (meta/builds.json, 2026-09-03's in the comments):
  *
  *  - The item range table (cexi_item_ranges, 0x10372150): 20-byte entries {file, first id, end id, 0,
  *    handler}, the first an id falls in wins. Monstrosity's 0x7400-0x7800 becomes 0x7400-0xE000, so
@@ -24,7 +24,7 @@
  * --cexi full: those, and the spell and job-ability ceilings (0x400 spells, 0xB00 commands) raised to
  * 0x1000, so the records the server's menu DAT (ROM/118/114.DAT, enlarged) adds past retail show in
  * the menus, resolve by name and keep recasts, with effects and weapon-skill motions from file ids
- * past the retail ones. The sites come from cexislots' site list (tools/cexi_sites.py --slots):
+ * past the retail ones. The sites come from cexislots' site list (tools/version/cexi_sites.py --slots):
  *
  *  - Patch group cexi_slots: every loop bound, size and list layout constant the ceilings move
  *    (the known-spell list: bitmap 0x200, ids from +0x200, count at +0x2200; the same for commands),
@@ -225,7 +225,7 @@ extern GuestFn rt_hook_cexi_spell_list, rt_hook_cexi_cmd_list, rt_hook_cexi_ja_s
 #define SPELLS 0x400u   /* retail */
 #define COMMANDS 0xB00u /* retail */
 #define BITS (CEILING / 8)
-/* The region (tools/cexi_sites.py writes the code that names it; keep the two in step) */
+/* The region (tools/version/cexi_sites.py writes the code that names it; keep the two in step) */
 #define R_SPELL_PLAYER (FFXI_CEXI_REGION + 0x0)
 #define R_CMD_PLAYER (FFXI_CEXI_REGION + 0x4)
 #define R_SPELL_BITS (FFXI_CEXI_REGION + 0x100)
@@ -644,7 +644,7 @@ void cexi_frame(void)
 static int setup_slots(const char* game)
 {
     (void)game;
-    rt_log("[recomp] cexi: build %s has no spell and ability sites (tools/cexi_sites.py --slots); they stay retail\n", FFXI_BUILD);
+    rt_log("[recomp] cexi: build %s has no spell and ability sites (tools/version/cexi_sites.py --slots); they stay retail\n", FFXI_BUILD);
     return 0;
 }
 void cexi_frame(void) {}

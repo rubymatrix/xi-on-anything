@@ -81,18 +81,18 @@
     "dinput_pad": {
       "title": "Gamepad map on DirectInput-only clients",
       "what": "For clients that read the gamepad only through DirectInput (no XInput; the 2009 one), the pad's buttons are numbered as the game's XInput codes are, the triggers and the D-pad as buttons too, so padsin000 (ffxi.reg's map, Config > Gamepad's) means the same buttons as on today's clients. Without it the shipped map is scrambled there: Confirm on Y, Cancel on A, the menus on Back, Start and the shoulders.",
-      "code": "runtime/portable/dinput.c dinput_xinput_order",
+      "code": "runtime/portable/winapi/dinput.c dinput_xinput_order",
       "builds": ["2009-07-09"]
     },
     "modern_fx": {
       "title": "Modern effects (post-processing)",
       "what": "Grading, saturation, contrast, sharpening and anisotropic filtering over the game's own picture. Works on the finished frame, not the game's data, so every build has it.",
-      "code": "runtime/portable/gfx_fx.c fx"
+      "code": "runtime/portable/gfx/gfx_fx.c fx"
     },
     "ps2_draws": {
       "title": "PS2 Accuracy (draws)",
       "what": "Draws what the PC version got wrong as the PS2 does: metal's shine, summons' halos, Port Bastok's sea, menu buttons (fix_ps2). Works on the game's draws, not its code, so needs no hooks; tested on 2025 and 2026 builds.",
-      "code": "runtime/portable/d3d8.c fixes_frame"
+      "code": "runtime/portable/winapi/d3d8.c fixes_frame"
     },
     "ps2_models": {
       "title": "PS2 Accuracy (shine batches, disintegrate)",

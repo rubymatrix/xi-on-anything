@@ -15,7 +15,7 @@ What changed from 2026-09-03
 ----------------------------
 FFXi.dll: rebuilt, but its unpacked .text and .reloc are byte-identical to 2026-09-03's;
 .rdata/.data/.rsrc differ in 27 bytes (as 2026-08-22 -> 2026-09-03). Its metadata is
-2026-09-03's with the new hash and label (tools/newbuild.py meta).
+2026-09-03's with the new hash and label (tools/version/newbuild.py meta).
 
 FFXiMain.dll: a small update. .text is 0x40 bytes longer; code moves by 0 at the bottom (the
 Present call site, the hooks, the menu functions and nearly every manual verdict are unchanged) and
@@ -25,7 +25,7 @@ in 1,556 bytes and .data in 379, mostly code pointers into the moved range.
 
 Carrying addresses over
 -----------------------
-tools/newbuild.py carry --from 2026-09-03 --to 2026-10-05 --write mapped everything except five:
+tools/version/newbuild.py carry --from 2026-09-03 --to 2026-10-05 --write mapped everything except five:
   cexi_region          not an image address: cexi_sites.py's fixed REGION (0xfe000000), kept
   cexi_fx_spell_edi    no unique byte window; disassembly at 0x100a8e9c is the same
                        `add edi,0xaf0 ; push 0x34 ; mov [esp+0x18],edi ; call <malloc>` in both
@@ -35,7 +35,7 @@ tools/newbuild.py carry --from 2026-09-03 --to 2026-10-05 --write mapped everyth
   menus_addons         "menu    conf1win", "tkdebug dbdelsel", "menu    oplev") -> 0x10375064,
                        0x10375b0c, 0x103740ec, unchanged
   character table pointer 0x104df770 (1,733 of 1,733 sites agree), Present call site 0x100035cb.
-After prepare, tools/frame_sites.py and tools/cexi_sites.py (without --slots) found their sites
+After prepare, tools/version/frame_sites.py and tools/version/cexi_sites.py (without --slots) found their sites
 by shape: every one where 2026-09-03 has it or moved by +0x20 (frame_yield, the lobby's wait sites,
 some frame_int_sites); cexi_item_ranges, cexi_gear_groups, cexi_item_general and the cexi_items
 patch bytes unchanged. The cexi_slots patches (91) are carry's byte-window mapping; no cexidats
@@ -50,7 +50,7 @@ call rel32s into code that moved (_ftol 0x10311c2c -> 0x10311c6c, as the CRT sli
 
 Method
 ------
-Ghidra 11.3.2 headless (JDK 21), tools/discover.py, as for 2026-09-03.
+Ghidra 11.3.2 headless (JDK 21), tools/version/discover.py, as for 2026-09-03.
 The carried verdicts (10 NOT_CODE, 4 REDECODE, 5 switch overrides) were enough: round 1 and
 round 2 both ended with 0 conflicts, 0 suspect functions, switch review 0. No new verdicts.
 

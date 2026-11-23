@@ -26,7 +26,7 @@ This skill runs two others in order:
 ## Flow
 
 ```
-python tools/newbuild.py identify --game "<FINAL FANTASY XI>"
+python tools/version/newbuild.py identify --game "<FINAL FANTASY XI>"
 ```
 
 - **Already known** (`known_build` set): nothing to analyze. Run game-version-build for that

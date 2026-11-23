@@ -1,12 +1,12 @@
 # The manual verdicts, per module and per retail build. Imported by Discover2.py, Switches.py
-# and BogusCheck.py (Jython), and read by tools/newbuild.py (CPython): keep it plain data, no
+# and BogusCheck.py (Jython), and read by tools/version/newbuild.py (CPython): keep it plain data, no
 # Ghidra imports at module level. A build is recognised by the PE TimeDateStamp of the imported
 # image, which the unpacker keeps from the retail DLL; the module by the image's name
 # (FFXiMain.unpacked.dll -> 'ffximain', FFXi.unpacked.dll -> 'ffxi').
 #
 # The verdicts for a new build are the previous build's, carried over with an address map (a byte
 # window around each old address, relocated dwords wildcarded, must match exactly once in the new
-# .text: `tools/newbuild.py carry`) and then re-checked by the pipeline itself:
+# .text: `tools/version/newbuild.py carry`) and then re-checked by the pipeline itself:
 # Conflicts/BogusCheck/SwitchAudit report anything the carried-over lists miss. See the build's
 # discovery notes (discovery/notes/).
 BUILDS = {
@@ -98,7 +98,7 @@ VERDICTS = {
         'SWITCHES': {0x100063fc: 21, 0x10006fe1: 11, 0x102208dd: 9, 0x102a5888: 4, 0x102b92a9: 6},
     },
     ('ffxi', '2025-12-26'): {'NOT_CODE': [0x100067d0], 'REDECODE': [0x100067c8], 'SWITCHES': {}},
-    # Carried over from 2026-09-03 by tools/newbuild.py carry; re-checked by the discovery pass.
+    # Carried over from 2026-09-03 by tools/version/newbuild.py carry; re-checked by the discovery pass.
     # modern menus_conf1win/menus_display/menus_addons (meta/builds.json): no code references them;
     # the menu table 0x10372000..0x10376400 is byte-identical to 2026-09-03's, so they keep 0x10375064,
     # 0x10375b0c, 0x103740ec. The cexi_fx_spell_edi hook and cexi_region were read by hand the same way.
@@ -112,7 +112,7 @@ VERDICTS = {
         'REDECODE': [0x100067c8],
         'SWITCHES': {},
     },
-    # Carried over from 2026-10-05 by tools/newbuild.py carry; re-checked by the discovery pass.
+    # Carried over from 2026-10-05 by tools/version/newbuild.py carry; re-checked by the discovery pass.
     # Read by hand (newbuild.py dis, both builds), all in meta/builds.json, none a verdict:
     # patches ahcolors 0x101f6acd (mov ebp,0x80808080 imm), quicksets 0x101a9132 (jne after call),
     # statustimers 0x10229a6a (test eax,eax / je), trimspells 0x101afff6 (push 1), cexi_slots 0x101688b7,
@@ -189,7 +189,7 @@ def build_of(prog):
     lfanew = mem.getInt(base.add(0x3c))
     ts = mem.getInt(base.add(lfanew + 8)) & 0xFFFFFFFF
     if ts not in BUILDS:
-        raise Exception('unknown build: PE timestamp 0x%08x; add it to discovery/verdicts.py (tools/newbuild.py carry)' % ts)
+        raise Exception('unknown build: PE timestamp 0x%08x; add it to discovery/verdicts.py (tools/version/newbuild.py carry)' % ts)
     return BUILDS[ts]
 
 

@@ -118,4 +118,4 @@ The app writes to its LocalState: `host64.log` (every `[app]`, `[signin]`, `[lsb
 line), `host64.out.log` (standard output), `app.log` (the app's errors before the game's log opens), and,
 with `Profile=1` in `xbox.cfg`, `samples.bin`. `platforms/xbox/tools/xbox.py logs <folder>` copies them.
 Read `samples.bin` against the linker map of **the same build** of `XIonXbox.exe`, on the machine that
-built it: `tools/sample_report.py samples.bin <exe.map>`.
+built it: `tools/debug/sample_report.py samples.bin <exe.map>`.

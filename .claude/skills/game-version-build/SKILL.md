@@ -47,7 +47,7 @@ runtime or graphics code changed too.
    - `boot64` also exports the game's registry keys (from a retail install on this machine) to
      `build/ffxi.reg`. On a machine without one that is expected to fail quietly.
    - If the build's `builds.json` entry has a `geometry` section without a `layout`, run
-     `python3 tests/geometry_replay_test.py` (any host; needs `pefile` and `unicorn`). On a pass,
+     `python3 tests/geometry/geometry_replay_test.py` (any host; needs `pefile` and `unicorn`). On a pass,
      set `"layout": 1` in that section and rebuild `host64`. On a failure, leave the layout out
      and report it: the build keeps the translated skinning.
 
@@ -68,7 +68,7 @@ runtime or graphics code changed too.
 
 - **difftest mismatches**: a CRT address in `builds.json` is wrong for this build, or the
   translator broke. Check the named function with
-  `python tools/newbuild.py dis --label <label> --at <crt addr>`. It should be the start of the
+  `python tools/version/newbuild.py dis --label <label> --at <crt addr>`. It should be the start of the
   same routine as in the previous build.
 - **`translated N` far from the metadata's function count**, or a BOOT failure: see
   `build/host.log` and `build/boot64.log`. `FATAL at <addr>: indirect call/jump to an address with

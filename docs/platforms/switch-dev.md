@@ -16,8 +16,8 @@ what has been verified, and what is left.
 | `platforms/switch/tls_nx.c`, `platforms/switch/mbedtls_config.h` | mbedtls' clock and entropy | — |
 | `platforms/switch/app.json` | the application NPDM (for the forwarder) | hbloader's |
 | `platforms/switch/tests/switch_plat_test.c` | the platform layer's self-test, as its own `.nro` | — |
-| `runtime/portable/gfx_gl.c`, `gfx_gl_api.h` | graphics: OpenGL 4.3 core on Mesa's nouveau through EGL; also builds on the desktop (SDL3's GL context) for testing | `gfx_webgpu.c`, `gfx_vulkan.c` |
-| `platforms/switch/tests/switch_gfx_test.c` | `tests/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
+| `runtime/portable/gfx/gfx_gl.c`, `gfx_gl_api.h` | graphics: OpenGL 4.3 core on Mesa's nouveau through EGL; also builds on the desktop (SDL3's GL context) for testing | `gfx_webgpu.c`, `gfx_vulkan.c` |
+| `platforms/switch/tests/switch_gfx_test.c` | `tests/gfx/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
 
 The translation is the desktop one (`generated/all`, `generated/ffxi`). The generated C is portable, and
 the Switch adds no wraps or hooks. Compile flags: `-D__SWITCH__ -DRT_GUEST_WINDOW -DFFXI_SWITCH
@@ -37,7 +37,7 @@ A GL context is current on one thread, but the game makes buffers and reads occl
 threads. So the game uses the render queue (`GFX_QUEUE`, gfx_queue.c). With `GFX_GL` it brings the device
 up on the render thread and makes every call there (`GFXQ_OWNED`, as WebGPU does in the browser).
 
-Test on a desktop first: `tools/build.py gfxtest-gl` (tests/gfx_test.c, offscreen) and
+Test on a desktop first: `tools/build.py gfxtest-gl` (tests/gfx/gfx_test.c, offscreen) and
 `tools/build.py host64-gl` (the game; `FFXI_GL_DEBUG=1` for the debug context and checks). On the Switch
 the surface is 1920x1080, cropped to the screen at each present. The back end logs through
 `svcOutputDebugString` (in Ryubing's log).
@@ -141,7 +141,7 @@ Found with Ryubing's GDB stub and `FFXI_NET_TRACE` / `FFXI_RECOMP_TRACE` set fro
 
 ## Saved passwords
 
-host/keychain.c's Switch store. There is no keychain, so each remembered password is a file on the card:
+host/signin/keychain.c's Switch store. There is no keychain, so each remembered password is a file on the card:
 `data/keychain/<key>.bin`, holding a random counter, the password padded to 128 bytes and encrypted with
 AES-CTR, and an AES-CMAC of both. The keys come from the security engine, derived from the console's device
 key through spl:mig (`splCryptoGenerateAesKek` with the device-unique option, then `splCryptoLoadAesKey`

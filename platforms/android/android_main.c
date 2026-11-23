@@ -9,7 +9,7 @@
 #include <SDL3/SDL_main.h>
 #include "build.h"
 #if defined(FFXI_RENDER_WORKER_BUILD)
-#include "gfx_worker.h"
+#include "../../runtime/portable/gfx/gfx_worker.h"
 #else
 static void gfx_worker_shutdown(void) {}
 #endif

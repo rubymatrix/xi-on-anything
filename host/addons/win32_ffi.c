@@ -24,11 +24,11 @@
 
 #include <SDL3/SDL.h>
 
-#include "d3d8.h"
+#include "../../runtime/portable/winapi/d3d8.h"
 #include "d3d_ffi.h"
 #include "host.h"
 #include "res.h"
-#include "user32.h"
+#include "../../runtime/portable/winapi/user32.h"
 
 typedef struct
 {
