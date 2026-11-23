@@ -931,6 +931,9 @@ static struct
 {
     uint32_t meshes, left, items, built, why[8]; /* why left: not kind 0, buffers, state, stream, vb, uv, ib, palette */
     uint32_t stale; /* draws where the game's current palette was another actor's (theirs used) */
+    uint32_t state_why[3]; /* why[2] by kind: a fading actor, the shine pass, the silhouette shadows */
+    uint32_t buf_why[3];   /* why[1] by kind: no buffer, command stream or counts; +0x68 not set; no index or other buffer */
+    uint64_t left_ns[8];   /* FFXI_SCENELOG: the game's own draw of the ones left, by why */
 } g_ccount;
 
 /* a batch to draw before the work after it: d3d8's world flush finds it, or with the worker on d3d8 calls the front
@@ -1109,10 +1112,11 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         return ++g_ccount.why[0], 0;
     uint32_t vbuf = rd32(res + 0x5e), cmd = rd32(res + 0x36), counts = rd32(res + 0x42);
     if (!vbuf || !cmd || !counts || !rd8(vbuf + 0x68) || !rd32(vbuf + 0x40) || !rd32(vbuf + 0x4c))
-        return ++g_ccount.why[1], 0;
+        return ++g_ccount.buf_why[!vbuf || !cmd || !counts ? 0 : !rd8(vbuf + 0x68) ? 1 : 2], ++g_ccount.why[1], 0;
     uint32_t tint = rd32(FFXI_SCENE_TINT);
     if ((tint >> 24) != 0x80 || rd8(FFXI_SCENE_SHINE) || rd8(FFXI_SCENE_SHADOW_MODE) == 1)
-        return ++g_ccount.why[2], 0; /* a fading actor (its own target), the shine pass, the silhouette shadows */
+        return ++g_ccount.state_why[(tint >> 24) != 0x80 ? 0 : rd8(FFXI_SCENE_SHINE) ? 1 : 2], ++g_ccount.why[2],
+               0; /* a fading actor (its own target), the shine pass, the silhouette shadows */
     uint32_t total = rd16(counts) + rd16(counts + 2) + rd32(vbuf + 0x60);
     /* the command stream once without drawing: no environment maps, a texture before every draw, nothing unknown */
     int have_tex = 0, envmap = 0;
@@ -1128,7 +1132,13 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
             {
                 if (rd16(p + 2 + 0xe) || rdf32(p + 2 + 0x28) != 0.0f)
                 {
-                    if (gfx_fx_get("scene_shadow_envmap") <= 0.0f)
+                    /* (the setting read once a frame: gfx_fx_get compares the name with each setting's, and this
+                     * ran for every environment-mapped mesh, 0.2 ms of a busy town's frame on the Switch) */
+                    static uint32_t envmap_at = ~0u;
+                    static float envmap_on;
+                    if (envmap_at != g_frame_no)
+                        envmap_at = g_frame_no, envmap_on = gfx_fx_get("scene_shadow_envmap");
+                    if (envmap_on <= 0.0f)
                         return ++g_ccount.why[3], 0;
                     envmap = 1; /* environment-mapped: the game draws it, it casts */
                 }
@@ -1326,6 +1336,8 @@ static void mesh_draw(Guest* g)
     uint32_t res = mgr && handle ? guest_thiscall(FFXI_SCENE_RES_GET, mgr, 1, (uint32_t[]){ handle }) : 0;
     ++g_ccount.meshes;
     ++g_taking;
+    uint32_t why0[8];
+    memcpy(why0, g_ccount.why, sizeof why0);
     int took = chars_take(g, res, model);
     --g_taking;
     if (g_send_put_off)
@@ -1333,7 +1345,15 @@ static void mesh_draw(Guest* g)
     if (!took)
     {
         ++g_ccount.left;
+        uint64_t t0 = g_log ? rt_monotonic_ns() : 0;
         rt_orig_mesh_draw(g);
+        if (t0)
+        {
+            int w = 0;
+            while (w < 7 && g_ccount.why[w] == why0[w])
+                ++w;
+            g_ccount.left_ns[w] += rt_monotonic_ns() - t0;
+        }
         return;
     }
     rt_return(g, 0, 0x18);
@@ -1520,6 +1540,13 @@ static void chars_only_frame(void)
             frames, (double)(g_ccount.meshes - g_ccount.left) / frames, (double)g_ccount.left / frames, g_ccount.why[0],
             g_ccount.why[1], g_ccount.why[2], g_ccount.why[3], g_ccount.why[4], g_ccount.why[5], g_ccount.why[6],
             g_ccount.why[7], (double)g_ccount.items / frames, g_ccount.built);
+        rt_log("[recomp] scene: characters left to the game, its draws in ms a frame by why: kind %.2f, buffers %.2f "
+               "(no buffer %u, not skinned %u, no index buffer %u), state %.2f (fading %u, shine %u, silhouettes %u), "
+               "stream %.2f, vb %.2f, uv %.2f, ib %.2f, palette %.2f\n",
+            g_ccount.left_ns[0] * 1e-6 / frames, g_ccount.left_ns[1] * 1e-6 / frames, g_ccount.buf_why[0], g_ccount.buf_why[1],
+            g_ccount.buf_why[2], g_ccount.left_ns[2] * 1e-6 / frames, g_ccount.state_why[0], g_ccount.state_why[1],
+            g_ccount.state_why[2], g_ccount.left_ns[3] * 1e-6 / frames, g_ccount.left_ns[4] * 1e-6 / frames,
+            g_ccount.left_ns[5] * 1e-6 / frames, g_ccount.left_ns[6] * 1e-6 / frames, g_ccount.left_ns[7] * 1e-6 / frames);
         if (d3d8_world_front())
             rt_log("[recomp] scene: characters sent to the worker: %.1f batches a frame, %.0f items; it ran %.1f batches, %.0f "
                    "items, of them %.1f without their index buffer, %.1f without their texture; %u batches with no target\n",

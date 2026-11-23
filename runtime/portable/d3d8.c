@@ -390,6 +390,7 @@ static struct
 {
     int every; /* -1 not read */
     uint32_t n;
+    uint32_t cur, quiet, made_at; /* the interval now (every, doubled per clean sweep), checks since one found any, objects made then */
     uint64_t nested, checked, differ, differ_bytes, bytes, ns, runs; /* (bytes, ns, runs: what the checks compared, took) */
     uint32_t logged, next; /* next: where the next check starts (an eighth at a time) */
 } g_bufchk = { -1 };
@@ -471,11 +472,11 @@ static void ws_frame(void)
             g_ws.tex_calls / f, g_ws.applies / f, g_ws.applies_forget / f);
         if (g_w.threaded)
             rt_log("[d3d8] worker check: %llu nested buffer locks; %llu buffers checked, %llu written outside a lock "
-                   "(%llu KB); %llu checks, %.2f ms and %.0f KB each\n",
+                   "(%llu KB); %llu checks, %.2f ms and %.0f KB each, every %u frames now\n",
                 (unsigned long long)g_bufchk.nested, (unsigned long long)g_bufchk.checked,
                 (unsigned long long)g_bufchk.differ, (unsigned long long)(g_bufchk.differ_bytes >> 10),
                 (unsigned long long)g_bufchk.runs, g_bufchk.runs ? (double)g_bufchk.ns / g_bufchk.runs * 1e-6 : 0.0,
-                g_bufchk.runs ? (double)g_bufchk.bytes / g_bufchk.runs / 1024.0 : 0.0);
+                g_bufchk.runs ? (double)g_bufchk.bytes / g_bufchk.runs / 1024.0 : 0.0, g_bufchk.cur);
         g_bufchk.nested = g_bufchk.checked = g_bufchk.differ = g_bufchk.differ_bytes = 0;
         g_bufchk.bytes = g_bufchk.ns = g_bufchk.runs = 0;
         g_w.recs = g_w.bytes = g_w.syncs = g_w.waits = g_w.wait_ns = g_w.present_waits = g_w.present_wait_ns = 0;
@@ -492,6 +493,7 @@ static void ws_frame(void)
 static Obj* g_obj_pages[OBJ_PAGES];
 #define OBJ_AT(i) (&g_obj_pages[(i) / OBJ_PAGE][(i) % OBJ_PAGE])
 static uint32_t g_nobjs, g_free_hint = 1;
+static uint32_t g_obj_made; /* objects made so far (d3dw_check_buffers: a zone's load makes many) */
 static uint32_t g_vtbl[O_SURFACE + 1];
 
 static uint32_t obj_new(int kind)
@@ -515,6 +517,7 @@ static uint32_t obj_new(int kind)
         i = g_nobjs++;
     }
     g_free_hint = i + 1;
+    g_obj_made++;
     Obj* o = OBJ_AT(i);
     memset(o, 0, sizeof *o);
     g_ws.creates++;
@@ -5155,10 +5158,22 @@ static void d3dw_check_buffers(void)
     {
         const char* e = getenv("FFXI_D3D_CHECK");
         g_bufchk.every = e && *e ? atoi(e) : 30;
+        g_bufchk.cur = g_bufchk.every > 0 ? (uint32_t)g_bufchk.every : 0;
+        g_bufchk.made_at = g_obj_made;
     }
-    if (g_bufchk.every <= 0 || ++g_bufchk.n < (uint32_t)g_bufchk.every)
+    if (g_bufchk.every <= 0)
+        return;
+    /* each check waits for the worker and compares an eighth of the buffers (a ~2 ms stall in a town): while the
+     * sweeps find nothing the interval doubles after each whole one, to 16 times FFXI_D3D_CHECK, and goes back to
+     * it when one finds a buffer or many objects have come since (a zone's load, where they were found before) */
+    if (++g_bufchk.n < g_bufchk.cur)
         return;
     g_bufchk.n = 0;
+    if (g_obj_made - g_bufchk.made_at > 64) /* (made since the last check) */
+        g_bufchk.cur = (uint32_t)g_bufchk.every, g_bufchk.quiet = 0;
+    g_bufchk.made_at = g_obj_made;
+    if (++g_bufchk.quiet % 8 == 0 && g_bufchk.cur < 16u * (uint32_t)g_bufchk.every)
+        g_bufchk.cur *= 2;
     d3dw_sync_at("the buffer check"); /* (both copies compared with the worker idle; Present doesn't wait) */
     uint64_t t0 = rt_monotonic_ns();
     int found = 0;
@@ -5199,7 +5214,7 @@ static void d3dw_check_buffers(void)
     g_bufchk.ns += rt_monotonic_ns() - t0, g_bufchk.runs++;
     /* while it finds some, it looks again at the next frame (a zone's load writes a few at a time) */
     if (found)
-        g_bufchk.n = (uint32_t)g_bufchk.every;
+        g_bufchk.n = g_bufchk.cur = (uint32_t)g_bufchk.every, g_bufchk.quiet = 0;
 }
 
 /* Lock(OffsetToLock, SizeToLock, ppbData, Flags) */

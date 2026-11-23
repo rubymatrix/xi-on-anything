@@ -88,6 +88,10 @@ def flags():
 # fault. The translated code works in guest memory, not on objects like these, and keeps it.
 OWN = ['-fno-tree-pta']
 
+# The translated code's own flags after flags()' (a later -O wins): XI_SWITCH_GEN_OPT, e.g. "-O3", to try others on it.
+# Changing them builds all of it again (the generated files are ~3 MB of C each).
+GEN_OPT = os.environ.get('XI_SWITCH_GEN_OPT', '').split()
+
 
 def run(args, **kw):
     args = [str(a) for a in args]
@@ -113,7 +117,7 @@ def compile_one(job):
     obj.parent.mkdir(parents=True, exist_ok=True)
     cxx = s.suffix == '.cpp'
     compiler = tc.tool('g++' if cxx else 'gcc')
-    f = flags() + ([] if src.startswith('generated/') else OWN) + list(extra) + (
+    f = flags() + (GEN_OPT if src.startswith('generated/') else OWN) + list(extra) + (
         ['-std=gnu++17', '-fno-rtti'] if cxx else ['-std=gnu11'])
     if MESA and src in MESA_INCLUDERS:  # its EGL and GL headers ahead of switch-mesa's in portlibs
         f = ['-I' + str(MESA / 'include')] + f
