@@ -6,6 +6,7 @@
  * and hands it to the shell. Compiled against SDL3's headers for its types. */
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,6 +157,15 @@ bool SDL_GetWindowSizeInPixels(SDL_Window* w, int* width, int* height)
     return true;
 }
 bool SDL_GetWindowSize(SDL_Window* w, int* width, int* height) { return SDL_GetWindowSizeInPixels(w, width, height); }
+bool SDL_GetWindowPosition(SDL_Window* w, int* x, int* y)
+{
+    (void)w;
+    if (x)
+        *x = 0;
+    if (y)
+        *y = 0;
+    return true;
+}
 SDL_Window* SDL_GetWindowFromEvent(const SDL_Event* e) { (void)e; return g_have_window ? &g_window : NULL; }
 bool SDL_ShowWindow(SDL_Window* w)
 {
@@ -184,6 +194,7 @@ SDL_PropertiesID SDL_CreateProperties(void) { return 1; }
 void SDL_DestroyProperties(SDL_PropertiesID props) { (void)props; }
 bool SDL_SetNumberProperty(SDL_PropertiesID props, const char* name, Sint64 value) { (void)props, (void)name, (void)value; return true; }
 bool SDL_SetStringProperty(SDL_PropertiesID props, const char* name, const char* value) { (void)props, (void)name, (void)value; return true; }
+bool SDL_SetBooleanProperty(SDL_PropertiesID props, const char* name, bool value) { (void)props, (void)name, (void)value; return true; }
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window* w) { (void)w; return 0; }
 void* SDL_GetPointerProperty(SDL_PropertiesID props, const char* name, void* default_value)
 {
@@ -435,6 +446,28 @@ void SDL_CloseGamepad(SDL_Gamepad* p)
         p->open = 0;
 }
 SDL_Gamepad* SDL_GetGamepadFromID(SDL_JoystickID id) { return id == PAD_ID && pad_connected() ? &g_pad : NULL; }
+bool SDL_IsGamepad(SDL_JoystickID id) { return id == PAD_ID; }
+/* input.c names a joystick SDL has no mapping for; the page's pad is the only one and is mapped */
+const char* SDL_GetJoystickNameForID(SDL_JoystickID id) { return id == PAD_ID ? "Xbox controller" : NULL; }
+SDL_GUID SDL_GetJoystickGUIDForID(SDL_JoystickID id)
+{
+    (void)id;
+    SDL_GUID g;
+    memset(&g, 0, sizeof g);
+    return g;
+}
+void SDL_GUIDToString(SDL_GUID guid, char* out, int n)
+{
+    static const char HEX[] = "0123456789abcdef";
+    int i = 0;
+    for (; i < (int)sizeof guid.data && 2 * i + 2 < n; ++i)
+    {
+        out[2 * i] = HEX[guid.data[i] >> 4];
+        out[2 * i + 1] = HEX[guid.data[i] & 15];
+    }
+    if (n > 0)
+        out[2 * i < n ? 2 * i : n - 1] = 0;
+}
 const char* SDL_GetGamepadNameForID(SDL_JoystickID id) { (void)id; return "Xbox controller"; }
 const char* SDL_GetGamepadName(SDL_Gamepad* p) { (void)p; return "Xbox controller"; }
 bool SDL_GetGamepadButton(SDL_Gamepad* p, SDL_GamepadButton b)
@@ -631,6 +664,13 @@ size_t SDL_strlcat(char* dst, const char* src, size_t n)
 }
 int SDL_GetAtomicInt(SDL_AtomicInt* a) { return __atomic_load_n(&a->value, __ATOMIC_SEQ_CST); }
 int SDL_SetAtomicInt(SDL_AtomicInt* a, int v) { return __atomic_exchange_n(&a->value, v, __ATOMIC_SEQ_CST); }
+Uint32 SDL_GetAtomicU32(SDL_AtomicU32* a) { return __atomic_load_n(&a->value, __ATOMIC_SEQ_CST); }
+void SDL_LockSpinlock(SDL_SpinLock* l)
+{
+    while (__atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE))
+        sched_yield();
+}
+void SDL_UnlockSpinlock(SDL_SpinLock* l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); }
 
 float SDL_GetWindowPixelDensity(SDL_Window* w) { (void)w; return 1.0f; } /* the shell sizes in device pixels */
 bool SDL_SetWindowFullscreenMode(SDL_Window* w, const SDL_DisplayMode* m) { (void)w, (void)m; return true; }

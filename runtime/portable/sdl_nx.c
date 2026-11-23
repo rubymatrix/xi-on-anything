@@ -787,6 +787,27 @@ SDL_JoystickID* SDL_GetGamepads(int* count)
 }
 bool SDL_HasGamepad(void) { return pad_connected(); }
 bool SDL_IsGamepad(SDL_JoystickID id) { return id == PAD_ID; }
+/* input.c names a joystick SDL has no mapping for; the console's own pad is the only one and is mapped */
+const char* SDL_GetJoystickNameForID(SDL_JoystickID id) { return id == PAD_ID ? "Nintendo Switch controller" : NULL; }
+SDL_GUID SDL_GetJoystickGUIDForID(SDL_JoystickID id)
+{
+    (void)id;
+    SDL_GUID g;
+    memset(&g, 0, sizeof g);
+    return g;
+}
+void SDL_GUIDToString(SDL_GUID guid, char* out, int n)
+{
+    static const char HEX[] = "0123456789abcdef";
+    int i = 0;
+    for (; i < (int)sizeof guid.data && 2 * i + 2 < n; ++i)
+    {
+        out[2 * i] = HEX[guid.data[i] >> 4];
+        out[2 * i + 1] = HEX[guid.data[i] & 15];
+    }
+    if (n > 0)
+        out[2 * i < n ? 2 * i : n - 1] = 0;
+}
 SDL_Gamepad* SDL_OpenGamepad(SDL_JoystickID id)
 {
     if (id != PAD_ID)
