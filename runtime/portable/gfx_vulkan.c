@@ -1724,7 +1724,13 @@ static VkShaderModule compile_glsl(const char* text, int fragment)
         fprintf(stderr, "[recomp] gfx: GLSL link failed: %s\n", glslang_program_get_info_log(prog));
         goto done;
     }
-    glslang_program_SPIRV_generate(prog, stage);
+    /* not glslang_program_SPIRV_generate, which runs SPIRV-Tools' validator on every module: the kit's glslang
+     * is built without SPIRV-Tools (tools/linux/kit.sh, ENABLE_OPT off) so never did, but a build on the system's
+     * glslang (ARM Linux) did, on the pipeline workers, and crashed in it (spvtools::val); its findings went
+     * nowhere anyway */
+    glslang_spv_options_t so = { 0 };
+    so.disable_optimizer = true;
+    glslang_program_SPIRV_generate_with_options(prog, stage, &so);
     VkShaderModuleCreateInfo mi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
     mi.codeSize = glslang_program_SPIRV_get_size(prog) * 4;
     mi.pCode = glslang_program_SPIRV_get_ptr(prog);
