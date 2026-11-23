@@ -1,5 +1,5 @@
 /* Our own gamecore's function-table slots (R3). Every slot here follows its specification in
- * specs/gamecore-slots.*.txt (read from the retail gamecore and
+ * runtime/specs/gamecore-slots.*.txt (read from the retail gamecore and
  * checked against the live R3.0 call log); the comment on each names the retail function.
  *
  * Every slot FFXI uses is cdecl: the caller pops the arguments, so slots return with RETC.

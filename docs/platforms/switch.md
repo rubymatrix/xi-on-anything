@@ -3,7 +3,7 @@
 The game as a Switch homebrew app (`.nro`). You build it with devkitPro's libnx on your own PC from your
 own game files, then copy it to the console's SD card with the game beside it.
 
-Developer notes: [../switch.md](../switch.md).
+Developer notes: [../switch.md](switch-dev.md).
 
 > [!IMPORTANT]
 > **Status**: experimental, playable on a console. Sign-in, the world, battles and menus run on a Switch

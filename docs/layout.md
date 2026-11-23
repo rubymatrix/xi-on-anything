@@ -18,7 +18,7 @@ runtime/portable/  64-bit hosts: plat.h (+ plat_win.c, plat_posix.c), gwin (gues
 host/              ffximain.c: the 32-bit stand-in FFXiMain.dll; host64.c: the 64-bit game host;
                    lsb_login.c: the LandSandBoat sign-in; android_main.c (the Android entry) and
                    benchmark.c (its frame timestamps)
-android/           the Android app: its manifest and activity (docs/android.md)
+android/           the Android app: its manifest and activity (docs/platforms/android-dev.md)
 xbox/              the Xbox app, its packaging and the console tools (xbox/README.md)
 tests/             difftest.c (original vs translation), boot.c (x86), boot64.c (x64),
                    gfx_test.c (the Metal back end), d3d8_test.c (the D3D8 front end on it)
@@ -35,8 +35,9 @@ discovery/         the discovery pass: Ghidra (Jython) post-scripts, verdicts.py
                    per build), notes/ (what each build's run found)
 meta/              builds.json, and the per-build metadata the recompiler reads
 .claude/skills/    game-version-update (-analyze, -build): a new client version end to end
-specs/             the specifications the runtime implements (gamecore slots, D3D8 and gamecore surfaces)
-ffxi.reg           the game's registry keys, a starting point for --reg
+runtime/specs/     the specifications the runtime implements (gamecore slots, D3D8 and gamecore surfaces)
+assets/            fonts, icons, textures, UI art; ffxi.reg (the game's registry keys, a starting point for --reg)
+docs/              these guides; images/ (the README's screenshots), platforms/ (one guide per platform)
 generated/         (gitignored) unpacked images (images/<build>/), discovery projects, recompiler output
 build/             (gitignored)
 ```

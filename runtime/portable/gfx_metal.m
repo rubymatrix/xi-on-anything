@@ -9500,7 +9500,7 @@ void gfx_set_present_rect(int x, int y, int w, int h)
     g_present_rect.x = x, g_present_rect.y = y, g_present_rect.w = w > 0 && h > 0 ? w : 0, g_present_rect.h = h;
 }
 
-/* The present interval. iOS has no switch: its layer always waits for the display (docs/ios.md). */
+/* The present interval. iOS has no switch: its layer always waits for the display (docs/platforms/ios-dev.md). */
 static void layer_vsync(int vsync)
 {
 #if TARGET_OS_OSX

@@ -1,4 +1,4 @@
-/* SDL entry point of the Android app (docs/android.md): Android defaults, the --android-* options,
+/* SDL entry point of the Android app (docs/platforms/android-dev.md): Android defaults, the --android-* options,
  * the touch controls (android_overlay.c), then the portable host: its sign-in screen, or the
  * LandSandBoat account the arguments give. */
 #include <stdio.h>

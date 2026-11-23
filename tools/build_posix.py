@@ -557,7 +557,7 @@ def app(game, a):
     os.makedirs(res)
     exe = os.path.join(macos, APP_NAME)
     shutil.copy(os.path.join(ROOT, 'build', 'host64'), exe)
-    shutil.copy(os.path.join(ROOT, 'ffxi.reg'), res)
+    shutil.copy(os.path.join(ROOT, 'assets', 'ffxi.reg'), res)
     shutil.copy(os.path.join(ROOT, 'assets', 'icon.icns'), res)
     shutil.copy(os.path.join(ROOT, 'build', 'runtime.json'), res)  # the launcher's rebuild check
     shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(res, 'textures'))  # bundled hi-res packs

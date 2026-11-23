@@ -259,7 +259,7 @@ def rt_shaders(env):
                 if name in files:
                     os.remove(os.path.join(d, name))
 GFX_LIBS = ['d3d12.lib', 'dxgi.lib', 'd3dcompiler.lib', 'dxguid.lib']
-# the OpenGL 4.3 back end (the Switch's, docs/switch.md), built here to be tested without one: SDL3's GL
+# the OpenGL 4.3 back end (the Switch's, docs/platforms/switch-dev.md), built here to be tested without one: SDL3's GL
 # context, its functions loaded through SDL (no GL library to link); gfx_fx.c wants C11 atomics
 GL_SOURCES = ['runtime\\portable\\gfx_gl.c', 'runtime\\portable\\gfx_msl.c', 'runtime\\portable\\gfx_msl_shaders.c',
               'runtime\\portable\\gfx_fx.c']

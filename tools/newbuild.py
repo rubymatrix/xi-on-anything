@@ -110,7 +110,7 @@ def _solve(v, t, k, bit, found):
 def patch_ver_version(path):
     """The client version string in a retail patch.ver, or None. The core's file cipher with the
     key recovered from the file itself (the first two plaintext blocks are zero), as
-    runtime/portable/gamecore_files.c does it; see specs/gamecore-slots.files.txt, slot 1171."""
+    runtime/portable/gamecore_files.c does it; see runtime/specs/gamecore-slots.files.txt, slot 1171."""
     data = open(path, 'rb').read()
     if len(data) < 0x120:
         return None

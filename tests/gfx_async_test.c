@@ -8,7 +8,7 @@
  * usage: tools/build_android.py gfxtest --test gfx_async, or libmain's --android-async-test
  *        (exit status 0 when every check passes, 77 where the keyed API is not built; with
  *        FFXI_RENDER_WORKER=1 and FFXI_RENDER_WORKER_MAILBOX=1 it also requires delayed GPU
- *        copies, see docs/android.md) */
+ *        copies, see docs/platforms/android-dev.md) */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

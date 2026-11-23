@@ -343,7 +343,7 @@ class Server:
         self.origins = {o.rstrip('/') for o in a.origin or []}
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.trees = {'dat': Tree([('', a.game)]),
-                      'app': Tree([('ffxi.reg', os.path.join(repo, 'ffxi.reg')),
+                      'app': Tree([('ffxi.reg', os.path.join(repo, 'assets', 'ffxi.reg')),
                                    ('textures', os.path.join(repo, 'assets', 'textures'))]),
                       'dats': Tree([(str(i), d) for i, d in enumerate(a.dats or [])])}
         # the bucket's copy: (tree, its prefix) -> the folder in the bucket

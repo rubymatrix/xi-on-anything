@@ -140,8 +140,8 @@ def main():
         # app's bundle has it
         assets = out / 'assets'
         assets.mkdir()
-        if (ROOT / 'ffxi.reg').is_file():
-            shutil.copyfile(ROOT / 'ffxi.reg', assets / 'ffxi.reg')
+        if (ROOT / 'assets' / 'ffxi.reg').is_file():
+            shutil.copyfile(ROOT / 'assets' / 'ffxi.reg', assets / 'ffxi.reg')
         run(
             [
                 BT / 'aapt',

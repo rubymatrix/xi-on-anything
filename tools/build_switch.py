@@ -327,7 +327,7 @@ def setup_mtp(a):
         shutil.copyfile(nro, stage / nro.name)
     elif a.nro:
         raise SystemExit(f'{nro}: no such file')
-    shutil.copyfile(ROOT / 'ffxi.reg', stage / 'ffxi.reg')
+    shutil.copyfile(ROOT / 'assets' / 'ffxi.reg', stage / 'ffxi.reg')
     shutil.copyfile(ROOT / 'switch/switch.reg', stage / 'switch.reg')  # the Switch's defaults over it
     lines = run_args(a)
     if lines or not (stage / 'run.args').exists():
@@ -376,7 +376,7 @@ def setup(a):
     if a.dats:
         n, size = copy_tree(Path(a.dats), app / 'dats')
         print(f'DAT overlay: {n} files copied, {size / 1e6:.0f} MB')
-    shutil.copyfile(ROOT / 'ffxi.reg', app / 'ffxi.reg')
+    shutil.copyfile(ROOT / 'assets' / 'ffxi.reg', app / 'ffxi.reg')
     shutil.copyfile(ROOT / 'switch/switch.reg', app / 'switch.reg')  # the Switch's defaults over it
     lines = run_args(a)
     if lines or not (app / 'run.args').exists():

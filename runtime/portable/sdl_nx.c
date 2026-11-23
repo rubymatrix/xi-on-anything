@@ -1110,7 +1110,7 @@ bool SDL_LoadWAV(const char* path, SDL_AudioSpec* spec, Uint8** buf, Uint32* len
 
 /* --- the device's own streams (sewave.c): s16, mono or stereo, any rate -------------------------------- */
 /* The thread is not started here: the sign-in opens the device just after the render thread is made, and a
- * thread made then can meet the start-up race (docs/switch.md "Open"): a black screen on the console. */
+ * thread made then can meet the start-up race (docs/platforms/switch-dev.md "Open"): a black screen on the console. */
 SDL_AudioDeviceID SDL_OpenAudioDevice(SDL_AudioDeviceID dev, const SDL_AudioSpec* spec)
 {
     (void)dev, (void)spec;

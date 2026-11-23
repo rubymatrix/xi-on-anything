@@ -1,4 +1,4 @@
-/* SDL entry point of the iPhone app (docs/ios.md). SDL_main.h turns main() into SDL_main and runs it
+/* SDL entry point of the iPhone app (docs/platforms/ios-dev.md). SDL_main.h turns main() into SDL_main and runs it
  * inside UIApplicationMain; this adds the arguments in Documents/run.args, finds the game folder the
  * player copied into Documents, sends the log to Documents/host64.log, then starts the portable host
  * (host64.c, built with main renamed to xi_host_main). */

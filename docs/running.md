@@ -41,7 +41,7 @@ To sign in to a LandSandBoat server without the sign-in screen:
 ```
 build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
     --server <server name> --user <account> \
-    --reg ffxi.reg --reg-overlay build/settings.reg --dats ~/FFXI/DATs
+    --reg assets/ffxi.reg --reg-overlay build/settings.reg --dats ~/FFXI/DATs
 ```
 
 ## Options
@@ -60,7 +60,7 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--trust on\|off` | xiloader's "trust this computer": after a two-factor code, the server hands out a token that replaces the code for 30 days. It is kept in the keychain per `--server` name and account (the sign-in screen's Settings has the same switch). Without `--server`, or without a password store (a Linux desktop with no Secret Service), nothing is kept. |
 | `--authport`, `--dataport`, `--viewport` | LandSandBoat's ports, by default 54231 (sign-in, TLS), 54230 (data), 54001 (lobby view). |
 | `--loader-version <a.b.c>` | The loader version sent at sign-in, `2.2.0` by default (current xiloader). LandSandBoat refuses a version it does not expect. When the refusal names the one it wants (`2.1.x`), `host64` retries once with that (an `x` as 0). The sign-in screen remembers it (`loader_version=` in `signin.cfg`). |
-| `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its registry keys. Start from this repo's `ffxi.reg`. |
+| `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its registry keys. Start from this repo's `assets/ffxi.reg`. |
 | `--reg-overlay <file.reg>` | Where the game saves settings it changes. Loaded after the `--reg` files, which are never rewritten. |
 | `--data-dir <folder>` | Where `host64` keeps its own files (see above). Default: the sign-in screen's data folder; with no sign-in screen, none (the `patch.<version>.ver` then goes beside `host64`). |
 | `--reg-final <file.reg>` | Loaded after the overlay, so it wins over what the game saved (up to 8). Without one, `<data dir>/settings.reg` is loaded here. |

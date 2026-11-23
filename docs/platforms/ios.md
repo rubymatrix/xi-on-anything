@@ -2,7 +2,7 @@
 
 The macOS host on UIKit: the same recompiled client and Metal back end, with SDL3 for video, audio
 and controllers, and touch controls over the game. No emulator and no JIT: LuaJIT runs as its
-interpreter, since iOS forbids writable code. Developer notes are in [../ios.md](../ios.md).
+interpreter, since iOS forbids writable code. Developer notes are in [../ios.md](ios-dev.md).
 
 ## What you need
 

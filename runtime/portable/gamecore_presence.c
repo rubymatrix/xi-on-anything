@@ -1,6 +1,6 @@
 /* Our own gamecore, the presence group (R3): presence client, handle and character records, mail,
  * text, the Help Desk FAQ and misc slots. Each follows
- * specs/gamecore-slots.presence.txt; its section 3 is the summary this file
+ * runtime/specs/gamecore-slots.presence.txt; its section 3 is the summary this file
  * implements. All cdecl (RETC).
  *
  * The model, from that spec: the online client features (friends, mail, FAQ, server-side settings)

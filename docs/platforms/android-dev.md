@@ -1,6 +1,6 @@
 # Android (experimental)
 
-These are the developer notes. To install and play, see [platforms/android.md](platforms/android.md).
+These are the developer notes. To install and play, see [platforms/android.md](android.md).
 
 The Android build runs the recompiled client natively on ARM64, through SDL3 and a C++ Vulkan back
 end. It uses no Wine, GameNative, FEX or DXVK. It shares the geometry adapter with the desktop
@@ -104,7 +104,7 @@ Packaging checks the library's hash against its build metadata and sets the matc
 Neither the build nor packaging installs an APK or changes device settings.
 
 For PlayOnline sign-in, set `XI_POL` and add the `aarch64-linux-android` Rust target: see
-[PlayOnline sign-in](building.md#playonline-sign-in-on-iphone-ipad-and-android).
+[PlayOnline sign-in](../building.md#playonline-sign-in-on-iphone-ipad-and-android).
 
 The APK is `build/android/xi-native-test.apk`, package `com.rubymatrix.xionanything`, named XI on
 Anything on the home screen, with the iPhone app's icon. Before replacing an installed app, keep a
@@ -124,7 +124,7 @@ So `run.args` must give `--data-dir` (without it the app exits with code 2), and
 
 ## Screen, touch controls and keyboard
 
-These are the iPhone build's ([ios.md](ios.md)), shared through `FFXI_MOBILE`:
+These are the iPhone build's ([ios.md](ios-dev.md)), shared through `FFXI_MOBILE`:
 
 - **Screen:** `host/display_fit.c` sizes the game for the screen it is on: the back buffer at the
   safe area's pixels (beside a camera cutout) within a pixel budget (about 2.4 MP on a phone, 4 MP

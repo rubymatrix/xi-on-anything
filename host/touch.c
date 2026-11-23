@@ -1,4 +1,4 @@
-/* Touch controls on iOS and Android (docs/ios.md, docs/android.md): a gamepad on the screen, for
+/* Touch controls on iOS and Android (docs/platforms/ios-dev.md, docs/platforms/android-dev.md): a gamepad on the screen, for
  * playing without a controller or a keyboard, and Back everywhere.
  *
  * The gamepad is SDL's virtual one: the game sees an Xbox pad like any other (input.c, dinput.c), with

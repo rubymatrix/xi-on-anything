@@ -22,7 +22,7 @@
  * targets and depth the GPU is, and a lock reads the level back (and an unlock writes it again).
  * Vertex and index buffers stay in guest memory; each draw copies the range it uses.
  *
- * The method set is the one the game was measured to use (specs/FFXiMain.2026-08-22.d3d8-surface.txt); vtable order is the D3D8 ABI, as the R1 proxy
+ * The method set is the one the game was measured to use (runtime/specs/FFXiMain.2026-08-22.d3d8-surface.txt); vtable order is the D3D8 ABI, as the R1 proxy
  * (d3d8proxy.cpp) lists it. */
 #include <math.h>
 #include <stddef.h>

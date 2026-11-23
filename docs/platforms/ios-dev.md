@@ -6,7 +6,7 @@ no JIT: LuaJIT runs as its interpreter, because iOS forbids writable code.
 
 Status: playable. It builds for the simulator and devices, signs in to LandSandBoat, and runs the
 game in landscape, sized to the screen, with touch controls. What is left is under
-[Not yet done](#differences-from-macos). The player's guide is [platforms/ios.md](platforms/ios.md).
+[Not yet done](#differences-from-macos). The player's guide is [platforms/ios.md](ios.md).
 
 ## Build on a Mac
 
@@ -68,7 +68,7 @@ the `FINAL FANTASY XI` folder, with its viewer folder beside it, into Documents.
 the app uses `Documents/FINAL FANTASY XI`.
 
 A build with the PlayOnline client signs in to PlayOnline and updates these files first
-([building.md](building.md#playonline-sign-in-on-iphone-ipad-and-android)), so the folder must stay
+([building.md](../building.md#playonline-sign-in-on-iphone-ipad-and-android)), so the folder must stay
 writable.
 
 `Documents/run.args` adds host64 arguments, one per line, with no shell expansion (as on Android).

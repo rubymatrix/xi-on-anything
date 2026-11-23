@@ -15,7 +15,7 @@ objects in build/ are not touched), with SDL3's UIKit tree (third_party/sdl3-ios
 and host/ios_main.c as the entry. Generated game code stays in generated/ (ignored by git). A
 simulator build is signed ad hoc; a device build needs a signing identity and a provisioning
 profile whose app id allows the entitlements below (extended virtual addressing: the guest's 4 GB
-window, guest.h). See docs/ios.md.
+window, guest.h). See docs/platforms/ios-dev.md.
 """
 import argparse
 import concurrent.futures
@@ -234,7 +234,7 @@ def info_plist(t):
                                              'UIInterfaceOrientationLandscapeRight'],
         'UISupportedInterfaceOrientations~ipad': ['UIInterfaceOrientationLandscapeLeft',
                                                   'UIInterfaceOrientationLandscapeRight'],
-        # the player copies the game folder in with the Files app or Finder (docs/ios.md)
+        # the player copies the game folder in with the Files app or Finder (docs/platforms/ios-dev.md)
         'UIFileSharingEnabled': True,
         'LSSupportsOpeningDocumentsInPlace': True,
         'LSApplicationCategoryType': 'public.app-category.role-playing-games',
@@ -273,7 +273,7 @@ def app(t, a):
     shutil.copy(exe, os.path.join(bundle, APP_NAME))
     if pol:  # the shipped copy names none of the PlayOnline client's functions (build_posix.POL_CFLAGS)
         run(['xcrun', 'strip', '-S', '-x', os.path.join(bundle, APP_NAME)])
-    shutil.copy(os.path.join(ROOT, 'ffxi.reg'), bundle)
+    shutil.copy(os.path.join(ROOT, 'assets', 'ffxi.reg'), bundle)
     shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(bundle, 'textures'))
     if a.wallpaper:  # behind the black bars (host/ios_main.c): PNG or JPEG, anything else as a PNG
         src, ext = os.path.expanduser(a.wallpaper), os.path.splitext(a.wallpaper)[1].lower()
@@ -294,7 +294,7 @@ def app(t, a):
         a.sign_identity = a.sign_identity or find_identity()
         if not a.sign_identity or not a.profile:
             raise SystemExit('a device build needs a signing identity and a provisioning profile for %s '
-                             '(--sign-identity, --profile; docs/ios.md)' % t.bundle_id)
+                             '(--sign-identity, --profile; docs/platforms/ios-dev.md)' % t.bundle_id)
         shutil.copy(a.profile, os.path.join(bundle, 'embedded.mobileprovision'))
         prof = plistlib.loads(subprocess.run(['security', 'cms', '-D', '-i', a.profile], capture_output=True,
                                              check=True).stdout)

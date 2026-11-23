@@ -95,7 +95,7 @@ What the runtime meets in a client this old
     slot 177 reads.
   - FFXiMain calls gamecore slot 441 (+0x6e4, one caller, 0x100d5235), which no later build calls.
     Handled: it reads a counter only the viewer changes, so our slot returns 0 (see
-    specs/gamecore-slots.session.txt). The other 141 slots the 2025-11-12 build calls are all
+    runtime/specs/gamecore-slots.session.txt). The other 141 slots the 2025-11-12 build calls are all
     called here too.
   - Known gap: no write_line, and chat_add has another arity, so addons get no chat text_in.
   - Known gap: the addon game layer (host/addons/game.c) finds its structures by Ashita's patterns

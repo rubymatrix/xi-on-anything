@@ -1,7 +1,7 @@
 /* Our own gamecore (R3, decided 2026-09-24): what
  * the retail core library gives FFXi.dll and FFXiMain.dll, implemented natively.
  *
- * Two surfaces (specs/FFXI.gamecore-surface.txt):
+ * Two surfaces (runtime/specs/FFXI.gamecore-surface.txt):
  *   - the ICoreCom object FFXi.dll's GameStart receives. FFXi.dll calls six methods; the
  *     object answers only the US interface id, so FFXi.dll records region 1, as a retail
  *     US client does;
@@ -10,7 +10,7 @@
  *     so a slot with no implementation traps with its offset on first call.
  *
  * The slot implementations (gamecore_slots.c) follow the per-slot specifications in
- * specs/gamecore-slots.*.txt. */
+ * runtime/specs/gamecore-slots.*.txt. */
 #pragma once
 
 #include <stdint.h>
