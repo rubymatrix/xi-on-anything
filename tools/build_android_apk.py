@@ -71,6 +71,37 @@ def version():
     return (int(digits) if digits.isdigit() else 1), info['version']
 
 
+def bundle(directory, to, minimum_api):
+    """The game for an app that has its own (the launcher, built with Gradle): its Java (SDL's and
+    platforms/android/'s: GameActivity, BuildActivity), its libraries (libmain.so stripped of debug info,
+    libSDL3.so, and with --split-game the phone's compiler and Python) and its assets (with
+    --split-game the kit, the translator and its Python library; the app brings ffxi.reg). The app's
+    manifest declares GameActivity and BuildActivity; bundle.json says what this is."""
+    shutil.rmtree(to, ignore_errors=True)
+    java = to / 'java'
+    shutil.copytree(CACHE / SDL.name / 'android-project/app/src/main/java', java)
+    shutil.copytree(ROOT / 'platforms/android/app/src/main/java', java, dirs_exist_ok=True)
+    libs = to / 'jniLibs/arm64-v8a'
+    libs.mkdir(parents=True)
+    shutil.copyfile(CACHE / 'sdl-build/libSDL3.so', libs / 'libSDL3.so')
+    shutil.copyfile(directory / 'libmain.so', libs / 'libmain.so')
+    run([TC / 'llvm-strip', '--strip-debug', libs / 'libmain.so'])
+    for extra in ('lib_llvm.so', 'lib_python.so', 'libpython3.14.so'):
+        if (directory / extra).is_file():
+            shutil.copyfile(directory / extra, libs / extra)
+    # the base registry is the app's own asset (the launcher bundles its copy, ffxi.reg)
+    assets = to / 'assets'
+    assets.mkdir()
+    for part in ('kit', 'phone', 'pyhome'):
+        if (directory / part).is_dir():
+            shutil.copytree(directory / part, assets / part)
+    code, name = version()
+    (to / 'bundle.json').write_text(
+        json.dumps({'version_code': code, 'version_name': name, 'minimum_api': minimum_api}, indent=1) + '\n'
+    )
+    print(json.dumps({'bundle': str(to), 'version_code': code, 'version_name': name}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument(
@@ -81,9 +112,17 @@ def main():
     )
     parser.add_argument('--keystore', type=Path, help='PKCS#12 key to sign with; its password in XI_ANDROID_KEYSTORE_PASS')
     parser.add_argument('--key-alias', default='xi', help="the key's alias in --keystore")
+    parser.add_argument(
+        '--bundle',
+        type=Path,
+        help='instead of an APK, the game\'s part of one for another app to build in (the launcher\'s '
+        'Android project): java/, jniLibs/arm64-v8a/, assets/ and bundle.json in this folder',
+    )
     args = parser.parse_args()
     directory = args.build_dir.resolve()
     minimum_api, actual = build_metadata(directory)
+    if args.bundle:
+        return bundle(directory, args.bundle.resolve(), minimum_api)
     intermediates = directory / 'apk'
     intermediates.mkdir(parents=True, exist_ok=True)
     # javac leaves removed/renamed classes behind when its output directory is reused.
@@ -136,7 +175,7 @@ def main():
         )
         unsigned = out / 'unsigned.apk'
         code, name = version()
-        # the base registry the app starts the game with (MainActivity.getArguments), as the iPhone
+        # the base registry the app starts the game with (GameActivity.getArguments), as the iPhone
         # app's bundle has it
         assets = out / 'assets'
         assets.mkdir()

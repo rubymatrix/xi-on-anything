@@ -58,7 +58,7 @@ import org.libsdl.app.SDLControllerManager;
  * getArguments(). Over the game's surface, Overlay draws the touch controls host/touch.c lays out
  * (through platforms/android/android_overlay.c) and the wallpaper beside the game; touches go through it to SDL.
  * The intent's gfx_test extra runs the offscreen graphics fixture instead of the game. */
-public final class MainActivity extends SDLActivity {
+public final class GameActivity extends SDLActivity {
     private Overlay overlay;
 
     @Override
@@ -370,12 +370,34 @@ public final class MainActivity extends SDLActivity {
         return new String[] {"SDL3", "main"};
     }
 
+    /* SDL finds SDL_main with dlsym in this library and the ones it needs. host/android_main.c names
+     * the game build's addresses, so a phone-built game has it in libgame.so (which needs libmain.so). */
+    @Override
+    protected String getMainSharedObject() {
+        File game = BuildActivity.gameLibrary(getFilesDir());
+        return game.isFile() ? game.getAbsolutePath() : super.getMainSharedObject();
+    }
+
     /* A game built on this phone (BuildActivity) is libgame.so in this app's files, and libmain.so
      * (the host) is built without it. libgame.so needs libmain.so, whose game symbols it holds: loading
      * libgame.so first loads libmain.so as its dependency, in one group, so each resolves the other's.
      * SDL's own load of libmain.so then finds it loaded. Without libgame.so, libmain.so has the game. */
     @Override
     public void loadLibraries() {
+        // the launcher's environment for the game (its sign-in: FFXI_PASSWORD, FFXI_LSB_SESSION, as
+        // host64 has them on a PC), set before the game's code runs. This activity's process is the
+        // game's alone (android:process), so it goes no further.
+        String[] env = getIntent().getStringArrayExtra(EXTRA_ENV);
+        for (String pair : env == null ? new String[0] : env) {
+            int eq = pair.indexOf('=');
+            if (eq > 0) {
+                try {
+                    android.system.Os.setenv(pair.substring(0, eq), pair.substring(eq + 1), true);
+                } catch (android.system.ErrnoException e) {
+                    Log.w("xi", "could not set " + pair.substring(0, eq));
+                }
+            }
+        }
         File game = BuildActivity.gameLibrary(getFilesDir());
         System.loadLibrary("SDL3");
         if (game.isFile())
@@ -414,7 +436,7 @@ public final class MainActivity extends SDLActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                Toast.makeText(MainActivity.this, "Allow All files access so XI on Anything can read the game in the folder you chose.",
+                Toast.makeText(GameActivity.this, "Allow All files access so XI on Anything can read the game in the folder you chose.",
                         Toast.LENGTH_LONG).show();
                 if (Build.VERSION.SDK_INT >= 30) {
                     try {
@@ -437,6 +459,12 @@ public final class MainActivity extends SDLActivity {
         }
         Log.i("xi", "storage access granted");
     }
+
+    /* The arguments an app that starts the game (the launcher) adds to the default command line: a
+     * String[] extra on the intent that starts BuildActivity, which hands it on. */
+    public static final String EXTRA_ARGS = "com.rubymatrix.xionanything.ARGS";
+    /* And its environment for the game: a String[] of NAME=value. */
+    public static final String EXTRA_ENV = "com.rubymatrix.xionanything.ENV";
 
     // run.args (one argument per line) replaces the default command line below. The game is the
     // "FINAL FANTASY XI" folder the launcher's phone page copies here (the PlayOnline viewer beside
@@ -477,9 +505,14 @@ public final class MainActivity extends SDLActivity {
         } catch (IOException e) {
             reg = new File(base, "ffxi.reg"); // a build without the asset: one put there by hand
         }
-        return new String[] {"--game", game.getPath(), "--data-dir", data.getPath(), "--reg", reg.getPath(),
-                "--reg-overlay", new File(data, "settings.reg").getPath(), "--user-dir",
-                new File(data, "USER").getPath(), "--aspect", "off"};
+        ArrayList<String> args = new ArrayList<>(Arrays.asList("--game", game.getPath(), "--data-dir", data.getPath(),
+                "--reg", reg.getPath(), "--reg-overlay", new File(data, "settings.reg").getPath(), "--user-dir",
+                new File(data, "USER").getPath(), "--aspect", "off"));
+        // the launcher's, when it started the game (an account's server and options), after these
+        String[] extra = getIntent().getStringArrayExtra(EXTRA_ARGS);
+        if (extra != null)
+            args.addAll(Arrays.asList(extra));
+        return args.toArray(new String[0]);
     }
 
     /* Saved sign-in passwords (host/signin/keychain.c, from any thread): each one encrypted with an AES key

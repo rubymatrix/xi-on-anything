@@ -200,48 +200,82 @@ def library(name):
     return archive, ['-I' + str(lib / d) for d in m['public']]
 
 
-def game_kit(game_objs, libmain, configuration):
-    """--split-game: what the phone needs to make libgame.so itself, none of it game code.
+def keep_for(device_objs):
+    """--split-game: libmain.so's link flags that keep every library function the phone's build.h
+    sources call (-u): libmain.so links the libraries' archives, which give it only what its own
+    objects call, and libgame.so finds the rest of its symbols there."""
+    if not device_objs:
+        return []
+    nm = str(TC / 'llvm-nm') + ('.exe' if WINDOWS else '')
+    out = subprocess.run([nm, '-u', '--just-symbol-name'] + [str(o) for o in device_objs], capture_output=True, text=True,
+                         check=True).stdout
+    defined = subprocess.run([nm, '--defined-only', '--just-symbol-name'] + [str(o) for o in device_objs],
+                             capture_output=True, text=True, check=True).stdout
+    names = {n.strip() for n in out.splitlines() if n.strip() and not n.endswith(':')}
+    names -= {n.strip() for n in defined.splitlines()}
+    return ['-Wl,-u,' + n for n in sorted(names)]
 
-    <OUT>/kit: the compiler's side (cflags.txt, the runtime's and C library's headers the translation
-    includes, compiler-rt's builtins, kit.id). <OUT>/phone: the translator's side (recomp/, unpack.py,
-    phone_kit.py, and phone-kit.json with this build's metadata files beside it). Both go into the APK
-    as assets; on the phone, phone_kit.py translates the player's own DLLs into kit/src and
-    BuildActivity compiles it. <OUT>/libgame.so is linked here from the same translation, to check
-    that the two libraries resolve each other. The headers are the ones the objects' depfiles name."""
+
+# The system libraries libgame.so links on the phone besides libmain.so (/system/lib64), and the APK's
+# own (@LIB@: its native library folder): what the build.h sources call directly
+PHONE_LIBS = ['@LIB@/libSDL3.so', '/system/lib64/libvulkan.so', '/system/lib64/libandroid.so', '/system/lib64/liblog.so',
+              '/system/lib64/libdl.so', '/system/lib64/libc.so', '/system/lib64/libm.so']
+
+
+def game_kit(game_objs, libmain, device, device_objs, host_flags, sdl_lib):
+    """--split-game: what the phone needs to make libgame.so itself, none of it game code, for any
+    build recomp/meta/builds.json knows.
+
+    <OUT>/kit: the compiler's side. cflags.txt and the runtime's and C library's headers the
+    translation includes; host.txt, the host's sources that include build.h (tree/, as in this
+    checkout, with every header they include, and host-cflags.txt), compiled on the phone with the
+    player's build's build.h, which phone_kit.py writes into gen/; link.txt, the libraries libgame.so
+    links; compiler-rt's builtins; kit.id. <OUT>/phone: the translator's side (recomp/, unpack.py,
+    phone_kit.py and the tools it imports, meta/). Both go into the APK as assets; on the phone,
+    phone_kit.py translates the player's own DLLs into kit/src and BuildActivity compiles it.
+    <OUT>/libgame.so is linked here from the same translation and sources, to check that the two
+    libraries resolve each other. The headers are the ones the compiler lists (-M)."""
     kit = OUT / 'kit'
     shutil.rmtree(kit, ignore_errors=True)
-    sysroot = TC.parent / 'sysroot'
-    resource = Path(subprocess.run([CC, '-print-resource-dir'], capture_output=True, text=True, check=True).stdout.strip())
-    headers = set()
+    sysroot = (TC.parent / 'sysroot').resolve()
+    resource = Path(subprocess.run([CC, '-print-resource-dir'], capture_output=True, text=True, check=True).stdout.strip()).resolve()
+    generated = (OUT / 'generated').resolve()
+    root = ROOT.resolve()
+
+    def listed(cmd, name):
+        """The files a compile reads (-M), the source first."""
+        full = OUT / 'obj' / (name + '-system.d')
+        run(cmd + ['-M', '-MF', full, '-E', '-o', os.devnull])
+        deps = shlex.split(full.read_text().replace('\\\n', ' ').split(':', 1)[-1])
+        return [(Path(d) if Path(d).is_absolute() else ROOT / d).resolve() for d in deps]
+
+    def system(h):
+        if h.is_relative_to(sysroot):
+            return kit / 'sysroot' / h.relative_to(sysroot)
+        if h.is_relative_to(resource):
+            return kit / 'resource' / h.relative_to(resource)
+        return None
+
+    # the translation's: flat, in runtime/ (they all include the same few)
     for part, objs in game_objs.items():
-        for o in objs:
+        src = (ROOT / 'generated' / part / 'f_0.c')
+        src = src if src.exists() else sorted((ROOT / 'generated' / part).glob('*.c'))[0]
+        found = set(listed([CC] + FLAGS + WARN + ['-std=c11', '-I' + str(src.parent), src], part)[1:])
+        for o in objs:  # and what any other of its files includes (-MMD: the system's left out)
             deps = shlex.split(o.with_suffix('.d').read_text().replace('\\\n', ' ').split(':', 1)[-1])
-            src = Path(deps[0]) if Path(deps[0]).is_absolute() else ROOT / deps[0]
-            for d in deps[1:]:
-                headers.add((Path(d) if Path(d).is_absolute() else ROOT / d).resolve())
-        # the depfiles (-MMD) leave out system headers: one full list (-M) for the part, whose files all
-        # include the same ones
-        full = OUT / 'obj' / (part + '-system.d')
-        run([CC] + FLAGS + WARN + ['-std=c11', '-I' + str(src.parent), '-M', '-MF', full, '-E', '-o', os.devnull, src])
-        for d in shlex.split(full.read_text().replace('\\\n', ' ').split(':', 1)[-1])[1:]:
-            headers.add((Path(d) if Path(d).is_absolute() else ROOT / d).resolve())
-    for h in sorted(headers):
-        if h.is_relative_to(sysroot.resolve()):
-            dest = kit / 'sysroot' / h.relative_to(sysroot.resolve())
-        elif h.is_relative_to(resource.resolve()):
-            dest = kit / 'resource' / h.relative_to(resource.resolve())
-        elif h.parent.name in game_objs:  # a part's own funcs.h: the phone's translation makes it
-            continue
-        else:
-            dest = kit / 'runtime' / h.name
-            if dest.exists() and dest.read_bytes() != h.read_bytes():
-                raise RuntimeError('two runtime headers named ' + h.name)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(h, dest)
-    builtins = resource / 'lib/linux/libclang_rt.builtins-aarch64-android.a'
-    (kit / 'lib').mkdir()
-    shutil.copyfile(builtins, kit / 'lib' / builtins.name)
+            found.update((Path(d) if Path(d).is_absolute() else ROOT / d).resolve() for d in deps[1:])
+        for h in sorted(found):
+            dest = system(h)
+            if dest is None:
+                if h.parent.name in game_objs:  # a part's own funcs.h: the phone's translation makes it
+                    continue
+                if h.name == 'build.h':
+                    raise RuntimeError('the translation includes build.h: it would be one build\'s')
+                dest = kit / 'runtime' / h.name
+                if dest.exists() and dest.read_bytes() != h.read_bytes():
+                    raise RuntimeError('two runtime headers named ' + h.name)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(h, dest)
     flags = (
         [f'--target=aarch64-linux-android{MIN_API}', '--sysroot=@KIT@/sysroot', '-resource-dir', '@KIT@/resource']
         + [f for f in FLAGS if not f.startswith('-I') and f != '-g']
@@ -250,25 +284,72 @@ def game_kit(game_objs, libmain, configuration):
     )
     (kit / 'cflags.txt').write_text('\n'.join(flags) + '\n')
 
+    # the host's build.h sources: this checkout's tree (tree/), and each include folder outside it (inc/<n>)
+    every = FLAGS + list(host_flags)
+    outside = sorted({Path(f[2:]).resolve() for f in every if f.startswith('-I') and not Path(f[2:]).resolve().is_relative_to(root)},
+                     key=lambda d: -len(str(d)))
+
+    def place(h):
+        dest = system(h)
+        if dest is not None:
+            return dest
+        if h.parent == generated:
+            if h.name == 'build.h':
+                return None  # the phone's (phone_kit.py)
+            return kit / 'gen' / h.name
+        if h.name == 'build.h':
+            raise RuntimeError('%s: a build.h other than %s' % (h, generated / 'build.h'))
+        if h.is_relative_to(root):
+            return kit / 'tree' / h.relative_to(root)
+        for n, d in enumerate(outside):
+            if h.is_relative_to(d):
+                return kit / 'inc' / str(n) / h.relative_to(d)
+        raise RuntimeError('%s: in no include folder' % h)
+
+    host_list, wanted = [], set()
+    for s in device:
+        wanted.update(listed([CC] + FLAGS + list(host_flags) + ['-std=c11', str(ROOT / s)], 'device-' + s.replace('/', '_')))
+        host_list.append(s)
+    # and every header beside those outside the C library: what this build's build.h leaves out of the
+    # list (#if FFXI_FEATURE_..., host/scene.c's scene_gi.inc) another build's includes
+    for folder in {f.parent for f in wanted if system(f) is None}:
+        wanted.update(f.resolve() for f in folder.iterdir() if f.suffix in ('.h', '.inc', '.hpp') and f.is_file())
+    for f in sorted(wanted):
+        dest = place(f)
+        if dest is not None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, dest)
+    host_cflags = [f'--target=aarch64-linux-android{MIN_API}', '--sysroot=@KIT@/sysroot', '-resource-dir', '@KIT@/resource']
+    for f in every:
+        if not f.startswith('-I'):
+            if f != '-g':
+                host_cflags.append(f)
+            continue
+        d = Path(f[2:]).resolve()
+        if d == generated:
+            host_cflags.append('-I@KIT@/gen')
+        elif d.is_relative_to(root):
+            host_cflags.append('-I@KIT@/tree/' + d.relative_to(root).as_posix())
+        else:
+            host_cflags.append('-I@KIT@/inc/%d' % outside.index(d))
+    host_cflags.append('-std=c11')
+    (kit / 'gen').mkdir(exist_ok=True)
+    (kit / 'host-cflags.txt').write_text('\n'.join(host_cflags) + '\n')
+    (kit / 'host.txt').write_text('\n'.join(host_list) + '\n')
+    (kit / 'link.txt').write_text('\n'.join(PHONE_LIBS) + '\n')
+    builtins = resource / 'lib/linux/libclang_rt.builtins-aarch64-android.a'
+    (kit / 'lib').mkdir()
+    shutil.copyfile(builtins, kit / 'lib' / builtins.name)
+
     phone = OUT / 'phone'
     shutil.rmtree(phone, ignore_errors=True)
     (phone / 'recomp').mkdir(parents=True)
     (phone / 'tools').mkdir()
-    for f in ('recomp/recomp.py', 'recomp/x86c.py', 'tools/unpack.py', 'tools/phone_kit.py'):
+    for f in ('recomp/recomp.py', 'recomp/x86c.py', 'tools/unpack.py', 'tools/phone_kit.py', 'tools/build.py',
+              'tools/buildinfo.py', 'tools/android_translation.py'):
         shutil.copyfile(ROOT / f, phone / f)
-    config = {
-        'build': configuration['build'],
-        'ffximain_sha': configuration['ffximain_sha'],
-        'ffxi_sha': configuration['ffxi_sha'],
-        'ffximain_meta': Path(configuration['ffximain_meta']).name,
-        'ffxi_meta': Path(configuration['ffxi_meta']).name,
-        'wraps': configuration['wraps'],
-        'hooks': configuration['hooks'],
-        'patches': configuration['patches'],
-    }
-    for key in ('ffximain_meta', 'ffxi_meta'):
-        shutil.copyfile(configuration[key], phone / config[key])
-    (phone / 'phone-kit.json').write_text(json.dumps(config, indent=1, sort_keys=True) + '\n')
+    # every build's metadata: the phone's install may be any of them
+    shutil.copytree(ROOT / 'recomp' / 'meta', phone / 'recomp' / 'meta', ignore=shutil.ignore_patterns('.*', 'discovery'))
 
     python_runtime()
     # what the phone has, before the translation: a new one (another APK) translates and builds again
@@ -278,17 +359,17 @@ def game_kit(game_objs, libmain, configuration):
             if f.is_file():
                 digest.update(str(f.relative_to(OUT)).encode() + b'\0' + f.read_bytes())
     (kit / 'kit.id').write_text(digest.hexdigest()[:16] + '\n')
-    all_objs = [o for objs in game_objs.values() for o in objs]
+    all_objs = [o for objs in game_objs.values() for o in objs] + list(device_objs)
     run(
         [CC, '-shared', '-Wl,--no-undefined', '-Wl,-soname,libgame.so', '-Wl,-z,max-page-size=16384', '-o', OUT / 'libgame.so']
         + all_objs
-        + [libmain, '-lm']
+        + [libmain, sdl_lib, '-lvulkan', '-landroid', '-llog', '-ldl', '-lm']
     )
     llvm = ROOT / 'build/android-llvm/android/bin/llvm'
     if llvm.is_file():  # the phone's compiler (LLVM's multi-call driver, cross-built for Android)
         shutil.copyfile(llvm, OUT / 'lib_llvm.so')
         run([STRIP, '--strip-all', OUT / 'lib_llvm.so'])
-    print('kit', kit, (kit / 'kit.id').read_text().strip())
+    print('kit', kit, (kit / 'kit.id').read_text().strip(), '-', len(host_list), 'host sources for the phone')
 
 
 # The standard library goes in whole but for these (tests, the GUI and docs): tracing what the scripts
@@ -448,15 +529,19 @@ def main():
         objs += compile_many(pol_sources, 'pol', pol_flags + build_posix.POL_CFLAGS)
     if pol_libs:  # the client's symbols stay out of libmain.so's exports, built here or prebuilt
         link = pol_libs + ['-Wl,--exclude-libs,' + os.path.basename(a) for a in pol_libs] + link
-    objs += compile_many(
+    host_sources = (
         PORTABLE
         + HOST
         + ADDONS
         + gfx
-        + ['platforms/android/android_main.c', 'platforms/android/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c'],
-        'host',
-        extra + pol_flags + ['-Dmain=xi_host_main'],
+        + ['platforms/android/android_main.c', 'platforms/android/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c']
     )
+    host_flags = extra + pol_flags + ['-Dmain=xi_host_main']
+    # split: the sources that name a game build's addresses (build.h) go to libgame.so, compiled on the
+    # phone with the build.h of the player's own build, as a Steam Deck's kit does (build_posix.kit)
+    device = [s for s in host_sources if a.split_game and build_posix.names_build(s)]
+    objs += compile_many([s for s in host_sources if s not in device], 'host', host_flags)
+    device_objs = compile_many(device, 'host', host_flags) if device else []
     for source, entry in [
         ('gfx_test.c', 'xi_gfx_test_main'),
         ('gfx_format_test.c', 'xi_format_test_main'),
@@ -484,6 +569,7 @@ def main():
             library_path,
         ]
         + objs
+        + keep_for(device_objs)
         + link
     )
     if pol_libs:  # the shipped library names none of the PlayOnline client's functions (build_posix.POL_CFLAGS)
@@ -499,7 +585,7 @@ def main():
     }
     if a.split_game:
         metadata['split_game'] = True
-        game_kit(game_objs, library_path, configuration)
+        game_kit(game_objs, library_path, device, device_objs, host_flags, sdl_lib)
     else:
         for stale in ('lib_llvm.so', 'libgame.so'):
             (OUT / stale).unlink(missing_ok=True)
