@@ -636,6 +636,8 @@ static const Row GRAPHICS_ROWS[] = {
     { "Texture Filtering", "aniso", CHOICE, 4, { "Off", "4x", "8x", "16x" }, { 1, 4, 8, 16 }, 0, 0,
         "Sharper ground and walls at an angle." },
     { "Sharpening", "sharpen", SLIDER, 0, { 0 }, { 0 }, 0, 1.0f, "Crisper detail over the whole screen." },
+    { "PS2 Accuracy", "fix_ps2", TOGGLE, 2, { "PS2", "PC" }, { 1, 0 }, 0, 0,
+        "Draws what the PC version got wrong as the PS2 does: metal's shine, summons' halos, the Shadow Lord's break-up, Port Bastok's sea, menu buttons." },
     HEADER_ROW("Upscaling"),
 #ifdef __APPLE__
     { "Upscaling", "upscale", CHOICE, 3, { "Off", "Spatial", "Temporal" }, { 0, 1, 2 }, 0, 0,

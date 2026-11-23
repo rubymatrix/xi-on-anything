@@ -266,7 +266,7 @@ GL_SOURCES = ['runtime\\portable\\gfx_gl.c', 'runtime\\portable\\gfx_msl.c', 'ru
 GL_CFLAGS = ['/experimental:c11atomics', '/DGFX_GL']
 HOST_BASE = ['runtime\\portable\\user32.c', 'runtime\\portable\\d3d8.c', 'runtime\\portable\\dsound.c',
              'runtime\\portable\\input.c', 'runtime\\portable\\dinput.c', 'runtime\\portable\\ws2.c', 'host\\host64.c',
-             'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\padmap.c', 'host\\cexi.c', 'host\\discord.c', 'host\\frame.c', 'host\\scene.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c', 'host\\vicons.c',
+             'host\\lsb_login.c', 'host\\datui.c', 'host\\uidraw.c', 'host\\modern.c', 'host\\padmap.c', 'host\\cexi.c', 'host\\discord.c', 'host\\frame.c', 'host\\scene.c', 'host\\ps2fix.c', 'host\\signin.c', 'host\\sewave.c', 'host\\ui_art.c', 'host\\vicons.c',
              'host\\keychain.c', 'host\\appdefaults.c', 'runtime\\portable\\sampler_win.c',
              'runtime\\portable\\geometry_hooks.c']
 HOST_SOURCES = HOST_BASE + GFX_SOURCES
