@@ -3,6 +3,7 @@
  * (libnx's console can't share the screen with EGL); then gfx_test's frames to the window (--window), and
  * the verdict for three seconds as the whole screen's color: green when every check passed, red when one
  * failed. */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,15 @@
 #define DIR_ROOT "sdmc:/switch/xi-on-anything"
 
 int gfx_test_main(int argc, char** argv); /* tests/gfx/gfx_test.c's main */
+
+/* sdl_nx.c logs through the runtime's rt_log, which this test does not link: to the log file */
+void rt_log(const char* fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+}
 
 static void verdict(int ok)
 {
