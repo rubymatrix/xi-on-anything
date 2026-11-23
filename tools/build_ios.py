@@ -166,8 +166,10 @@ class Target:
             f.write(key)
 
 
-def host(t):
-    """host64 for iOS: build/ios-<sdk>/host64."""
+def host(t, embed=False):
+    """host64 for iOS: build/ios-<sdk>/host64. embed: instead the game as a library for the launcher's
+    app (its Play calls xi_ios_play, platforms/ios/ios_main.c): build/ios-<sdk>/embed/libxi.a, with
+    embed/link.json, what else the app links (the libraries' archives and the frameworks)."""
     if build.BUILD is None:
         raise SystemExit('run: python3 tools/build_posix.py prepare --game <folder>')
     build_posix.translate()
@@ -193,9 +195,13 @@ def host(t):
     sources = build_posix.PORTABLE + build_posix.HOST_SOURCES + build_posix.ADDON_SOURCES
     objs += t.compile([s for s in sources if s != 'host/host64.c'], 'host', ours)
     objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
-    objs += t.compile(['platforms/ios/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
-    exe = os.path.join(t.out, 'host64')
-    fw = sum((['-framework', f] for f in FRAMEWORKS), []) + ['-weak_framework', 'MetalFX']  # the upscaler (iOS 16 on)
+    objs += t.compile(['platforms/ios/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'embed' if embed else 'entry',
+                      ours + (['-DXI_IOS_EMBED'] if embed else []))  # iOS only
+    fw = sum((['-framework', f] for f in FRAMEWORKS), [])
+    # the upscaler (iOS 16 on), where the SDK has it: Xcode 27's simulator SDK has none (gfx_metal.m does without)
+    sdk = subprocess.run(['xcrun', '--sdk', t.sdk, '--show-sdk-path'], capture_output=True, text=True).stdout.strip()
+    if os.path.isdir(os.path.join(sdk, 'System/Library/Frameworks/MetalFX.framework')):
+        fw += ['-weak_framework', 'MetalFX']
     hidden = ['-Wl,-load_hidden,' + a for a in pol_libs]  # the crate's symbols, not exported
     sim = []
     if t.sdk == 'iphonesimulator':
@@ -206,6 +212,17 @@ def host(t):
         with open(path, 'wb') as f:
             plistlib.dump({'application-identifier': 'SIMULATOR.' + t.bundle_id}, f)
         sim = ['-Wl,-sectcreate,__TEXT,__entitlements,' + path]
+    if embed:
+        out = os.path.join(t.out, 'embed')
+        os.makedirs(out, exist_ok=True)
+        lib = os.path.join(out, 'libxi.a')
+        if os.path.exists(lib):
+            os.remove(lib)
+        run([t.ar, 'rcs', lib] + objs)
+        with open(os.path.join(out, 'link.json'), 'w') as f:
+            json.dump({'library': lib, 'archives': archives + list(pol_libs), 'flags': frameworks + fw + ['-lc++', '-lm']}, f, indent=2)
+        return lib, bool(pol_libs)
+    exe = os.path.join(t.out, 'host64')
     run(t.cc + ['-o', exe] + objs + archives + hidden + sim + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
                                                                                   '-Wl,-export_dynamic'])
     return exe, bool(pol_libs)
@@ -374,7 +391,7 @@ def simulator(name):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('target', choices=['app', 'run', 'install'])
+    ap.add_argument('target', choices=['app', 'run', 'install', 'lib'])
     ap.add_argument('--sdk', choices=['iphonesimulator', 'iphoneos'], default='iphonesimulator')
     ap.add_argument('--sign-identity')
     ap.add_argument('--profile')
@@ -389,6 +406,9 @@ def main():
     if a.target == 'install':
         a.sdk = 'iphoneos'
     t = Target(a.sdk, a.bundle_id)
+    if a.target == 'lib':  # the game for the launcher's app (host's embed)
+        print(host(t, embed=True)[0])
+        return
     bundle = app(t, a)
     if a.target == 'install':
         run(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', iphone(a.device), bundle])
