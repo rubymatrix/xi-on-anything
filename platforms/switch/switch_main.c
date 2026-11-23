@@ -328,6 +328,13 @@ int __wrap___syscall_thread_create(struct __pthread_t** thread, void* (*func)(vo
     u64 mask = 0;
     svcGetThreadCoreMask(&core, &mask, h);
     svcGetThreadPriority(&prio, h);
+    /* glthread's worker is the one the render thread makes (it alone runs on core 1): FFXI_SAMPLE_THREAD=glthread
+     * samples it */
+    if (svcGetCurrentProcessorNumber() == 1)
+    {
+        extern void sampler_thread_handle(const char* role, unsigned handle);
+        sampler_thread_handle("glthread", (unsigned)h);
+    }
     static int want = -2;
     if (want == -2)
     {

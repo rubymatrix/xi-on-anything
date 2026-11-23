@@ -118,6 +118,15 @@ void sampler_thread_here(const char* role)
     g_game = threadGetCurHandle();
 }
 
+void sampler_thread_handle(const char* role, unsigned handle)
+{
+    const char* e = getenv("FFXI_SAMPLE_THREAD");
+    if (!e || strcmp(e, role) || !getenv("FFXI_SAMPLE") || !handle)
+        return;
+    g_stack_hi = 0; /* (its stack's bounds found again at its first sample) */
+    g_game = (Handle)handle;
+}
+
 int sampler_start(const char* path)
 {
     /* sdmc:/a/b -> /a/b on the card's file system */
