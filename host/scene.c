@@ -1097,7 +1097,12 @@ static uint32_t char_state(const float* W, const float* WV, const float* P, uint
     s->tfactor[2] = (float)(tf & 255) / 255.0f, s->tfactor[3] = (float)(tf >> 24) / 255.0f;
     float fsf, fef;
     memcpy(&fsf, &fs, 4), memcpy(&fef, &fe, 4);
-    s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on && gfx_fx_get("fog_modern") <= 0.0f ? 1.0f : 0.0f;
+    /* (read once a frame: gfx_fx_get compares names, and this ran for every material, 0.08 ms a frame on the Switch) */
+    static uint32_t modern_at = ~0u;
+    static float modern;
+    if (modern_at != g_frame_no)
+        modern_at = g_frame_no, modern = gfx_fx_get("fog_modern");
+    s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on && modern <= 0.0f ? 1.0f : 0.0f;
     s->fog_col[0] = (float)((fog_col >> 16) & 255) / 255.0f, s->fog_col[1] = (float)((fog_col >> 8) & 255) / 255.0f;
     s->fog_col[2] = (float)(fog_col & 255) / 255.0f;
     s->fog_col[3] = f; /* (the material's light scale, for the back end's lamps) */
@@ -1336,7 +1341,7 @@ static void mesh_draw(Guest* g)
     uint32_t res = mgr && handle ? guest_thiscall(FFXI_SCENE_RES_GET, mgr, 1, (uint32_t[]){ handle }) : 0;
     ++g_ccount.meshes;
     ++g_taking;
-    uint32_t why0[8];
+    uint32_t why0[8], sil0 = g_ccount.state_why[2];
     memcpy(why0, g_ccount.why, sizeof why0);
     int took = chars_take(g, res, model);
     --g_taking;
@@ -1345,8 +1350,28 @@ static void mesh_draw(Guest* g)
     if (!took)
     {
         ++g_ccount.left;
+        /* FFXI_SILPROBE (with FFXI_D3D_WORKER=0): the state of the game's draws of a few of the ones left, by kind (the
+         * silhouette shadows, the environment-mapped), every 10 s up to 4 times each */
+        static int probe = -1, probed[2];
+        static uint32_t probe_at[2];
+        if (probe < 0)
+            probe = getenv("FFXI_SILPROBE") && *getenv("FFXI_SILPROBE") ? 1 : 0;
+        int pk = g_ccount.state_why[2] != sil0 ? 0 : g_ccount.why[3] != why0[3] ? 1 : -1;
+        if (probe && pk >= 0 && probed[pk] < 4 && g_frame_no - probe_at[pk] > 600)
+        {
+            probe_at[pk] = g_frame_no, ++probed[pk];
+            float W[16], V[16], P[16];
+            int x = d3d8_get_transform(256, W) && d3d8_get_transform(2, V) && d3d8_get_transform(3, P);
+            rt_log("[recomp] scene: probe, a mesh left to the game (%s), frame %u, model %08x, shadow mode %u, tint %08x; "
+                   "P %.3f %.3f %.3f %.3f / %.3f %.3f; V %.2f %.2f %.2f %.2f; W %.2f %.2f %.2f\n",
+                pk ? "environment-mapped" : "silhouette", g_frame_no, model, rd16(FFXI_SCENE_SHADOW_MODE),
+                rd32(FFXI_SCENE_TINT), x ? P[0] : 0, x ? P[5] : 0, x ? P[10] : 0, x ? P[11] : 0, x ? P[14] : 0, x ? P[15] : 0,
+                x ? V[12] : 0, x ? V[13] : 0, x ? V[14] : 0, x ? V[0] : 0, x ? W[12] : 0, x ? W[13] : 0, x ? W[14] : 0);
+            d3d8_probe_draws = 3;
+        }
         uint64_t t0 = g_log ? rt_monotonic_ns() : 0;
         rt_orig_mesh_draw(g);
+        d3d8_probe_draws = 0;
         if (t0)
         {
             int w = 0;
@@ -1526,6 +1551,7 @@ static void chars_only_frame(void)
 {
     if (g_pending)
         d3d8_world_front() ? chars_send() : chars_flush();
+    ++g_frame_no; /* (scene_frame's own, which returns before it here: the per-frame caches in chars_take need it) */
     chars_reset();
 #if defined(FFXI_SCENE_CHAR_DRAW) && defined(FFXI_SCENE_CHAR_DRAW_END)
     /* the game's own character draws (the meshes left to it) don't end the batch: it is drawn after them */

@@ -28,6 +28,8 @@ void d3d8_backbuffer_size(uint32_t* w, uint32_t* h);
  * the addon host's Direct3D for addons): 0 before the device exists. */
 int d3d8_get_transform(uint32_t ts, float m[16]);
 int d3d8_get_render_state(uint32_t rs, uint32_t* v);
+/* Draws whose state is logged next (counted down; only the draws on the game's thread: FFXI_D3D_WORKER=0). */
+extern int d3d8_probe_draws;
 /* Called at every Present after the present hook, with the back buffer the frame is in: where the
  * addon host draws its overlay (gfx_draw into it; d3d8 binds its own targets again at its next
  * draw). */

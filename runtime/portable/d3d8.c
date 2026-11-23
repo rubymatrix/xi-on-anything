@@ -4632,9 +4632,34 @@ static Obj* wr_target(void)
     return t && t->wr_track ? t : NULL;
 }
 
+/* d3d8_probe_draws (d3d8.h): the state at the next draws, logged (the game's thread only: with the worker on its draws
+ * run there, and a thread's stdio other than the main one's breaks it on the Switch) */
+int d3d8_probe_draws;
+static void probe_draw_log(uint32_t prim, uint32_t n)
+{
+    const uint32_t* rs = g_dev.cur.rs;
+    Obj* rt = obj(g_dev.rt);
+    Obj* rtt = rt && rt->container ? obj(rt->container) : NULL;
+    rt_log("[d3d8] probe draw: prim %u n %u; target %s %ux%u usage %#x; z %u zwrite %u zfunc %u; blend %u %u>%u; "
+           "atest %u ref %u func %u; lighting %u fog %u cull %u shade %u; tfactor %08x; colorwrite %#x\n",
+        prim, n, rtt ? "texture" : rt && rt->implicit ? "back buffer" : "surface", rt ? rt->width : 0, rt ? rt->height : 0,
+        rtt ? rtt->usage : 0, rs[7], rs[14], rs[23], rs[27], rs[19], rs[20], rs[15], rs[24], rs[25], rs[137], rs[28],
+        rs[22], rs[9], rs[60], rs[168]);
+    for (int s = 0; s < 3; ++s)
+    {
+        const uint32_t* t = g_dev.cur.tss[s];
+        Obj* tx = obj(g_dev.cur.tex[s]);
+        rt_log("[d3d8] probe draw:   stage %d: color %u(%u,%u) alpha %u(%u,%u) texcoord %#x transform %u; texture %s %ux%u "
+               "usage %#x\n", s, t[1], t[2], t[3], t[4], t[5], t[6], t[11], t[24],
+            !tx ? "none" : tx->kind == O_CUBE ? "cube" : "2d", tx ? tx->width : 0, tx ? tx->height : 0, tx ? tx->usage : 0);
+    }
+}
+
 static void draw_packet(uint32_t prim, uint32_t count, uint32_t start, uint32_t indices, uint32_t index_size,
     uint32_t up_data, uint32_t up_stride, uint32_t n)
 {
+    if (d3d8_probe_draws > 0 && !d3dw_on_worker())
+        --d3d8_probe_draws, probe_draw_log(prim, count);
     if (g_gpu_skip)
     {
         /* what the call draws over must not be waiting to be used: the scratch target is also where a fading
