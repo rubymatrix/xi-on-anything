@@ -2,7 +2,7 @@
  *
  *   benchmark_test off|existing-frame|existing-marker|write-fail|clock-back|records <dir>
  *
- * Built and run by tests/android_policy_test.py. */
+ * Built and run by platforms/android/tests/android_policy_test.py. */
 #include "benchmark.h"
 #include "plat.h"
 #include <assert.h>

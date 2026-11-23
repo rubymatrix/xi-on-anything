@@ -71,7 +71,7 @@ Edit it on the card to change them later. `--layout` becomes `--switch-layout` t
 | `--dats <folder>` | A DAT overlay folder, copied to the card and passed as `--dats`. |
 | `--arg "<host options>"` | Any other [host option](../running.md#options), for example `--arg "--user me"`. |
 | `--nro <file>` | The `.nro` to copy (default `build/switch/xi-on-anything.nro`). |
-| `--mtp [device]` | Copy over USB to a console running DBI's MTP responder, by its name in This PC (default `Switch`). Windows only (`tools/switch_mtp.ps1`). |
+| `--mtp [device]` | Copy over USB to a console running DBI's MTP responder, by its name in This PC (default `Switch`). Windows only (`platforms/switch/switch_mtp.ps1`). |
 | `--storage <name>` | With `--mtp`: the device's storage (default `1: SD Card`). |
 | `--extra <file>` | With `--mtp`: another file to put beside the `.nro` (for example `plat-test.nro`). |
 

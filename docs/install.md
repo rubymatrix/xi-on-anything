@@ -37,7 +37,7 @@ installs in your home folder, on an SD card and in Proton prefixes. It builds th
 files (a while, once per game update), keeps itself up to date and starts the game full screen.
 
 The launcher fetches its compiler (zig) and the prebuilt rest of the client (the Linux kit,
-`tools/linux/kit.sh`) itself. You need python3 (the installer uses it for the Steam shortcut),
+`platforms/linux/kit.sh`) itself. You need python3 (the installer uses it for the Steam shortcut),
 glibc 2.35 or later and Vulkan 1.3. A Deck and any current distribution with Mesa or NVIDIA's
 driver have all three.
 

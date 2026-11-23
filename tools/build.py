@@ -13,7 +13,7 @@
   python tools/build.py host64-gl  host64 on the OpenGL 4.3 back end (the Switch's), for testing it here:
                                    build/host64-gl.exe
   python tools/build.py gfxtest-gl tests/gfx_test.c on the OpenGL back end (no scene effects)
-  python tools/build.py uwp-lib    host64 as a library for the UWP app (xbox/): build/uwp/ffxi_uwp.lib
+  python tools/build.py uwp-lib    host64 as a library for the UWP app (platforms/xbox/): build/uwp/ffxi_uwp.lib
   python tools/build.py gfxtest    the Direct3D 12 back end and the D3D8 front end, offscreen, without
                                    the game (tests/gfx_test.c, tests/d3d8_test.c); needs no prepare
 
@@ -192,10 +192,10 @@ def host(env):
     recomp('generated/all', ['--all'])
     gen = ['generated\\all\\' + f for f in sorted(os.listdir(os.path.join(ROOT, 'generated', 'all'))) if f.endswith('.c')]
     objs = compile_stale(env, gen + ['runtime\\runtime.c', 'runtime\\win32\\bridge.c', 'runtime\\win32\\loader.c',
-                                     'host\\ffximain.c'], 'build\\all', ['/I', 'generated\\all'])
+                                     'platforms\\windows\\ffximain.c'], 'build\\all', ['/I', 'generated\\all'])
     os.makedirs(os.path.join(ROOT, 'build', 'host'), exist_ok=True)
     # Fixed base, out of the way of the game image's preferred 0x10000000 (it may still be relocated).
-    run(['link', '/nologo', '/DLL', '/DEF:host\\ffximain.def', '/OUT:build\\host\\FFXiMain.dll', '/MACHINE:X86',
+    run(['link', '/nologo', '/DLL', '/DEF:platforms\\windows\\ffximain.def', '/OUT:build\\host\\FFXiMain.dll', '/MACHINE:X86',
          '/BASE:0x60000000', '/DYNAMICBASE:NO', 'ole32.lib', 'user32.lib', 'synchronization.lib'] + objs, env)
     boot = compile_stale(env, ['tests\\boot.c'], 'build\\boot', [])
     run(['link', '/nologo', '/OUT:build\\boot.exe', '/MACHINE:X86', 'ole32.lib', 'uuid.lib'] + boot, env)
@@ -367,10 +367,10 @@ def game_objects(env):
 
 
 def host_resources(env, objdir):
-    """host/host64.rc (the game's icon and the file's description) as a .res for link."""
+    """platforms/windows/host64.rc (the game's icon and the file's description) as a .res for link."""
     res = os.path.join(objdir, 'host64.res')
     os.makedirs(os.path.join(ROOT, objdir), exist_ok=True)
-    run(['rc', '/nologo', '/fo', res, 'host\\host64.rc'], env)
+    run(['rc', '/nologo', '/fo', res, 'platforms\\windows\\host64.rc'], env)
     return res
 
 
@@ -467,7 +467,7 @@ def host64_headless(env):
     print('built build\\host64-headless.exe')
 
 
-# The UWP app (xbox/) links the game as a library: the dynamic CRT (/MD) that UWP apps must use, no
+# The UWP app (platforms/xbox/) links the game as a library: the dynamic CRT (/MD) that UWP apps must use, no
 # SDL3 (sdl_uwp.c in its place; SDL3's headers still give the types), the sign-in's TLS from the app,
 # and host64's main renamed host_main for the app to call. Which Win32 calls UWP allows is checked
 # when the app links, against WindowsApp.lib alone.
@@ -483,7 +483,7 @@ def uwp_lib(env):
     objs += compile_stale(env, gen_ffxi, 'build\\uwp\\ffxi', ['/I', 'generated\\ffxi'], UWP_CFLAGS)
     sdl_inc = ['/I', os.path.join(SDL3, 'include')]
     # the sign-in screen as on every other host, drawn on the app's CoreWindow
-    host = HOST_SOURCES + ['runtime\\portable\\sdl_uwp.c']
+    host = HOST_SOURCES + ['platforms\\xbox\\sdl_uwp.c']
     rt_shaders(env)
     objs += compile_stale(env, PORTABLE + host, 'build\\uwp\\host', sdl_inc + HOST_INCLUDES + ['/Dmain=host_main'], UWP_CFLAGS)
     objs += addon_objects(env, UWP_CFLAGS, 'build\\uwp', uwp=True)

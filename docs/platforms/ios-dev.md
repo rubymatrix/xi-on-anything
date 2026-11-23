@@ -50,7 +50,7 @@ others. `app --sdk iphoneos` builds and signs without installing.
     and automatic signing to the connected device, so Xcode registers the device to the team. A
     profile made before that won't install on it.
 
-The app's icon is `assets/icon-ios.png` (made by `tools/make_ios_icon.swift`), compiled into the
+The app's icon is `platforms/ios/icon-ios.png` (made by `platforms/ios/make_ios_icon.swift`), compiled into the
 bundle with `actool`.
 
 On iOS the guest's memory is a 2 GB reserved window (`runtime/portable/gwin.c`), a 32-bit process's

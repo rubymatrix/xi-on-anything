@@ -1,6 +1,6 @@
 /* The game's size for the screen it is on (iOS and Android: docs/platforms/ios-dev.md): the back buffer at the safe
  * area's pixels within a pixel budget, the interface at about ui_points points a pixel within 640x480
- * to 1200 lines (the web port's rule, tools/web/hud.js), presented into the safe area. */
+ * to 1200 lines (the web port's rule, platforms/web/hud.js), presented into the safe area. */
 #pragma once
 
 typedef struct DisplayIn

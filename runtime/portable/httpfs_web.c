@@ -41,7 +41,7 @@ EM_JS(int, httpfs_xhr, (const char* url, double start, double n, uint8_t* dst, u
     return k;
 });
 
-/* the same through the page's file cache (tools/web/dlcache.js): the request goes to the cache worker on
+/* the same through the page's file cache (platforms/web/dlcache.js): the request goes to the cache worker on
  * the 'xi-cache' channel and this thread waits on cell (0 asked, 1 being written, 2 done; cell[1] the result)
  * while the worker answers from Cache Storage or the network into dst. -2: no answer (the caller reads
  * the network itself): the cell is marked 3 so a late answer is dropped. */

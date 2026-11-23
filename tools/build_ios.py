@@ -12,7 +12,7 @@
 
 The same sources as build_posix.py's host64, compiled for iOS into build/ios-<sdk>/obj (the desktop
 objects in build/ are not touched), with SDL3's UIKit tree (third_party/sdl3-ios, tools/vendor.py)
-and host/ios_main.c as the entry. Generated game code stays in generated/ (ignored by git). A
+and platforms/ios/ios_main.c as the entry. Generated game code stays in generated/ (ignored by git). A
 simulator build is signed ad hoc; a device build needs a signing identity and a provisioning
 profile whose app id allows the entitlements below (extended virtual addressing: the guest's 4 GB
 window, guest.h). See docs/platforms/ios-dev.md.
@@ -193,7 +193,7 @@ def host(t):
     sources = build_posix.PORTABLE + build_posix.HOST_SOURCES + build_posix.ADDON_SOURCES
     objs += t.compile([s for s in sources if s != 'host/host64.c'], 'host', ours)
     objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
-    objs += t.compile(['host/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
+    objs += t.compile(['platforms/ios/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'entry', ours)  # iOS only
     exe = os.path.join(t.out, 'host64')
     fw = sum((['-framework', f] for f in FRAMEWORKS), []) + ['-weak_framework', 'MetalFX']  # the upscaler (iOS 16 on)
     hidden = ['-Wl,-load_hidden,' + a for a in pol_libs]  # the crate's symbols, not exported
@@ -245,13 +245,13 @@ def info_plist(t):
 
 
 def app_icon(t, bundle):
-    """assets/icon-ios.png (tools/make_ios_icon.swift) as the app's icon: an asset catalog compiled into
+    """platforms/ios/icon-ios.png (platforms/ios/make_ios_icon.swift) as the app's icon: an asset catalog compiled into
     the bundle with actool; returns the Info.plist keys that name it."""
     cat = os.path.join(t.out, 'Assets.xcassets')
     icon = os.path.join(cat, 'AppIcon.appiconset')
     shutil.rmtree(cat, ignore_errors=True)
     os.makedirs(icon)
-    shutil.copy(os.path.join(ROOT, 'assets', 'icon-ios.png'), os.path.join(icon, 'icon.png'))
+    shutil.copy(os.path.join(ROOT, 'platforms', 'ios', 'icon-ios.png'), os.path.join(icon, 'icon.png'))
     with open(os.path.join(icon, 'Contents.json'), 'w') as f:
         json.dump({'images': [{'filename': 'icon.png', 'idiom': 'universal', 'platform': 'ios', 'size': '1024x1024'}],
                    'info': {'author': 'xcode', 'version': 1}}, f)
@@ -275,7 +275,7 @@ def app(t, a):
         run(['xcrun', 'strip', '-S', '-x', os.path.join(bundle, APP_NAME)])
     shutil.copy(os.path.join(ROOT, 'assets', 'ffxi.reg'), bundle)
     shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(bundle, 'textures'))
-    if a.wallpaper:  # behind the black bars (host/ios_main.c): PNG or JPEG, anything else as a PNG
+    if a.wallpaper:  # behind the black bars (platforms/ios/ios_main.c): PNG or JPEG, anything else as a PNG
         src, ext = os.path.expanduser(a.wallpaper), os.path.splitext(a.wallpaper)[1].lower()
         if ext in ('.png', '.jpg', '.jpeg'):
             shutil.copy(src, os.path.join(bundle, 'wallpaper' + ext))

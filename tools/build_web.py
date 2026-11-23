@@ -4,7 +4,7 @@ with Emscripten, for the local web server (tools/webserve.py) to serve to the pl
   python3 tools/build_web.py --game <FINAL FANTASY XI> [--node]
 
 Guest addresses are wasm linear-memory addresses (no RT_GUEST_WINDOW): see guest.h and gwin.c.
-SDL3 is not linked; runtime/portable/sdl_web.c stands in for it, fed by the page (tools/web/).
+SDL3 is not linked; platforms/web/sdl_web.c stands in for it, fed by the page (platforms/web/).
 The addon host (LuaJIT) is not built: host/addons_none.c stands in for it.
 
 --node builds for Node.js instead of a page, for running the game headless while the web pieces are
@@ -39,11 +39,11 @@ CFLAGS = ['-O2', '-std=c11', '-g2', '-pthread', '-fno-strict-aliasing', '-I', 'r
           '-I', 'generated', '-I', 'third_party/stb', '-I', 'third_party/sdl3/include', '-DXI_WEB=1', '-D_GNU_SOURCE', '-DGFX_QUEUE']
 # host64 without the native graphics back ends, SDL3, Discord and the addon host
 HOST = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + [
-    'runtime/portable/gfx_queue.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c', 'runtime/portable/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
+    'runtime/portable/gfx_queue.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c', 'platforms/web/sdl_web.c', 'runtime/portable/net_web.c', 'runtime/portable/httpfs_web.c',
     'host/addons_none.c']
 LINK = ['-pthread', '-sPROXY_TO_PTHREAD', '-sALLOW_MEMORY_GROWTH', '-sMAXIMUM_MEMORY=4GB', '-sINITIAL_MEMORY=64MB',
         '-sSTACK_SIZE=1MB', '-sDEFAULT_PTHREAD_STACK_SIZE=1MB', '-sPTHREAD_POOL_SIZE=24', '-sEXIT_RUNTIME',
-        '-Wl,--wrap=sbrk', '-sERROR_ON_UNDEFINED_SYMBOLS=1', '-lm', '--js-library', 'tools/web/net.js',
+        '-Wl,--wrap=sbrk', '-sERROR_ON_UNDEFINED_SYMBOLS=1', '-lm', '--js-library', 'platforms/web/net.js',
         '-sEXPORTED_RUNTIME_METHODS=ENV,FS,stringToNewUTF8,HEAPU8,wasmMemory', '-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_wn_deliver,_web_key,_web_text,_web_mouse_move,_web_mouse_button,_web_mouse_wheel,_web_focus,_web_close,_web_view_size,_web_gamepad,_web_audio_ring,_web_resize,_web_hud_frames,_web_hud_worst_us']
 
 
@@ -74,8 +74,8 @@ def main():
     port = [] if a.node else ['--use-port=emdawnwebgpu']
     objdir = 'build/web-obj/' + ('host-node' if a.node else 'host')
     objs += bp.compile_stale(bp.PORTABLE + HOST + gfx, objdir, tls_flags + port)
-    env = ['-sENVIRONMENT=node', '-sNODERAWFS', '--pre-js', 'tools/web/node_pre.js', '--js-library', 'tools/web/gfx.js'] if a.node else \
-        ['-sENVIRONMENT=web,worker', '--pre-js', 'tools/web/web_pre.js', '--js-library', 'tools/web/gfx.js'] + port
+    env = ['-sENVIRONMENT=node', '-sNODERAWFS', '--pre-js', 'platforms/web/node_pre.js', '--js-library', 'platforms/web/gfx.js'] if a.node else \
+        ['-sENVIRONMENT=web,worker', '--pre-js', 'platforms/web/web_pre.js', '--js-library', 'platforms/web/gfx.js'] + port
     os.makedirs(os.path.join(ROOT, out), exist_ok=True)
     names = ['--profiling-funcs'] if a.profile else []
     bp.run(['em++', '-O2', '-o', os.path.join(out, 'host64.js')] + objs + [thirdparty.archive('mbedtls')] + LINK + env + names)
@@ -84,7 +84,7 @@ def main():
     with open(os.path.join(ROOT, out, 'host64.js'), encoding='utf-8') as fh:
         stand_ins = sorted(set(re.findall(r'\bfunction _(SDL_\w+)\(', fh.read())))
     if stand_ins:
-        sys.exit('build_web: SDL functions missing from runtime/portable/sdl_web.c: ' + ' '.join(stand_ins))
+        sys.exit('build_web: SDL functions missing from platforms/web/sdl_web.c: ' + ' '.join(stand_ins))
     if not a.node:
         # the build's id, in each page's ?v= (index.html's XI_BUILD): the wasm and the pages, hashed
         h = hashlib.sha1()
@@ -93,11 +93,11 @@ def main():
                 h.update(fh.read())
         pages = ('index.html', 'input.js', 'hud.js', 'audio-worklet.js', 'dlcache.js')
         for page in pages:
-            with open(os.path.join(ROOT, 'tools', 'web', page), 'rb') as fh:
+            with open(os.path.join(ROOT, 'platforms', 'web', page), 'rb') as fh:
                 h.update(fh.read())
         build_id = h.hexdigest()[:12]
         for page in pages:
-            with open(os.path.join(ROOT, 'tools', 'web', page), encoding='utf-8') as fh:
+            with open(os.path.join(ROOT, 'platforms', 'web', page), encoding='utf-8') as fh:
                 text = fh.read().replace('__XI_BUILD__', build_id)
             with open(os.path.join(ROOT, out, page), 'w', encoding='utf-8') as fh:
                 fh.write(text)

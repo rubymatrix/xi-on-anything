@@ -147,7 +147,7 @@ These are the iPhone build's ([ios.md](ios-dev.md)), shared through `FFXI_MOBILE
   at once and kept in `gamepads.txt` in the data folder. The page scrolls when it is taller than the
   interface.
 - **Drawing:** the controls are drawn by a view over the game's surface (`MainActivity.Overlay`,
-  fed by `host/android_overlay.c`), not by the Vulkan back end. They keep the display's rate when
+  fed by `platforms/android/android_overlay.c`), not by the Vulkan back end. They keep the display's rate when
   the game runs slower, and their labels use the system font. Touches pass through to SDL.
 - **Back:** Android's Back, gesture or button, is Escape. It never closes the app, and Escape on the
   sign-in screen does not quit.
@@ -207,9 +207,9 @@ Without the game or a device:
 ```sh
 python3 tests/geometry_simd_test.py
 python3 tests/geometry_guest_test.py
-python3 tests/android_policy_test.py
-python3 tests/android_build_test.py
-python3 tests/android_entry_test.py
+python3 platforms/android/tests/android_policy_test.py
+python3 platforms/android/tests/android_build_test.py
+python3 platforms/android/tests/android_entry_test.py
 ```
 
 Visibility storage's shaders are compiled into `gfx_visibility_storage.inc` from the GLSL beside

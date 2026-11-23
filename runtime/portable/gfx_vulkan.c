@@ -1725,7 +1725,7 @@ static VkShaderModule compile_glsl(const char* text, int fragment)
         goto done;
     }
     /* not glslang_program_SPIRV_generate, which runs SPIRV-Tools' validator on every module: the kit's glslang
-     * is built without SPIRV-Tools (tools/linux/kit.sh, ENABLE_OPT off) so never did, but a build on the system's
+     * is built without SPIRV-Tools (platforms/linux/kit.sh, ENABLE_OPT off) so never did, but a build on the system's
      * glslang (ARM Linux) did, on the pipeline workers, and crashed in it (spvtools::val); its findings went
      * nowhere anyway */
     glslang_spv_options_t so = { 0 };

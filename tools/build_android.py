@@ -6,7 +6,7 @@
         game prepared by tools/build_posix.py prepare
   python3 tools/build_android.py gfxtest --test <name> [--native-tls]   one offscreen GPU fixture
         (tests/<name>_test.c), without the game
-  python3 tools/build_android.py tls-test [--native-tls]   the ELF TLS check (tests/android_tls_test.c)
+  python3 tools/build_android.py tls-test [--native-tls]   the ELF TLS check (platforms/android/tests/android_tls_test.c)
   python3 tools/build_android.py install --device SERIAL [--keystore file.p12 --key-alias xi]
         everything the app needs, from the dependencies (android_deps.py, once) to the API 29 host and
         its APK (build_android_apk.py, signed with --keystore, its password in
@@ -237,7 +237,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / 'generated').mkdir(exist_ok=True)
     if a.target == 'tls-test':
-        source = ['tests/android_tls_test.c']
+        source = ['platforms/android/tests/android_tls_test.c']
         module = compile_many(source, 'tls-module', ['-DXI_TLS_TEST_MODULE'])
         runner = compile_many(source, 'tls-runner', ['-DXI_TLS_TEST_DRIVER'])
         run([CC, '-shared', '-Wl,-z,max-page-size=16384', '-o', OUT / 'libtls-test.so'] + module)
@@ -300,7 +300,7 @@ def main():
         + HOST
         + ADDONS
         + gfx
-        + ['host/android_main.c', 'host/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c'],
+        + ['platforms/android/android_main.c', 'platforms/android/android_overlay.c', 'host/touch.c', 'host/display_fit.c', 'host/benchmark.c'],
         'host',
         extra + pol_flags + ['-Dmain=xi_host_main'],
     )

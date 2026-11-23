@@ -9,15 +9,15 @@ what has been verified, and what is left.
 | --- | --- | --- |
 | `tools/build_switch.py` | `plat-test`, `gfx-test`, `host`, `setup`, `run`, `deploy`, `logs` | `build_android.py`, `xbox.py` |
 | `tools/switch_toolchain.py` | finds devkitPro (and its msys2 on Windows) and the emulator | `android_toolchain.py` |
-| `tools/switch_mtp.ps1` | `setup --mtp`: copies to a console over USB MTP (DBI's MTP responder), on Windows | — |
-| `host/switch_main.c` | libnx entry: sockets, the screen's size, `run.args`, the log; calls `xi_host_main` | `host/ios_main.c` |
-| `runtime/portable/sdl_nx.c`, `nx_bridge.h` | the SDL3 calls the runtime makes, over libnx (HID, touch, swkbd, audout) | `sdl_web.c`, `sdl_uwp.c` |
+| `platforms/switch/switch_mtp.ps1` | `setup --mtp`: copies to a console over USB MTP (DBI's MTP responder), on Windows | — |
+| `platforms/switch/switch_main.c` | libnx entry: sockets, the screen's size, `run.args`, the log; calls `xi_host_main` | `platforms/ios/ios_main.c` |
+| `platforms/switch/sdl_nx.c`, `nx_bridge.h` | the SDL3 calls the runtime makes, over libnx (HID, touch, swkbd, audout) | `sdl_web.c`, `sdl_uwp.c` |
 | `runtime/portable/plat_posix.c` (`__SWITCH__`) | memory, address waits, thread ids, time | the Emscripten branch |
-| `runtime/portable/tls_nx.c`, `switch/mbedtls_config.h` | mbedtls' clock and entropy | — |
-| `switch/app.json` | the application NPDM (for the forwarder) | hbloader's |
-| `tests/switch_plat_test.c` | the platform layer's self-test, as its own `.nro` | — |
+| `platforms/switch/tls_nx.c`, `platforms/switch/mbedtls_config.h` | mbedtls' clock and entropy | — |
+| `platforms/switch/app.json` | the application NPDM (for the forwarder) | hbloader's |
+| `platforms/switch/tests/switch_plat_test.c` | the platform layer's self-test, as its own `.nro` | — |
 | `runtime/portable/gfx_gl.c`, `gfx_gl_api.h` | graphics: OpenGL 4.3 core on Mesa's nouveau through EGL; also builds on the desktop (SDL3's GL context) for testing | `gfx_webgpu.c`, `gfx_vulkan.c` |
-| `tests/switch_gfx_test.c` | `tests/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
+| `platforms/switch/tests/switch_gfx_test.c` | `tests/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
 
 The translation is the desktop one (`generated/all`, `generated/ffxi`). The generated C is portable, and
 the Switch adds no wraps or hooks. Compile flags: `-D__SWITCH__ -DRT_GUEST_WINDOW -DFFXI_SWITCH
@@ -80,7 +80,7 @@ plat_posix.c) picks one of two modes, by whether the process has a system resour
 - **Physical**: the C heap is capped at `FFXI_SWITCH_HEAP_MB` (1024). The window is in the alias region and
   commit is `svcMapPhysicalMemory` (decommit unmaps; the next commit is zero). hbloader hands over its heap
   at all of memory: it is shrunk at start and grown back at exit. Needs an NPDM with a
-  `system_resource_size` (hbloader's has one; `switch/app.json` asks for 16 MB).
+  `system_resource_size` (hbloader's has one; `platforms/switch/app.json` asks for 16 MB).
 - **Heap**: no system resource (Ryubing running a bare `.nro`, an applet). The heap takes all of memory and
   the window is its top 2 GB, always backed; decommit zeroes.
 
@@ -192,7 +192,7 @@ newest portable Ryubing at `<XI_EMU_DIR>/<version>/Ryujinx.exe` (`XI_EMU_DIR` de
 emulator's log in `portable/Logs`. Turn off Ryubing's "expand DRAM" so memory matches a real 4 GB console,
 and turn on "Enable guest Internet access" (Settings > Network), or no name resolves.
 
-The display defaults are `switch/switch.reg`, loaded after the desktop `ffxi.reg` and before what the game
+The display defaults are `platforms/switch/switch.reg`, loaded after the desktop `ffxi.reg` and before what the game
 saves (`settings.reg`, the overlay). The desktop file's 3440x1440 window and 6880x2880 background drew the
 lobby 21:9 squeezed into 16:9, and the game saves its whole registry on the first run, so a bad default
 sticks. Config > Advanced's Display page reads and writes `data/settings.reg` (loaded last), as on the

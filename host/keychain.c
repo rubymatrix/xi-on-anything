@@ -77,7 +77,7 @@ void keychain_delete(const char* key)
 
 int keychain_available(void) { return 1; }
 
-#elif defined(_WIN32) && !defined(FFXI_UWP) /* the UWP app has its own (xbox/app/Keychain.cpp) */
+#elif defined(_WIN32) && !defined(FFXI_UWP) /* the UWP app has its own (platforms/xbox/app/Keychain.cpp) */
 #include <windows.h>
 #include <wincred.h>
 

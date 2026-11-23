@@ -4,7 +4,7 @@
  * Threads: every call here runs on the browser build's render thread (gfx_queue.c), a worker that goes
  * back to its event loop between frames: WebGPU only presents a canvas, and answers its callbacks
  * (the adapter, the device, a pipeline built, a buffer mapped), between a worker's tasks. The page hands
- * that worker its canvas as an OffscreenCanvas (tools/web/web_pre.js), which is Module.canvas there.
+ * that worker its canvas as an OffscreenCanvas (platforms/web/web_pre.js), which is Module.canvas there.
  *
  * What WebGPU changes from Vulkan:
  *  - no push descriptors: one bind group per draw, cached by what it holds (the uniform block is the one
@@ -210,7 +210,7 @@ static int g_has_bc;
 static volatile uint32_t g_failures;
 static int g_errors_said;
 
-/* the page's canvas, as the render worker holds it (tools/web/web_pre.js) */
+/* the page's canvas, as the render worker holds it (platforms/web/web_pre.js) */
 EM_JS(int, web_canvas_ready, (void), { return (typeof Module != 'undefined' && Module['canvas']) ? 1 : 0; });
 EM_JS(void, web_canvas_size, (uint32_t w, uint32_t h), {
     var c = Module['canvas'];
@@ -1743,7 +1743,7 @@ static void make_statics(void)
     g_blit_samp = wgpuDeviceCreateSampler(g_dev, &sd);
 }
 
-/* The page's fps gauge (tools/web/hud.js): frames presented, and the longest gap between two since it last
+/* The page's fps gauge (platforms/web/hud.js): frames presented, and the longest gap between two since it last
  * asked (the worst frame), read from the page's thread. */
 static volatile uint32_t g_hud_frames;
 static volatile uint32_t g_hud_worst_us;

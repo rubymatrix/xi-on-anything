@@ -628,7 +628,7 @@ static void web_frame(void)
 }
 EM_JS(int, web_frame_rate, (void), { return typeof requestAnimationFrame == 'function' ? 0 : 60; });
 
-extern void web_give_canvas(uintptr_t thread); /* tools/web/gfx.js */
+extern void web_give_canvas(uintptr_t thread); /* platforms/web/gfx.js */
 
 static void* web_render_thread(void* unused)
 {

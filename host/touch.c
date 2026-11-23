@@ -3,7 +3,7 @@
  *
  * The gamepad is SDL's virtual one: the game sees an Xbox pad like any other (input.c, dinput.c), with
  * its own button mapping (ffxi.reg padsin000). Drawn by gfx_set_touch_shapes: on iOS the Metal back
- * end, over the frame; on Android a view over the game's surface (host/android_overlay.c):
+ * end, over the frame; on Android a view over the game's surface (platforms/android/android_overlay.c):
  *   - the left stick floats: it starts where the thumb lands in the lower left, and moves the player
  *   - a drag anywhere else on the game turns the camera (the right stick, from where the finger landed)
  *   - the face buttons (PlayStation's shapes, as FFXI's console pads), the D-pad, L1/R1, L2/R2 (the

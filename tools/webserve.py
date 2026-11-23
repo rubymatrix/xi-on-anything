@@ -21,7 +21,7 @@ Cloudflare R2, ...) takes the file reads off this machine's upload: --bucket is 
 in the host name (https://<bucket>.<region>.digitaloceanspaces.com, or the CDN one), --bucket-game the folder
 the install is in, --bucket-dats each overlay's folder (in --dats order), and XI_BUCKET_KEY /
 XI_BUCKET_SECRET an access key (in the environment, or in ~/.config/xi-web.env or --env <file> as KEY=VALUE
-lines). The page's file cache (tools/web/dlcache.js) then reads blocks straight from
+lines). The page's file cache (platforms/web/dlcache.js) then reads blocks straight from
 the bucket with links signed here, so only this server's sign-in can read it. Keep the bucket private, and
 let the page's address read it cross-origin (tools/bucket.py cors sets that up).
 

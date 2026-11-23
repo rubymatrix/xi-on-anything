@@ -145,7 +145,7 @@ code, or a server launcher's token. Start with [Building](docs/building.md) and 
 | [Options catalog](docs/options.md) | Every setting, in game and out |
 | [Addons](docs/addons.md) | Ashita and Windower addons |
 | [Game versions](docs/new-client-version.md) | Which versions of the game work, and adding a new one |
-| [iPhone and iPad](docs/platforms/ios-dev.md), [Web](docs/web.md), [Xbox](xbox/README.md), [Android](docs/platforms/android-dev.md), [Switch](docs/platforms/switch-dev.md) | Developer notes for each port |
+| [iPhone and iPad](docs/platforms/ios-dev.md), [Web](docs/web.md), [Xbox](platforms/xbox/README.md), [Android](docs/platforms/android-dev.md), [Switch](docs/platforms/switch-dev.md) | Developer notes for each port |
 | [Replay scenes](tools/replay/README.md) | Recorded scenes for performance testing |
 | [Repository layout](docs/layout.md) | What lives where |
 

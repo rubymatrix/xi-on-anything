@@ -1,4 +1,4 @@
-/* What the runtime and the UWP app (xbox/) give each other, where SDL3 cannot be used: SDL3 has
+/* What the runtime and the UWP app (platforms/xbox/) give each other, where SDL3 cannot be used: SDL3 has
  * no UWP back end. sdl_uwp.c implements the SDL calls the runtime and the sign-in screen make
  * (user32.c, input.c, dsound.c, host/signin.c) over these; the app feeds it its window's input and
  * plays its audio.

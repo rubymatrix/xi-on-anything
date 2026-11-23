@@ -8,7 +8,7 @@ description: Pull XI on Xbox's logs and profile (host64.log, app.log, samples.bi
 ## Pull
 
 ```bash
-python3 xbox/tools/xbox.py logs build/xbox/xbox-logs/$(date +%Y%m%d-%H%M%S)
+python3 platforms/xbox/tools/xbox.py logs build/xbox/xbox-logs/$(date +%Y%m%d-%H%M%S)
 ```
 
 It copies `host64.log`, `host64.out.log`, `app.log`, `samples.bin` and `settings.reg` from the app's LocalState,

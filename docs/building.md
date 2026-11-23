@@ -84,11 +84,11 @@ rm key.pem cs.p12
 ## Linux (x86_64)
 
 Needs Vulkan 1.3 (`runtime/portable/gfx_vulkan.c`), the system's SDL3 (3.2 or later, through
-pkg-config) and glslang. `tools/linux/Dockerfile` has all of it, plus Mesa's software Vulkan for the
+pkg-config) and glslang. `platforms/linux/Dockerfile` has all of it, plus Mesa's software Vulkan for the
 tests:
 
 ```
-docker build -t xi-linux tools/linux
+docker build -t xi-linux platforms/linux
 docker run --rm -v "$PWD":/src -w /src xi-linux python3 tools/build_posix.py gfxtest
 docker run --rm -v "$PWD":/src -v "<FINAL FANTASY XI>":/game:ro -w /src xi-linux \
     sh -c 'python3 tools/build_posix.py prepare --game /game && python3 tools/build_posix.py host64 --game /game'
@@ -99,7 +99,7 @@ docker run --rm -v "$PWD":/src -v "<FINAL FANTASY XI>":/game:ro -w /src xi-linux
 applications menu (`~/.local/share/applications/xi-on-anything.desktop`, named for host64's app
 id), so docks and window switchers show the game's icon.
 
-The launcher builds the Steam Deck's client from a kit, `tools/linux/kit.sh` (zig, static SDL3 and
+The launcher builds the Steam Deck's client from a kit, `platforms/linux/kit.sh` (zig, static SDL3 and
 glslang; CI publishes it as the `kit-linux` pre-release). It holds everything but the game,
 prebuilt, so the player needs only zig and python3 to build `host64` (`build_posix.py host64 --kit`).
 

@@ -27,7 +27,7 @@
 
   python3 tools/build_posix.py kit --out <dir>     (Linux) the kit: every library and every source that
         does not name a game build's addresses (build.h), built into static archives, and kit.json.
-        tools/linux/kit.sh makes it with zig for the Steam Deck and other x86_64 Linux.
+        platforms/linux/kit.sh makes it with zig for the Steam Deck and other x86_64 Linux.
   python3 tools/build_posix.py host64 --game <folder> --kit <dir>
         host64 from a kit: translates the player's DLLs and compiles only that and the sources that
         include build.h, then links against the kit. What the launcher runs on a Steam Deck, where
@@ -84,7 +84,7 @@ else:
                 '-lMachineIndependent', '-lGenericCodeGen', '-lOSDependent', '-lSPIRV-Tools-opt', '-lSPIRV-Tools',
                 '-Wl,--end-group', '-lstdc++', '-lpthread', '-ldl', '-lm']
     CFLAGS += ['-I', 'third_party/vma', '-I', 'third_party/volk']
-    # XI_DEPS: a prefix with SDL3 and glslang built for the kit (tools/linux/kit.sh), else the system's
+    # XI_DEPS: a prefix with SDL3 and glslang built for the kit (platforms/linux/kit.sh), else the system's
     if os.environ.get('XI_DEPS'):
         CFLAGS += ['-I', os.path.join(os.environ['XI_DEPS'], 'include')]
         GFX_LIBS = ['-L' + os.path.join(os.environ['XI_DEPS'], 'lib')] + GFX_LIBS
@@ -558,7 +558,7 @@ def app(game, a):
     exe = os.path.join(macos, APP_NAME)
     shutil.copy(os.path.join(ROOT, 'build', 'host64'), exe)
     shutil.copy(os.path.join(ROOT, 'assets', 'ffxi.reg'), res)
-    shutil.copy(os.path.join(ROOT, 'assets', 'icon.icns'), res)
+    shutil.copy(os.path.join(ROOT, 'platforms', 'macos', 'icon.icns'), res)
     shutil.copy(os.path.join(ROOT, 'build', 'runtime.json'), res)  # the launcher's rebuild check
     shutil.copytree(os.path.join(ROOT, 'assets', 'textures'), os.path.join(res, 'textures'))  # bundled hi-res packs
     keys = {'FFXIGameFolder': game}

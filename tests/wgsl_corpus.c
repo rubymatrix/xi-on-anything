@@ -1,7 +1,7 @@
 /* WGSL for every shader key pair the game has used: reads a back end's pipeline cache (the Metal one,
  * pipelines.v1: records of a PipeKey whose first member is the LibKey {GfxVsKey, GfxFsKey}, then the
  * vs and ps tokens) and writes gfx_wgsl_generate's text for each distinct pair to <out>/NNNN.wgsl,
- * for a WGSL validator (tools/web/wgsl_check.sh runs naga over them).
+ * for a WGSL validator (platforms/web/wgsl_check.sh runs naga over them).
  *
  *   clang -O1 -I runtime -I runtime/portable tests/wgsl_corpus.c runtime/portable/gfx_msl.c \
  *       runtime/portable/gfx_msl_shaders.c -o build/wgsl_corpus

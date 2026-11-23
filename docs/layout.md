@@ -18,8 +18,8 @@ runtime/portable/  64-bit hosts: plat.h (+ plat_win.c, plat_posix.c), gwin (gues
 host/              ffximain.c: the 32-bit stand-in FFXiMain.dll; host64.c: the 64-bit game host;
                    lsb_login.c: the LandSandBoat sign-in; android_main.c (the Android entry) and
                    benchmark.c (its frame timestamps)
-android/           the Android app: its manifest and activity (docs/platforms/android-dev.md)
-xbox/              the Xbox app, its packaging and the console tools (xbox/README.md)
+platforms/android/           the Android app: its manifest and activity (docs/platforms/android-dev.md)
+platforms/xbox/              the Xbox app, its packaging and the console tools (platforms/xbox/README.md)
 tests/             difftest.c (original vs translation), boot.c (x86), boot64.c (x64),
                    gfx_test.c (the Metal back end), d3d8_test.c (the D3D8 front end on it)
 tools/             prepare.py, buildinfo.py, unpack.py, build.py (MSVC), build_posix.py (clang),
