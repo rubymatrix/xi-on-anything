@@ -5,11 +5,11 @@ with WebGPU. A small server you run yourself, `tools/webserve.py`, serves the pa
 files, and carries the game's network traffic to your LandSandBoat server over a WebSocket.
 
 **There is no public instance, and there must never be one.** The WebAssembly is translated from your
-own `FFXiMain.dll` (Square Enix code), and the server hands out your game files. You build it from
-your own install and host it for yourself, on your own machine, reachable only by you. That is why
-`webserve.py` listens on `127.0.0.1` only and every request needs a token: to use it from your other
-devices you put it behind a private network or a sign-in you control (below), never on the open
-internet.
+own `FFXiMain.dll` (Square Enix code), and the server hands out your game files. Build it from your
+own install and host it for yourself only. `webserve.py` listens on `127.0.0.1` only. The token guards
+your game files and the network bridge, but the page and the translated game load without it: anyone
+who can reach the port can download them. To use it from other devices, put it behind a private
+network or a sign-in you control (below), never on the open internet.
 
 ## What you need
 
@@ -42,14 +42,16 @@ requested with the build's own id, so a browser never mixes an old page with a n
 python3 tools/webserve.py --server <your server, by name or IP> --game /path/to/"FINAL FANTASY XI"
 ```
 
-It prints the address to open, `http://127.0.0.1:8417/#t=<token>`, and a sign-in form for the
-server's account comes up. Useful options:
+It prints the address to open, `http://127.0.0.1:8417/#t=<token>`; open it and a sign-in form for the
+server's account comes up. With `--origin` it also prints `and through your proxy: <origin>/#t=<token>`,
+the address for your other devices. Useful options:
 
 | Option | What it does |
 | --- | --- |
-| `--server name` | The game server. Repeat it for each host the server sends you to (lobby, map servers): the WebSocket bridge connects to these addresses only. |
-| `--dats folder` | A DAT overlay folder (repeat; the first one given wins), as host64's `--dats`. |
+| `--server name` | The game server, by name or IPv4 address. Repeat it for each host the server sends you to (lobby, map servers): the WebSocket bridge connects to these only. The first one is the lobby. |
+| `--dats folder` | A DAT overlay folder (repeat, up to 8; the first one wins), as host64's `--dats`. |
 | `--port 8417` | The port on `127.0.0.1`. |
+| `--root folder` | The built page (default `build/web`). |
 | `--token value` | A fixed token instead of a new one each run, so a bookmark keeps working. Also `XI_WEB_TOKEN`. |
 | `--origin https://…` | The address a proxy of yours serves it under (below); repeat for more. |
 | `--env file` | A file of `KEY=value` lines read into the environment; `~/.config/xi-web.env` is read by default if it exists. |
@@ -87,10 +89,10 @@ only the token in front of it.
 ## Faster loading: your own private bucket (optional)
 
 Without a bucket every file comes from your machine, so a device far from home waits on your upload
-speed. With a private S3-compatible bucket (tested with DigitalOcean Spaces; Cloudflare R2 and other S3-compatible stores should work the same way)
-holding a copy of the files, the page downloads them from the bucket instead, by links `webserve.py`
-signs for six hours at a time; only those small requests reach your machine. The bucket stays
-private: a request without a signature gets 403.
+speed. With a private bucket holding a copy of the files, the page downloads them from the bucket
+instead, by links `webserve.py` signs for six hours at a time; only those small requests reach your
+machine. A request without a signature gets 403. Only DigitalOcean Spaces is tested: the signing
+expects Spaces addresses, so other S3-compatible stores may need changes.
 
 1. Create a **private** bucket (no public read, no public listing) and an access key for it. The key
    needs write access for the upload in step 4; a read-only key is enough for `webserve.py` afterwards.
@@ -103,7 +105,8 @@ private: a request without a signature gets 403.
    ```
 
 3. Let your page's address read it cross-origin (or set the same rule in the provider's console:
-   origin your address, methods GET and HEAD, allowed header `Range`):
+   origin your address, methods GET and HEAD, allowed headers `*`, exposed headers `Content-Range`
+   and `Content-Length`, max age 86400):
 
    ```sh
    python3 tools/bucket.py cors --bucket https://<bucket>.<region>.digitaloceanspaces.com --origin https://xi.example.com
@@ -132,10 +135,11 @@ private: a request without a signature gets 403.
    `python3 tools/bucket.py check --bucket … --object <some object> --origin …` shows a signed read
    working and an unsigned one refused.
 
-In the page, **Download all game data** (under the gear at the top right) fills the browser's own storage with every file,
-small files first: minutes rather than hours from a bucket (the 55,000 small files took about a minute
-in testing). After that, zoning reads nothing over the network. The page also learns which files the game opens together, and fetches the rest of a set when
-its first file opens.
+In the page, **Download all game data** (under the gear at the top right, while the file cache is
+on) fills the browser's storage with every file, small files first: minutes rather than hours from a
+bucket (the 55,000 small files took about a minute in testing). After that, zoning reads nothing over
+the network. The page also learns which files the game opens together, and fetches the rest of a set
+when its first file opens. `webserve.py` keeps these sets in `~/.cache/xi-web/follow-<server>.json`.
 
 ## Page options
 
@@ -143,9 +147,9 @@ Add these after the token in the address, e.g. `#t=<token>&ui=1.25`.
 
 | Option | What it does |
 | --- | --- |
-| `cache=clear` | Empties the browser's file cache first (once; leave it off afterwards). `cache=0` reads everything from the network. |
+| `cache=clear` | Empties the browser's file cache on every load while it is in the address; remove it afterwards. `cache=0` reads everything from the network. |
 | `ui=1.25` | Interface size: 1.25 is a quarter bigger, 0.8 smaller (0.5 to 3). |
-| `shape=16:9` | The interface's shape on a wide window: `16:9`, `4:3`, or `off` (the whole window). As Config > Modern > Interface Shape. |
+| `shape=16:9` | The interface's shape on a wide window: `16:9`, `4:3`, or `off` (the whole window). As Config > Advanced > Display > Interface Shape. |
 | `maxpx=8.3` | The most pixels the game renders, in millions (default 8.3, about 4K). |
 | `fps`, `dl`, `log`, `status` `=0` or `=1` | Hide or show the fps counter, the file downloads list, the log, the status line. By default the fps counter and status line are on and the log and downloads list off; the gear at the top right switches each, and the browser remembers it. The log turns itself on when an error is logged. |
 
@@ -171,8 +175,9 @@ Checked in Chromium at 1280 x 720, 1920 x 1080, 800 x 600, 2560 x 720 (with and 
 
 - New code: `git pull`, then `build_web.py`, and restart `webserve.py`.
 - A new client version: `prepare`, then `build_web.py`.
-- The server changed its DATs: with a bucket, run `bucket.py blocks` again (`webserve.py` picks the
-  changes up within five minutes); either way the page fetches only the files that changed.
+- The server changed its DATs: with a bucket, run `bucket.py blocks` again; then restart
+  `webserve.py`, which reads the game files once at startup. The page fetches only the files that
+  changed.
 
 ## When something goes wrong
 
@@ -182,11 +187,15 @@ Checked in Chromium at 1280 x 720, 1920 x 1080, 800 x 600, 2560 x 720 (with and 
   `webserve.py` just printed, or set a fixed `--token`.
 - **403 "other origins may not use this server"**: start `webserve.py` with `--origin` set to the
   address in the browser's address bar.
-- **`net: refused <address> (not the game server)`** in `webserve.py`'s output: the game server sent you to a host not in
-  `--server`; add it.
-- **Black screen at 0 fps**: read the log under the game (it opens by itself on an error; or turn it on under the gear, or add `&log=1`). A crash prints `thread crashed:` and its
-  stack there; WebGPU errors show up there too.
-- **Slow zoning**: the overlay at the top left lists each file read, how long it took and where from
-  (`bucket`, `bucket, gzip`, `bucket, pack` or `server`). Use a bucket, or **Download all game data**.
+- **`net: refused <address> (not the game server)`** in `webserve.py`'s output: the game server sent
+  you to a host not in `--server`; add it.
+- **Black screen at 0 fps**: read the log under the game (it opens by itself on an error, or turn it
+  on under the gear or with `&log=1`). A crash prints `thread crashed:` and its stack there, as do
+  WebGPU errors.
+- **`[recomp] gfx: this browser has no WebGPU`** or **`no WebGPU adapter`** in the log: use desktop
+  Chrome or Edge with WebGPU.
+- **Slow zoning**: turn on the downloads list (gear, or `&dl=1`). It lists each file read, how long it
+  took and where from (`bucket`, `bucket, gzip`, `bucket, pack` or `server`). Use a bucket, or
+  **Download all game data**.
 - **A bucket read failing**: `bucket.py check` prints the bucket's own error (`SignatureDoesNotMatch`,
   `AccessDenied`, `NoSuchKey`) and whether the CORS rule is answering.
