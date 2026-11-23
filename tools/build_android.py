@@ -271,7 +271,7 @@ def main():
     )
     if a.target == 'gfxtest':
         objs = compile_many(
-            gfx + ['tests/' + a.test + '_test.' + ('cpp' if a.test == 'gfx_visibility_storage' else 'c')],
+            gfx + ['tests/gfx/' + a.test + '_test.' + ('cpp' if a.test == 'gfx_visibility_storage' else 'c')],
             'gfxtest',
             extra,
         )
@@ -313,7 +313,7 @@ def main():
         ('gfx_pass_plan_gpu_test.c', 'xi_pass_plan_test_main'),
         ('gfx_visibility_storage_test.cpp', 'xi_visibility_storage_test_main'),
     ]:
-        objs += compile_many(['tests/' + source], 'host-' + entry, extra + ['-Dmain=' + entry])
+        objs += compile_many(['tests/gfx/' + source], 'host-' + entry, extra + ['-Dmain=' + entry])
     library_path = OUT / 'libmain.so'
     run(
         [
