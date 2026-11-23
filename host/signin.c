@@ -30,6 +30,7 @@
 #endif
 #include "discord.h"
 #include "uidraw.h"
+#include "vfs.h"
 
 
 /* ---- what is remembered ---- */
@@ -625,6 +626,7 @@ static int open_dat_at(const char* host_game, const char* rel, Dat* d, const cha
 {
     char path[1024];
     snprintf(path, sizeof path, "%s/%s", host_game, rel);
+    vfs_match_case(path); /* (an install may have it as rom/119/50.dat: the game's own reads find it in any case) */
     memset(d, 0, sizeof *d);
     if (!dat_read(path, &d->file))
     {
