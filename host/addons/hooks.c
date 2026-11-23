@@ -1,4 +1,4 @@
-/* The game hooks the addon host stands on (recomp.py --wraps, meta/builds.json "wraps"):
+/* The game hooks the addon host stands on (recomp.py --wraps, recomp/meta/builds.json "wraps"):
  *
  *   parse_input    int __cdecl (const char* line, int mode): every typed line, macro line and menu
  *                  command. The host's commands and addons' command events run first; handled
@@ -774,7 +774,7 @@ void xi_hooks_init(void)
 #endif
 #if !defined(FFXI_WRAP_PARSE_INPUT) || !defined(FFXI_WRAP_WRITE_LINE) || !defined(FFXI_WRAP_CHAT_ADD) || \
     !defined(FFXI_WRAP_PACKET_DECRYPT) || !defined(FFXI_WRAP_PACKET_ENCRYPT)
-    xi_log("build %s lacks some addon hooks (meta/builds.json wraps): commands, chat or packets are not seen", FFXI_BUILD);
+    xi_log("build %s lacks some addon hooks (recomp/meta/builds.json wraps): commands, chat or packets are not seen", FFXI_BUILD);
 #endif
     (void)g_write_line_fn;
 }

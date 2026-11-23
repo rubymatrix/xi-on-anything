@@ -1,5 +1,5 @@
 /* BSD sockets for the browser build (net_web.c): browsers can't open TCP or UDP sockets, so every
- * socket is a channel on one WebSocket to the local server (tools/webserve.py, /net), which opens
+ * socket is a channel on one WebSocket to the local server (platforms/web/webserve.py, /net), which opens
  * the real one. ws2.c and lsb_login.c include this after the system headers; the macros send their
  * socket calls here. Socket numbers start at WN_BASE, below FD_SETSIZE, so fd_set holds them. */
 #pragma once

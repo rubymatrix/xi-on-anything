@@ -18,7 +18,7 @@
  * the next instances' handles are unchanged or name a light no effect has lit: that is followed here, in the
  * order the game draws.
  *
- * Every address is the 2026-09-03 build's (meta/builds.json "scene_*"); a build without them never turns
+ * Every address is the 2026-09-03 build's (recomp/meta/builds.json "scene_*"); a build without them never turns
  * this on. Checked in the client: docs (FFXI Scene Data and a Replacement Renderer, Phase 0). */
 #include <math.h>
 #include <stdio.h>
@@ -26,7 +26,7 @@
 #include <string.h>
 
 #include "build.h"
-#include "d3d8.h"
+#include "../runtime/portable/winapi/d3d8.h"
 #include "gfx.h"
 #include "gthread.h"
 #include "gwin.h"

@@ -1,0 +1,115 @@
+FFXiMain.dll / FFXi.dll build 2009-07-09: R1 function discovery for static recompilation
+=====================================================================================
+
+Retail files  the July 2009 PC install (patch 30090710_2), put together from a Steam install and a
+              2010 install's data
+  FFXiMain.dll  SHA-256 84e66b4313aecc9dc12e9448fd7987eaa4a74edbca383401674e8df01acbc3c0
+                PE timestamp 0x4a55f863 (2009-07-09), 2,526,292 bytes packed
+  FFXi.dll      SHA-256 7569626903e9b03d3e760b66fe87f5c645612dbec2977c8a11407eed1932633d
+                PE timestamp 0x4a55f89d
+Version       30090710_2, decrypted from patch.ver
+Metadata      FFXiMain.2009-07-09.meta.json (discovered), FFXi.2009-07-09.meta.json (carried)
+Label         the date of the PE timestamp, eight months before 2010-03-16
+
+What changed from 2010-03-16
+----------------------------
+FFXiMain's .text differs: 2,874,286 bytes unpacked against 2,878,510. The packer is the same
+(tools/unpack.py unchanged). FFXi.dll's .text is identical to 2010-03-16's, so its metadata was
+carried over (`newbuild.py meta`) and it needed no discovery pass.
+
+Carrying addresses over
+-----------------------
+From 2010-03-16 with `newbuild.py carry`. Every address mapped by a unique byte window or by
+votes, most moved by -0x1080 or less:
+
+  chars_ptr        0x10444228   votes 1533 of 1533
+  present_site     0x100031db   unchanged
+  nameplate_scale  0x1007c909
+  wraps            parse_input 0x10078080, packet_decrypt 0x100c20e0, packet_encrypt 0x100c1fb0;
+                   geometry_* (all five) unchanged
+  geometry         info 0x103c3a4c, callback 0x103c89a0, palette 0x103c4778, counts 0x103c8840
+                   (all by 64 or 37 votes of as many); no layout yet
+  crt              all 15, same order, delta -0x1080
+  offsets          chars_table 0x12eb0, as 2010-03-16. `carry` does not copy this section; it was
+                   added by hand after checking the getter at 0x100d2930
+                   (`mov eax,[0x10444228]; mov eax,[eax+0x12eb0]; ret`).
+
+Found by hand (no unique window):
+  NOT_CODE 0x101cc483 / REDECODE 0x101cc480 of 2010-03-16. Both builds have two copies of the
+  function (`mov al,[g]; push esi; test al,al; mov esi,ecx; jne +0x1f; mov eax,[g2]`): 2010-03-16
+  at 0x101cc480 and 0x101cda90, this build at 0x101cb260 and 0x101cc9e0, in the same order. The
+  hint carry gave (0x101cb320) is other code.
+
+Method
+------
+Ghidra 11.3.2 headless (tools/version/discover.py), JDK 21. The first run's gate failed with 2 conflicts and
+2 suspect functions. A --reuse run with their verdicts then showed one switch for review: removing
+the false functions at 0x1004bd10 and 0x1004c010 clears their whole bodies, which in a reused
+project had grown over real case code (including the nested switch at 0x1004cf64). The switch's
+guard needs no verdict (`lea ecx,[eax-1]; cmp ecx,0x9d; ja`, 158 cases). A fresh run with all the
+verdicts passed: Discover2 skips NOT_CODE starts before it makes them, so nothing is cleared.
+
+Verdicts, FFXiMain.dll
+  Carried from 2010-03-16 and checked by disassembly:
+  NOT_CODE 0x10006610   21-case table of the switch at 0x10005c39, after a ret
+  NOT_CODE 0x100d76e0   4-entry jump table after `ret; nop`
+  NOT_CODE 0x10127c50   4-entry jump table after a ret
+  NOT_CODE 0x102a6a40, 0x102a6ab0   16-byte records {ptr, int, flags, 0} in .text
+  NOT_CODE 0x102a89f0   inside the 11-byte `mov eax,[g]; jmp [eax+off]` stub; REDECODE 0x102a89e8
+  NOT_CODE 0x102a5a40   256 16-byte records up to 0x102a6a40
+  NOT_CODE 0x1016c02a   inside `mov ecx,[eax+0x18]`; REDECODE 0x1016c028
+  NOT_CODE 0x10255d30   inside `or ah,1` (80 cc 01); REDECODE 0x10255d2e
+  NOT_CODE 0x101cb263   inside `mov al,[0x103ec9f7]` at a function start; REDECODE 0x101cb260
+  SWITCHES 0x10005c39: 21, 0x101c4ced: 9, 0x1023eda8: 4   as in 2010-03-16
+  New in this build:
+  NOT_CODE 0x1004bd10   inside `je` (0f 84 90 28 00 00) at 0x1004bd0d, its 0x90 read as padding;
+                        REDECODE 0x1004bd0d (conflict at 0x1004bd0b)
+  NOT_CODE 0x1004c010   the same in the `je` at 0x1004c00d; REDECODE 0x1004c00d
+  NOT_CODE 0x1004e660   the 158-entry table of the switch at 0x1004ab63, after `ret 4; nop`
+                        (suspect: 2 insns, a rare one; its dwords are relocated case addresses)
+  NOT_CODE 0x1008f2b0   2-entry jump table {0x1008f25b, 0x1008f25f} and its 0/1 index bytes,
+                        after a ret (suspect, 36 insns, 5 zero adds)
+Verdicts, FFXi.dll
+  NOT_CODE 0x10006680, REDECODE 0x10006678   carried with its metadata
+
+Results
+-------
+                                  auto-analysis   after discovery   2010-03-16 after discovery
+FFXiMain functions in .text       12,220          18,977            19,010
+instructions                      771,923         867,646           868,976
+instruction bytes                 83.1%           93.2%             93.2%
+instructions outside functions    128,671         0                 0
+scaled-index switches             696             774               774
+tail_jumps                        -               1,874             1,876
+FFXi.dll                          functions 366, switches 42, tail jumps 17 (the same as 2010-03-16)
+
+What the runtime meets in this client
+-------------------------------------
+  - The same as 2010-03-16: the character table at +0x12eb0 (recomp/meta/builds.json "offsets") and
+    gamecore slot 441 (the rebased 2010 fixes). Not checked here: whether this build calls any
+    other slot 2010-03-16 does not.
+  - The same known gaps: no write_line, chat_add left out, the addon game layer unchecked, no
+    host/modern.c addresses.
+  - The camera's aspect float is at +0x2e8, not +0x2f0: the setter at 0x10013450 ends
+    `fdivr [esp+8]; fstp [eax+0x2e8]` (2026-09-03: +0x2f0 at 0x100153a0). host64 wrote +0x2f0 every
+    frame and wrecked the title screen's scene (smeared ground, a flat blue polygon, the horizon
+    torn). host/host64.c now reads the field from the setter's fstp. Checked in game: the title
+    and character select draw cleanly.
+  - No frame divisor (the Ashita fps pattern does not match). The frame loop at 0x1000fc70 compares
+    the elapsed time with the float 2.0 at 0x102bf664 at 0x10010c64, 0x10010c8a, 0x10010cd3 and
+    0x10010d6c, and floors its step at 2.0 (`mov [esi+0x24], 0x40000000` at 0x10010d79).
+    recomp/meta/builds.json patches.frame60 re-points the four compares at the 1.0 at 0x102bf5fc and
+    makes the floor 1.0 (recomp/meta/features.json frame60). Forced on at the title it runs at 58 fps
+    against 30. In the world (tools/replay/staticserver.py does sign this client in, to Port Jeuno) it
+    runs at 58 fps against 29, and walking covers the same ground in the same time.
+  - The entity map (0x103ecdf8) holds 0x800 entities, the player's from 0x400 on (the player index
+    global 0x103efa02 read 1024). The addon layer's entitymap.size pattern (an edi loop over 0x900)
+    does not match; its alternative, the esi loop at 0x10087071 (`inc esi; cmp esi, 0x800; jl;
+    mov [g], edi`), does. Without it the entity count was 0, the player index invalid, login
+    status stuck at 1, and frame60, which waits for the world (status 2), never came on.
+  - Draw distance: the drawdistance pattern matches once, at 0x1014fbec, the same code as 2026-09-03's
+    0x1018a8dc; world 0x103c3df8, characters 0x103c3de8 (each referenced at the same four kinds of
+    place as today's). Nameplates: the hook at 0x1007c909 is right after `fstp [esp+0x50]`, the
+    glyph scales stored at [esp+0x4c] and [esp+0x50] from the screen size times the size argument,
+    with no push between, as at 2026-09-03's 0x100863d6. Both are on (recomp/meta/features.json).
+

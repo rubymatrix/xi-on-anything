@@ -1,4 +1,4 @@
--- The Windower layer's test addon (tests/windower_layer_test.sh): a Windower 4 addon that uses
+-- The Windower layer's test addon (tests/addons/windower_layer_test.sh): a Windower 4 addon that uses
 -- the raw windower.* API (no Windower libraries) and prints what it sees.
 _addon.name = 'wlayer'
 _addon.version = '1.0'

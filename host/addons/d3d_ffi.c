@@ -37,7 +37,7 @@
 #include <sys/mman.h>
 #endif
 
-#include "d3d8.h"
+#include "../../runtime/portable/winapi/d3d8.h"
 #include "d3d_ffi.h"
 #include "host.h"
 

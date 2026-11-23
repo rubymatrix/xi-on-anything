@@ -106,7 +106,7 @@ static void lock_yield(void)
  * (so rare calls - a connect, a registry read - are logged however long the run; frame-rate
  * traffic stops after SEQ_REPEAT), up to SEQ_MAX lines. It is the list of
  * shims R3.1 needs and the reference trace later builds are diffed against. Updated under the
- * guest lock, so the tables need no atomics. tools/trace_report.py resolves the addresses. */
+ * guest lock, so the tables need no atomics. tools/debug/trace_report.py resolves the addresses. */
 typedef struct TraceSlot
 {
     uint32_t target, site, count;

@@ -1,7 +1,7 @@
 /* The game-data layer: FFXiMain's live structures, found by pattern and read in place (game.h).
  *
  * Patterns and what they resolved to in our 2026-09-03 image (generated/FFXiMain.unpacked.dll,
- * image base 0x10000000); tests/game_test.c checks every one of these against the image:
+ * image base 0x10000000); tests/addons/game_test.c checks every one of these against the image:
  *
  *   pointer            source   match       resolves to
  *   entity map         Ashita   0x10003A17  +9  = 0x10480AF0  entity_t*[0x900] (static array)

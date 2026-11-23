@@ -20,7 +20,7 @@
 #include <SDL3/SDL.h>
 
 #include "build.h"
-#include "d3d8.h"
+#include "../../runtime/portable/winapi/d3d8.h"
 #include "gthread.h"
 #include "gwin.h"
 #include "host.h"

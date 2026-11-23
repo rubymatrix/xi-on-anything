@@ -15,11 +15,11 @@
 #include <SDL3/SDL.h>
 
 #include "addons.h"
-#include "d3d8.h"
-#include "dinput.h"
+#include "../../runtime/portable/winapi/d3d8.h"
+#include "../../runtime/portable/winapi/dinput.h"
 #include "host.h"
-#include "input.h"
-#include "user32.h"
+#include "../../runtime/portable/winapi/input.h"
+#include "../../runtime/portable/winapi/user32.h"
 
 #define CHAT_MODE 207
 

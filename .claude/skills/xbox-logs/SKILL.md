@@ -8,7 +8,7 @@ description: Pull XI on Xbox's logs and profile (host64.log, app.log, samples.bi
 ## Pull
 
 ```bash
-python3 xbox/tools/xbox.py logs build/xbox/xbox-logs/$(date +%Y%m%d-%H%M%S)
+python3 platforms/xbox/tools/xbox.py logs build/xbox/xbox-logs/$(date +%Y%m%d-%H%M%S)
 ```
 
 It copies `host64.log`, `host64.out.log`, `app.log`, `samples.bin` and `settings.reg` from the app's LocalState,
@@ -32,7 +32,7 @@ Read `host64.log` and report:
 
 `samples.bin` is only readable with the linker map of **the same build** of `XIonXbox.exe`, which is on the
 machine that built it (usually the Windows PC):
-`python tools/sample_report.py samples.bin <exe.map> [--top 40]` (in xi-on-anything).
+`python tools/debug/sample_report.py samples.bin <exe.map> [--top 40]` (in xi-on-anything).
 Don't analyze it against a different build's map. Every sample would be attributed to the wrong function.
 
 ## Send to another machine

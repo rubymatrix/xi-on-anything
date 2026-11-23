@@ -1,8 +1,8 @@
 /* BSD sockets over the local server's WebSocket (net_web.h): the browser build's network.
  *
- * Every socket is a channel on one WebSocket to tools/webserve.py's /net, which opens the real TCP
+ * Every socket is a channel on one WebSocket to platforms/web/webserve.py's /net, which opens the real TCP
  * or UDP socket on the player's machine, to the game server the player configured and nothing else.
- * The WebSocket lives on the page's main thread (tools/web/net.js); this side keeps each socket's
+ * The WebSocket lives on the page's main thread (platforms/web/net.js); this side keeps each socket's
  * state and received data, so the game's threads block, poll and select here exactly as on a host
  * with sockets, and nothing waits on the main thread.
  *
@@ -29,7 +29,7 @@
 #include <sys/ioctl.h>
 #include <time.h>
 
-/* tools/web/net.js: sends one frame (malloc'd here, freed there), on the main thread */
+/* platforms/web/net.js: sends one frame (malloc'd here, freed there), on the main thread */
 extern void wn_js_send(uint8_t* frame, uint32_t len);
 
 typedef struct Pkt
@@ -554,7 +554,7 @@ int wn_getsockname(int s, struct sockaddr* a, socklen_t* len)
     return 0;
 }
 
-/* From tools/web/net.js, on the main thread: one frame from the server, malloc'd there, freed here. */
+/* From platforms/web/net.js, on the main thread: one frame from the server, malloc'd there, freed here. */
 EMSCRIPTEN_KEEPALIVE void wn_deliver(uint8_t* f, uint32_t n)
 {
     if (n < 5)

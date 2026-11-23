@@ -1,5 +1,5 @@
 -- Test addon (kind xi) for host/addons/lua/windower_events.lua: prints every Windower event the
--- module raises as "EV <name> <args>" (tests/windower_events_test.sh compares them).
+-- module raises as "EV <name> <args>" (tests/addons/windower_events_test.sh compares them).
 local wev = require('xi.windower_events')
 
 local function ser(v, depth)

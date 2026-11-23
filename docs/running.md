@@ -13,7 +13,7 @@ build/host64 --game <FINAL FANTASY XI folder> [options]
 
 Without a way in on its command line (`--session`, `--pol-status stdio`, or `--user` with a
 password or token), `host64` shows its own sign-in screen first. It uses the game's UI art from the
-install (window themes, font, title art; `host/datui.c`), in the window the game then takes over.
+install (window themes, font, title art; `host/ui/datui.c`), in the window the game then takes over.
 It signs in to a **LandSandBoat server** (username, password, one-time code). Its **Settings** hold
 the server, the window theme, and whether to remember the password (in the macOS Keychain, the
 Windows Credential Manager, or the Secret Service on Linux). It keeps its files in its data folder
@@ -41,7 +41,7 @@ To sign in to a LandSandBoat server without the sign-in screen:
 ```
 build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
     --server <server name> --user <account> \
-    --reg ffxi.reg --reg-overlay build/settings.reg --dats ~/FFXI/DATs
+    --reg assets/ffxi.reg --reg-overlay build/settings.reg --dats ~/FFXI/DATs
 ```
 
 ## Options
@@ -60,17 +60,17 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--trust on\|off` | xiloader's "trust this computer": after a two-factor code, the server hands out a token that replaces the code for 30 days. It is kept in the keychain per `--server` name and account (the sign-in screen's Settings has the same switch). Without `--server`, or without a password store (a Linux desktop with no Secret Service), nothing is kept. |
 | `--authport`, `--dataport`, `--viewport` | LandSandBoat's ports, by default 54231 (sign-in, TLS), 54230 (data), 54001 (lobby view). |
 | `--loader-version <a.b.c>` | The loader version sent at sign-in, `2.2.0` by default (current xiloader). LandSandBoat refuses a version it does not expect. When the refusal names the one it wants (`2.1.x`), `host64` retries once with that (an `x` as 0). The sign-in screen remembers it (`loader_version=` in `signin.cfg`). |
-| `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its registry keys. Start from this repo's `ffxi.reg`. |
+| `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its registry keys. Start from this repo's `assets/ffxi.reg`. |
 | `--reg-overlay <file.reg>` | Where the game saves settings it changes. Loaded after the `--reg` files, which are never rewritten. |
 | `--data-dir <folder>` | Where `host64` keeps its own files (see above). Default: the sign-in screen's data folder; with no sign-in screen, none (the `patch.<version>.ver` then goes beside `host64`). |
 | `--reg-final <file.reg>` | Loaded after the overlay, so it wins over what the game saved (up to 8). Without one, `<data dir>/settings.reg` is loaded here. |
 | `--dats <folder>` | DAT overlays, the way XIPivot does them (up to 8; the first folder given wins). See below. |
 | `--textures <folder>` | A texture pack: high-resolution replacements for the game's textures (up to 8; the first with a texture wins). Default `<data dir>/textures`. The bundled packs come after these. |
 | `--user-dir <folder>` | The game's `USER` folder (settings, macros) here instead of in the install. |
-| `--fps-divisor <n>` | The game's frame divisor: `1` is 60 fps (the default here), `2` is 30 fps as shipped, `0` uncapped. Uncapped keeps the world at its speed in game builds with frame sites (`tools/frame_sites.py`); in others the world runs as fast as the frames (for measurements). `--fps-limit <n>` holds uncapped to n a second. The 2009 and 2010 clients have no divisor: `1` runs their frame loop at one sixtieth in the world (`frame60`), the title and lobby at 30. |
-| `--features` | Print which of `host64`'s additions this game build has, as JSON (`id`, `title`, `on`, `why`), and exit. From `meta/features.json`; see [Features by client build](options.md#features-by-client-build). |
+| `--fps-divisor <n>` | The game's frame divisor: `1` is 60 fps (the default here), `2` is 30 fps as shipped, `0` uncapped. Uncapped keeps the world at its speed in game builds with frame sites (`tools/version/frame_sites.py`); in others the world runs as fast as the frames (for measurements). `--fps-limit <n>` holds uncapped to n a second. The 2009 and 2010 clients have no divisor: `1` runs their frame loop at one sixtieth in the world (`frame60`), the title and lobby at 30. |
+| `--features` | Print which of `host64`'s additions this game build has, as JSON (`id`, `title`, `on`, `why`), and exit. From `recomp/meta/features.json`; see [Features by client build](options.md#features-by-client-build). |
 | `--ui-aspect <w:h>` | Keep the interface at this shape, full height and centered, in a wider window (`16:9` on an ultrawide), not stretched. The 3D world still fills the window. The mouse is mapped to match, so the sides can't be clicked. Off by default; an app bundle's `FFXIUIAspect` key sets the default. Best with a 16:9 menu resolution (960x540). |
-| `--nameplates fix\|off` | The names over characters' heads. The game sizes them by the window's width and height, so they widen with the window (1.8 times at 3440x1440). `fix`, the default, keeps their 4:3 shape. Only builds with a `nameplate_scale` hook in `meta/builds.json`. |
+| `--nameplates fix\|off` | The names over characters' heads. The game sizes them by the window's width and height, so they widen with the window (1.8 times at 3440x1440). `fix`, the default, keeps their 4:3 shape. Only builds with a `nameplate_scale` hook in `recomp/meta/builds.json`. |
 | `--nameplate-scale <s>` | Their size: `1.25`, or across x down (`1x1.2`). 1 by default. |
 | `--draw-distance <k>` | How far the world is drawn: a factor from 0.5 to 20 (1 as the game draws), or world x characters (`3x1.5`). |
 | `--lod near\|game` | `near`, the default, draws the world's most detailed models at every distance; `game` lets the game pick. |
@@ -131,7 +131,7 @@ overlay (`ROM255` above) work too. Overlays are indexed once at start-up, and th
 | `FFXI_GPU_TIMES=<file>` | Vulkan: GPU timestamps around each run of draws from one game call site, each effects pass, the sun maps and present. Each second, `<file>` gets the GPU time and draws per site (`t <epoch> frames <n> gpu_ms <ms>`, then `<site> <ns> <draws> <runs>`; a site is the draw's return address, with the next return address up the stack above it). |
 | `FFXI_ASYNC_READBACK=1` | Small read-only surface locks take the newest finished copy instead of waiting for the GPU. |
 | `FFXI_VSYNC=0` | Never wait for the display, to measure frame rates past its refresh rate. |
-| `FFXI_NATIVE_GEOMETRY=1` | Skin characters with SSE-order kernels (NEON or SSE2, `runtime/portable/geometry_simd.c`) instead of the translated x87 code, on builds with a verified layout (2025-11-12). Same output as the original's SSE path; no measured FPS gain on desktop. |
+| `FFXI_NATIVE_GEOMETRY=1` | Skin characters with SSE-order kernels (NEON or SSE2, `runtime/portable/geometry/geometry_simd.c`) instead of the translated x87 code, on builds with a verified layout (2025-11-12). Same output as the original's SSE path; no measured FPS gain on desktop. |
 | `FFXI_CACHE_DIR` | Where `fx.txt` and the pipeline cache go. Default `~/Library/Caches/FFXI` on macOS, `$XDG_CACHE_HOME/FFXI` (or `~/.cache/FFXI`) on Linux, `%LOCALAPPDATA%\FFXI` on Windows. |
 | `FFXI_RECOMP_TRACE=1` | Log every shim call, and every failed `CreateFileA` / `FindFirstFileA` path. |
 | `FFXI_RECOMP_MISSING=1` | Log imports that have no shim. |

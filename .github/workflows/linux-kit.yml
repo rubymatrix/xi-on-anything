@@ -1,4 +1,4 @@
-# The Linux kit (tools/linux/kit.sh) for the launcher's Linux and Steam Deck installs: built for each
+# The Linux kit (platforms/linux/kit.sh) for the launcher's Linux and Steam Deck installs: built for each
 # release and republished under the kit-linux pre-release, with the commit its sources are in
 # (kit.json), which the launcher downloads beside it.
 name: linux-kit
@@ -27,12 +27,12 @@ jobs:
           curl -fsSL https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz | sudo tar xJ -C /opt
           sudo ln -s /opt/zig-x86_64-linux-0.14.1/zig /usr/local/bin/zig
       - name: Kit
-        run: XI_COMMIT=${{ github.sha }} tools/linux/kit.sh
+        run: XI_COMMIT=${{ github.sha }} platforms/linux/kit.sh
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view kit-linux >/dev/null 2>&1 || \
             gh release create kit-linux --prerelease --title "Linux kit" \
-              --notes "What the launcher builds the Linux client from (tools/linux/kit.sh). Replaced with every release."
+              --notes "What the launcher builds the Linux client from (platforms/linux/kit.sh). Replaced with every release."
           gh release upload kit-linux build/xi-kit-linux-x86_64.tar.gz --clobber

@@ -33,7 +33,7 @@ Without FUSE 2 an AppImage can't mount itself. The installer then starts it with
 ## Option 2: build from source
 
 You need clang, python3 with `capstone` and `pefile`, SDL3 3.2 or later with its development
-files (found through pkg-config), glslang, and the Vulkan headers. `tools/linux/Dockerfile` is the
+files (found through pkg-config), glslang, and the Vulkan headers. `platforms/linux/Dockerfile` is the
 reference. On Ubuntu 24.04:
 
 ```bash
@@ -68,10 +68,10 @@ icon.
 
 ### In Docker instead
 
-`tools/linux/Dockerfile` has every dependency, plus Mesa's software Vulkan for the tests:
+`platforms/linux/Dockerfile` has every dependency, plus Mesa's software Vulkan for the tests:
 
 ```bash
-docker build -t xi-linux tools/linux
+docker build -t xi-linux platforms/linux
 docker run --rm -v "$PWD":/src -v ~/Games/"FINAL FANTASY XI":/game:ro -w /src xi-linux \
     sh -c 'python3 tools/build_posix.py prepare --game /game && python3 tools/build_posix.py host64 --game /game'
 ```

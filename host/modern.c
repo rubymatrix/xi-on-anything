@@ -38,26 +38,26 @@
 
 #include "build.h"
 #include "cachedir.h"
-#include "d3d8.h"
-#include "datui.h"
+#include "../runtime/portable/winapi/d3d8.h"
+#include "ui/datui.h"
 #include "frame.h"
 #include "gfx.h"
-#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
+#include "../runtime/portable/gfx/gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
 #include "gthread.h"
 #include "gwin.h"
-#include "k32.h"
+#include "../runtime/portable/winapi/k32.h"
 #include "modern.h"
 #ifdef FFXI_MOBILE
 #include "display_fit.h"
 #endif
 #include "padmap.h"
 #include "plat.h"
-#include "thunk.h"
-#include "user32.h"
+#include "../runtime/portable/winapi/thunk.h"
+#include "../runtime/portable/winapi/user32.h"
 #include "vfs.h"
 
 /* ---- the game ----
- * Its addresses are the build's (meta/builds.json "modern", generated/build.h; 2026-09-03's in the
+ * Its addresses are the build's (recomp/meta/builds.json "modern", generated/build.h; 2026-09-03's in the
  * comments here). A build without them all has FFXI_MODERN 0: then nothing here calls the game. */
 enum
 {
@@ -3635,7 +3635,7 @@ void modern_frame(void)
          * function (FATAL: no translation). */
         if (!FFXI_MODERN)
         {
-            fprintf(stderr, "[modern] build %s has no menu addresses (meta/builds.json): no Config > Modern\n",
+            fprintf(stderr, "[modern] build %s has no menu addresses (recomp/meta/builds.json): no Config > Modern\n",
                 FFXI_BUILD);
             state = -1;
             return;

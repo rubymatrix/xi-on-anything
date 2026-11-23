@@ -10,7 +10,7 @@
  * - Every guest read and write is checked with xi_mapped first: a bad pointer reads as "absent"
  *   (functions return 0 / nil), never a fault.
  * - Field layouts come from Ashita's SDK headers (plugins/sdk/ffxi/ headers) through
- *   tools/gen_game_fields.py -> game_fields.inc: one descriptor table and one generic
+ *   tools/addons/gen_game_fields.py -> game_fields.inc: one descriptor table and one generic
  *   getter/setter path (xi_game_read / xi_game_write) instead of a function per field.
  *
  * Addresses here are guest addresses (uint32_t). Callers hold the guest lock (addons run on the
