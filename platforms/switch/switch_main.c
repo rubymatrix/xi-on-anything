@@ -511,7 +511,7 @@ static int read_args(const char* path, char** out, int room)
     {
         size_t len = strcspn(line, "\r\n");
         line[len] = 0;
-        if ((!strncmp(line, "FFXI_", 5) || !strncmp(line, "mesa_", 5) || !strncmp(line, "MESA_", 5)) && strchr(line, '='))
+        if ((!strncmp(line, "FFXI_", 5) || !strncmp(line, "mesa_", 5) || !strncmp(line, "MESA_", 5) || !strncmp(line, "NOUVEAU_", 8)) && strchr(line, '='))
         {
             /* FFXI_NAME=value: an environment variable (there is no shell to set one); Mesa's own too (mesa_glthread=false:
              * its driver work on the render thread, not a thread of its own) */
