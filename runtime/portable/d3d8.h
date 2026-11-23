@@ -77,6 +77,7 @@ void d3d8_set_world_flush(void (*fn)(void));
  * comparison). 0 ranges: none. */
 void d3d8_world_ranges(uint32_t zone_lo, uint32_t zone_hi, uint32_t char_lo, uint32_t char_hi, int time);
 GfxTex* d3d8_world_texture(uint32_t iface);
+GfxTex* d3d8_world_texture_any(uint32_t iface); /* the same, a cube's too */
 typedef struct GfxSampler GfxSampler;
 int d3d8_world_sampler(uint32_t iface, GfxSampler* out);
 GfxBuf* d3d8_world_vbuf(uint32_t iface, uint32_t* size);

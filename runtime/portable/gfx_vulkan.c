@@ -7836,6 +7836,7 @@ done:
     return drew > 0;
 }
 
+int gfx_chars_env(void) { return 0; } /* (its environment-mapped meshes the game's) */
 int gfx_chars_draw(const GfxCharFrame* f)
 {
     if (!g_dev || !f->nitem || !f->nbones || !world_init())

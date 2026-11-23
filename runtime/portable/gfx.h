@@ -425,7 +425,19 @@ typedef struct GfxCharItem
     uint32_t mirror;    /* the mirrored copy: mirror bones and axes */
     GfxTex* tex;
     GfxSampler samp;
+    uint32_t env;       /* the environment-mapped layer (gfx_chars_env): 1 + its GfxCharFrame.env, 0 none */
+    GfxTex* env_tex;    /* ... stage 1's texture (2D or cube) */
+    GfxSampler env_samp;
 } GfxCharItem;
+/* An environment-mapped material's stage 1, as the game sets it: the camera-space normal (kind 1) or reflection
+ * vector (kind 2) through D3DTS_TEXTURE1 (three coordinates), MODULATEALPHA_ADDCOLOR over stage 0 (the colour plus
+ * its alpha times the texture's), the alphas added; the texture factor is the state's (no MODULATE2X by it here) */
+typedef struct GfxCharEnv
+{
+    float wv[16];       /* world x view (D3D row-major) */
+    float tex[16];      /* D3DTS_TEXTURE1 */
+    float kind[4];      /* 1 normal, 2 reflection */
+} GfxCharEnv;
 typedef struct GfxCharFrame
 {
     uint32_t vp[6];
@@ -437,9 +449,13 @@ typedef struct GfxCharFrame
     uint32_t nstate;
     const GfxCharItem* item;
     uint32_t nitem;
+    const GfxCharEnv* env; /* items' env - 1 (an index past nenv: the item drawn without it) */
+    uint32_t nenv;
 } GfxCharFrame;
 /* Draws a batch of characters into the current targets; 0 when it drew nothing. */
 int gfx_chars_draw(const GfxCharFrame* f);
+/* 1 when gfx_chars_draw draws the items' environment-mapped layer (GfxCharItem.env); 0 and the game draws those. */
+int gfx_chars_env(void);
 /* The lamps lit this frame (the light pool's point lights, world space), for the clustered lamps (scene_lamps): set
  * once a frame before its batches; n 0 none. */
 void gfx_lamps(const GfxWorldLight* l, uint32_t n);

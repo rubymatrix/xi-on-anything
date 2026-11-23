@@ -6327,6 +6327,13 @@ GfxTex* d3d8_world_texture(uint32_t iface)
     return kind == 1 ? t : NULL;
 }
 
+GfxTex* d3d8_world_texture_any(uint32_t iface)
+{
+    d3dw_sync_at("d3d8_world_texture_any"); /* (the device's state is the worker's while it runs) */
+    int kind = 0;
+    return texture_for_draw(iface, &kind);
+}
+
 /* stage 0's sampler as a draw now would have it with this texture (build_draw's) */
 int d3d8_world_sampler(uint32_t iface, GfxSampler* out)
 {

@@ -2420,6 +2420,7 @@ static const char CHARS_GL[] =
     "layout(std140, binding = 0) uniform CU { vec4 params; uvec4 at; } D;\n" /* alpha ref, pixel; -, -, mirror */
     "struct CL { vec4 pos, dir, diffuse, ambient, att; };\n"
     "layout(std140, binding = 1) uniform CSB { mat4 wvp, world; CL light[4]; vec4 ambient, md, ma, me, tf, fog, fog_col; } S;\n"
+    "layout(std140, binding = 3) uniform CEB { mat4 wv, tm; vec4 kind; } E;\n" /* GfxCharEnv; kind: 1 normal, 2 reflection; cube */
     "#ifdef GFX_VS\n"
     "layout(std140, binding = 2) uniform CPB { mat4 P[128]; } B;\n" /* D3D's rows: GLSL's columns */
     "layout(binding = 1) uniform usamplerBuffer vbt;\n"
@@ -2427,6 +2428,7 @@ static const char CHARS_GL[] =
     "out vec2 o_uv;\n"
     "out vec4 o_col;\n"
     "out float o_z;\n"
+    "out vec3 o_env;\n"
     "const vec3 SIGN[4] = vec3[4](vec3(1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(1.0, 1.0, -1.0));\n"
     "vec4 vw4(int b) { return uintBitsToFloat(uvec4(texelFetch(vbt, b).x, texelFetch(vbt, b + 1).x, texelFetch(vbt, b + 2).x,"
     " texelFetch(vbt, b + 3).x)); }\n"
@@ -2452,6 +2454,12 @@ static const char CHARS_GL[] =
     "  pos.y -= pos.w * D.params.z;\n"
     "  gl_Position = vec4(pos.x, -pos.y, gl_clip_z(pos), pos.w);\n" /* (GL's window has D3D's rows: y negated) */
     "  o_uv = uintBitsToFloat(uvec2(texelFetch(uvt, 2 * vid).x, texelFetch(uvt, 2 * vid + 1).x));\n"
+    "  o_env = vec3(0.0);\n"
+    "  if (E.kind.x > 0.0) {\n" /* stage 1's coordinates: camera space, LOCALVIEWER's reflection, then D3DTS_TEXTURE1 */
+    "    vec3 ne = normalize(mat3(E.wv) * n);\n"
+    "    vec3 c = E.kind.x > 1.5 ? reflect(normalize((E.wv * vec4(p, 1.0)).xyz), ne) : ne;\n"
+    "    o_env = (E.tm * vec4(c, 1.0)).xyz;\n"
+    "  }\n"
     "  vec3 amb = S.ambient.rgb, dif = vec3(0.0);\n"
     "  for (int k = 0; k < 4; ++k) {\n"
     "    CL l = S.light[k];\n"
@@ -2473,14 +2481,26 @@ static const char CHARS_GL[] =
     "#endif\n"
     "#ifdef GFX_FS\n"
     "layout(binding = 8) uniform sampler2D t;\n"
+    "layout(binding = 9) uniform sampler2D te;\n"
+    "layout(binding = 10) uniform samplerCube tc;\n"
     "in vec2 o_uv;\n"
     "in vec4 o_col;\n"
     "in float o_z;\n"
+    "in vec3 o_env;\n"
     "out vec4 oc;\n"
     "void main() {\n"
     "  vec4 tx = texture(t, o_uv), tf = S.tf;\n"
-    "  vec3 c = sat(2.0 * sat(2.0 * tx.rgb * o_col.rgb) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
-    "  float a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"          /* MODULATE2X, then MODULATE4X */
+    "  vec3 c;\n"
+    "  float a;\n"
+    "  if (E.kind.x > 0.0) {\n" /* MODULATE2X; then MODULATEALPHA_ADDCOLOR with stage 1's texture, the alphas ADD */
+    "    vec3 c0 = sat(2.0 * tx.rgb * o_col.rgb);\n"
+    "    float a0 = sat(2.0 * tx.a * tf.a);\n"
+    "    vec4 e = E.kind.y > 0.5 ? texture(tc, o_env) : texture(te, o_env.xy);\n"
+    "    c = sat(c0 + a0 * e.rgb), a = sat(a0 + e.a);\n"
+    "  } else {\n"
+    "    c = sat(2.0 * sat(2.0 * tx.rgb * o_col.rgb) * tf.rgb);\n" /* MODULATE2X, then MODULATE2X by the factor */
+    "    a = sat(4.0 * sat(2.0 * tx.a * tf.a) * tf.a);\n"          /* MODULATE2X, then MODULATE4X */
+    "  }\n"
     "  if (!(a * 255.0 > D.params.x)) discard;\n"
     "  if (S.fog.z > 0.0) c = mix(S.fog_col.rgb, c, sat((S.fog.y - o_z) / max(S.fog.y - S.fog.x, 1e-6)));\n"
     "  oc = vec4(c, a);\n"
@@ -2501,6 +2521,8 @@ static void ch_kind(uint64_t* t, int k)
 static GLuint g_chars_prog;
 static int g_chars_failed;
 
+int gfx_chars_env(void) { return 1; }
+
 int gfx_chars_draw(const GfxCharFrame* f)
 {
     if (!g_up || !f->nitem || !f->nbones || g_chars_failed)
@@ -2517,13 +2539,16 @@ int gfx_chars_draw(const GfxCharFrame* f)
     /* the room in one segment of the ring: a state and a palette each time they change along the items (an actor's
      * items are in a run, as are a material's), a block a draw, every one aligned as a uniform block's range is */
     const uint32_t al = (uint32_t)g_ubo_align, st_sz = (uint32_t)sizeof(GfxCharState), pal_max = 128u * 64u;
-    uint32_t nst = 0, npal = 0, ls = ~0u, lp = ~0u;
+    uint32_t nst = 0, npal = 0, nenv = 1, ls = ~0u, lp = ~0u, le = ~0u; /* (nenv: and the empty one, bound first) */
+    const uint32_t env_sz = (uint32_t)sizeof(GfxCharEnv);
     for (uint32_t i = 0; i < f->nitem; ++i)
     {
         nst += f->item[i].state != ls, ls = f->item[i].state;
         npal += f->item[i].palette != lp, lp = f->item[i].palette;
+        nenv += f->item[i].env && f->item[i].env != le, le = f->item[i].env;
     }
-    uint64_t need = (uint64_t)nst * (st_sz + al) + (uint64_t)npal * (pal_max + al) + (uint64_t)f->nitem * (32u + al);
+    uint64_t need = (uint64_t)nst * (st_sz + al) + (uint64_t)npal * (pal_max + al) + (uint64_t)f->nitem * (32u + al) +
+        (uint64_t)nenv * (env_sz + al);
     if (need > RING_SEG || !ring_reserve((uint32_t)need))
     {
         gfx_prof_skip(GFX_SKIP_RANGE);
@@ -2546,8 +2571,15 @@ int gfx_chars_draw(const GfxCharFrame* f)
     if (S.poly_mode != GL_FILL)
         gl.PolygonMode(GL_FRONT_AND_BACK, GL_FILL), S.poly_mode = GL_FILL;
     st_scissor(0, 0, 0, 0, 0);
-    BufBind b1, b2; /* bindings 1 and 2 as set here (nothing else binds them) */
-    memset(&b1, 0xFF, sizeof b1), memset(&b2, 0xFF, sizeof b2);
+    BufBind b1, b2, b3; /* bindings 1, 2 and 3 as set here (nothing else binds them) */
+    memset(&b1, 0xFF, sizeof b1), memset(&b2, 0xFF, sizeof b2), memset(&b3, 0xFF, sizeof b3);
+    /* the environment layer's block (binding 3): an empty one for the items without it (kind 0), and stage 1's units
+     * with something of their kind in them */
+    static const GfxCharEnv no_env;
+    uint32_t env_at = ring_put(&no_env, env_sz, al), last_env = 0;
+    st_buffer(GL_UNIFORM_BUFFER, 3, &b3, g_ring, env_at, env_sz);
+    st_texture(UNIT0 + 1, GL_TEXTURE_2D, g_dummy2d->name);
+    st_texture(UNIT0 + 2, GL_TEXTURE_CUBE_MAP, g_dummycube->name);
     uint32_t last_state = ~0u, state_at = 0, last_pal = ~0u, pal_at = 0, pal_size = 0;
     int drew = 0;
     GfxTex* last_tex = NULL;
@@ -2569,6 +2601,26 @@ int gfx_chars_draw(const GfxCharFrame* f)
             pal_size = (nb < 128u ? nb : 128u) * 64u;
             pal_at = ring_put(f->palette + 16u * it->palette, pal_size, al), last_pal = it->palette;
             g_rp.ch_pals++, g_rp.ch_pal_bytes += pal_size;
+        }
+        GfxTex* et = it->env && it->env - 1 < f->nenv ? it->env_tex : NULL;
+        uint32_t env = et && (et->type == GFX_TEX_2D || et->type == GFX_TEX_CUBE) && et != g_rt ? it->env : 0;
+        if (env != last_env)
+        {
+            uint32_t at = env_at;
+            if (env)
+            {
+                GfxCharEnv e = f->env[env - 1];
+                e.kind[1] = et->type == GFX_TEX_CUBE ? 1.0f : 0.0f;
+                at = ring_put(&e, env_sz, al);
+            }
+            st_buffer(GL_UNIFORM_BUFFER, 3, &b3, g_ring, at, env_sz);
+            last_env = env;
+        }
+        if (env)
+        {
+            int u = et->type == GFX_TEX_CUBE ? UNIT0 + 2 : UNIT0 + 1;
+            st_texture(u, et->target, et->name);
+            st_sampler(u, sampler(&it->env_samp));
         }
         struct
         {

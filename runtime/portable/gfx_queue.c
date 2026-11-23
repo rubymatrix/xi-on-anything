@@ -1320,12 +1320,14 @@ void gfxq_chars_draw(const GfxCharFrame* f)
     if (!f->nitem || !f->nbones)
         return;
     size_t hz = ALIGN16(sizeof *f), pz = ALIGN16((size_t)f->nbones * 64), sz = ALIGN16((size_t)f->nstate * sizeof *f->state);
-    size_t iz = (size_t)f->nitem * sizeof *f->item;
-    uint8_t* p = (uint8_t*)rec(OP_CHARS_DRAW, hz + pz + sz + iz);
+    size_t iz = ALIGN16((size_t)f->nitem * sizeof *f->item), ez = (size_t)f->nenv * sizeof *f->env;
+    uint8_t* p = (uint8_t*)rec(OP_CHARS_DRAW, hz + pz + sz + iz + ez);
     memcpy(p, f, sizeof *f);
     memcpy(p + hz, f->palette, (size_t)f->nbones * 64);
     memcpy(p + hz + pz, f->state, (size_t)f->nstate * sizeof *f->state);
-    memcpy(p + hz + pz + sz, f->item, iz);
+    memcpy(p + hz + pz + sz, f->item, (size_t)f->nitem * sizeof *f->item);
+    if (ez)
+        memcpy(p + hz + pz + sz + iz, f->env, ez);
     done();
 }
 
@@ -1338,8 +1340,13 @@ static void run_chars(const uint8_t* body)
     f.state = (const GfxCharState*)(body + hz + pz);
     GfxCharItem* it = (GfxCharItem*)(uintptr_t)(body + hz + pz + sz); /* (the batch is the queue's own memory) */
     for (uint32_t i = 0; i < f.nitem; ++i)
+    {
         it[i].vb = real_buf(it[i].vb), it[i].uv = real_buf(it[i].uv), it[i].ib = real_buf(it[i].ib), it[i].tex = real_tex(it[i].tex);
+        if (it[i].env)
+            it[i].env_tex = real_tex(it[i].env_tex);
+    }
     f.item = it;
+    f.env = f.nenv ? (const GfxCharEnv*)(body + hz + pz + sz + ALIGN16((size_t)f.nitem * sizeof *f.item)) : NULL;
     gfx_chars_draw(&f);
 }
 

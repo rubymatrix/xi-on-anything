@@ -4367,6 +4367,7 @@ void gfx_shadow_begin(const GfxShadowFrame* f) { (void)f; }
 void gfx_gi_zone(const GfxGiZone* z) { (void)z; }
 void gfx_gi_frame(const GfxGiFrame* f) { (void)f; }
 int gfx_chars_draw(const GfxCharFrame* f) { (void)f; return 0; }
+int gfx_chars_env(void) { return 0; }
 void gfx_lamps(const GfxWorldLight* l, uint32_t n) { (void)l, (void)n; }
 void gfx_set_fixed_light(int fixed) { (void)fixed; }
 void gfx_set_weather(int weather) { (void)weather; }
