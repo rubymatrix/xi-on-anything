@@ -82,7 +82,30 @@ Some effects are not on every platform or game version yet (several need Metal o
 
 Every setting, in game and out, is in the [options catalog](docs/options.md).
 
-### Other features
+### Screenshots
+
+<table>
+  <tr>
+    <td colspan="2"><img src="screenshots/titlescreen_uw.jpg" alt="Title screen at 3440x1440"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/login.jpg" alt="Sign-in screen"></td>
+    <td width="50%"><img src="screenshots/login_config.jpg" alt="Sign-in settings"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="screenshots/graphics_options.jpg" alt="Config &gt; Modern graphics options"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/godrays.jpg" alt="God rays in Bastok Mines"></td>
+    <td width="50%"><img src="screenshots/shadows_ao.jpg" alt="Sun shadows and ambient occlusion"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="screenshots/lighting.jpg" alt="Per-pixel lighting"></td>
+    <td width="50%"><img src="screenshots/lighting2.jpg" alt="Per-pixel lighting and shadows"></td>
+  </tr>
+</table>
+
+## Other features
 
 - **Your server's custom files** load on top of your install without changing it
   ([DAT overlays](docs/running.md#dat-overlays---dats)).
@@ -110,29 +133,6 @@ This repo holds the recompiler, its runtime, that platform layer, and `host64`, 
 its own sign-in screen drawn in the game's UI art. Sign-in takes a username, password and one-time
 code, or a server launcher's token. Start with [Building](docs/building.md) and the
 [repository layout](docs/layout.md).
-
-## Screenshots
-
-<table>
-  <tr>
-    <td colspan="2"><img src="screenshots/titlescreen_uw.jpg" alt="Title screen at 3440x1440"></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/login.jpg" alt="Sign-in screen"></td>
-    <td width="50%"><img src="screenshots/login_config.jpg" alt="Sign-in settings"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="screenshots/graphics_options.jpg" alt="Config &gt; Modern graphics options"></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/godrays.jpg" alt="God rays in Bastok Mines"></td>
-    <td width="50%"><img src="screenshots/shadows_ao.jpg" alt="Sun shadows and ambient occlusion"></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/lighting.jpg" alt="Per-pixel lighting"></td>
-    <td width="50%"><img src="screenshots/lighting2.jpg" alt="Per-pixel lighting and shadows"></td>
-  </tr>
-</table>
 
 ## Documentation
 
