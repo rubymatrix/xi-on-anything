@@ -30,7 +30,7 @@
 extern void _start(void); /* libnx's entry, the .nro's first byte: its runtime address is the image's base */
 extern char __end__[];
 
-static Handle g_game;
+static volatile Handle g_game; /* the thread sampled: the game's, or FFXI_SAMPLE_THREAD's (sampler_thread_here) */
 static Thread g_thread;
 static FsFile g_file;
 static s64 g_off;
@@ -109,6 +109,15 @@ static void sampler_main(void* unused)
     fsFileClose(&g_file);
 }
 
+void sampler_thread_here(const char* role)
+{
+    const char* e = getenv("FFXI_SAMPLE_THREAD");
+    if (!e || strcmp(e, role) || !getenv("FFXI_SAMPLE"))
+        return;
+    g_stack_hi = 0; /* (its stack's bounds found again at its first sample) */
+    g_game = threadGetCurHandle();
+}
+
 int sampler_start(const char* path)
 {
     /* sdmc:/a/b -> /a/b on the card's file system */
@@ -125,7 +134,8 @@ int sampler_start(const char* path)
     fsFileWrite(&g_file, 0, magic, 8, FsWriteOption_Flush);
     g_off = 8;
     /* this thread's own handle (the caller is the game thread) */
-    g_game = threadGetCurHandle();
+    if (!g_game) /* (unless another thread took its place already) */
+        g_game = threadGetCurHandle();
     /* above the game's priority, on the core the game thread isn't on (it has core 0; the pool takes 1 and 2) */
     if (R_FAILED(threadCreate(&g_thread, sampler_main, NULL, NULL, 0x10000, 0x2A, 2)) || R_FAILED(threadStart(&g_thread)))
     {

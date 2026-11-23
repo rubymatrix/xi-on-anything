@@ -375,7 +375,8 @@ def host(a):
     objs += compile_many(gen_all, 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
     objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
     phase('app')
-    nro = link_nro(objs, 'xi-on-anything', [thirdparty.archive('mbedtls')] + GFX_LIBS + ['-lnx', '-lm'])
+    # (--wrap: switch_main.c sees the threads pthread_create makes - Mesa's - FFXI_SWITCH_PTHREAD_CORE)
+    nro = link_nro(objs, 'xi-on-anything', ['-Wl,--wrap=__syscall_thread_create', thirdparty.archive('mbedtls')] + GFX_LIBS + ['-lnx', '-lm'])
     settings(a)
     # what it was built from (version, commit, game build): put on the card beside it, where the launcher or a
     # later setup reads whether the card's app is current

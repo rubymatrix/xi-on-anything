@@ -305,8 +305,69 @@ static void idle_start(void)
     }
 }
 
+/* The threads pthread_create makes (Mesa's: glthread's, its shader queue's), which libnx makes on the process's
+ * default core at a priority of its own: their core and priority as made, logged by idle_report (another thread's
+ * stdio breaks the main one's); FFXI_SWITCH_PTHREAD_CORE=<0-2> moves them to that core at the game's priority
+ * (linked with --wrap=__syscall_thread_create, tools/build_switch.py). libnx's struct __pthread_t begins with its Thread,
+ * whose first member is the handle. */
+struct __pthread_t;
+int __real___syscall_thread_create(struct __pthread_t** thread, void* (*func)(void*), void* arg, void* stack, size_t sz);
+static struct
+{
+    uint32_t n;
+    int32_t core[16], prio[16], func_rva[16], moved[16];
+} g_pt;
+static uint32_t g_pt_said;
+int __wrap___syscall_thread_create(struct __pthread_t** thread, void* (*func)(void*), void* arg, void* stack, size_t sz)
+{
+    int r = __real___syscall_thread_create(thread, func, arg, stack, sz);
+    if (r || !thread || !*thread)
+        return r;
+    Handle h = *(const Handle*)*thread;
+    s32 core = -1, prio = -1;
+    u64 mask = 0;
+    svcGetThreadCoreMask(&core, &mask, h);
+    svcGetThreadPriority(&prio, h);
+    static int want = -2;
+    if (want == -2)
+    {
+        const char* e = getenv("FFXI_SWITCH_PTHREAD_CORE");
+        want = e && *e >= '0' && *e <= '2' ? *e - '0' : -1;
+    }
+    int moved = 0;
+    if (want >= 0)
+    {
+        /* (their own priority kept, below the game's: at the game's on core 2, glthread's took the d3d8 worker's time
+         * there, 0x2d, and a busy town went from ~53 to ~37 fps; FFXI_SWITCH_PTHREAD_PRIO=main that again) */
+        moved = R_SUCCEEDED(svcSetThreadCoreMask(h, want, 1ull << want));
+        const char* pe = getenv("FFXI_SWITCH_PTHREAD_PRIO");
+        if (pe && !strcmp(pe, "main"))
+        {
+            s32 main_prio = 0x2c;
+            svcGetThreadPriority(&main_prio, CUR_THREAD_HANDLE);
+            svcSetThreadPriority(h, (u32)main_prio);
+        }
+    }
+    uint32_t i = __atomic_fetch_add(&g_pt.n, 1, __ATOMIC_RELAXED);
+    if (i < 16)
+    {
+        extern void _start(void);
+        g_pt.core[i] = core, g_pt.prio[i] = prio, g_pt.moved[i] = moved ? want : -1;
+        g_pt.func_rva[i] = (int32_t)((uintptr_t)func - (uintptr_t)&_start);
+    }
+    return r;
+}
+
 static void idle_report(void)
 {
+    {
+        uint32_t n = __atomic_load_n(&g_pt.n, __ATOMIC_RELAXED);
+        for (; g_pt_said < n && g_pt_said < 16; ++g_pt_said)
+            fprintf(stderr, "[switch] pthread %u (function at 0x%x in the .nro): made on core %d at priority 0x%x%s%s\n",
+                g_pt_said, (unsigned)g_pt.func_rva[g_pt_said], (int)g_pt.core[g_pt_said], (unsigned)g_pt.prio[g_pt_said],
+                g_pt.moved[g_pt_said] >= 0 ? ", moved to core " : "",
+                g_pt.moved[g_pt_said] >= 0 ? (g_pt.moved[g_pt_said] == 0 ? "0" : g_pt.moved[g_pt_said] == 1 ? "1" : "2") : "");
+    }
     uint64_t now = armTicksToNs(armGetSystemTick());
     char s[3][24];
     for (int c = 0; c < 3; ++c)
@@ -443,9 +504,10 @@ static int read_args(const char* path, char** out, int room)
     {
         size_t len = strcspn(line, "\r\n");
         line[len] = 0;
-        if (!strncmp(line, "FFXI_", 5) && strchr(line, '='))
+        if ((!strncmp(line, "FFXI_", 5) || !strncmp(line, "mesa_", 5) || !strncmp(line, "MESA_", 5)) && strchr(line, '='))
         {
-            /* FFXI_NAME=value: an environment variable (there is no shell to set one) */
+            /* FFXI_NAME=value: an environment variable (there is no shell to set one); Mesa's own too (mesa_glthread=false:
+             * its driver work on the render thread, not a thread of its own) */
             char* eq = strchr(line, '=');
             *eq = 0;
             setenv(line, eq + 1, 1);

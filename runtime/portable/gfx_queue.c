@@ -695,6 +695,9 @@ static void consume(uint32_t t)
 static void render_thread(void* unused)
 {
     (void)unused;
+#if defined(__SWITCH__)
+    sampler_thread_here("render"); /* (FFXI_SAMPLE_THREAD=render: this thread sampled, not the game's) */
+#endif
     for (;;)
     {
         uint32_t t = g_tail;
@@ -1485,6 +1488,12 @@ void gfxq_present(GfxTex* backbuffer)
         if (last && gfx_profiling)
             thunk_frame_end(sampler_frame, now - last, g_game_wait_all - rt_was, lock - lock_was);
         last = now, rt_was = g_game_wait_all, lock_was = lock;
+        if (gfx_profiling) /* (FFXI_FILE_TRACE: this frame's file calls, after its long-frame line if it had one) */
+        {
+            char fl[256];
+            for (int k = 0; k < 512 && plat_file_trace_next(fl, sizeof fl); ++k)
+                rt_log("%s\n", fl);
+        }
         sampler_frame++;
         static uint64_t read_said;
         if (gfx_profiling && now - read_said > 10000000000ull)

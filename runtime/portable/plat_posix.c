@@ -744,6 +744,90 @@ static void read_note(const PlatFile* f, int64_t off, int64_t got, uint64_t ns)
         __atomic_store_n(slot, key, __ATOMIC_RELAXED);
 }
 
+/* FFXI_FILE_TRACE=1 (with FFXI_PROFILE): every open, read, write and close of the game's files, by any thread, into a
+ * ring the game's thread logs from each frame (plat_file_trace_next; another thread's stdio breaks the main one's):
+ * the time, the thread, the call, the file (its name's end), the offset and size, and how long it took. */
+typedef struct FtRec
+{
+    uint64_t at_us, us;
+    uint32_t hash, thread;
+    int64_t off, n;
+    char op; /* o open, r read, w write, c close */
+} FtRec;
+#define FT_N 8192u
+static int g_ft = -1;
+static FtRec g_ft_rec[FT_N];
+static uint32_t g_ft_head, g_ft_tail, g_ft_lost; /* head: next written (atomic); tail: next logged */
+static struct
+{
+    uint32_t hash;
+    char name[40];
+} g_ft_names[1024];
+
+static int ft_on(void)
+{
+    if (g_ft < 0)
+    {
+        const char* e = getenv("FFXI_FILE_TRACE");
+        g_ft = e && *e == '1' && g_read_prof > 0;
+    }
+    return g_ft;
+}
+
+static void ft_name(uint32_t hash, const char* path)
+{
+    size_t l = strlen(path);
+    const char* s = l > sizeof g_ft_names[0].name - 1 ? path + l - (sizeof g_ft_names[0].name - 1) : path;
+    uint32_t k = hash & 1023u;
+    g_ft_names[k].hash = hash;
+    snprintf(g_ft_names[k].name, sizeof g_ft_names[k].name, "%s", s);
+}
+
+static void ft_note(char op, uint32_t hash, int64_t off, int64_t n, uint64_t t0, uint64_t t1)
+{
+    uint32_t i = __atomic_fetch_add(&g_ft_head, 1, __ATOMIC_RELAXED);
+    if (i - __atomic_load_n(&g_ft_tail, __ATOMIC_RELAXED) >= FT_N)
+    {
+        __atomic_fetch_add(&g_ft_lost, 1, __ATOMIC_RELAXED);
+        return; /* (the slot is still to be logged: this one is lost, counted) */
+    }
+    FtRec* r = &g_ft_rec[i % FT_N];
+    static uint64_t start;
+    if (!start)
+        start = t0;
+    r->at_us = (t0 - start) / 1000u, r->us = (t1 - t0) / 1000u, r->hash = hash, r->thread = (uint32_t)threadGetCurHandle();
+    r->off = off, r->n = n;
+    __atomic_store_n(&r->op, op, __ATOMIC_RELEASE);
+}
+
+int plat_file_trace_next(char* out, size_t n)
+{
+    if (g_ft <= 0)
+        return 0;
+    uint32_t t = g_ft_tail;
+    if (t == __atomic_load_n(&g_ft_head, __ATOMIC_ACQUIRE))
+    {
+        uint32_t lost = __atomic_exchange_n(&g_ft_lost, 0, __ATOMIC_RELAXED);
+        if (!lost)
+            return 0;
+        snprintf(out, n, "[file] %u calls not traced (the ring full)", lost);
+        return 1;
+    }
+    FtRec* r = &g_ft_rec[t % FT_N];
+    char op = __atomic_load_n(&r->op, __ATOMIC_ACQUIRE);
+    if (!op)
+        return 0; /* (being written) */
+    uint32_t k = r->hash & 1023u;
+    const char* name = g_ft_names[k].hash == r->hash ? g_ft_names[k].name : "?";
+    snprintf(out, n, "[file] %llu.%03llu s thread %x %s %s at %lld, %lld bytes, %.2f ms",
+        (unsigned long long)(r->at_us / 1000000u), (unsigned long long)(r->at_us / 1000u % 1000u), r->thread,
+        op == 'o' ? "open" : op == 'r' ? "read" : op == 'w' ? "write" : "close", name, (long long)r->off, (long long)r->n,
+        (double)r->us * 1e-3);
+    r->op = 0;
+    __atomic_store_n(&g_ft_tail, t + 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
 int plat_read_report(char* out, size_t n)
 {
     if (g_read_prof <= 0)
@@ -896,6 +980,9 @@ static int64_t bc_read(PlatFile* f, void* buf, uint32_t n)
 
 PlatFile* plat_file_open(const char* path, int flags)
 {
+#if defined(__SWITCH__)
+    uint64_t open_t0 = rt_monotonic_ns(); /* (FFXI_FILE_TRACE) */
+#endif
 #if defined(__EMSCRIPTEN__)
     if (HTTP(path))
     {
@@ -946,6 +1033,8 @@ PlatFile* plat_file_open(const char* path, int flags)
         f->path_hash = path_hash(path);
     if ((flags & PLAT_CACHED) && !(flags & PLAT_WRITE))
         f->path64 = path_hash64(path);
+    if (g_read_prof > 0 && ft_on())
+        ft_name(f->path_hash, path), ft_note('o', f->path_hash, (flags & PLAT_WRITE) ? 1 : 0, 0, open_t0, rt_monotonic_ns());
 #endif
     t_error = PLAT_OK;
     return f;
@@ -979,7 +1068,12 @@ int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n)
         set_error(NULL);
 #if defined(__SWITCH__)
     if (g_read_prof > 0)
-        read_note(f, off, r, rt_monotonic_ns() - t0);
+    {
+        uint64_t t1 = rt_monotonic_ns();
+        read_note(f, off, r, t1 - t0);
+        if (ft_on())
+            ft_note('r', f->path_hash, off, r, t0, t1);
+    }
 #endif
     return r;
 }
@@ -992,11 +1086,19 @@ int64_t plat_file_write(PlatFile* f, const void* buf, uint32_t n)
         return -1;
     }
     ssize_t r;
+#if defined(__SWITCH__)
+    uint64_t t0 = g_read_prof > 0 && ft_on() ? rt_monotonic_ns() : 0;
+    int64_t off = t0 ? (int64_t)lseek(f->fd, 0, SEEK_CUR) : 0;
+#endif
     do
         r = write(f->fd, buf, n);
     while (r < 0 && errno == EINTR);
     if (r < 0)
         set_error(NULL);
+#if defined(__SWITCH__)
+    if (t0)
+        ft_note('w', f->path_hash, off, r, t0, rt_monotonic_ns());
+#endif
     return r;
 }
 
@@ -1039,12 +1141,19 @@ int plat_file_flush(PlatFile* f)
 
 void plat_file_close(PlatFile* f)
 {
+#if defined(__SWITCH__)
+    uint64_t t0 = g_read_prof > 0 && ft_on() ? rt_monotonic_ns() : 0;
+#endif
 #if defined(__EMSCRIPTEN__)
     if (f->h)
         httpfs_close(f->h);
     else
 #endif
         close(f->fd);
+#if defined(__SWITCH__)
+    if (t0)
+        ft_note('c', f->path_hash, 0, 0, t0, rt_monotonic_ns());
+#endif
     free(f);
 }
 

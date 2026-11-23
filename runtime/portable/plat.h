@@ -37,6 +37,8 @@ void plat_thread_counts(uint32_t* made, uint32_t* idle); /* the thread pool: thr
 /* (the Switch) the jobs given to threads so far, as text (each one's offset in the .nro, core, priority): how many */
 uint32_t plat_thread_list(char* out, size_t n);
 int plat_read_report(char* out, size_t n); /* FFXI_PROFILE: file reads since the last report, by size; 0 when off */
+/* FFXI_FILE_TRACE=1 (with FFXI_PROFILE, the Switch): the next traced file call as a log line; 0 when none is waiting */
+int plat_file_trace_next(char* out, size_t n);
 #endif
 void plat_sleep_ms(uint32_t ms);
 void plat_sleep_us(uint32_t us); /* at least us microseconds, where the system allows less than a millisecond */

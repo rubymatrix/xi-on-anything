@@ -278,6 +278,33 @@ On core 1, the audio thread stopped the render thread inside its GL calls for 1-
 game's other threads took the core whenever it waited for its next batch. `FFXI_PROFILE` logs each thread's job (its
 offset in the .nro), core and priority as they start.
 
+Mesa's own threads (`pthread_create`: glthread's worker and its shader queue) are logged too, as made: libnx makes
+them at priority 0x3B, glthread's on core 1 with the render thread that made it. There it runs when the render thread
+waits, and that is the best of what was tried in a busy town at 1785/614 (52-54 fps at 900-1200 draws):
+
+| Tried | fps there | The render thread busy a frame |
+| --- | --- | --- |
+| glthread's worker on core 1, as made | 52-54 | 11-16 ms |
+| `mesa_glthread=false` (the driver's work on the render thread) | 51, 36 at 1200+ | 22 ms |
+| `FFXI_SWITCH_PTHREAD_CORE=2` (core 2, its priority) | 33 | 31 ms |
+| the same with `FFXI_SWITCH_PTHREAD_PRIO=main` (the game's priority) | 37 | 21 ms: it took the d3d8 worker's time |
+
+`run.args` lines starting `mesa_` or `MESA_` are Mesa's own settings, set as `FFXI_` ones are.
+
+### Where the render thread's time goes
+
+`FFXI_SAMPLE_THREAD=render` (with `FFXI_SAMPLE`) samples the render thread in the game thread's place. In a busy town
+it waits for its next batch (~40%), for glthread's worker at the swap (~32%) and for room in that worker's queue
+(~22%): the driver's own work per draw, on that worker, is what the frame waits for. With `FFXI_PROFILE` the GL back
+end's GPU timestamps (`the GPU, ms a frame`) follow it: a character draw cost ~7 us of them whatever it held (one
+triangle, every bind kept), and the game's draws ~5 us, none of them like the one before (nothing to merge). The
+characters' mirrored copies are drawn as a second instance and their continuing lists joined (`FFXI_GL_CHARS_MERGE=0`:
+an item a draw), half the draws: ~1.6 ms of those timestamps a frame in a crowd.
+
+`FFXI_FILE_TRACE=1` (with `FFXI_PROFILE`) logs every open, read, write and close of the game's files. A town's
+hitches when players come into view are their model DATs read the first time: 1.7-1.9 MB each in 256 KB reads of
+~4 ms (the card's speed, past the block cache's reads under 256 KB), and in a session little was read twice.
+
 ## Controls
 
 The controller works the way an Xbox controller does on the PC builds (the game's own gamepad support),
