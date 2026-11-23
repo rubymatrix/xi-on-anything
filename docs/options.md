@@ -347,7 +347,8 @@ rather than offer it.
 
 The clients from 2009 and 2010 have, of host64's additions: the widescreen view (`aspect`), 60 fps
 in the world (`frame60`: a translated variant of their frame loop, as they have no frame divisor),
-draw distance, nameplates and the modern effects' post-processing (`modern_fx`); the 2009 one also
+draw distance, nameplates, the modern effects' post-processing (`modern_fx`) and PS2 Accuracy's
+fixes to the game's draws (`ps2_draws`, not tried on them); the 2009 one also
 `dinput_pad` (the gamepad's buttons in XInput's numbering, and Config › Gamepad's rows on F12); the rest need
 hooks those builds don't have. They have no addons (`addons`): Ashita's and Windower's libraries
 read today's packets, resources and memory, and on those clients they get them wrong (battlemod
