@@ -1,6 +1,6 @@
 # Android (experimental)
 
-These are the developer notes. To install and play, see [platforms/android.md](android.md).
+These are the developer notes. To install and play, see [android.md](android.md).
 
 The Android build runs the recompiled client natively on ARM64, through SDL3 and a C++ Vulkan back
 end. It uses no Wine, GameNative, FEX or DXVK. It shares the geometry adapter with the desktop
@@ -96,7 +96,7 @@ LuaFileSystem, SQLite); `host` and `install` build them too. `XI_ANDROID_BUILD_D
 native output directory; pass the same directory to `build_android_apk.py --build-dir`.
 
 The Android translation of FFXiMain.dll goes to `generated/android-all`; the desktop `generated/all`
-is left as it is. Builds with `android_wraps` in `meta/builds.json` (only 2025-11-12) also get the
+is left as it is. Builds with `android_wraps` in `recomp/meta/builds.json` (only 2025-11-12) also get the
 occlusion-probe wraps. FFXi.dll is translated from the same prepared files. All generated game code
 stays ignored. `--native-tls` targets API 29 (Android 10) and its ELF TLS; without it the build
 targets API 28 (Android 9) with emulated TLS. The object cache keys include the compiler command.

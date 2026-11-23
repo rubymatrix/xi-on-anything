@@ -85,7 +85,7 @@ FFXi.dll                          functions 366, switches 42, tail jumps 17 (the
 
 What the runtime meets in this client
 -------------------------------------
-  - The same as 2010-03-16: the character table at +0x12eb0 (meta/builds.json "offsets") and
+  - The same as 2010-03-16: the character table at +0x12eb0 (recomp/meta/builds.json "offsets") and
     gamecore slot 441 (the rebased 2010 fixes). Not checked here: whether this build calls any
     other slot 2010-03-16 does not.
   - The same known gaps: no write_line, chat_add left out, the addon game layer unchecked, no
@@ -98,8 +98,8 @@ What the runtime meets in this client
   - No frame divisor (the Ashita fps pattern does not match). The frame loop at 0x1000fc70 compares
     the elapsed time with the float 2.0 at 0x102bf664 at 0x10010c64, 0x10010c8a, 0x10010cd3 and
     0x10010d6c, and floors its step at 2.0 (`mov [esi+0x24], 0x40000000` at 0x10010d79).
-    meta/builds.json patches.frame60 re-points the four compares at the 1.0 at 0x102bf5fc and
-    makes the floor 1.0 (meta/features.json frame60). Forced on at the title it runs at 58 fps
+    recomp/meta/builds.json patches.frame60 re-points the four compares at the 1.0 at 0x102bf5fc and
+    makes the floor 1.0 (recomp/meta/features.json frame60). Forced on at the title it runs at 58 fps
     against 30. In the world (tools/replay/staticserver.py does sign this client in, to Port Jeuno) it
     runs at 58 fps against 29, and walking covers the same ground in the same time.
   - The entity map (0x103ecdf8) holds 0x800 entities, the player's from 0x400 on (the player index
@@ -111,5 +111,5 @@ What the runtime meets in this client
     0x1018a8dc; world 0x103c3df8, characters 0x103c3de8 (each referenced at the same four kinds of
     place as today's). Nameplates: the hook at 0x1007c909 is right after `fstp [esp+0x50]`, the
     glyph scales stored at [esp+0x4c] and [esp+0x50] from the screen size times the size argument,
-    with no push between, as at 2026-09-03's 0x100863d6. Both are on (meta/features.json).
+    with no push between, as at 2026-09-03's 0x100863d6. Both are on (recomp/meta/features.json).
 

@@ -1,4 +1,4 @@
-/* geometry_guest.c's wrappers on this build's skinning functions (meta/builds.json "wraps" and
+/* geometry_guest.c's wrappers on this build's skinning functions (recomp/meta/builds.json "wraps" and
  * "geometry"). Off unless FFXI_NATIVE_GEOMETRY=1; builds without a verified layout keep the
  * translation. Each wrapper falls back to the original body it replaces. */
 #include "build.h"

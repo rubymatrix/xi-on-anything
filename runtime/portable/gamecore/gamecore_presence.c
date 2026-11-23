@@ -118,7 +118,7 @@ static void s173_handle(Guest* g)
  * own when the host has them; otherwise built from FFXiMain's character table: entry =
  * [[FFXI_CHARS_PTR] + FFXI_OFFSET_CHARS_TABLE + a0 * 0x8c], contentId = d[+4], charId = w[+8] |
  * b[+0xf] << 16, world = w[+0xa]. The table is at +0x13820 in every build since 2025 and at +0x12eb0
- * in 2010-03-16 (meta/builds.json "offsets"); the entry is the same in both. Registered to handle 0
+ * in 2010-03-16 (recomp/meta/builds.json "offsets"); the entry is the same in both. Registered to handle 0
  * (q[0x10] bit 15). */
 #define FFXI_MAX_CHARS 16
 

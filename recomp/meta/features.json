@@ -1,6 +1,6 @@
 {
   "format": "ffxi-recomp-features/1",
-  "comment": "What host64 adds to the game, and which client builds each addition works on. tools/buildinfo.py resolves this for the build tools/prepare.py chose: generated/build.h gets FFXI_FEATURE_<ID> 1 or 0 and FFXI_FEATURE_TABLE (host64 --features prints it as JSON), and runtime.json beside a build lists each feature with whether it is on and why not, for the launcher. A feature is on for a build when every rule holds: min_build / max_build (build labels, the PE timestamp dates meta/builds.json is keyed by, compared as text), builds (only these labels) and needs (keys the build's meta/builds.json entry must have: 'hooks.lod_pick', 'patches.frame60', 'addresses.scene_mgr', or 'modern' for a complete Config > Modern address set). A build's own entry can override the result with \"features\": {\"<id>\": true} (on despite the rules, tested) or {\"<id>\": \"<why it is off>\"}. Where the code also checks a build's hooks at compile time (#if defined(FFXI_HOOK_...)), needs repeats the main ones so the launcher can say why; both must hold. A feature the catalog leaves out is not gated.",
+  "comment": "What host64 adds to the game, and which client builds each addition works on. tools/buildinfo.py resolves this for the build tools/prepare.py chose: generated/build.h gets FFXI_FEATURE_<ID> 1 or 0 and FFXI_FEATURE_TABLE (host64 --features prints it as JSON), and runtime.json beside a build lists each feature with whether it is on and why not, for the launcher. A feature is on for a build when every rule holds: min_build / max_build (build labels, the PE timestamp dates recomp/meta/builds.json is keyed by, compared as text), builds (only these labels) and needs (keys the build's recomp/meta/builds.json entry must have: 'hooks.lod_pick', 'patches.frame60', 'addresses.scene_mgr', or 'modern' for a complete Config > Modern address set). A build's own entry can override the result with \"features\": {\"<id>\": true} (on despite the rules, tested) or {\"<id>\": \"<why it is off>\"}. Where the code also checks a build's hooks at compile time (#if defined(FFXI_HOOK_...)), needs repeats the main ones so the launcher can say why; both must hold. A feature the catalog leaves out is not gated.",
   "features": {
     "aspect": {
       "title": "Widescreen 3D view",
@@ -21,7 +21,7 @@
     "frame60": {
       "title": "60 fps (code patch)",
       "what": "For clients with no frame divisor: a translated variant of the frame loop that waits for and steps the world by one sixtieth instead of two, switched on in the world with --fps-divisor 1 (the title and lobby count frames for 30 and stay there).",
-      "code": "host/host64.c frame60_frame; meta/builds.json patches.frame60",
+      "code": "host/host64.c frame60_frame; recomp/meta/builds.json patches.frame60",
       "needs": ["patches.frame60"]
     },
     "uncapped": {

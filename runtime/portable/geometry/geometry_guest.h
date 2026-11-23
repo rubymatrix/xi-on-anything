@@ -1,5 +1,5 @@
 /* The game's skinning routine on geometry_simd.h's kernels, through the recompiler's function
- * wrappers (geometry_hooks.c), for builds whose meta/builds.json "geometry" layout is verified.
+ * wrappers (geometry_hooks.c), for builds whose recomp/meta/builds.json "geometry" layout is verified.
  * Used by every game host. */
 #pragma once
 #include "guest.h"

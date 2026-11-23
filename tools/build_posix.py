@@ -1,7 +1,7 @@
 """Build driver for POSIX hosts (clang): arm64 macOS for R3, Linux as a by-product.
 
   python3 tools/build_posix.py prepare --game <FINAL FANTASY XI folder>
-        identify the player's build (meta/builds.json) and unpack FFXiMain.dll and FFXi.dll into
+        identify the player's build (recomp/meta/builds.json) and unpack FFXiMain.dll and FFXi.dll into
         generated/ (Square Enix code: generated/ is gitignored, never committed)
   python3 tools/build_posix.py boot64 --game <folder>    the boot test (R3.1)
   python3 tools/build_posix.py host64 --game <folder>    the game host, with SDL3

@@ -6,7 +6,7 @@ no JIT: LuaJIT runs as its interpreter, because iOS forbids writable code.
 
 Status: playable. It builds for the simulator and devices, signs in to LandSandBoat, and runs the
 game in landscape, sized to the screen, with touch controls. What is left is under
-[Not yet done](#differences-from-macos). The player's guide is [platforms/ios.md](ios.md).
+[Not yet done](#differences-from-macos). The player's guide is [ios.md](ios.md).
 
 ## Build on a Mac
 

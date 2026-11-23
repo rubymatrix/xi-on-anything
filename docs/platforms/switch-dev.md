@@ -1,6 +1,6 @@
 # Nintendo Switch port: developer notes
 
-The player's guide is [platforms/switch.md](switch.md). This page covers how the port is built,
+The player's guide is [switch.md](switch.md). This page covers how the port is built,
 what has been verified, and what is left.
 
 ## Layout

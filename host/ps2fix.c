@@ -13,7 +13,7 @@
  * parts go back to their own streams.
  *
  * The part: skin_part_b (1002da20 in 2025-11-12) skins each part of a character on the CPU into world space, calling
- * its skinning (geometry_parent) with mov ecx,ebx / call; "skin_part" (meta/builds.json "hooks") is that call, the
+ * its skinning (geometry_parent) with mov ecx,ebx / call; "skin_part" (recomp/meta/builds.json "hooks") is that call, the
  * part in ecx. Part +0x36 is its command stream: records of a 16-bit op and a 16-bit count, 0x80n1 a material (0x2e
  * bytes), 0x80n0 a texture (0x12, its name at +6), 0x54 a triangle list (4 + count x 30 bytes), 0xffff the end.
  *

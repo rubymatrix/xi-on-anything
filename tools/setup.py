@@ -6,7 +6,7 @@
   python3 tools/setup.py --find            list the game folders found on this Mac, and stop
 
 It finds the game folder the player got from their server (or takes --game), checks that its
-version is one meta/builds.json knows, makes .venv with the recompiler's two Python packages,
+version is one recomp/meta/builds.json knows, makes .venv with the recompiler's two Python packages,
 translates the game's code and compiles it (the vendored SDL3 and mbedtls too), signs
 "Final Fantasy XI.app" with a code-signing certificate of this Mac's own (made on the first run),
 and copies the app to /Applications (~/Applications if that is not writable).

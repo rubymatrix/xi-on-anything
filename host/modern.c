@@ -57,7 +57,7 @@
 #include "vfs.h"
 
 /* ---- the game ----
- * Its addresses are the build's (meta/builds.json "modern", generated/build.h; 2026-09-03's in the
+ * Its addresses are the build's (recomp/meta/builds.json "modern", generated/build.h; 2026-09-03's in the
  * comments here). A build without them all has FFXI_MODERN 0: then nothing here calls the game. */
 enum
 {
@@ -3635,7 +3635,7 @@ void modern_frame(void)
          * function (FATAL: no translation). */
         if (!FFXI_MODERN)
         {
-            fprintf(stderr, "[modern] build %s has no menu addresses (meta/builds.json): no Config > Modern\n",
+            fprintf(stderr, "[modern] build %s has no menu addresses (recomp/meta/builds.json): no Config > Modern\n",
                 FFXI_BUILD);
             state = -1;
             return;

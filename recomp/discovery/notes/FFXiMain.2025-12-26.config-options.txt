@@ -2,7 +2,7 @@ FFXiMain.dll build 2025-12-26: the game's config options (FsConfig) and its own 
 ======================================================================================
 
 Build         FFXiMain.dll SHA-256 f5ed4c3b6aabef3936ac2c1cf49c2475b3ab9a5b7c20c3c2744bdb938ce7a7f6
-              (meta/builds.json "2025-12-26"); addresses are the unpacked image's (base 0x10000000)
+              (recomp/meta/builds.json "2025-12-26"); addresses are the unpacked image's (base 0x10000000)
 Source        found for VanaCore (CatsEyeXI) from the PS2 client's FsConfig (fshira/FsConfig.cpp) and
               the unpacked PC client, then checked in game by logging the table while the in-game
               Config menu was changed

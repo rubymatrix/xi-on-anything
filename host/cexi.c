@@ -4,7 +4,7 @@
  * ids (its MAX_ITEMID is 0xE000); the player's DAT overlay (--dats) carries the extended Monstrosity
  * item DAT (ROM/288/80.DAT English, 79.DAT Japanese: 0xC00-byte records, record n is id 0x7400 + n,
  * the custom ones from record 1024) and the expanded FTABLE/VTABLE with the gear files. Four changes,
- * found in each build by tools/version/cexi_sites.py (meta/builds.json, 2026-09-03's in the comments):
+ * found in each build by tools/version/cexi_sites.py (recomp/meta/builds.json, 2026-09-03's in the comments):
  *
  *  - The item range table (cexi_item_ranges, 0x10372150): 20-byte entries {file, first id, end id, 0,
  *    handler}, the first an id falls in wins. Monstrosity's 0x7400-0x7800 becomes 0x7400-0xE000, so

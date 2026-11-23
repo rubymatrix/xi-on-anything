@@ -1,7 +1,7 @@
 # Android (experimental)
 
 The recompiled game as a native ARM64 Android app, drawn with Vulkan. No emulator, Wine or DXVK.
-Developer notes are in [../android.md](android-dev.md).
+Developer notes are in [android-dev.md](android-dev.md).
 
 > [!IMPORTANT]
 > **Status**: experimental, tested on a Pixel Fold. The APK is a debug build. The scene effects

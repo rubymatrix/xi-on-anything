@@ -7,9 +7,9 @@ description: Unpack and analyze a new FINAL FANTASY XI client build to produce i
 
 **Input:** a `FINAL FANTASY XI` folder.
 **Output:**
-- `meta/FFXiMain.<label>.meta.json` and `meta/FFXi.<label>.meta.json`
-- the build's entry in `meta/builds.json`
-- its entry in `discovery/verdicts.py`
+- `recomp/meta/FFXiMain.<label>.meta.json` and `recomp/meta/FFXi.<label>.meta.json`
+- the build's entry in `recomp/meta/builds.json`
+- its entry in `recomp/discovery/verdicts.py`
 
 All tools run from the repo root. `generated/` holds everything derived from the game and is never
 committed.
@@ -28,7 +28,7 @@ python tools/version/newbuild.py identify --game "<FINAL FANTASY XI>"
   collides with a different build, stop and ask the user.
 - `version`: decrypted from `patch.ver` when the install has one. Otherwise it is inferred as
   `30` + YYMMDD. Tell the user when it is inferred: a server whose lobby expects another string
-  will refuse the client, and the fix is just to edit `version` in `meta/builds.json`.
+  will refuse the client, and the fix is just to edit `version` in `recomp/meta/builds.json`.
 - If `known_build` is set, this build is already supported. Skip to game-version-build.
 
 ## 2. Unpack
@@ -47,7 +47,7 @@ Stop and report it; that is a tooling change, not a routine update.
 
 ## 3. Carry the previous build over
 
-Pick the newest known build (the last in `meta/builds.json`) as `<old>`.
+Pick the newest known build (the last in `recomp/meta/builds.json`) as `<old>`.
 
 ```
 python tools/version/newbuild.py carry --from <old> --to <label>          # dry run: read the report
@@ -79,9 +79,9 @@ python tools/version/newbuild.py dis --label <label> --at <hinted>  --before 24 
 
 Accept the hint only when the instruction sequence is the same, allowing for changed struct
 displacements or immediates. Then:
-- a verdict goes into the new `VERDICTS` entry in `discovery/verdicts.py`, replacing its
+- a verdict goes into the new `VERDICTS` entry in `recomp/discovery/verdicts.py`, replacing its
   `# TODO unmapped` line.
-- an address or CRT entry goes into `meta/builds.json`, replacing the `UNMAPPED from ...` string.
+- an address or CRT entry goes into `recomp/meta/builds.json`, replacing the `UNMAPPED from ...` string.
 
 Nothing may be left UNMAPPED. `build.py` would crash on it, and the discovery scripts would run
 without the verdict.

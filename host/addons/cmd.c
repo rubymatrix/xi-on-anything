@@ -236,7 +236,7 @@ void xi_cmd_frame(void)
 {
     static int booted;
     if (!booted && !FFXI_FEATURE_ADDONS)
-        booted = 1; /* older builds: no addons, so not their startup scripts either (meta/features.json) */
+        booted = 1; /* older builds: no addons, so not their startup scripts either (recomp/meta/features.json) */
     if (!booted)
     {
         booted = 1;

@@ -5,8 +5,8 @@ description: Recompile and test a FINAL FANTASY XI build for every platform targ
 
 # Build every platform target
 
-**Input:** a `FINAL FANTASY XI` folder whose build is in `meta/builds.json` with its metadata in
-`meta/`.
+**Input:** a `FINAL FANTASY XI` folder whose build is in `recomp/meta/builds.json` with its metadata in
+`recomp/meta/`.
 
 The same translation (`recomp/recomp.py` → `generated/all`, plus `generated/ffxi` for `FFXi.dll`)
 feeds every target. Only the compiler, runtime and graphics back end differ.
@@ -54,7 +54,7 @@ runtime or graphics code changed too.
 3. **macOS arm64.** If this session runs on macOS, build the two POSIX targets (`brew install
    sdl3 pkg-config mbedtls`, `pip3 install capstone pefile`). On Windows it can't be built here.
    Don't mark it passed. Report it as pending and give the user the steps for the Mac:
-   - the new build's `meta/` files and `builds.json` entry must be on the Mac, by commit and pull.
+   - the new build's `recomp/meta/` files and `builds.json` entry must be on the Mac, by commit and pull.
    - the install's `SquareEnix` folder (`FINAL FANTASY XI`, and the viewer folder beside it if
      there is one) copied to e.g. `~/SquareEnix`, where `build_posix.py` looks by default.
    - then `prepare`, `boot64` and `host64` from the table above.

@@ -1,4 +1,4 @@
-"""Find what host/cexi.c changes for a CatsEyeXI-style server in this build, and record it in meta/builds.json.
+"""Find what host/cexi.c changes for a CatsEyeXI-style server in this build, and record it in recomp/meta/builds.json.
 
   python3 tools/version/cexi_sites.py [--dry-run] [--slots <cexidats checkout>]
 

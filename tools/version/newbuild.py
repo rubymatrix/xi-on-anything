@@ -1,4 +1,4 @@
-"""Bring up a retail build meta/builds.json does not know yet.
+"""Bring up a retail build recomp/meta/builds.json does not know yet.
 
   python tools/version/newbuild.py identify --game <FINAL FANTASY XI folder>
         hashes, PE timestamps, the build label and client version, and whether each DLL is a
@@ -7,8 +7,8 @@
         copy and unpack the retail DLLs into generated/images/<label>/, known build or not
   python tools/version/newbuild.py carry --from <old label> --to <new label> [--write] [--only modern|geometry]
         map every address the old build's entry names (builds.json addresses, hooks, modern and
-        crt, the manual verdicts in discovery/verdicts.py) onto the new image; --write adds the new
-        build to meta/builds.json and discovery/verdicts.py. Unmapped addresses are listed for a
+        crt, the manual verdicts in recomp/discovery/verdicts.py) onto the new image; --write adds the new
+        build to recomp/meta/builds.json and recomp/discovery/verdicts.py. Unmapped addresses are listed for a
         hand read. --only: just that section, written into a build builds.json already has. The
         geometry addresses are carried all or none, and never their layout: on the new build,
         tests/geometry/geometry_replay_test.py decides it.
@@ -48,7 +48,7 @@ import buildinfo  # noqa: E402
 
 ROOT = buildinfo.ROOT
 IMAGES = os.path.join(ROOT, 'generated', 'images')
-VERDICTS = os.path.join(ROOT, 'discovery', 'verdicts.py')
+VERDICTS = os.path.join(ROOT, 'recomp', 'discovery', 'verdicts.py')
 MODULES = ('FFXiMain.dll', 'FFXi.dll')
 M64 = (1 << 64) - 1
 
@@ -312,7 +312,7 @@ def load_verdicts():
 def carry(old_label, new_label, write, only=None):
     known = buildinfo.known()
     if old_label not in known:
-        raise SystemExit('%s is not in meta/builds.json' % old_label)
+        raise SystemExit('%s is not in recomp/meta/builds.json' % old_label)
     for lab in (old_label, new_label):
         for m in MODULES:
             if not os.path.exists(image(lab, m)):
@@ -396,8 +396,8 @@ def carry(old_label, new_label, write, only=None):
     print('\n'.join(report))
     if failed:
         print('\n%d unmapped: read them by hand (disassemble old and new around each; the same instruction '
-              'usually moved by the same delta as its neighbours) and fix them in meta/builds.json / '
-              'discovery/verdicts.py after --write' % len(failed))
+              'usually moved by the same delta as its neighbours) and fix them in recomp/meta/builds.json / '
+              'recomp/discovery/verdicts.py after --write' % len(failed))
     if not write:
         return
     ts = {m: pe_timestamp(image(new_label, m, 'retail')) for m in MODULES}
@@ -415,7 +415,7 @@ def carry(old_label, new_label, write, only=None):
         f.write('\n')
     write_verdicts(new_label, ts, new_verdicts, old_label,
                    [line.strip() for line in report if 'UNMAPPED' in line and not line.lstrip().startswith(('address', 'hook', 'crt', 'geometry'))])
-    print('\nwrote meta/builds.json (%s, version %s) and discovery/verdicts.py' % (new_label, entry['version']))
+    print('\nwrote recomp/meta/builds.json (%s, version %s) and recomp/discovery/verdicts.py' % (new_label, entry['version']))
 
 
 def map_modern(old_entry, main_old, main_new, put):
@@ -472,14 +472,14 @@ SECTIONS = {'modern': lambda *a: {'modern': map_modern(*a)}, 'geometry': map_geo
 
 
 def carry_section(old_entry, new_label, section, main_old, main_new, put, report, failed, write):
-    """--only: one section carried into a build meta/builds.json already has, the rest of its entry
+    """--only: one section carried into a build recomp/meta/builds.json already has, the rest of its entry
     (hand-checked addresses among it) left as it is."""
     report.append('FFXiMain.dll %s' % section)
     out = SECTIONS[section](old_entry, main_old, main_new, put)
     print('\n'.join(report))
     if failed:
         print('\n%d unmapped: read them by hand (newbuild.py dis in both builds) and fix them in '
-              'meta/builds.json after --write' % len(failed))
+              'recomp/meta/builds.json after --write' % len(failed))
     if section == 'geometry' and not out:
         print('\ngeometry: nothing written (every address must map); add them by hand, then run '
               'tests/geometry/geometry_replay_test.py')
@@ -491,7 +491,7 @@ def carry_section(old_entry, new_label, section, main_old, main_new, put, report
     with open(buildinfo.BUILDS) as f:
         doc = json.load(f)
     if new_label not in doc['builds']:
-        raise SystemExit('%s is not in meta/builds.json: carry it without --only first' % new_label)
+        raise SystemExit('%s is not in recomp/meta/builds.json: carry it without --only first' % new_label)
     build_entry = doc['builds'][new_label]
     if section == 'geometry':
         # a verified layout stays only while every address it was verified with does
@@ -505,7 +505,7 @@ def carry_section(old_entry, new_label, section, main_old, main_new, put, report
     with open(buildinfo.BUILDS, 'w') as f:
         json.dump(doc, f, indent=2)
         f.write('\n')
-    print('\nwrote meta/builds.json (%s: %s)' % (new_label, section))
+    print('\nwrote recomp/meta/builds.json (%s: %s)' % (new_label, section))
 
 
 def write_verdicts(label, ts, verdicts, old_label, unmapped):

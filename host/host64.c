@@ -128,7 +128,7 @@ void touch_frame(int in_game); /* touch.c: the touch controls, each frame of the
 #include "build.h" /* FFXI_VERSION */
 
 /* --- features by client build ----------------------------------------------------------------------
- * meta/features.json says which of host64's additions work on which client builds; tools/build.py
+ * recomp/meta/features.json says which of host64's additions work on which client builds; tools/build.py
  * resolves it for this build into FFXI_FEATURE_<ID> (1 or 0) and this table. A feature that is 0
  * is never switched on, whatever the command line or settings ask; the log and --features say why. */
 typedef struct Feature
@@ -287,10 +287,10 @@ static void fps_request(int divisor)
 /* Config > Display > Frame Rate picked (modern.c), the one it showed too: an addon's ends */
 static void fps_chosen(void) { fps_request(-1); }
 
-/* --- 60 fps on clients with no frame divisor (meta/features.json frame60) ---------------------------
+/* --- 60 fps on clients with no frame divisor (recomp/meta/features.json frame60) ---------------------------
  * The 2009 and 2010 clients' frame loop (0x10010c40 on) waits for, and steps the world by, a fixed two
  * sixtieths: it compares the elapsed time with the float 2.0 four times and floors its step at 2.0.
- * meta/builds.json "patches" frame60 re-points those compares at a 1.0 and makes the floor 1.0;
+ * recomp/meta/builds.json "patches" frame60 re-points those compares at a 1.0 and makes the floor 1.0;
  * recomp.py translates the loop a second time with those bytes, and the variant runs while its
  * rt_patches flag is set (the game's code bytes stay as they are). It is set in the world with a
  * divisor of 1 (--fps-divisor 1, the default): the title and the lobby count frames made for 30 a
@@ -316,7 +316,7 @@ static void frame60_frame(void)
                     g_frame60[g_frame60_n++] = rt_patches[i].on;
             }
         rt_log("[recomp] frame60: %s\n", g_frame60_n ? "60 fps in the world with --fps-divisor 1"
-                                                       : "no translated variant (meta/builds.json patches.frame60)");
+                                                       : "no translated variant (recomp/meta/builds.json patches.frame60)");
     }
     if (!g_frame60_n)
         return;
@@ -659,7 +659,7 @@ static double parse_shape(const char* s)
  * corner is its offset from the projected point times [esp+0x4c] across and [esp+0x50] down. It
  * sets those from the target's width and height, which the target's stretch to the window turns
  * into the window's, so a name keeps the shape it was drawn for only in a 4:3 window and widens
- * with the window (1.8 times at 3440x1440). The hook point (meta/builds.json "nameplate_scale")
+ * with the window (1.8 times at 3440x1440). The hook point (recomp/meta/builds.json "nameplate_scale")
  * is just after both are set: the across factor is brought back to a 4:3 window's, and both take
  * the size asked for. Text stays centred on the point, since offsets are from it. */
 #ifdef FFXI_HOOK_NAMEPLATE_SCALE
@@ -711,7 +711,7 @@ static void setup_nameplates(void)
  * its FourCC at +0x20, and at +0x28 its parent's handle (*handle is the parent resource). The zone
  * DATs keep their water models under effect directories named for it - mizu, miz1, umi1, sea, taki
  * (waterfalls), kawa (rivers) - so a model with one of those above it is water. The hooks bracket the
- * load (meta/builds.json "water_model_load" at its start, "water_model_loaded" just after the call
+ * load (recomp/meta/builds.json "water_model_load" at its start, "water_model_loaded" just after the call
  * that makes the model's vertex buffers) and d3d8 marks the buffers made meanwhile (d3d8_water_loading).
  * FFXI_WATERLOG=1 logs every model loaded with the directories above it, to find more. */
 #ifdef FFXI_HOOK_WATER_MODEL_LOAD

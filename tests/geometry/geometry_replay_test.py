@@ -4,7 +4,7 @@ in Unicorn, over synthetic animated meshes: --frames per single/dual stream, wit
 remapping. Every page the original touches must match, as must the general registers and flags.
 
 Needs your own prepared build (generated/all, generated/FFXiMain.unpacked.dll), pefile and unicorn,
-and the build's geometry addresses in meta/builds.json (its geometry_* wraps and "geometry" globals,
+and the build's geometry addresses in recomp/meta/builds.json (its geometry_* wraps and "geometry" globals,
 from tools/version/newbuild.py carry). A build without a layout yet is run as layout 1: a pass is what lets
 it have one. The translated functions are copied into a temporary folder only; nothing from the
 game is written anywhere else. Checks geometry, not gameplay or frame rate.
@@ -285,7 +285,7 @@ def main():
     print(f'geometry_replay: PASS ({config["build"]}: {total} parent calls, {checked} page bytes, '
           'no mismatch with the original SSE code)')
     if config['geometry'].get('layout') != 1:
-        print(f'{config["build"]} matches layout 1: set "layout": 1 in its meta/builds.json "geometry"')
+        print(f'{config["build"]} matches layout 1: set "layout": 1 in its recomp/meta/builds.json "geometry"')
 
 
 if __name__ == '__main__':

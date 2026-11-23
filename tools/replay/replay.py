@@ -521,10 +521,10 @@ def recorder_version():
 
 
 def client_build(label):
-    """A game build as meta/builds.json names it: '<label> (<client version>)'."""
+    """A game build as recomp/meta/builds.json names it: '<label> (<client version>)'."""
     builds = buildinfo.known()
     if label not in builds:
-        raise SystemExit(f'--build: {label!r} is not a build in meta/builds.json ({", ".join(builds)})')
+        raise SystemExit(f'--build: {label!r} is not a build in recomp/meta/builds.json ({", ".join(builds)})')
     return f'{label} ({builds[label]["version"]})'
 
 
@@ -586,7 +586,7 @@ def main():
     ap.add_argument('--zone-port', type=int, default=replayserver.ZONE_PORT, help="the replay server's zone port")
     ap.add_argument('--out', help='where the results go (keep: default tools/replay/scenes/)')
     ap.add_argument('--lsb', help='with keep: the LandSandBoat commit the recordings were made on')
-    ap.add_argument('--build', help='with keep: the game build they were made with, as meta/builds.json names it')
+    ap.add_argument('--build', help='with keep: the game build they were made with, as recomp/meta/builds.json names it')
     a = ap.parse_args(argv)
     a.client_args = client_args
     if a.what == 'keep':

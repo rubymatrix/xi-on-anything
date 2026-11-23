@@ -4,9 +4,9 @@
 
 Reads generated/images/<label>/<Module>.unpacked.dll and .retail.dll (tools/version/newbuild.py unpack),
 works in generated/discovery/<label>/<Module>/ (a scratch Ghidra project and every step's report:
-Square Enix code, gitignored), and writes meta/<Module>.<label>.meta.json.
+Square Enix code, gitignored), and writes recomp/meta/<Module>.<label>.meta.json.
 
-The pipeline (discovery/, Jython post-scripts; notes on past runs in discovery/notes/):
+The pipeline (recomp/discovery/, Jython post-scripts; notes on past runs in recomp/discovery/notes/):
 
   import + auto-analysis                 RecompStats -> 00-auto.stats.txt
   round 1 and 2:
@@ -16,12 +16,12 @@ The pipeline (discovery/, Jython post-scripts; notes on past runs in discovery/n
     Conflicts                            decodes that overlap a real instruction
     BogusCheck APPLY                     apply the manual verdicts, list data decoded as code
   gate: conflicts 0, suspect_functions 0, SwitchAudit review 0 -- else stop (exit 2) with the
-        reports named: read each site, add NOT_CODE / REDECODE / SWITCHES to discovery/verdicts.py,
+        reports named: read each site, add NOT_CODE / REDECODE / SWITCHES to recomp/discovery/verdicts.py,
         and run again with --reuse (keeps the analysed project)
   Classify, Diagnose, RecompStats        coverage reports
   Export                                 the metadata: addresses and shapes only
 
-The build must be in discovery/verdicts.py first (tools/version/newbuild.py carry --write): the scripts
+The build must be in recomp/discovery/verdicts.py first (tools/version/newbuild.py carry --write): the scripts
 pick their manual verdicts by the image's PE timestamp.
 
 Ghidra: --ghidra, else GHIDRA_INSTALL_DIR, else the newest C:/Dev/Ghidra/ghidra_*_PUBLIC or
@@ -42,7 +42,7 @@ import buildinfo  # noqa: E402
 import newbuild  # noqa: E402
 
 ROOT = buildinfo.ROOT
-SCRIPTS = os.path.join(ROOT, 'discovery')
+SCRIPTS = os.path.join(ROOT, 'recomp', 'discovery')
 PROJECT = 'discovery'
 MAX_ROUNDS = 12
 
@@ -118,22 +118,22 @@ def discover2_created(text):
 
 
 def check_verdicts(image):
-    """Fail fast if discovery/verdicts.py does not know this image's build (the scripts would)."""
+    """Fail fast if recomp/discovery/verdicts.py does not know this image's build (the scripts would)."""
     ns = newbuild.load_verdicts()
     ts = newbuild.pe_timestamp(image)
     module = os.path.basename(image).split('.')[0].lower()
     if ts not in ns['BUILDS']:
-        raise SystemExit('discovery/verdicts.py does not know PE timestamp 0x%08x (%s): '
+        raise SystemExit('recomp/discovery/verdicts.py does not know PE timestamp 0x%08x (%s): '
                          'run tools/version/newbuild.py carry --from <previous> --to <label> --write first' % (ts, image))
     if (module, ns['BUILDS'][ts]) not in ns['VERDICTS']:
-        raise SystemExit('discovery/verdicts.py has no verdicts for (%r, %r)' % (module, ns['BUILDS'][ts]))
+        raise SystemExit('recomp/discovery/verdicts.py has no verdicts for (%r, %r)' % (module, ns['BUILDS'][ts]))
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--label', required=True, help='the build (generated/images/<label>/)')
     ap.add_argument('--module', required=True, choices=newbuild.MODULES)
-    ap.add_argument('--out', help='default: meta/<Module>.<label>.meta.json')
+    ap.add_argument('--out', help='default: recomp/meta/<Module>.<label>.meta.json')
     ap.add_argument('--reuse', action='store_true', help='keep the analysed project; skip import + auto-analysis')
     ap.add_argument('--ghidra', help='the Ghidra install folder')
     ap.add_argument('--export-anyway', action='store_true', help='export even if the gate fails')
@@ -173,7 +173,7 @@ def main():
 
     bad = {k: v for k, v in gate.items() if v[0] != 0}
     if bad and not args.export_anyway:
-        print('\nGATE FAILED; nothing exported. Read these, record verdicts in discovery/verdicts.py, '
+        print('\nGATE FAILED; nothing exported. Read these, record verdicts in recomp/discovery/verdicts.py, '
               'then rerun with --reuse:')
         for k, (n, path) in bad.items():
             print('  %s %s: %s' % (k, n, path))

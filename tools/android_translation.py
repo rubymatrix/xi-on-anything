@@ -1,5 +1,5 @@
 """The Android translation, for tools/build_android.py: FFXiMain.dll into generated/android-all with
-the occlusion probe's constructor and destructor wrapped (meta/builds.json "android_wraps"), and
+the occlusion probe's constructor and destructor wrapped (recomp/meta/builds.json "android_wraps"), and
 FFXi.dll into generated/ffxi as on the desktop.
 
 The wraps are accepted only for the validated 2025-11-12 build and unpacked image. The hashes and

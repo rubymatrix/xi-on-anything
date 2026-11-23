@@ -2,7 +2,7 @@
 
 ## Supported builds
 
-Every supported build is listed in `meta/builds.json`, keyed by the SHA-256 of its retail
+Every supported build is listed in `recomp/meta/builds.json`, keyed by the SHA-256 of its retail
 `FFXiMain.dll` and `FFXi.dll`. `tools/prepare.py` identifies the install's build and records it in
 `generated/build.json`; the build tools read it from there.
 
@@ -25,7 +25,7 @@ so every build needs its own entry before it can be translated. `prepare` refuse
 does not know:
 
 ```
-.../FFXiMain.dll is build <sha256>, which meta/builds.json does not know
+.../FFXiMain.dll is build <sha256>, which recomp/meta/builds.json does not know
 ```
 
 In Claude Code, the `game-version-update` skill (`.claude/skills/`) runs all of this: hand it the
@@ -57,9 +57,9 @@ install folder. By hand:
    differential test compares, host/modern.c's menu addresses (the `modern` section; a build
    without all of them builds with Config > Advanced and Config > Menus off), the skinning kernels'
    functions and globals (the `geometry` section, all or none, without its layout; see step 4),
-   and the manual verdicts in `discovery/verdicts.py`. `--only modern --write` or
-   `--only geometry --write` carries just that section into a build `meta/builds.json` already
-   has. `--write` adds the build to `meta/builds.json` and `discovery/verdicts.py`. Addresses it
+   and the manual verdicts in `recomp/discovery/verdicts.py`. `--only modern --write` or
+   `--only geometry --write` carries just that section into a build `recomp/meta/builds.json` already
+   has. `--write` adds the build to `recomp/meta/builds.json` and `recomp/discovery/verdicts.py`. Addresses it
    cannot map come with a hint (how their neighbours moved); check each with
    `python tools/version/newbuild.py dis --label <build> --at <addr>` in both builds and fill it in.
 
@@ -72,7 +72,7 @@ install folder. By hand:
 
    It stops before exporting if a decode conflict, a function that looks like data, or an
    unaudited switch remains; the report says which. Each needs a manual verdict in
-   `discovery/verdicts.py` (see the entries there and `discovery/notes/`); then rerun with
+   `recomp/discovery/verdicts.py` (see the entries there and `recomp/discovery/notes/`); then rerun with
    `--reuse`.
 
 4. **Prepare and build.**
@@ -103,8 +103,8 @@ install folder. By hand:
    what remains is a real gap: add the function to the metadata and rebuild.
 
 6. **Record it.** Add the build to the [Supported builds](#supported-builds) table above, write
-   its discovery notes in `discovery/notes/`, and check `meta/features.json` against it: an
+   its discovery notes in `recomp/discovery/notes/`, and check `recomp/meta/features.json` against it: an
    addition that misbehaves on this build gets a `min_build`/`max_build` there, or an override in
    its own `builds.json` entry ([Features by client build](options.md#features-by-client-build));
    `host64 --features` shows the result. Commit the metadata, `builds.json` and
-   `discovery/verdicts.py` together. Never commit anything from `generated/`.
+   `recomp/discovery/verdicts.py` together. Never commit anything from `generated/`.

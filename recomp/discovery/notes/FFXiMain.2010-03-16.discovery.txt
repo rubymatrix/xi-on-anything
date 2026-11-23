@@ -91,7 +91,7 @@ What the runtime meets in a client this old
 -------------------------------------------
   - The character table is at [chars_ptr]+0x12eb0, not +0x13820 (same 0x8c stride and entry
     layout; checked at the getter 0x100d2bb0 and the record reader near 0x100d2719). Handled:
-    meta/builds.json "offsets" chars_table, written to build.h as FFXI_OFFSET_CHARS_TABLE, which
+    recomp/meta/builds.json "offsets" chars_table, written to build.h as FFXI_OFFSET_CHARS_TABLE, which
     slot 177 reads.
   - FFXiMain calls gamecore slot 441 (+0x6e4, one caller, 0x100d5235), which no later build calls.
     Handled: it reads a counter only the viewer changes, so our slot returns 0 (see

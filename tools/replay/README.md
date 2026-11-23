@@ -115,7 +115,7 @@ Then:
 
 `keep` writes what playback reads into `scenes/`: the server's packets from the zone-in to the
 zone-out and the markers, with the character renamed `Replay`, trimmed, and the meta line above
-(`--build` as `meta/builds.json` names it). The client's own packets, including the GM commands it
+(`--build` as `recomp/meta/builds.json` names it). The client's own packets, including the GM commands it
 typed, are left out. Keep the raw recordings, since trimmed packets can't be restored from `scenes/`,
 and pass only the recordings `default.txt` names.
 

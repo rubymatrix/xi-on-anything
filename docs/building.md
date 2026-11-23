@@ -11,12 +11,12 @@ Everything the build reads is in this repository.
 
 | input | here |
 | --- | --- |
-| per-build metadata `ffxi-recomp-meta/1` (addresses and shapes, no bytes) | `meta/<module>.<build>.meta.json` |
-| the builds, their hashes, and the few addresses the runtime and tests name | `meta/builds.json` (written to `generated/build.h`) |
+| per-build metadata `ffxi-recomp-meta/1` (addresses and shapes, no bytes) | `recomp/meta/<module>.<build>.meta.json` |
+| the builds, their hashes, and the few addresses the runtime and tests name | `recomp/meta/builds.json` (written to `generated/build.h`) |
 | static unpacker for the packed `.text` | `tools/unpack.py` |
 | the specifications the runtime implements: gamecore slots, the gamecore and D3D8 surfaces | `runtime/specs/` |
 
-The metadata comes from a Ghidra discovery pass over each build's unpacked DLLs: `discovery/`
+The metadata comes from a Ghidra discovery pass over each build's unpacked DLLs: `recomp/discovery/`
 (Ghidra post-scripts and per-build manual verdicts), run by `tools/version/discover.py`. The build uses the
 committed metadata; you need the pass only for a [new build](new-client-version.md).
 
@@ -125,7 +125,7 @@ FSR DLLs (about 57 MB); offline, it uses FSR 1.
 
 ## Android (experimental)
 
-See [android.md](platforms/android-dev.md).
+See [platforms/android-dev.md](platforms/android-dev.md).
 
 ## PlayOnline sign-in on iPhone, iPad and Android
 

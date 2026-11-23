@@ -37,7 +37,7 @@ windows, text and images over the game's frame.
 
 | Piece | Files |
 |---|---|
-| Recompiler wraps | `recomp/recomp.py --wraps`, `meta/builds.json` "wraps", `runtime/runtime.h` rt_arg/rt_return |
+| Recompiler wraps | `recomp/recomp.py --wraps`, `recomp/meta/builds.json` "wraps", `runtime/runtime.h` rt_arg/rt_return |
 | Core: addons, states, events, errors, crash guard | `host/addons/core.c`, `host.h`, `addons.h` |
 | Game hooks: command line, chat log, packets | `host/addons/hooks.c` |
 | Commands, scripts, aliases | `host/addons/cmd.c` |

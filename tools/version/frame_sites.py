@@ -1,4 +1,4 @@
-"""Find what host/frame.c needs to run FFXiMain past 60 fps in this build, and record it in meta/builds.json.
+"""Find what host/frame.c needs to run FFXiMain past 60 fps in this build, and record it in recomp/meta/builds.json.
 
   python3 tools/version/frame_sites.py [--dry-run] [--list]
 
@@ -285,7 +285,7 @@ def classify(md, read, ret, ftol, getters, spills=True):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('--dry-run', action='store_true', help='print, do not write meta/builds.json')
+    ap.add_argument('--dry-run', action='store_true', help='print, do not write recomp/meta/builds.json')
     ap.add_argument('--list', action='store_true', help='print every caller and how it was classified')
     args = ap.parse_args()
     build = buildinfo.current()
@@ -378,7 +378,7 @@ def main():
     net_waits = [base + lo + m.start() for m in NET_WAIT.finditer(img[lo:hi]) if img[lo + m.start() - 1] in (0x90, 0xcc, 0xc3)]
     if len(net_waits) != 1:
         print('frame_sites: wait for the server: %d matches, want 1; frame_net_wait not written (one already in '
-              'meta/builds.json is kept: check it by hand)' % len(net_waits))
+              'recomp/meta/builds.json is kept: check it by hand)' % len(net_waits))
     paces = [base + lo + m.start() + 3 for m in PACE.finditer(img[lo:hi])]
     if len(paces) != 1:
         die('frame pacer: %d matches, want 1' % len(paces))

@@ -1,4 +1,4 @@
-"""Collect the code patches addons make into meta/builds.json "patches" for the current build.
+"""Collect the code patches addons make into recomp/meta/builds.json "patches" for the current build.
 
   python3 tools/addons/addon_patches.py <survey log folder>... [--dry-run]
 
@@ -95,12 +95,12 @@ def main():
         print('%-28s %s' % (name, ' '.join('%s:%s' % kv for kv in sorted(runs.items()))))
     if a.dry_run:
         return 0
-    path = os.path.join(ROOT, 'meta', 'builds.json')
+    path = os.path.join(ROOT, 'recomp', 'meta', 'builds.json')
     data = json.load(open(path), object_pairs_hook=collections.OrderedDict)
     data['builds'][build]['patches'] = patches
     with open(path, 'w') as f:
         f.write(json.dumps(data, indent=2) + '\n')
-    print('%d patch groups for %s in meta/builds.json' % (len(patches), build))
+    print('%d patch groups for %s in recomp/meta/builds.json' % (len(patches), build))
     return 0
 
 

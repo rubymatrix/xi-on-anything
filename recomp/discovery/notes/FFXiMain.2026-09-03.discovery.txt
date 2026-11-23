@@ -33,7 +33,7 @@ the new operand. Results used:
   character table pointer       0x104df7b0 -> 0x104df770 (layout unchanged: +0x13820, stride 0x8c)
   Present call site             0x100035cb (unchanged)
   difftest CRT slice            each -0x40 (strlen 0x10317440 ... strpbrk 0x10322bb0), all entries
-These are in FFXIRecompile meta/builds.json.
+These are in FFXIRecompile recomp/meta/builds.json.
 
 Method
 ------
