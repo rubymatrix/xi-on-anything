@@ -5,7 +5,7 @@ gdifonts renderer (gdifont_ffi.c), in the addon harness with Ashita's own libs/d
     python3 tests/addons/d3d8_ffi.py --game <FINAL FANTASY XI> [--ashita <dir with addons/libs>]
                                      [--gdifonts <ThornyFFXI's gdifonts folder>]...
 
---ashita defaults to the installed data dir's ashita/ (tools/addons_fetch.py puts Ashita's addons
+--ashita defaults to the installed data dir's ashita/ (tools/addons/addons_fetch.py puts Ashita's addons
 and libs there). gdifonts is not in this repository: without --gdifonts (or /tmp/gdifonts) its test
 is skipped. Addons carry versions of it (tTimers ThornyFFXI's, fancychat's with colour markers,
 balloon's with regions and clipping): each --gdifonts is tested in turn. A scratch data dir gets the libs and the test addons (tests/addons/d3d8test, gditest);
@@ -53,7 +53,7 @@ def main():
     a = ap.parse_args()
     libs = os.path.join(a.ashita, 'addons', 'libs')
     if not os.path.isdir(os.path.join(libs, 'd3d8')):
-        raise SystemExit('no Ashita libs at %s (tools/addons_fetch.py, or --ashita)' % libs)
+        raise SystemExit('no Ashita libs at %s (tools/addons/addons_fetch.py, or --ashita)' % libs)
     data = tempfile.mkdtemp(prefix='d3d8ffi-')
     try:
         shutil.copytree(libs, os.path.join(data, 'ashita', 'addons', 'libs'))

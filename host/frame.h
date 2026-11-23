@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-/* Installs the hooks (a build tools/frame_sites.py has not seen keeps the game's pacing) and
+/* Installs the hooks (a build tools/version/frame_sites.py has not seen keeps the game's pacing) and
  * reads FFXI_FPS_LIMIT (a cap in frames a second while uncapped, over the player's) and FFXI_FRAMELOG=1. */
 void frame_setup(void);
 /* From the Present hook: whether the player's uncapped frame rate is in effect this frame, whether

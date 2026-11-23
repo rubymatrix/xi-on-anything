@@ -12,36 +12,36 @@ copy, the with-game package) doesn't work or is much worse on this console.
 
 ## Before you start
 
-- **Console address** (Dev Home shows it). `export XBOX=<address>`; `xbox/tools/xbox.py` remembers it.
+- **Console address** (Dev Home shows it). `export XBOX=<address>`; `platforms/xbox/tools/xbox.py` remembers it.
 - **Device Portal on** (Dev Home > Remote Access Settings). If it asks for a login, set `XBOX_USER` / `XBOX_PASS`.
-- **The app-only package**, `XIonXbox-xbox.msix` (about 17 MB, from `xbox/tools/deploy-xbox.ps1 -PackageOnly`),
+- **The app-only package**, `XIonXbox-xbox.msix` (about 17 MB, from `platforms/xbox/tools/deploy-xbox.ps1 -PackageOnly`),
   usually in `~/Downloads`.
 - **The player's `FINAL FANTASY XI` folder** (contains `FFXiMain.dll`). Never copy it into this repo.
   `PlayOnlineViewer` isn't needed.
 
 ## Steps
 
-1. `python3 xbox/tools/xbox.py status`, and act on what it says:
+1. `python3 platforms/xbox/tools/xbox.py status`, and act on what it says:
    - **Installed from a package** (e.g. after `deploy-xbox.ps1` or the with-game package): a loose app can't
-     replace it (`0x80073CFB`). Tell the user it will be uninstalled, then run `python3 xbox/tools/xbox.py uninstall`.
+     replace it (`0x80073CFB`). Tell the user it will be uninstalled, then run `python3 platforms/xbox/tools/xbox.py uninstall`.
      It backs LocalState up to `build/xbox/localstate-backup-*` first. On this console LocalState survived the
      uninstall anyway (settings, the game's `USER` folder, the shader cache).
    - **`game.txt` in LocalState:** it would override the game beside the app. Ask, then
-     `python3 xbox/tools/xbox.py rm local:\LocalState game.txt`.
+     `python3 platforms/xbox/tools/xbox.py rm local:\LocalState game.txt`.
    - **`LocalState\SquareEnix`** (an unfinished in-app copy): it fills the small user drive. Ask, then
-     `python3 xbox/tools/xbox.py rmdir local:\LocalState SquareEnix`.
+     `python3 platforms/xbox/tools/xbox.py rmdir local:\LocalState SquareEnix`.
 2. **Tell the user to leave the local game folder where it is until the upload finishes.** Moving it mid-upload
    fails every remaining file (this has happened twice).
 3. Run the setup **in the background** (the game upload takes about 40 minutes on a good LAN):
-   `python3 -u xbox/tools/xbox.py setup "<msix>" "<FINAL FANTASY XI folder>"`
+   `python3 -u platforms/xbox/tools/xbox.py setup "<msix>" "<FINAL FANTASY XI folder>"`
    It sends the app's files (with `AppxMetadata/CodeIntegrity.cat`: without it the app won't launch), registers
    the folder, then uploads the game, skipping files already there.
 4. Check progress now and then (lines like `  12000/65252 files, 3.10/15.04 GB, 14.2 MB/s`), and report it when asked.
-5. **When it finishes:** if files failed, run `python3 xbox/tools/xbox.py game "<FINAL FANTASY XI folder>"` to send just
+5. **When it finishes:** if files failed, run `python3 platforms/xbox/tools/xbox.py game "<FINAL FANTASY XI folder>"` to send just
    those. If they failed with "No such file", the folder moved: find it, and resume from the new place.
-6. Run `python3 xbox/tools/xbox.py launch`, then `status`. Ask the user to set the app's type to **Game** in Dev Home
+6. Run `python3 platforms/xbox/tools/xbox.py launch`, then `status`. Ask the user to set the app's type to **Game** in Dev Home
    (XI on Xbox > View details); as an App it gets about 1 GB of RAM.
-7. To confirm the game was found: `python3 xbox/tools/xbox.py logs build/xbox/logs-check` and look for
+7. To confirm the game was found: `python3 platforms/xbox/tools/xbox.py logs build/xbox/logs-check` and look for
    `[app] starting the game: D:\DevelopmentFiles\LooseApps\XIonXbox\SquareEnix\FINAL FANTASY XI` in `host64.log`.
 
 ## Don't

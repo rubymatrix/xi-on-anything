@@ -1,4 +1,4 @@
--- The addons' profile and cached pattern scans (tests/addon_prof_test.sh).
+-- The addons' profile and cached pattern scans (tests/addons/addon_prof_test.sh).
 
 -- //busy <ms>: a command that takes that long, for the slow-call log and /addon prof
 xi.events.on('command', function(e)

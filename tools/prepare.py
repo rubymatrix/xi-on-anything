@@ -3,7 +3,7 @@
   python tools/prepare.py [--game "<FINAL FANTASY XI folder>"]
 
 Finds FFXiMain.dll in --game (default: the install folder in the game's registry key), identifies its build by
-SHA-256 in meta/builds.json, and unpacks it statically with tools/unpack.py - FFXiMain.dll,
+SHA-256 in recomp/meta/builds.json, and unpacks it statically with tools/unpack.py - FFXiMain.dll,
 and FFXi.dll from the same folder, which must be the same build. The choice is recorded in
 generated/build.json for build.py and install.py. Output lands in generated/, which is gitignored:
 it is Square Enix code and never committed.
@@ -43,7 +43,7 @@ def main():
     digest = buildinfo.sha256(dll)
     label = buildinfo.match(digest)
     if label is None:
-        raise SystemExit('%s is build %s, which meta/builds.json does not know (a stand-in? run install.py restore)'
+        raise SystemExit('%s is build %s, which recomp/meta/builds.json does not know (a stand-in? run install.py restore)'
                          % (dll, digest))
     want = buildinfo.known()[label]['FFXi.dll']['sha256']
     if buildinfo.sha256(ffxi) != want:
@@ -59,7 +59,7 @@ def main():
     subprocess.check_call([sys.executable, unpack, dll, out])
     subprocess.check_call([sys.executable, unpack, ffxi, os.path.join(args.out, 'FFXi.unpacked.dll')])
     # One copy per build too: the next game update maps its addresses from this one
-    # (tools/newbuild.py carry).
+    # (tools/version/newbuild.py carry).
     keep = os.path.join(args.out, 'images', label)
     os.makedirs(keep, exist_ok=True)
     for name in ('FFXiMain.retail.dll', 'FFXiMain.unpacked.dll', 'FFXi.retail.dll', 'FFXi.unpacked.dll'):

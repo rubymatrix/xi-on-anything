@@ -127,6 +127,56 @@ GuestFn rt_lookup_any(uint32_t target)
 void watermark_probe(Guest* g, uint32_t target); /* runtime/portable/watermark.c */
 #endif
 
+/* The guest's setjmp/longjmp. The CRT's longjmp restores the registers _setjmp3 saved and ends in
+ * `jmp [buf+0x14]`, an indirect jump to the instruction after the call to _setjmp3: the middle of
+ * a translated function, which no table holds (D3DX's JPEG and PNG readers bail out of a file they
+ * cannot read this way, and the image loader tries the JPEG reader on every format it has not
+ * matched yet). So the translation follows each call to _setjmp3 with a host setjmp (guest.h
+ * RT_SETJMP), recorded here under that resume address and the guest esp there; the longjmp's jump
+ * finds the record (same address, and the esp longjmp restored) and longjmps the host back into
+ * that frame, which reloads the registers from g and carries on as the guest would. Translated
+ * frames are plain C, so the host longjmp unwinds them like kobj.c's ExitThread does.
+ *
+ * Records live per thread and are never removed: a setjmp's frame may return at any time without
+ * telling anyone. A longjmp into a frame that has returned is undefined in the guest as well; a
+ * record is only ever reused for the same (address, esp) or, when all are taken, the oldest. */
+#define SJ_SLOTS 16u
+typedef struct
+{
+    uint32_t resume, esp, stamp;
+    jmp_buf jb;
+} SjSlot;
+static LOOKUP_TLS SjSlot t_sj[SJ_SLOTS];
+static LOOKUP_TLS uint32_t t_sj_clock;
+
+jmp_buf* rt_setjmp_slot(Guest* g, uint32_t resume)
+{
+    SjSlot* s = NULL;
+    for (unsigned i = 0; i < SJ_SLOTS && !s; ++i)
+        if (t_sj[i].stamp && t_sj[i].resume == resume && t_sj[i].esp == g->esp)
+            s = &t_sj[i];
+    if (!s)
+    {
+        s = &t_sj[0];
+        for (unsigned i = 1; i < SJ_SLOTS; ++i)
+            if (t_sj[i].stamp < s->stamp)
+                s = &t_sj[i];
+    }
+    s->resume = resume;
+    s->esp = g->esp;
+    s->stamp = ++t_sj_clock;
+    return &s->jb;
+}
+
+void rt_longjmp_check(Guest* g, uint32_t target)
+{
+    if (!t_sj_clock)
+        return;
+    for (unsigned i = 0; i < SJ_SLOTS; ++i)
+        if (t_sj[i].stamp && t_sj[i].resume == target && t_sj[i].esp == g->esp)
+            longjmp(t_sj[i].jb, 1);
+}
+
 void rt_call_indirect(Guest* g, uint32_t target)
 {
 #if defined(RT_WATERMARK)
@@ -138,6 +188,7 @@ void rt_call_indirect(Guest* g, uint32_t target)
         fn(g);
         return;
     }
+    rt_longjmp_check(g, target);
     /* Not a translated function: an import (IAT slot holding a host API address) or a bug.
      * The platform layer decides; without one this is fatal. */
     if (g_native && g_native(g, target))
@@ -146,7 +197,7 @@ void rt_call_indirect(Guest* g, uint32_t target)
 }
 
 /* Nonzero while a guest thread waits for the guest lock; the platform bridge maintains it and
- * installs the yield. Without a bridge (tests/difftest.c) there is one thread and no lock. */
+ * installs the yield. Without a bridge (tests/runtime/difftest.c) there is one thread and no lock. */
 volatile uint32_t rt_lock_contended;
 static void (*g_yield)(void);
 

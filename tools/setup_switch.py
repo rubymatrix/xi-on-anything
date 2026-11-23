@@ -1,5 +1,5 @@
 """Build XI on Anything for the Nintendo Switch and put it on an SD card, start to finish.
-switch/setup-switch.bat (Windows) and switch/setup-switch.sh (Linux, macOS) run it.
+platforms/switch/setup-switch.bat (Windows) and platforms/switch/setup-switch.sh (Linux, macOS) run it.
 
   python tools/setup_switch.py [--game <FINAL FANTASY XI folder>] [--sd <SD card's root>|emu]
                                [--server <name or IP>] [--layout nintendo|xbox] [--dats <folder>]
@@ -7,7 +7,7 @@ switch/setup-switch.bat (Windows) and switch/setup-switch.sh (Linux, macOS) run 
 
 It checks this PC (Python's two packages, devkitPro's), identifies the game's version (meta/builds.json),
 prepares its code (tools/prepare.py), finds its frame delta sites when meta/builds.json has none
-(tools/frame_sites.py: without them the Switch runs at 30 fps, with them uncapped), builds the .nro
+(tools/version/frame_sites.py: without them the Switch runs at 30 fps, with them uncapped), builds the .nro
 (tools/build_switch.py host) and copies the .nro, the game and the settings to the card
 (tools/build_switch.py setup). Each step is skipped when it is already done, so run it again after a
 game update or a pull: it does only what changed.
@@ -629,9 +629,9 @@ def main():
     if has_frame_sites(label):
         note(f'meta/builds.json has them for {label}: the Switch runs uncapped, the world at its real speed')
     else:
-        note(f'finding them in {label} (tools/frame_sites.py)')
+        note(f'finding them in {label} (tools/version/frame_sites.py)')
         try:
-            run([sys.executable, HERE / 'frame_sites.py'])
+            run([sys.executable, HERE / 'version' / 'frame_sites.py'])
             note('found and recorded in meta/builds.json: the Switch runs uncapped. (Worth sending upstream:\n'
                  '  a pull request with meta/builds.json gives every player of this version the same.)')
         except Failure as e:

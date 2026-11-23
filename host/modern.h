@@ -30,6 +30,8 @@ void modern_frame(void);
 /* The window has a new size (the browser's: the page was resized), and the menus' size for it (0: the
  * window's over the UI scale): applied between frames as Config > Display applies a size it picks. */
 void modern_window_size(int w, int h, int menu_w, int menu_h);
+/* The UI Scale the player picked, as data_dir's modern.cfg has it: 0 if none. */
+float modern_saved_ui_scale(const char* data_dir);
 
 /* Config > Interface > Addons: back buffer pixels an addon's pixel. Addons draw and are told the
  * screen in their own pixels (the back buffer's over this), which the overlay scales up as it draws.
@@ -51,3 +53,23 @@ typedef struct ModernAddons
 
 /* Before the menus are in (modern_frame's first): with NULL or never called, no Addons page. */
 void modern_set_addons(const ModernAddons* ops);
+
+/* Config > Gamepad opened at the next frame, over whatever is up (the touch controls' Pad; any thread).
+ * Nothing before the game's menus are in (the sign-in screen). */
+void modern_open_gamepad(void);
+
+/* The Gamepad window: F12 on a client without Config > Advanced (the 2009 one), Config > Gamepad's
+ * rows in the overlay (host/addons/gui.cpp). On the game's thread. */
+int modern_pad_window(void);          /* it is up */
+void modern_pad_window_set(int open);
+void modern_pad_window_frame(void);   /* each frame it is up, before it is drawn */
+/* Row i (0 up): its label, NULL past the last; kind 0 a heading, 1 a game function (its button),
+ * 2 a stick axis (the controller's own, host/padmap.c); help its line. */
+const char* modern_pad_row(int i, int* kind, const char** help);
+int modern_pad_choices(int i);
+const char* modern_pad_choice(int i, int c);
+int modern_pad_get(int i);
+void modern_pad_set(int i, int choice); /* written and applied at once */
+void modern_pad_record(int i);          /* the next button pressed (a stick pushed) becomes it; -1 stops */
+int modern_pad_recording(void);         /* the row being recorded, or -1 */
+const char* modern_pad_device(void);    /* the controller's name, NULL with none */

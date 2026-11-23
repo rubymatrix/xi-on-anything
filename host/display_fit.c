@@ -36,6 +36,13 @@ void display_policy(const DisplayIn* in, DisplayOut* out)
         u = fmin((double)sw / MIN_UI_W, (double)sh / MIN_UI_H);
     out->menu_w = (int)lround(sw / u) & ~1;
     out->menu_h = (int)lround(sh / u) & ~1;
+    /* the player's UI Scale, while the interface still has its 640x480 */
+    if (in->ui_scale > 0.0f)
+    {
+        int mw = (int)lround(out->w / in->ui_scale) & ~1, mh = (int)lround(out->h / in->ui_scale) & ~1;
+        if (mw >= MIN_UI_W && mh >= MIN_UI_H)
+            out->menu_w = mw, out->menu_h = mh;
+    }
     out->rect_x = (int)lround(sx * d), out->rect_y = (int)lround(sy * d);
     out->rect_w = (int)lround(sw * d), out->rect_h = (int)lround(sh * d);
 }
@@ -43,11 +50,11 @@ void display_policy(const DisplayIn* in, DisplayOut* out)
 #ifndef DISPLAY_FIT_POLICY_ONLY
 #include <SDL3/SDL.h>
 
-#include "d3d8.h"
+#include "../runtime/portable/winapi/d3d8.h"
 #include "gfx.h"
-#include "k32.h"
+#include "../runtime/portable/winapi/k32.h"
 #include "modern.h"
-#include "user32.h"
+#include "../runtime/portable/winapi/user32.h"
 #ifdef __ANDROID__
 void android_overlay_present_rect(int x, int y, int w, int h); /* android_overlay.c */
 #endif
@@ -57,6 +64,7 @@ void android_overlay_present_rect(int x, int y, int w, int h); /* android_overla
 static SDL_Window* g_window;
 static DisplayIn g_last;
 static float g_coords = 1.0f; /* the window's coordinates a point: iOS's are points, Android's pixels */
+static float g_scale;         /* the player's UI Scale: display_fit_scale */
 
 /* What the window is now. FFXI_MAX_PIXELS and FFXI_UI_POINTS override the defaults: a phone (under
  * 600 points high) about 2.4 MP, two thirds of its native pixels, as it runs hot and on battery; an
@@ -85,12 +93,14 @@ static int read_window(SDL_Window* win, DisplayIn* in)
     e = getenv("FFXI_MAX_PIXELS");
     int short_side = in->win_w < in->win_h ? in->win_w : in->win_h;
     in->max_pixels = e ? atof(e) : short_side < 600 ? 2.4e6 : 4.0e6;
+    in->ui_scale = g_scale;
     return 1;
 }
 
-void display_fit_start(void* sdl_window)
+void display_fit_start(void* sdl_window, const char* data_dir)
 {
     g_window = (SDL_Window*)sdl_window;
+    g_scale = modern_saved_ui_scale(data_dir);
     DisplayIn in;
     DisplayOut o;
     if (!g_window || !read_window(g_window, &in))
@@ -124,5 +134,9 @@ void display_fit_frame(void)
 #endif
     fprintf(stderr, "[display] presented into %dx%d at %d,%d of the drawable; the game %dx%d, the interface %dx%d\n",
         o.rect_w, o.rect_h, o.rect_x, o.rect_y, o.w, o.h, o.menu_w, o.menu_h);
+}
+void display_fit_scale(float scale)
+{
+    g_scale = scale > 0.0f ? scale : 0.0f;
 }
 #endif

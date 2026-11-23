@@ -291,6 +291,12 @@ class FunctionTranslator:
 
     def call(self, target, ret_addr):
         self.ctx.referenced.add(target)
+        if target in getattr(self.ctx, 'setjmp', ()):
+            # The CRT's _setjmp3 (recomp.py SETJMP3): the guest's longjmp jumps back to ret_addr,
+            # mid-function, which only the host setjmp here can reach (guest.h RT_SETJMP).
+            self.ctx.setjmp_sites.append(ret_addr)
+            return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
+                    'REGS_STORE; %s%08x(g); RT_SETJMP(%s + RD); REGS_LOAD;' % (self.ctx.prefix, target, hexu(ret_addr))]
         # the arithmetic flags go in only to a function that reads them at entry, and come back only where the code
         # after the call may read them (guest.h, REGS_STORE_CALL; recomp/flags_across_calls.py); returns store them
         # all, a tail jump (goto above) too

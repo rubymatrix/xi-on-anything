@@ -37,13 +37,13 @@ windows, text and images over the game's frame.
 
 | Piece | Files |
 |---|---|
-| Recompiler wraps | `recomp/recomp.py --wraps`, `meta/builds.json` "wraps", `runtime/runtime.h` rt_arg/rt_return |
+| Recompiler wraps | `recomp/recomp.py --wraps`, `recomp/meta/builds.json` "wraps", `runtime/runtime.h` rt_arg/rt_return |
 | Core: addons, states, events, errors, crash guard | `host/addons/core.c`, `host.h`, `addons.h` |
 | Game hooks: command line, chat log, packets | `host/addons/hooks.c` |
 | Commands, scripts, aliases | `host/addons/cmd.c` |
 | Input, binds | `host/addons/keys.c` (+ `user32_event_hook` in user32.c) |
 | Overlay: ImGui, text objects, primitives, textures | `host/addons/gui.cpp` (+ `d3d8_set_overlay`, `GfxDraw.scissor`) |
-| Ashita's ImGui manager for Lua | `host/addons/gui_lua.cpp`, `tools/gen_imgui_lua.py` |
+| Ashita's ImGui manager for Lua | `host/addons/gui_lua.cpp`, `tools/addons/gen_imgui_lua.py` |
 | Native `xi.*` | `host/addons/lua_xi.c` |
 | Runtime every state starts with | `host/addons/lua/xi.lua` |
 | Game data (Ashita's IMemoryManager) | `host/addons/game.c`, `game_lua.c`, `lua/ashita_memory.lua` |
@@ -51,4 +51,4 @@ windows, text and images over the game's frame.
 | Ashita / Windower layers | `host/addons/lua/ashita*.lua`, `lua/windower*.lua` |
 | Headless test host | `host64 --addon-harness <script>` (`host/addons/harness.c`) |
 | Config > Addons (on/off a row each, scrolling; `addons.cfg`) | `host/addons/manage.c` (list, autoload), `host/modern.c` (the page) |
-| Fetching the projects' libraries | `tools/addons_fetch.py` (run by `tools/setup.py`) |
+| Fetching the projects' libraries | `tools/addons/addons_fetch.py` (run by `tools/setup.py`) |

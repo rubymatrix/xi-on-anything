@@ -1,6 +1,6 @@
-/* What the runtime and the UWP app (xbox/) give each other, where SDL3 cannot be used: SDL3 has
+/* What the runtime and the UWP app (platforms/xbox/) give each other, where SDL3 cannot be used: SDL3 has
  * no UWP back end. sdl_uwp.c implements the SDL calls the runtime and the sign-in screen make
- * (user32.c, input.c, dsound.c, host/signin.c) over these; the app feeds it its window's input and
+ * (user32.c, input.c, dsound.c, host/signin/signin.c) over these; the app feeds it its window's input and
  * plays its audio.
  *
  * Plain C, callable from the app's C++. Thread-safe: the app calls in from its UI thread, the game
@@ -59,13 +59,13 @@ typedef void (*UwpTextInput)(int show, int kind, const char* text);
 void uwp_set_text_input(UwpTextInput cb);
 void uwp_replace_text(const char* utf8);
 
-/* The LandSandBoat sign-in's TLS (host/lsb_login.c): one request, one reply, the server's
+/* The LandSandBoat sign-in's TLS (host/signin/lsb_login.c): one request, one reply, the server's
  * certificate not checked (private servers' are self-signed). SChannel is not available to UWP
  * apps; the app implements this over Windows.Networking.Sockets. 1, or 0 with a message. */
 int uwp_tls_exchange(uint32_t server_ipv4, uint16_t port, const char* request, char* reply, size_t replyn, char* err,
     size_t errn);
 
-/* The app also implements host/keychain.h (saved passwords and trust tokens), over the Windows
+/* The app also implements host/signin/keychain.h (saved passwords and trust tokens), over the Windows
  * credential locker. */
 
 #ifdef __cplusplus

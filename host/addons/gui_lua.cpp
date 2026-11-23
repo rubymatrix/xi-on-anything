@@ -1,7 +1,7 @@
 /* Lua binding of Ashita v4's IGuiManager: the object AshitaCore:GetGuiManager() returns and Ashita's
  * libs/imgui.lua wraps (see gui_lua.h for the conventions).
  *
- * Most functions and methods are generated (tools/gen_imgui_lua.py -> gui_lua_gen.inc) from Ashita's
+ * Most functions and methods are generated (tools/addons/gen_imgui_lua.py -> gui_lua_gen.inc) from Ashita's
  * annotations and our imgui.h. This file holds the runtime they use (argument conversion, live objects)
  * and the hand-written functions whose Lua shapes the generator can't derive (hand_*).
  *
@@ -591,7 +591,7 @@ bool guarded() { return !xi_gui_in_frame() || !ImGui::GetCurrentContext(); }
 
 ImGuiWindow* cur_window() { return GImGui ? GImGui->CurrentWindow : nullptr; }
 
-// Preconditions of the generated bindings (see PRECOND in tools/gen_imgui_lua.py).
+// Preconditions of the generated bindings (see PRECOND in tools/addons/gen_imgui_lua.py).
 bool range_ok(lua_State* L, int idx, int lo, int hi)
 {
     if (is_none(L, idx))

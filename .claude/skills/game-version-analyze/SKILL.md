@@ -7,34 +7,34 @@ description: Unpack and analyze a new FINAL FANTASY XI client build to produce i
 
 **Input:** a `FINAL FANTASY XI` folder.
 **Output:**
-- `meta/FFXiMain.<label>.meta.json` and `meta/FFXi.<label>.meta.json`
-- the build's entry in `meta/builds.json`
-- its entry in `discovery/verdicts.py`
+- `recomp/meta/FFXiMain.<label>.meta.json` and `recomp/meta/FFXi.<label>.meta.json`
+- the build's entry in `recomp/meta/builds.json`
+- its entry in `recomp/discovery/verdicts.py`
 
 All tools run from the repo root. `generated/` holds everything derived from the game and is never
 committed.
 
 Needs Python with `pefile` and `capstone`, plus Ghidra (11.3.2 tested) and a JDK (21). If
-`tools/discover.py` can't find Ghidra, it looks in `GHIDRA_INSTALL_DIR` and in
+`tools/version/discover.py` can't find Ghidra, it looks in `GHIDRA_INSTALL_DIR` and in
 `C:\Dev\Ghidra\ghidra_*_PUBLIC`.
 
 ## 1. Identify
 
 ```
-python tools/newbuild.py identify --game "<FINAL FANTASY XI>"
+python tools/version/newbuild.py identify --game "<FINAL FANTASY XI>"
 ```
 
 - `label`: the UTC date of `FFXiMain.dll`'s PE timestamp. Labels must be unique; if one
   collides with a different build, stop and ask the user.
 - `version`: decrypted from `patch.ver` when the install has one. Otherwise it is inferred as
   `30` + YYMMDD. Tell the user when it is inferred: a server whose lobby expects another string
-  will refuse the client, and the fix is just to edit `version` in `meta/builds.json`.
+  will refuse the client, and the fix is just to edit `version` in `recomp/meta/builds.json`.
 - If `known_build` is set, this build is already supported. Skip to game-version-build.
 
 ## 2. Unpack
 
 ```
-python tools/newbuild.py unpack --game "<FINAL FANTASY XI>"
+python tools/version/newbuild.py unpack --game "<FINAL FANTASY XI>"
 ```
 
 This writes `generated/images/<label>/` and reports whether each module's `.text` is identical to
@@ -47,20 +47,23 @@ Stop and report it; that is a tooling change, not a routine update.
 
 ## 3. Carry the previous build over
 
-Pick the newest known build (the last in `meta/builds.json`) as `<old>`.
+Pick the newest known build (the last in `recomp/meta/builds.json`) as `<old>`.
 
 ```
-python tools/newbuild.py carry --from <old> --to <label>          # dry run: read the report
-python tools/newbuild.py carry --from <old> --to <label> --write  # builds.json + verdicts.py
+python tools/version/newbuild.py carry --from <old> --to <label>          # dry run: read the report
+python tools/version/newbuild.py carry --from <old> --to <label> --write  # builds.json + verdicts.py
 ```
 
 The report maps these onto the new image:
 - `chars_ptr`: a global, found by voting over the code sites that reference it.
 - `present_site`: the return address after `call [ecx+0x3c]`, IDirect3DDevice8::Present.
+- `save_user_data`: the function logout and shutdown call to write the character's files (cnf.dat,
+  the macros...): three null-checked saves through globals and a `ret`. Phones call it when the app
+  goes to the background. Optional: a build without it just doesn't save then.
 - the 15 CRT functions that difftest compares.
 - the manual verdicts (NOT_CODE, REDECODE, SWITCHES).
 - the skinning kernels' five `geometry_*` wraps and four `geometry` globals, all or none, and
-  never the layout: game-version-build sets that once `tests/geometry_replay_test.py` passes. If
+  never the layout: game-version-build sets that once `tests/geometry/geometry_replay_test.py` passes. If
   they don't all map, the build simply goes without them; nothing is left UNMAPPED.
 
 Deltas are usually small and uniform (for example 0, -0x10, -0x40). A mapping far off from its
@@ -70,15 +73,15 @@ neighbours' delta is suspect, so check it with `dis`.
 one by disassembling both builds:
 
 ```
-python tools/newbuild.py dis --label <old>   --at <old addr> --before 24 --count 4
-python tools/newbuild.py dis --label <label> --at <hinted>  --before 24 --count 4
+python tools/version/newbuild.py dis --label <old>   --at <old addr> --before 24 --count 4
+python tools/version/newbuild.py dis --label <label> --at <hinted>  --before 24 --count 4
 ```
 
 Accept the hint only when the instruction sequence is the same, allowing for changed struct
 displacements or immediates. Then:
-- a verdict goes into the new `VERDICTS` entry in `discovery/verdicts.py`, replacing its
+- a verdict goes into the new `VERDICTS` entry in `recomp/discovery/verdicts.py`, replacing its
   `# TODO unmapped` line.
-- an address or CRT entry goes into `meta/builds.json`, replacing the `UNMAPPED from ...` string.
+- an address or CRT entry goes into `recomp/meta/builds.json`, replacing the `UNMAPPED from ...` string.
 
 Nothing may be left UNMAPPED. `build.py` would crash on it, and the discovery scripts would run
 without the verdict.
@@ -86,7 +89,7 @@ without the verdict.
 **A module whose `.text` is identical** to `<old>`'s (common for `FFXi.dll`) skips discovery:
 
 ```
-python tools/newbuild.py meta --from <old> --to <label> --module FFXi.dll
+python tools/version/newbuild.py meta --from <old> --to <label> --module FFXi.dll
 ```
 
 ## 4. Discovery pass
@@ -94,7 +97,7 @@ python tools/newbuild.py meta --from <old> --to <label> --module FFXi.dll
 For each module whose `.text` changed:
 
 ```
-python tools/discover.py --label <label> --module FFXiMain.dll
+python tools/version/discover.py --label <label> --module FFXiMain.dll
 ```
 
 Run it in the background. Import and auto-analysis take several minutes for `FFXiMain.dll`, then

@@ -1,5 +1,5 @@
 --[[
-xireplay: records zone visits for tools/replayserver.py and shows its events.
+xireplay: records zone visits for tools/replay/replayserver.py and shows its events.
 
 An Ashita v4 addon: Ashita on Windows, and xi-on-anything's addon host. Copy this folder to the
 addons folder (ashita/addons/xireplay) and load it: /addon load xireplay.
@@ -10,23 +10,23 @@ and the zone-out (incoming 0x00B) ends it. Each line is
 after a first {"meta": {...}} line; {"t": <ms>, "mark": "<label>"} lines mark a scene's phases.
 Record only on a server you run yourself. /xireplay record off stops it.
 
-Events: tools/replayserver.py sends its events as chat lines from "xireplay"; this hides them and
+Events: tools/replay/replayserver.py sends its events as chat lines from "xireplay"; this hides them and
 shows each as one line of its own:
     [17:18:37] xireplay BEGIN #2 mines (city) zone 234
 With /xireplay frames on it logs every frame's time and every event to frames-<date>.csv (the
-input of tools/replayreport.py), and with /xireplay quiet on the chat log shows nothing but these
+input of tools/replay/replayreport.py), and with /xireplay quiet on the chat log shows nothing but these
 lines. The latest event is in state.json, for a script deciding when to take a screenshot (READY:
 the scene is loaded and settled).
 Scenes: /xireplay run <name> [more...] (or all) plays one of the scenes below on your LandSandBoat
 server with GM commands (the character must be a GM) and records the zone visits it makes, as
-<name>-<n>.jsonl; tools/replay.py record does it unattended. /xireplay list shows them, /xireplay
+<name>-<n>.jsonl; tools/replay/replay.py record does it unattended. /xireplay list shows them, /xireplay
 stop ends one. !perftime and !perfcrowd are tools/replay/lsb's commands.
 --]]
 
 addon.name    = 'xireplay';
 addon.author  = 'xi-on-anything';
 addon.version = '1.0';
-addon.desc    = 'Records zone visits and shows the events of tools/replayserver.py.';
+addon.desc    = 'Records zone visits and shows the events of tools/replay/replayserver.py.';
 
 require('common');
 
@@ -337,7 +337,7 @@ local function tick()
         if #queue > 0 then
             start(table.remove(queue, 1), queue);
         else
-            -- for an unattended recording (tools/replay.py record): the run is over
+            -- for an unattended recording (tools/replay/replay.py record): the run is over
             local f = io.open(dir .. 'last-run.txt', 'w');
             if f ~= nil then f:write('done ', os.date('!%Y-%m-%dT%H:%M:%SZ'), '\n'); f:close(); end
         end

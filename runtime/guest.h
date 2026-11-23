@@ -10,6 +10,7 @@
 #pragma once
 
 #include <math.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -235,6 +236,15 @@ extern RT_HOT_GLOBAL volatile uint32_t rt_lock_contended;
 void rt_safepoint(void);
 #define RT_SAFEPOINT_EVERY 64u
 #define RT_SAFEPOINT do { if (rt_lock_contended && !(++rt_sp_n & (RT_SAFEPOINT_EVERY - 1u))) rt_safepoint(); } while (0)
+
+/* The guest's setjmp (runtime.c rt_setjmp_slot): the translation of a call to the CRT's _setjmp3
+ * is followed by RT_SETJMP(resume), resume being the runtime address after the call. The host
+ * setjmp has to run in the translated function's own frame, hence a macro; when the guest's
+ * longjmp comes back here (rt_call_indirect -> rt_longjmp_check), g holds the registers it
+ * restored, and the REGS_LOAD after this reads them on both paths. */
+jmp_buf* rt_setjmp_slot(Guest* g, uint32_t resume);
+void rt_longjmp_check(Guest* g, uint32_t target);
+#define RT_SETJMP(resume) do { if (setjmp(*rt_setjmp_slot(g, (resume)))) { /* the guest's longjmp */ } } while (0)
 
 #define RT_UNIMPL(addr, text) do { REGS_STORE; rt_fatal(g, (addr), "unimplemented: " text); } while (0)
 #define RT_BADJUMP(addr) do { REGS_STORE; rt_fatal(g, (addr), "jump to an address with no translation"); } while (0)

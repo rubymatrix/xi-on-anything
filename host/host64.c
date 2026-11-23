@@ -4,7 +4,7 @@
  * FFXiMain.dll and FFXi.dll are mapped into the guest window (FFXiMain at its preferred
  * 0x10000000, FFXi.dll - which prefers the same base - relocated), both CRTs start, FFXi.dll's
  * FFXiEntry is created through its class factory, and IFFXiEntry::GameStart runs the game with
- * our own gamecore (runtime/portable/gamecore.c) in place of the retail core library.
+ * our own gamecore (runtime/portable/gamecore/gamecore.c) in place of the retail core library.
  *
  * usage: host64 --game <FINAL FANTASY XI folder> [--reg <file.reg>]... [--reg-overlay <file.reg>]
  *               [--reg-final <file.reg>]...   loaded after the overlay: a launcher's settings
@@ -26,8 +26,9 @@
  *
  * --server is where the game's servers are: the lobby and every other host under the game's
  * domain resolve to it instead of through DNS. Default 127.0.0.1 (this machine); --lobby is an
- * older name for it. With --session nothing is redirected: the game's hosts resolve through DNS,
- * as retail's do, and --server is not used.
+ * older name for it. With --session or --pol-status the game's hosts resolve through DNS, as
+ * retail's do, unless --server is given too: then it is a private PlayOnline server, and the game's
+ * hosts go there as they do for a LandSandBoat sign-in.
  *
  * --fps-divisor: FFXI's frames are 60 / divisor per second; 1 (60 fps) here, 2 (30) as shipped;
  * 0 uncapped: the world at its own speed (frame.c) in a build with the frame sites, else as fast as the
@@ -63,14 +64,14 @@
  *     and keeps that sign-in open while the game runs. --auth is the 0x34-byte authCode block the
  *     game sends its lobby with it (the core's slot 936), as that launcher made it; host64 only
  *     carries the bytes. Without it the block is zeros, which LandSandBoat's lobby accepts.
- *   - a LandSandBoat server (host/lsb_login.c): --user signs in on the server's auth port first.
+ *   - a LandSandBoat server (host/signin/lsb_login.c): --user signs in on the server's auth port first.
  *     The password comes from --pass, else FFXI_PASSWORD, else the sign-in screen; --otp is the
  *     two-factor code, if the account has one. --login-token is a launch token from the server's
  *     own launcher, in place of the password and code. --trust on is xiloader's "trust this
  *     computer": signing in with the code then saves the token the server hands out (keychain.h,
  *     per --server name and user), which stands in for the code for 30 days.
  *
- * With neither, the sign-in screen (host/signin.c) comes first, in the game's own UI art, with the
+ * With neither, the sign-in screen (host/signin/signin.c) comes first, in the game's own UI art, with the
  * LandSandBoat server in its Settings; it remembers them in <data dir>/signin.cfg
  * (--data-dir, else the user's app data), the password in the keychain, and writes display
  * defaults to <data dir>/settings.reg, loaded when no --reg-final is given. Its window becomes the
@@ -82,18 +83,18 @@
 
 #include "gthread.h"
 #include "gwin.h"
-#include "k32.h"
-#include "pe.h"
-#include "gamecore.h"
-#include "gamecore_config.h"
-#include "lsb_login.h"
-#include "signin.h"
+#include "../runtime/portable/winapi/k32.h"
+#include "../runtime/portable/winapi/pe.h"
+#include "../runtime/portable/gamecore/gamecore.h"
+#include "../runtime/portable/gamecore/gamecore_config.h"
+#include "signin/lsb_login.h"
+#include "signin/signin.h"
 #ifdef FFXI_POL
-#include "signin_pol.h"
+#include "signin/signin_pol.h"
 #endif
 #include "appdefaults.h"
 #include "modern.h"
-#include "vicons.h"
+#include "ui/vicons.h"
 #include "cexi.h"
 #include "discord.h"
 #include "frame.h"
@@ -103,19 +104,20 @@
 #if defined(_WIN32) || defined(__SWITCH__)
 #include "sampler.h"
 #endif
-#include "thunk.h"
-#include "user32.h"
-#include "d3d8.h"
+#include "../runtime/portable/winapi/thunk.h"
+#include "../runtime/portable/winapi/user32.h"
+#include "../runtime/portable/winapi/d3d8.h"
 #include "gfx.h"
-#include "gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
-#include "dsound.h"
-#include "dinput.h"
-#include "ws2.h"
+#include "../runtime/portable/gfx/gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue */
+#include "../runtime/portable/winapi/dsound.h"
+#include "../runtime/portable/winapi/dinput.h"
+#include "../runtime/portable/winapi/ws2.h"
 #include "plat.h"
 #include "vfs.h"
-#include "geometry_guest.h"
+#include "../runtime/portable/geometry/geometry_guest.h"
 #include "watermark.h"
 #include "scene.h"
+#include "ps2fix.h"
 #ifdef FFXI_MOBILE
 #include <SDL3/SDL.h>
 #include "display_fit.h"
@@ -124,6 +126,45 @@ void touch_frame(int in_game); /* touch.c: the touch controls, each frame of the
 #include <SDL3/SDL.h> /* the chat line's keyboard */
 #endif
 #include "build.h" /* FFXI_VERSION */
+
+/* --- features by client build ----------------------------------------------------------------------
+ * recomp/meta/features.json says which of host64's additions work on which client builds; tools/build.py
+ * resolves it for this build into FFXI_FEATURE_<ID> (1 or 0) and this table. A feature that is 0
+ * is never switched on, whatever the command line or settings ask; the log and --features say why. */
+typedef struct Feature
+{
+    const char* id;
+    const char* title;
+    int on;
+    const char* why; /* "" when on */
+} Feature;
+static const Feature g_features[FFXI_FEATURE_COUNT] = { FFXI_FEATURE_TABLE };
+
+static const char* feature_why(const char* id)
+{
+    for (int i = 0; i < FFXI_FEATURE_COUNT; ++i)
+        if (!strcmp(g_features[i].id, id))
+            return g_features[i].why;
+    return "";
+}
+
+/* host64 --features: the table as JSON, for a launcher to show what this build can't do */
+static void print_features(void)
+{
+    printf("{\"format\": \"xi-features/1\", \"build\": \"%s\", \"version\": \"%s\", \"features\": [", FFXI_BUILD,
+        FFXI_VERSION);
+    for (int i = 0; i < FFXI_FEATURE_COUNT; ++i)
+        printf("%s\n  {\"id\": \"%s\", \"title\": \"%s\", \"on\": %s, \"why\": \"%s\"}", i ? "," : "", g_features[i].id,
+            g_features[i].title, g_features[i].on ? "true" : "false", g_features[i].why);
+    printf("\n]}\n");
+}
+
+static void log_features(void)
+{
+    for (int i = 0; i < FFXI_FEATURE_COUNT; ++i)
+        if (!g_features[i].on)
+            rt_log("[recomp] feature %s off for build %s: %s\n", g_features[i].id, FFXI_BUILD, g_features[i].why);
+}
 #if defined(FFXI_ANDROID_VULKAN)
 #include "benchmark.h"
 #endif
@@ -193,12 +234,22 @@ static uint32_t com_call(uint32_t obj, unsigned slot, unsigned nargs, const uint
  * the object, and the divisor is at +0x30. The game may reset it (zoning), so every frame puts
  * it back: the player's (g_fps_divisor, Config > Display > Frame Rate), or an addon's for the
  * session (g_fps_addon: Ashita's fps addon, FastCS through a cutscene), until the player picks one. */
+/* Android starts at 30 (a phone runs hot and on battery) until the player picks another (modern.cfg) */
+#ifdef __ANDROID__
+static uint32_t g_fps_divisor = 2, g_fps_global;
+#else
 static uint32_t g_fps_divisor = 1, g_fps_global;
+#endif
 static uint32_t g_fps_limit; /* uncapped, held to this many frames a second (Frame Rate 120, 144); 0 none */
 static int g_fps_addon = -1; /* an addon's divisor (fps_request); -1 none */
 
 static void find_fps_global(void)
 {
+    if (!FFXI_FEATURE_FRAME_DIVISOR)
+    {
+        g_fps_global = 0xFFFFFFFFu; /* frame60 (below) gives the old clients their 60 */
+        return;
+    }
     static const uint8_t PAT[] = { 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, 0x3B, 0xC1, 0x74, 0x21, 0x8B, 0x0D };
     uint32_t start = rt_image_base + rt_image_text_rva, end = start + rt_image_text_size;
     for (uint32_t a = start; a + sizeof PAT + 4 <= end; ++a)
@@ -236,14 +287,66 @@ static void fps_request(int divisor)
 /* Config > Display > Frame Rate picked (modern.c), the one it showed too: an addon's ends */
 static void fps_chosen(void) { fps_request(-1); }
 
+/* --- 60 fps on clients with no frame divisor (recomp/meta/features.json frame60) ---------------------------
+ * The 2009 and 2010 clients' frame loop (0x10010c40 on) waits for, and steps the world by, a fixed two
+ * sixtieths: it compares the elapsed time with the float 2.0 four times and floors its step at 2.0.
+ * recomp/meta/builds.json "patches" frame60 re-points those compares at a 1.0 and makes the floor 1.0;
+ * recomp.py translates the loop a second time with those bytes, and the variant runs while its
+ * rt_patches flag is set (the game's code bytes stay as they are). It is set in the world with a
+ * divisor of 1 (--fps-divisor 1, the default): the title and the lobby count frames made for 30 a
+ * second and would run fast. FFXI_FRAME60=always sets it everywhere (testing), 0 never. */
+static int g_addons_on; /* (defined again below, with the addon host) */
+static volatile int* g_frame60[8];
+static int g_frame60_n = -1, g_frame60_on;
+
+static void frame60_frame(void)
+{
+    if (!FFXI_FEATURE_FRAME60)
+        return;
+    if (g_frame60_n < 0)
+    {
+        g_frame60_n = 0;
+        for (unsigned i = 0; i < rt_patch_count && g_frame60_n < 8; ++i)
+            if (rt_patches[i].group && !strcmp(rt_patches[i].group, "frame60"))
+            {
+                int seen = 0;
+                for (int j = 0; j < g_frame60_n; ++j)
+                    seen |= g_frame60[j] == rt_patches[i].on;
+                if (!seen)
+                    g_frame60[g_frame60_n++] = rt_patches[i].on;
+            }
+        rt_log("[recomp] frame60: %s\n", g_frame60_n ? "60 fps in the world with --fps-divisor 1"
+                                                       : "no translated variant (recomp/meta/builds.json patches.frame60)");
+    }
+    if (!g_frame60_n)
+        return;
+    const char* env = getenv("FFXI_FRAME60");
+    uint32_t want = g_fps_addon >= 0 ? (uint32_t)g_fps_addon : g_fps_divisor;
+    int on = env && !strcmp(env, "always") ? 1
+           : env && !strcmp(env, "0")      ? 0
+                                            : want == 1 && g_addons_on && xi_game_login_status() == 2;
+    for (int i = 0; i < g_frame60_n; ++i)
+        if (*g_frame60[i] != on)
+            *g_frame60[i] = on; /* every frame: host/addons/patch.c turns it off if an addon writes there */
+    if (on != g_frame60_on)
+    {
+        g_frame60_on = on;
+        rt_log("[recomp] frame60: %s\n", on ? "on (60 fps)" : "off (the game's 30)");
+    }
+}
+
 /* --- the aspect ratio ---------------------------------------------------------------------------------
- * FFXiMain's projection takes its shape from a float at +0x2F0 of its camera object, which the game
+ * FFXiMain's projection takes its shape from a float of its camera object, which the game
  * sets from the configured resolution as h / (w * 0.25 * 3): 1 for 4:3, and a window of another
  * shape stretches the scene. Ashita's aspect addon finds the setter by its code,
- * `mov eax, [global]; test eax, eax; je; fld [esp+4]; fmul [0.25]; fmul [3.0]`, where the global
- * points at the object; every frame puts the value back from the shape the frame is shown at. */
+ * `mov eax, [global]; test eax, eax; je; fld [esp+4]; fmul [0.25]; fmul [3.0]; fdivr [esp+8];
+ * fstp [eax+field]`, where the global points at the object; every frame puts the value back from
+ * the shape the frame is shown at. The field is read from the setter's own fstp: +0x2F0 in today's
+ * builds, +0x2E8 in 2009-07-09 and 2010-03-16, where writing +0x2F0 clobbered another camera field
+ * every frame and wrecked the title screen's scene. */
 static float g_aspect;          /* width / height to project for; 0 follows the window, < 0 off */
 static uint32_t g_aspect_global; /* 0 not looked for yet, 0xFFFFFFFF not found */
+static uint32_t g_aspect_field;  /* the float's offset in the camera object, from the setter's fstp */
 
 static void find_aspect_global(void)
 {
@@ -259,8 +362,19 @@ static void find_aspect_global(void)
             ++i;
         if (i == sizeof PAT)
         {
+            /* the fstp [eax+disp32] (d9 98) that stores the result, a few instructions on */
+            uint32_t field = 0;
+            for (uint32_t b = a + sizeof PAT + 4; b + 6 <= end && b < a + sizeof PAT + 4 + 16; ++b)
+                if (rd8(b) == 0xD9 && rd8(b + 1) == 0x98)
+                {
+                    field = rd32(b + 2);
+                    break;
+                }
+            if (!field || field > 0x10000)
+                continue; /* not the setter's shape: don't write a guessed field */
             g_aspect_global = rd32(a + 1);
-            rt_log("[recomp] aspect ratio: global %08x (code at %08x), %s\n", g_aspect_global, a,
+            g_aspect_field = field;
+            rt_log("[recomp] aspect ratio: global %08x +%x (code at %08x), %s\n", g_aspect_global, field, a,
                 g_aspect > 0 ? "fixed" : "following the window");
             return;
         }
@@ -271,7 +385,7 @@ static void find_aspect_global(void)
 
 static void fix_aspect(void)
 {
-    if (g_aspect < 0)
+    if (g_aspect < 0 || !FFXI_FEATURE_ASPECT)
         return;
     if (!g_aspect_global)
         find_aspect_global();
@@ -292,8 +406,8 @@ static void fix_aspect(void)
     float v = 4.0f / 3.0f / ratio; /* the game's h / (w * 0.75) */
     uint32_t bits;
     memcpy(&bits, &v, 4);
-    if (rd32(object + 0x2F0) != bits)
-        wr32(object + 0x2F0, bits);
+    if (rd32(object + g_aspect_field) != bits)
+        wr32(object + g_aspect_field, bits);
 }
 
 /* --- draw distance -------------------------------------------------------------------------------------
@@ -333,6 +447,8 @@ static void find_draw_globals(void)
 static void fix_draw_distance(void)
 {
     static uint32_t game[2] = { 0x3F800000u, 0x3F800000u }, ours[2]; /* the game's last value, what we wrote */
+    if (!FFXI_FEATURE_DRAW_DISTANCE)
+        return;
     float live[2] = { gfx_fx_get("draw"), gfx_fx_get("draw_entities") };
     float k[2] = { live[0] > 0 ? live[0] : g_draw_world, live[1] > 0 ? live[1] : g_draw_entities };
     if (!g_draw_global[0])
@@ -543,7 +659,7 @@ static double parse_shape(const char* s)
  * corner is its offset from the projected point times [esp+0x4c] across and [esp+0x50] down. It
  * sets those from the target's width and height, which the target's stretch to the window turns
  * into the window's, so a name keeps the shape it was drawn for only in a 4:3 window and widens
- * with the window (1.8 times at 3440x1440). The hook point (meta/builds.json "nameplate_scale")
+ * with the window (1.8 times at 3440x1440). The hook point (recomp/meta/builds.json "nameplate_scale")
  * is just after both are set: the across factor is brought back to a 4:3 window's, and both take
  * the size asked for. Text stays centred on the point, since offsets are from it. */
 #ifdef FFXI_HOOK_NAMEPLATE_SCALE
@@ -570,6 +686,14 @@ static void nameplate_scale(Guest* g)
 static void setup_nameplates(void)
 {
     int wanted = g_nameplate_fix || g_nameplate_sx != 1.0f || g_nameplate_sy != 1.0f;
+    if (!FFXI_FEATURE_NAMEPLATES)
+    {
+        (void)nameplate_scale;
+        if (wanted)
+            rt_log("[recomp] nameplates: off for build %s (%s); they stay as the game draws them\n", FFXI_BUILD,
+                feature_why("nameplates"));
+        return;
+    }
 #ifdef FFXI_HOOK_NAMEPLATE_SCALE
     (void)wanted;
     rt_hook_nameplate_scale = nameplate_scale;
@@ -587,7 +711,7 @@ static void setup_nameplates(void)
  * its FourCC at +0x20, and at +0x28 its parent's handle (*handle is the parent resource). The zone
  * DATs keep their water models under effect directories named for it - mizu, miz1, umi1, sea, taki
  * (waterfalls), kawa (rivers) - so a model with one of those above it is water. The hooks bracket the
- * load (meta/builds.json "water_model_load" at its start, "water_model_loaded" just after the call
+ * load (recomp/meta/builds.json "water_model_load" at its start, "water_model_loaded" just after the call
  * that makes the model's vertex buffers) and d3d8 marks the buffers made meanwhile (d3d8_water_loading).
  * FFXI_WATERLOG=1 logs every model loaded with the directories above it, to find more. */
 #ifdef FFXI_HOOK_WATER_MODEL_LOAD
@@ -639,6 +763,11 @@ static void setup_water(void)
 {
     const char* log = getenv("FFXI_WATERLOG");
     g_water_log = log && log[0] && log[0] != '0';
+    if (!FFXI_FEATURE_WATER)
+    {
+        (void)water_model_load, (void)water_model_loaded;
+        return;
+    }
 #if defined(FFXI_HOOK_WATER_MODEL_LOAD) && defined(FFXI_HOOK_WATER_MODEL_LOADED)
     rt_hook_water_model_load = water_model_load;
     rt_hook_water_model_loaded = water_model_loaded;
@@ -715,6 +844,11 @@ static void setup_lod(void)
 {
     const char* log = getenv("FFXI_LODLOG");
     g_lod_log = log && log[0] && log[0] != '0';
+    if (!FFXI_FEATURE_LOD)
+    {
+        (void)lod_pick, (void)lod_pick2;
+        return;
+    }
 #if defined(FFXI_HOOK_LOD_PICK) && defined(FFXI_HOOK_LOD_PICK2)
     rt_hook_lod_pick = lod_pick;
     rt_hook_lod_pick2 = lod_pick2;
@@ -816,6 +950,8 @@ static void cull_test(Guest* g)
 static void setup_cull_prime(void)
 {
 #ifdef HAVE_CULL_PRIME
+    if (!FFXI_FEATURE_SUN_PRIME)
+        return;
     const char* log = getenv("FFXI_PRIMELOG");
     g_prime_log = log && log[0] && log[0] != '0';
     g_cull_pass = gwin_alloc(64);
@@ -981,6 +1117,20 @@ static void upscale_background(void)
 }
 #endif
 
+#if defined(FFXI_SAVE_USER_DATA) && defined(FFXI_MOBILE)
+/* The app going to the background (a phone's home button, the app switcher): the game writes the
+ * character's files - cnf.dat's settings, the macros, the item lists - only at logout and shutdown, and
+ * Android ends a backgrounded app without either, so what changed since was lost. The same save
+ * (logout's, 101acda0: three null-checked saves through globals), once the game runs (its window). */
+static void save_user_data(void)
+{
+    if (!d3d8_window())
+        return;
+    rt_log("[recomp] to the background: the character's settings and macros saved\n");
+    guest_call(FFXI_SAVE_USER_DATA, 0, NULL);
+}
+#endif
+
 #ifdef FFXI_MOBILE
 static void* g_signin_window; /* the window the game takes over: display_fit_start */
 
@@ -1142,7 +1292,7 @@ static void switch_fps(void)
 }
 #endif
 
-/* host/vicons.c reads the install through the DAT overlays, as the game would */
+/* host/ui/vicons.c reads the install through the DAT overlays, as the game would */
 static char g_vicons_game[1024];
 
 static uint8_t* vicons_read(const char* rel, size_t* size)
@@ -1204,6 +1354,7 @@ static void present_hook(void)
             modern_window_size(w, h, mw, mh);
     }
 #endif
+    frame60_frame();
     if (!g_fps_global)
         find_fps_global();
     if (g_fps_global == 0xFFFFFFFFu)
@@ -1278,6 +1429,12 @@ int xi_host_game_started;
 
 int main(int argc, char** argv)
 {
+    for (int i = 1; i < argc; ++i)
+        if (!strcmp(argv[i], "--features"))
+        {
+            print_features();
+            return 0;
+        }
 #if defined(_WIN32) && !defined(_MSC_VER)
     setvbuf(stdout, NULL, _IOFBF, 1 << 16);
     setvbuf(stderr, NULL, _IOFBF, 1 << 16);
@@ -1338,7 +1495,8 @@ int main(int argc, char** argv)
     const char* bundled_tex_env = getenv("FFXI_BUNDLED_TEXTURES");
     if ((bundled_tex_env && bundled_tex_env[0] == '0') || !bundled_path(argv[0], "textures", bundled_tex, sizeof bundled_tex))
         bundled_tex[0] = 0;
-    const char* server_name = NULL; /* --server as given, for the sign-in screen */
+    const char* server_name = NULL; /* --server as given, for the sign-in screen; with a PlayOnline
+                                     * session, a private PlayOnline server the game's hosts go to */
     int nameplates_given = 0, nameplate_scale_given = 0, ui_aspect_given = 0, draw_given = 0, fps_given = 0, lod_given = 0;
     int cexi = CEXI_OFF, cexi_given = 0;
     float ui_aspect = 0.0f;
@@ -1474,7 +1632,7 @@ int main(int argc, char** argv)
             if (!frame_supported())
             {
                 /* the game's own uncapped pacing would run the world as fast as the frames, unheld */
-                fprintf(stderr, "--fps-limit: game build %s cannot run uncapped at the game's speed (tools/frame_sites.py)\n",
+                fprintf(stderr, "--fps-limit: game build %s cannot run uncapped at the game's speed (tools/version/frame_sites.py)\n",
                     FFXI_BUILD);
                 return 2;
             }
@@ -1578,6 +1736,10 @@ int main(int argc, char** argv)
         lsb.password = getenv("FFXI_PASSWORD");
     if (!addon_harness)
         discord_init();
+    /* a launcher's PlayOnline session with --server: its PlayOnline server is a private one, and the
+     * game's hosts go there too. Taken before the sign-in screen, whose own PlayOnline sign-in is
+     * retail's whatever --server says. */
+    const int private_pol = have_session && server_name;
     if (!addon_harness && !have_session && !(lsb.user && (lsb.password || lsb.login_token)))
     {
         /* Nothing on the command line signs in: the sign-in screen, in the game's own art. Its
@@ -1725,10 +1887,12 @@ int main(int argc, char** argv)
     d3d8_init();
     dsound_init();
     dinput_init();
+    dinput_xinput_order(FFXI_FEATURE_DINPUT_PAD); /* padsin000's codes on a DirectInput-only client */
     ws2_init();
     /* the game's hosts: the lobby through gamecore's resolver, every other one through
-     * gethostbyname. With --session none is redirected: they resolve through DNS, as retail's. */
-    if (have_session)
+     * gethostbyname. With a PlayOnline session none is redirected: they resolve through DNS, as
+     * retail's, unless the launcher named a private PlayOnline server with --server. */
+    if (have_session && !private_pol)
     {
         ws2_set_game_server(0);
         gamecore_set_lobby_resolver(ws2_resolve_ipv4);
@@ -1758,7 +1922,10 @@ int main(int argc, char** argv)
     upscale_background();
 #endif
 #ifdef FFXI_MOBILE
-    display_fit_start(g_signin_window); /* the game's size from the screen, whatever the file says */
+#ifdef FFXI_SAVE_USER_DATA
+    user32_background_hook = save_user_data;
+#endif
+    display_fit_start(g_signin_window, data_dir); /* the game's size from the screen, whatever the file says (its UI Scale the player's) */
     soft_keyboard_off();
 #elif defined(__SWITCH__)
     {
@@ -1899,6 +2066,7 @@ int main(int argc, char** argv)
     ole_register_class(CLSID_GameMain, rt_image_base);
     ole_register_class(CLSID_FxFileManager, FFXI_BASE);
     ole_register_class(CLSID_FFXiEntry, FFXI_BASE);
+    log_features();
     gamecore_init();
     geometry_hooks_init();
     probe_hooks_init();
@@ -1907,7 +2075,7 @@ int main(int argc, char** argv)
     ModernSetup ms = { game, data_dir, &g_fps_divisor, fps_given, ui_aspect_given, nfinals ? finals[nfinals - 1] : NULL,
         &g_nameplate_fix, &g_nameplate_sx, &g_nameplate_sy, nameplates_given || nameplate_scale_given, fps_chosen, &g_fps_limit };
     modern_init(&ms);
-    /* status icons drawn from vectors (host/vicons.c); FFXI_VECTOR_ICONS=0 keeps the game's */
+    /* status icons drawn from vectors (host/ui/vicons.c); FFXI_VECTOR_ICONS=0 keeps the game's */
     if (!getenv("FFXI_VECTOR_ICONS") || strcmp(getenv("FFXI_VECTOR_ICONS"), "0"))
     {
         snprintf(g_vicons_game, sizeof g_vicons_game, "%s", game);
@@ -1917,6 +2085,7 @@ int main(int argc, char** argv)
     setup_nameplates();
     setup_water();
     setup_lod();
+    ps2fix_setup();
     scene_setup();
     frame_setup();
     setup_cull_prime();
@@ -1997,7 +2166,7 @@ int main(int argc, char** argv)
     /* IFFXiEntry::GameStart(pCore, &pFFXiMessage): the game runs inside this call */
     rt_log("[recomp] GameStart\n");
 #if defined(_WIN32) || defined(__SWITCH__)
-    /* FFXI_SAMPLE=<file>: where this thread's time goes, sampled (tools/sample_report.py) */
+    /* FFXI_SAMPLE=<file>: where this thread's time goes, sampled (tools/debug/sample_report.py) */
     if (getenv("FFXI_SAMPLE") && getenv("FFXI_SAMPLE")[0])
         rt_log("[recomp] sampling the game thread to %s: %s\n", getenv("FFXI_SAMPLE"),
             sampler_start(getenv("FFXI_SAMPLE")) ? "on" : "cannot write it");

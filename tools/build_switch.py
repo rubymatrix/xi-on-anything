@@ -2,12 +2,12 @@
 """Build XI on Anything for the Nintendo Switch (homebrew, libnx) and put it on an SD card.
 
   python tools/build_switch.py plat-test
-        the platform layer's self-test (tests/switch_plat_test.c) as build/switch/plat-test.nro
+        the platform layer's self-test (platforms/switch/tests/switch_plat_test.c) as build/switch/plat-test.nro
   python tools/build_switch.py gfx-test
-        the graphics back end's test (tests/gfx_test.c on OpenGL, through EGL) as build/switch/gfx-test.nro:
+        the graphics back end's test (tests/gfx/gfx_test.c on OpenGL, through EGL) as build/switch/gfx-test.nro:
         its lines to gfx-test.log on the card, then green on the screen when every check passed, red when not
   python tools/build_switch.py settings
-        the settings app (host/switch_settings.c: the resolution, the frame rate and the rest of run.args, on
+        the settings app (platforms/switch/switch_settings.c: the resolution, the frame rate and the rest of run.args, on
         the console) as build/switch/xi-on-anything-settings.nro; host builds it too, setup copies it to
         sdmc:/switch/xi-on-anything-settings/ (a folder of its own: the homebrew menu lists one .nro a folder)
   python tools/build_switch.py mesa
@@ -20,7 +20,7 @@
         files that changed since the last copy); write run.args from the options. <SD root> is the card
         in a reader, the console's SD mounted over USB (Hekate's UMS), or an emulator's virtual SD card
         (--sd emu: the one of the emulator `run` uses). --mtp [device] instead: the console over USB as an
-        MTP device (DBI's MTP responder), on Windows (tools/switch_mtp.ps1).
+        MTP device (DBI's MTP responder), on Windows (platforms/switch/switch_mtp.ps1).
   python tools/build_switch.py install --sd <SD root> [--game "<FINAL FANTASY XI folder>"] [setup's options]
         host, then setup: the .nro built and put on the card with the game and the settings, in one (what
         the launcher runs, as build_android.py install; tools/setup_switch.py runs it for a player). The game
@@ -183,7 +183,7 @@ def version():
 
 
 def icon():
-    own = ROOT / 'switch/icon.jpg'
+    own = ROOT / 'platforms/switch/icon.jpg'
     return own if own.exists() else tc.LIBNX / 'default_icon.jpg'
 
 
@@ -208,7 +208,7 @@ def link_nro(objs, name, libs, title=TITLE, icon_file=None):
 PLAT_TEST = [
     'runtime/portable/plat_posix.c',
     'runtime/portable/gwin.c',
-    'tests/switch_plat_test.c',
+    'platforms/switch/tests/switch_plat_test.c',
 ]
 
 
@@ -220,27 +220,27 @@ def plat_test(_a):
 
 
 def settings(_a):
-    """The settings app (host/switch_settings.c): build/switch/xi-on-anything-settings.nro. No game code in it."""
+    """The settings app (platforms/switch/switch_settings.c): build/switch/xi-on-anything-settings.nro. No game code in it."""
     tc.require()
     OUT.mkdir(parents=True, exist_ok=True)
-    objs = compile_many(['host/switch_settings.c'], 'settings')
-    return link_nro(objs, SETTINGS, ['-lnx', '-lm'], title=TITLE + ' Settings', icon_file=ROOT / 'switch/icon_settings.jpg')
+    objs = compile_many(['platforms/switch/switch_settings.c'], 'settings')
+    return link_nro(objs, SETTINGS, ['-lnx', '-lm'], title=TITLE + ' Settings', icon_file=ROOT / 'platforms/switch/icon_settings.jpg')
 
 
 def gfx_test(_a):
-    """tests/gfx_test.c on the OpenGL back end, through EGL (tests/switch_gfx_test.c): build/switch/gfx-test.nro"""
+    """tests/gfx/gfx_test.c on the OpenGL back end, through EGL (platforms/switch/tests/switch_gfx_test.c): build/switch/gfx-test.nro"""
     tc.require()
     pick_mesa()
     OUT.mkdir(parents=True, exist_ok=True)
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
-    objs = compile_many(GFX + ['runtime/portable/sdl_nx.c', 'runtime/portable/plat_posix.c', 'runtime/portable/gwin.c',
-                               'tests/switch_gfx_test.c'], 'gfx-test', sdl)
-    objs += compile_many(['tests/gfx_test.c'], 'gfx-test-main', sdl + ['-DGFX_GL', '-Dmain=gfx_test_main'])
+    objs = compile_many(GFX + ['platforms/switch/sdl_nx.c', 'runtime/portable/plat_posix.c', 'runtime/portable/gwin.c',
+                               'platforms/switch/tests/switch_gfx_test.c'], 'gfx-test', sdl)
+    objs += compile_many(['tests/gfx/gfx_test.c'], 'gfx-test-main', sdl + ['-DGFX_GL', '-Dmain=gfx_test_main'])
     return link_nro(objs, 'gfx-test', GFX_LIBS + ['-lnx', '-lm'], title='XI on Anything graphics test')
 
 
-# mbedtls' time and entropy from runtime/portable/tls_nx.c (switch/mbedtls_config.h), for it and its includers
-MBEDTLS_CONFIG = ['-I' + (ROOT / 'switch').as_posix(), '-DTF_PSA_CRYPTO_USER_CONFIG_FILE=<mbedtls_config.h>',
+# mbedtls' time and entropy from platforms/switch/tls_nx.c (platforms/switch/mbedtls_config.h), for it and its includers
+MBEDTLS_CONFIG = ['-I' + (ROOT / 'platforms' / 'switch').as_posix(), '-DTF_PSA_CRYPTO_USER_CONFIG_FILE=<mbedtls_config.h>',
                   '-DMBEDTLS_USER_CONFIG_FILE=<mbedtls_config.h>']
 
 
@@ -262,8 +262,8 @@ def desktop_tools():
 
 
 # the graphics: OpenGL 4.3 core (gfx_gl.c) on Mesa's nouveau, through EGL (switch-mesa, switch-libdrm_nouveau)
-GFX = ['runtime/portable/gfx_gl.c', 'runtime/portable/gfx_msl.c', 'runtime/portable/gfx_msl_shaders.c',
-       'runtime/portable/gfx_fx.c']
+GFX = ['runtime/portable/gfx/gfx_gl.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
+       'runtime/portable/gfx/gfx_fx.c']
 GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
 # Mesa 26, mesa-switch's (github.com/danfromtico/mesa-switch: a Horizon backend over libnx, and Mesa's disk
 # shader cache, which switch-mesa 20.1 is built without; docs/switch.md, Mesa 26), when there is one:
@@ -277,7 +277,7 @@ MESA_NAME = 'mesa-switch-26.2.4-0ff5207'
 MESA_RELEASE = ('https://github.com/hasanzainul10/xi-on-anything/releases/download/switch-mesa-26.2.4/'
                 + MESA_NAME + '.zip')
 MESA_SHA256 = '5f559138e4ec571cd3064dcb581624c75fa747df750807b0ef044095baa0df9d'
-MESA_INCLUDERS = {'runtime/portable/gfx_gl.c'}
+MESA_INCLUDERS = {'runtime/portable/gfx/gfx_gl.c'}
 MESA = None
 
 
@@ -353,15 +353,15 @@ def host(a):
     # ours first: its errors show in seconds, the translation's compile takes a while
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
     hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + GFX + [
-        'runtime/portable/sdl_nx.c', 'runtime/portable/tls_nx.c', 'runtime/portable/sampler_nx.c', 'host/addons_none.c']
+        'platforms/switch/sdl_nx.c', 'platforms/switch/tls_nx.c', 'runtime/portable/sampler_nx.c', 'host/addons_none.c']
     # the render queue: GL's context is its render thread's, and the game calls from several threads
     queue = ['-DGFX_GL', '-DGFX_QUEUE']
-    ours = bp.PORTABLE + hosts + ['runtime/portable/gfx_queue.c']
+    ours = bp.PORTABLE + hosts + ['runtime/portable/gfx/gfx_queue.c']
     gen_all, gen_ffxi = bp.generated('all'), bp.generated('ffxi')
     phase('compile')
     plan_progress(len(ours) + 1 + len(gen_all) + len(gen_ffxi))
     objs = compile_many(ours, 'host', sdl + tls + queue + ['-Dmain=xi_host_main'])
-    objs += compile_many(['host/switch_main.c'], 'entry', sdl)
+    objs += compile_many(['platforms/switch/switch_main.c'], 'entry', sdl)
     # GCC's names for the generated C's warnings (GEN_WARNINGS is clang's)
     warn = ['-w']
     jobs = int(os.environ.get('XI_SWITCH_JOBS', '6'))
@@ -500,8 +500,8 @@ def merge_args(old, new):
 
 
 def mtp_mirror(a, src, dest):
-    """src to dest (a path on the device's storage) over MTP (tools/switch_mtp.ps1)."""
-    run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ROOT / 'tools/switch_mtp.ps1',
+    """src to dest (a path on the device's storage) over MTP (platforms/switch/switch_mtp.ps1)."""
+    run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ROOT / 'platforms/switch/switch_mtp.ps1',
          '-Source', src, '-Dest', dest, '-Device', a.mtp, '-Storage', a.storage])
 
 
@@ -516,8 +516,8 @@ def setup_mtp(a):
         shutil.copyfile(nro, stage / nro.name)
     elif a.nro:
         raise SystemExit(f'{nro}: no such file')
-    shutil.copyfile(ROOT / 'ffxi.reg', stage / 'ffxi.reg')
-    shutil.copyfile(ROOT / 'switch/switch.reg', stage / 'switch.reg')  # the Switch's defaults over it
+    shutil.copyfile(ROOT / 'assets' / 'ffxi.reg', stage / 'ffxi.reg')
+    shutil.copyfile(ROOT / 'platforms/switch/switch.reg', stage / 'switch.reg')  # the Switch's defaults over it
     lines = run_args(a)
     if lines or not (stage / 'run.args').exists():
         (stage / 'run.args').write_text('\n'.join(lines) + ('\n' if lines else ''))
@@ -588,8 +588,8 @@ def setup(a):
     if a.dats:
         n, size = copy_tree(Path(a.dats), app / 'dats')
         print(f'DAT overlay: {n} files copied, {size / 1e6:.0f} MB')
-    shutil.copyfile(ROOT / 'ffxi.reg', app / 'ffxi.reg')
-    shutil.copyfile(ROOT / 'switch/switch.reg', app / 'switch.reg')  # the Switch's defaults over it
+    shutil.copyfile(ROOT / 'assets' / 'ffxi.reg', app / 'ffxi.reg')
+    shutil.copyfile(ROOT / 'platforms/switch/switch.reg', app / 'switch.reg')  # the Switch's defaults over it
     path = app / 'run.args'
     old = path.read_text().splitlines() if path.exists() else []
     lines = merge_args(old, run_args(a))

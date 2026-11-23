@@ -1,9 +1,9 @@
 # Nintendo Switch (homebrew, experimental)
 
-The recompiled game as a Switch homebrew app (`.nro`), built with devkitPro's libnx on your own PC from
-your own game files, and copied to the console's SD card with the game beside it.
+The game as a Switch homebrew app (`.nro`). You build it with devkitPro's libnx on your own PC from your
+own game files, then copy it to the console's SD card with the game beside it.
 
-Developer notes are in [../switch.md](../switch.md).
+Developer notes: [switch-dev.md](switch-dev.md).
 
 > [!IMPORTANT]
 > **Status**: experimental, playable on a console. The sign-in screen, the game in the world, battles
@@ -22,22 +22,21 @@ Developer notes are in [../switch.md](../switch.md).
   if it is not in `C:\devkitPro`, `C:\msys64` or `D:\msys64`.
 - Python 3.12+ with `capstone` and `pefile`.
 - Your `FINAL FANTASY XI` folder and a LandSandBoat server ([README.md](README.md)).
-- To run on a console: a Switch that runs homebrew (Atmosphère), launched with **full memory**: hold R
-  while starting a game to open the homebrew menu over it. The album's
-  homebrew menu has too little memory for the game.
-- To run without a console: [Ryubing](https://git.ryujinx.app/projects/Ryubing/releases) with your own
-  console's `prod.keys` (dumped with Lockpick_RCM) in its `system` folder. Its portable mode (a
-  `portable` folder beside `Ryujinx.exe`) keeps its data and virtual SD card beside it. Turn on
-  **Settings > Network > Enable guest Internet access**: without it Ryubing's resolver refuses every name,
-  even `127.0.0.1`, and the host exits with `--server: cannot resolve`. On macOS, `build_switch.py` finds
-  `Ryujinx.app` in `/Applications` or `~/Applications` and its card in `~/Library/Application Support/Ryujinx`.
+- To run on a console: a Switch that runs homebrew (Atmosphère), started with **full memory**: hold R
+  while starting a game to open the homebrew menu over it. The album's homebrew menu has too little memory.
+- To run without a console: [Ryubing](https://git.ryujinx.app/projects/Ryubing/releases) with your
+  console's `prod.keys` (dumped with Lockpick_RCM) in its `system` folder. Portable mode (a `portable`
+  folder beside `Ryujinx.exe`) keeps its data and virtual SD card there. Turn on **Settings > Network >
+  Enable guest Internet access**, or no name resolves, not even `127.0.0.1`, and the host exits with
+  `--server: cannot resolve`. On macOS, `build_switch.py` finds `Ryujinx.app` in `/Applications` or
+  `~/Applications` and its card in `~/Library/Application Support/Ryujinx`.
 
 ## Quick start
 
 With the SD card in the PC:
 
-- **Windows**: double-click `setup-switch.bat` in the `switch` folder.
-- **Linux, macOS**: `./switch/setup-switch.sh`.
+- **Windows**: double-click `setup-switch.bat` in the `platforms\switch` folder.
+- **Linux, macOS**: `./platforms/switch/setup-switch.sh`.
 
 A window opens: pick your game folder and the SD card with **Browse...** (a card with Atmosphère on it is
 listed by itself, and the server is filled in from your launcher), click **Install** beside *This PC* if it
@@ -86,14 +85,14 @@ What `setup-switch` does, one command at a time.
 
 ```
 python tools/prepare.py --game "<your FINAL FANTASY XI folder>"
-python tools/frame_sites.py
+python tools/version/frame_sites.py
 python tools/build_switch.py host
 ```
 
 `prepare.py` identifies your game version and unpacks its code into `generated/`. `frame_sites.py` is only
-needed when `meta/builds.json` has no frame delta sites for your version (no `frame_int_sites` in its entry;
+needed when `recomp/meta/builds.json` has no frame delta sites for your version (no `frame_int_sites` in its entry;
 a build without them logs `has no frame delta sites` at the start): it finds them and adds them to
-`meta/builds.json`. With them the Switch runs uncapped with the world at its real speed; without them, at
+`recomp/meta/builds.json`. With them the Switch runs uncapped with the world at its real speed; without them, at
 30 fps ([Performance](#performance)). If it can't find them it says so and changes nothing: skip it.
 
 `host` translates the game (the desktop translation, `generated/all`, shared with the PC builds) and
@@ -108,7 +107,7 @@ python tools/build_switch.py setup --sd E:\ --game "<your FINAL FANTASY XI folde
 ```
 
 `--sd` is the card's root: in a card reader, the console's card over USB (Hekate's USB Mass Storage), or
-`--sd emu` for the emulator's virtual card. It copies:
+`emu` for the emulator's card. On Windows, `--mtp` copies to the console over USB instead. It copies:
 
 - the `.nro` to `sdmc:/switch/xi-on-anything/`, where the homebrew menu lists it
 - the game to `sdmc:/switch/xi-on-anything/SquareEnix/FINAL FANTASY XI` (and the viewer folder beside it,
@@ -116,7 +115,8 @@ python tools/build_switch.py setup --sd E:\ --game "<your FINAL FANTASY XI folde
   stopped part way: only files whose size or date differ are copied.
 - `ffxi.reg`, and `switch.reg` over it: the Switch's defaults (a 1920x1080 window and background,
   windowed, menus at 960x540 so the UI is twice its size, readable on a TV and in handheld). What you
-  change in game is saved to `settings.reg` beside them and wins over both.
+  change in game is saved to `settings.reg` beside them and wins over both. Config > Advanced's Display
+  page keeps its own `data/settings.reg`, loaded last.
 - `run.args` with the options you gave: an option given replaces its line there, and every other line
   (yours, added by hand) is kept
 
@@ -125,8 +125,8 @@ After the first copy, a copy of the game is skipped when the game folder hasn't 
 `build_switch.py install` takes the same options and does steps 1's `host` and 2 in one, as
 `build_android.py install` does for Android.
 
-`setup`'s options, which it writes to `run.args` (one host argument per line; edit the file on the card
-to change them later; `--layout` becomes `--switch-layout` there):
+All options but `--nro`, `--mtp`, `--storage` and `--extra` go in `run.args`, one host argument per line.
+Edit it on the card to change them later. `--layout` becomes `--switch-layout` there.
 
 | Option | What it does |
 | --- | --- |
@@ -135,24 +135,27 @@ to change them later; `--layout` becomes `--switch-layout` there):
 | `--fps-divisor 0\|1\|2` | Leave it out: the default is the best there is (uncapped with frame delta sites, else 30). 1 (60 fps) or 2 (30) turn the frame delta sites off: see [Performance](#performance). |
 | `--dats <folder>` | A DAT overlay folder, copied to the card and passed as `--dats`. |
 | `--arg "<host options>"` | Any other [host option](../running.md#options), for example `--arg "--user me"`. |
+| `--nro <file>` | The `.nro` to copy (default `build/switch/xi-on-anything.nro`). |
+| `--mtp [device]` | Copy over USB to a console running DBI's MTP responder, by its name in This PC (default `Switch`). Windows only (`platforms/switch/switch_mtp.ps1`). |
+| `--storage <name>` | With `--mtp`: the device's storage (default `1: SD Card`). |
+| `--extra <file>` | With `--mtp`: another file to put beside the `.nro` (for example `plat-test.nro`). |
 
-Don't put `--pass` in `run.args` unless the card stays with you: it is a plain text file. Use the sign-in
-screen's **Remember password** instead: the password is kept on the card encrypted with a key only your
-console has (`sdmc:/switch/xi-on-anything/data/keychain/`), so a copy of the card can't be read on a
-computer or another Switch.
+`run.args` is plain text, so keep `--pass` out of it unless the card stays with you. Use the sign-in
+screen's **Remember password** instead. It stores the password on the card encrypted with a key only your
+console has (`sdmc:/switch/xi-on-anything/data/keychain/`), so a copy of the card is useless elsewhere.
 
-A line `FFXI_NAME=value` in `run.args` sets that environment variable instead of passing an argument
-(there is no shell on the Switch), for example `FFXI_NET_TRACE=1` to log the network.
+A line `FFXI_NAME=value` in `run.args` sets an environment variable (there is no shell on the Switch),
+for example `FFXI_NET_TRACE=1` to log the network.
 
 ### 3. Run
 
 - **Console**: hold R while starting any game, then pick **XI on Anything** in the homebrew menu
   ([Settings](#settings): **XI on Anything Settings**).
 - **Emulator**: `python tools/build_switch.py run` copies the `.nro` to the emulator's card and starts it.
-- **After a rebuild**, without copying the game again: `python tools/build_switch.py deploy --ip <console IP>`
-  sends the new `.nro` over the network (press Y in the homebrew menu first, to receive it).
+- **After a rebuild**: `python tools/build_switch.py deploy --ip <console IP>` sends the new `.nro` over
+  the network without copying the game again. Press Y in the homebrew menu first.
 
-The log is `sdmc:/switch/xi-on-anything/host64.log`; `python tools/build_switch.py logs --sd <card>` prints it.
+The log is `sdmc:/switch/xi-on-anything/host64.log`. `python tools/build_switch.py logs --sd <card>` prints it.
 
 ### Home screen icon
 
@@ -203,7 +206,7 @@ as above.
 By default the game is drawn at the screen's size (1280x720 in the hand, 1920x1080 on a TV), the world too,
 and the CPU runs at its top speed (1785 MHz) while a zone loads. The frame rate:
 
-- If your game version has frame delta sites (`tools/frame_sites.py`; the log says `[switch] frame rate: ...` at
+- If your game version has frame delta sites (`tools/version/frame_sites.py`; the log says `[switch] frame rate: ...` at
   the start), it runs uncapped: as many frames as the console draws, up to the screen's 60 (about 35-60 in the
   world at stock clocks), with the world at its real speed whatever the rate.
 - Without them it runs at 30 fps, which it holds. At 60 (`--fps-divisor 1`) a console at stock clocks draws
@@ -247,7 +250,7 @@ things took most of what wasn't the game's own logic. Both are moved off it by d
   `gfx_gl.c`'s `gfx_chars_draw`): each mesh's vertices go to the GPU once, and a frame's bones, lights and
   materials are copied per draw, instead of the game skinning every vertex on the CPU and drawing the result.
   The game still draws a few itself (environment-mapped armour, a fading character, the shine pass);
-  `FFXI_SCENELOG=1` counts them. Needs the game version's character addresses in `meta/builds.json`
+  `FFXI_SCENELOG=1` counts them. Needs the game version's character addresses in `recomp/meta/builds.json`
   (2025-12-26 has them); without them the game draws its characters.
 
 A busy town at 1020 MHz handheld (1,400-1,600 draws), the GPU at 614 MHz:
@@ -307,7 +310,6 @@ hitches when players come into view are their model DATs read the first time: 1.
 
 ## Controls
 
-The controller works the way an Xbox controller does on the PC builds (the game's own gamepad support),
-with A/B as chosen above. In handheld mode a quick tap on the touch screen is a click where you tap (as on
-Android); the D-pad and stick move through menus. Text fields (the sign-in) and the chat line open the
-Switch's keyboard.
+The controller works like an Xbox controller on the PC builds, with A/B as chosen above. In handheld mode,
+a quick tap on the touch screen clicks there; the D-pad and stick move through menus. Text fields and the
+chat line open the Switch's keyboard.

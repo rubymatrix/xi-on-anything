@@ -1,5 +1,5 @@
 -- The Ashita v4 layer (host/addons/lua/ashita*.lua), exercised the way Ashita addons use it
--- (tests/ashita_api_test.sh). Self-contained: Ashita's own libs are not needed.
+-- (tests/addons/ashita_api_test.sh). Self-contained: Ashita's own libs are not needed.
 addon.name    = 'ashtest';
 addon.author  = 'tests';
 addon.version = '1.0';

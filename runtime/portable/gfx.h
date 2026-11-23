@@ -550,7 +550,7 @@ void gfx_nx_swap_interval(int n); /* gfx_gl.c: vblanks per frame, 1 or 2 (the re
  * drawable, in its pixels, the back buffer is presented into, the rest black; w 0 for all of it
  * (Android: the letterbox present_rect.h makes). */
 void gfx_set_present_rect(int x, int y, int w, int h);
-/* iOS's Metal (host/ios_main.c) and Android's overlay (host/android_overlay.c): a picture (RGBA8,
+/* iOS's Metal (platforms/ios/ios_main.c) and Android's overlay (platforms/android/android_overlay.c): a picture (RGBA8,
  * w x h, copied) drawn behind the present rectangle, filling the drawable; NULL for none (black). */
 void gfx_set_wallpaper(const uint8_t* rgba, int w, int h);
 /* iOS's Metal and Android's overlay (host/touch.c): the touch controls drawn over every frame, in the

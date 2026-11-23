@@ -1,6 +1,6 @@
 ---
 name: game-version-update
-description: End-to-end support for a new FINAL FANTASY XI client version, from install folder to recompiled builds on every platform. Use when the user hands over a new game version or install ("here's my new game version", "the game patched", "new FFXiMain.dll", a private-server install), when prepare.py says a DLL "is build <sha>, which meta/builds.json does not know", or when asked to add or support a new build.
+description: End-to-end support for a new FINAL FANTASY XI client version, from install folder to recompiled builds on every platform. Use when the user hands over a new game version or install ("here's my new game version", "the game patched", "new FFXiMain.dll", a private-server install), when prepare.py says a DLL "is build <sha>, which recomp/meta/builds.json does not know", or when asked to add or support a new build.
 ---
 
 # New game version, end to end
@@ -10,7 +10,7 @@ there to a committed-ready build entry and translated, tested binaries on every 
 This skill runs two others in order:
 
 1. **game-version-analyze**: identify, unpack, carry addresses over, and run the discovery pass.
-   The result is `meta/<Module>.<label>.meta.json` and a `meta/builds.json` entry.
+   The result is `recomp/meta/<Module>.<label>.meta.json` and a `recomp/meta/builds.json` entry.
 2. **game-version-build**: prepare, then translate, build and test each platform target.
 
 ## Before starting
@@ -18,15 +18,15 @@ This skill runs two others in order:
 - Get the install folder. If the user gave a zip or an installer instead, ask where the unpacked
   `FINAL FANTASY XI` folder is; never write into the install.
 - **No Square Enix bytes are ever committed** (README, *Rules*). Images, Ghidra projects and
-  generated C stay in `generated/`, which is gitignored. Commit only `meta/`, `discovery/verdicts.py`,
-  `discovery/notes/`, docs and tooling.
+  generated C stay in `generated/`, which is gitignored. Commit only `recomp/meta/`, `recomp/discovery/verdicts.py`,
+  `recomp/discovery/notes/`, docs and tooling.
 - Note the working tree state (`git status`). Other work may be uncommitted. Touch only the files
   this flow owns, and never stage unrelated changes.
 
 ## Flow
 
 ```
-python tools/newbuild.py identify --game "<FINAL FANTASY XI>"
+python tools/version/newbuild.py identify --game "<FINAL FANTASY XI>"
 ```
 
 - **Already known** (`known_build` set): nothing to analyze. Run game-version-build for that
@@ -38,8 +38,8 @@ the gate result, and each platform's result.
 
 ## Finish
 
-1. Write `discovery/notes/<Module>.<label>.discovery.txt` for each module that went through the
-   discovery pass. Follow `discovery/notes/FFXiMain.2026-09-03.discovery.txt`: the retail files and
+1. Write `recomp/discovery/notes/<Module>.<label>.discovery.txt` for each module that went through the
+   discovery pass. Follow `recomp/discovery/notes/FFXiMain.2026-09-03.discovery.txt`: the retail files and
    hashes, what changed from the previous build, what carried over and what was mapped by hand,
    new verdicts with their evidence, the results table, and verification.
 2. `docs/new-client-version.md`: add the build to the *Supported builds* table (label, shortened SHA-256, version, where the
@@ -51,5 +51,5 @@ the gate result, and each platform's result.
    - every manual verdict added.
    - each platform target: PASS, FAIL, or not run (and why, e.g. "macOS needs the Mac").
    - what's left: an in-game test (sign in, zone in, fight, zone again) and the commit.
-4. Offer to commit `meta/`, `discovery/`, and `docs/new-client-version.md` together as one commit. Commit only when the
+4. Offer to commit `recomp/meta/`, `recomp/discovery/`, and `docs/new-client-version.md` together as one commit. Commit only when the
    user says so.

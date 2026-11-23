@@ -1,7 +1,7 @@
 /* The game-data layer: FFXiMain's live structures, found by pattern and read in place (game.h).
  *
  * Patterns and what they resolved to in our 2026-09-03 image (generated/FFXiMain.unpacked.dll,
- * image base 0x10000000); tests/game_test.c checks every one of these against the image:
+ * image base 0x10000000); tests/addons/game_test.c checks every one of these against the image:
  *
  *   pointer            source   match       resolves to
  *   entity map         Ashita   0x10003A17  +9  = 0x10480AF0  entity_t*[0x900] (static array)
@@ -130,7 +130,9 @@ typedef struct pattern_def
 
 static const pattern_def patterns[XI_P_COUNT] = {
     [XI_P_ENTITY_MAP] = {"entitymap", "8B560C8B042A8B0485", 9, 0, RD_U32},
-    [XI_P_ENTITY_COUNT] = {"entitymap.size", "4781FF????????7C??89", 3, 0, RD_U32},
+    /* the 2009 client's map holds 0x800 entities (the player's from 0x400), its loop over them
+     * in esi (2009-07-09: 0x10087071, `inc esi; cmp esi, 0x800; jl; mov [g], edi`) */
+    [XI_P_ENTITY_COUNT] = {"entitymap.size", "4781FF????????7C??89", 3, 0, RD_U32, "4681FE????????7C??893D", 3},
     [XI_P_PLAYER_INDEX] = {"player.index", "66A1????????6685C074??0FBFC08B0485????????85C075??33C0C3", 2, 0, RD_U32},
     [XI_P_PARTY] = {"party", "0FBEC38D0C5256578BF58D0448", 23, 0, RD_U32},
     [XI_P_PARTY_ICONS] = {"party.statusicons", "B93C0000008D7004BF????????F3A5", 9, 0, RD_U32},

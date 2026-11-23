@@ -4,7 +4,7 @@ tools (javac, d8, aapt, zipalign, apksigner) and no Gradle.
 
   python3 tools/build_android_apk.py [--build-dir build/android] [--keystore file.p12 [--key-alias xi]]
 
-The APK is <build dir>/xi-native-test.apk: SDL's Java and android/, libSDL3.so, and libmain.so with its
+The APK is <build dir>/xi-native-test.apk: SDL's Java and platforms/android/, libSDL3.so, and libmain.so with its
 debug info stripped. Its minimum API follows the library's build-config.json; its versionName is
 runtime.json's version and its versionCode the game build's digits (20261102), what the launcher reads
 back from a phone. --keystore signs it with that key (its password in XI_ANDROID_KEYSTORE_PASS): a
@@ -24,8 +24,11 @@ import sys
 import tempfile
 import zipfile
 
-from android_toolchain import CACHE, ROOT, SDK, SDL, TC
-import buildinfo
+# tools/ itself: the launcher's Python on Windows (the embeddable one, with a ._pth) does not put the
+# script's folder on sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from android_toolchain import CACHE, ROOT, SDK, SDL, TC  # noqa: E402
+import buildinfo  # noqa: E402
 
 BT = SDK / 'build-tools/36.0.0'
 ANDROID_JAR = SDK / 'platforms/android-36/android.jar'
@@ -86,7 +89,7 @@ def main():
     # javac leaves removed/renamed classes behind when its output directory is reused.
     with tempfile.TemporaryDirectory(prefix='staging-', dir=intermediates) as staging:
         out = Path(staging)
-        manifest = ROOT / 'android/app/src/main/AndroidManifest.xml'
+        manifest = ROOT / 'platforms/android/app/src/main/AndroidManifest.xml'
         if minimum_api != 28:
             contents, count = re.subn(
                 r'android:minSdkVersion="28"', f'android:minSdkVersion="{minimum_api}"', manifest.read_text()
@@ -97,7 +100,7 @@ def main():
             manifest.write_text(contents)
 
         java = sorted((CACHE / SDL.name / 'android-project/app/src/main/java').rglob('*.java')) + sorted(
-            (ROOT / 'android/app/src/main/java').rglob('*.java')
+            (ROOT / 'platforms/android/app/src/main/java').rglob('*.java')
         )
         classes = out / 'classes'
         classes.mkdir()
@@ -137,8 +140,8 @@ def main():
         # app's bundle has it
         assets = out / 'assets'
         assets.mkdir()
-        if (ROOT / 'ffxi.reg').is_file():
-            shutil.copyfile(ROOT / 'ffxi.reg', assets / 'ffxi.reg')
+        if (ROOT / 'assets' / 'ffxi.reg').is_file():
+            shutil.copyfile(ROOT / 'assets' / 'ffxi.reg', assets / 'ffxi.reg')
         run(
             [
                 BT / 'aapt',
@@ -152,7 +155,7 @@ def main():
                 '-M',
                 manifest,
                 '-S',
-                ROOT / 'android/app/src/main/res',
+                ROOT / 'platforms/android/app/src/main/res',
                 '-A',
                 assets,
                 '-I',

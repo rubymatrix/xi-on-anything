@@ -15,12 +15,12 @@ Background: `docs/xbox-install.md`.
 1. **Find the package.** Usually the newest `XIonXbox-xbox*.msix` in `~/Downloads` (browsers add ` 1`, ` 2`),
    or `build/xbox/XIonXbox-xbox.msix` on the Windows machine. Check with `ls -lt ~/Downloads/*.msix | head`.
    It must be the **app-only** package (about 17 MB). If it's about 15 GB, it's the with-game package: stop and ask.
-2. **Know the console's address.** `xbox/tools/xbox.py` remembers it in `build/xbox/xbox-address`. If that file doesn't
+2. **Know the console's address.** `platforms/xbox/tools/xbox.py` remembers it in `build/xbox/xbox-address`. If that file doesn't
    exist, ask the user (Dev Home shows it) and pass `XBOX=<address>`.
-3. **Check the console's state:** `python3 xbox/tools/xbox.py status`.
+3. **Check the console's state:** `python3 platforms/xbox/tools/xbox.py status`.
    - "installed from a package", or "not installed": this isn't an update. Use the `xbox-setup` skill instead.
    - "game.txt is there": it overrides the game beside the app. Say so and ask before removing it
-     (`python3 xbox/tools/xbox.py rm local:\LocalState game.txt`).
+     (`python3 platforms/xbox/tools/xbox.py rm local:\LocalState game.txt`).
    - "no Device Portal": the console is off, asleep, or not in Dev Mode. Ask the user to wake it.
 4. **Say what changed** before deploying. Compare the new package with `build/xbox/xbox-loose` (the last deploy):
    ```bash
@@ -39,7 +39,7 @@ Background: `docs/xbox-install.md`.
    ```
    Usually only `XIonXbox.exe` and `AppxMetadata/CodeIntegrity.cat` change. If the manifest changed (not just
    its version), tell the user. `deploy` re-registers anyway, so a manifest change still takes effect.
-5. **Deploy:** `python3 xbox/tools/xbox.py deploy "<msix>"`. It stops the app, stages the files in `build/xbox/xbox-loose`
+5. **Deploy:** `python3 platforms/xbox/tools/xbox.py deploy "<msix>"`. It stops the app, stages the files in `build/xbox/xbox-loose`
    with the **registered** version written into the manifest, sends every app file (the catalog keeps its size
    between builds, so a same-size skip would miss it), re-registers, and launches.
 6. **Report** the new exe's size, that it registered and launched, and offer to pull logs after a run

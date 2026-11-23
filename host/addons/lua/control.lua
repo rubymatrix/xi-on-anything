@@ -1,7 +1,7 @@
 --[==[
 The control port: a built-in addon (xi kind) that lets another program drive the game. host64 loads
 it on the first frame when FFXI_CONTROL is set (core.c): FFXI_CONTROL=1 listens on 127.0.0.1:54300,
-FFXI_CONTROL=<port> on that port. tools/xi_mcp.py speaks it for MCP clients.
+FFXI_CONTROL=<port> on that port. tools/debug/xi_mcp.py speaks it for MCP clients.
 
 The protocol is JSON, one object per line each way:
 
@@ -20,6 +20,9 @@ key holds, frame captures, waits). Commands:
                              "wait:500" (ms); down for hold_ms, then up, gap_ms between
   key {key, down}            one key down (true) or up (false), left as it is
   release_keys               every key this port pressed comes up
+  pad {buttons, hold_ms, gap_ms}  a test gamepad's buttons pressed in order (a b x y lb rb lt rt
+                             back start ls rs up down left right, "a+b" together, "wait:500"): an SDL
+                             virtual Xbox pad, attached on first use (FFXI_TEST_PAD=1: at start)
   capture {path}             the next frame to a file (see d3d8_capture); -> path, w, h, format
   entities {radius, limit}   entities near the player: index, id, name, type, distance, hp%
   target {index}             target an entity as the game does
@@ -340,6 +343,27 @@ local function keys(a)
     return { sent = #list }
 end
 
+local function pad(a)
+    local list = a.buttons
+    if type(list) == 'string' then list = { list } end
+    if type(list) ~= 'table' then error('pad: a list of button names') end
+    local hold, gap = tonumber(a.hold_ms) or 80, tonumber(a.gap_ms) or 120
+    for _, b in ipairs(list) do
+        local ms = tostring(b):match('^wait:(%d+)$')
+        if ms then
+            sleep_ms(tonumber(ms))
+        else
+            local parts = {}
+            for p in tostring(b):lower():gmatch('[^+]+') do parts[#parts + 1] = p end
+            for _, p in ipairs(parts) do xi.input.pad(p, true) end
+            sleep_ms(hold)
+            for i = #parts, 1, -1 do xi.input.pad(parts[i], false) end
+            sleep_ms(gap)
+        end
+    end
+    return { sent = #list }
+end
+
 local function release_keys()
     local n = 0
     for d in pairs(pressed) do xi.input.inject(d, false) n = n + 1 end
@@ -406,6 +430,7 @@ local commands = {
         return true
     end,
     release_keys = release_keys,
+    pad = pad,
     capture = capture,
     entities = entities,
     target = function(a)

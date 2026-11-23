@@ -1,8 +1,8 @@
 # Recorded scenes for performance tests
 
-`tools/replayserver.py` plays recorded zone visits ("scenes") to the game, the same way every time:
+`tools/replay/replayserver.py` plays recorded zone visits ("scenes") to the game, the same way every time:
 the NPCs, mobs, players, weather, time of day and effects of a visit recorded on a server you run,
-with nothing depending on a live server. It is `tools/staticserver.py`'s server (any sign-in, one
+with nothing depending on a live server. It is `tools/replay/staticserver.py`'s server (any sign-in, one
 character, the lobby and zone protocol) with recordings in place of its empty zones.
 
 ## Record
@@ -41,7 +41,7 @@ To record them on a LandSandBoat server of yours, with a GM account and the two 
 `lsb/` copied to its `scripts/commands/` (`!perftime` pins the clock, `!perfcrowd` brings a
 zone's mobs to the character):
 
-    python3 tools/replay.py record all --server <your server> --user <GM account> --password ...
+    python3 tools/replay/replay.py record all --server <your server> --user <GM account> --password ...
 
 A client signs in (Enter through the lobby, by the control port), runs `/xireplay run all` and quits
 when it is done; the recordings land in `generated/replay/`, not in `scenes/`.
@@ -55,9 +55,9 @@ Record it on its own, by day (the sun's shadows are what it stresses) and while 
 voyage has four minutes or more to run: the timetable is in the server's
 `data/zones/kazham/zone.yaml` and `data/zones/port_jeuno/zone.yaml`.
 
-    python3 tools/replay.py record airship --server <your server> --user <GM account> --password ...
+    python3 tools/replay/replay.py record airship --server <your server> --user <GM account> --password ...
 
-    python3 tools/replay.py run tools/replay/default.txt
+    python3 tools/replay/replay.py run tools/replay/default.txt
 
 ### The airship
 
@@ -73,7 +73,7 @@ airship for a zone with no sky, where the sun's shadows stay off without it), an
 distance, which brings in the scenery moving past the ship. With either one alone the cache stays
 small, and the scene shows nothing.
 
-    FFXI_FX_FILE="$PWD/tools/replay/airship-fx.txt" python3 tools/replay.py run tools/replay/default.txt --play airship
+    FFXI_FX_FILE="$PWD/tools/replay/airship-fx.txt" python3 tools/replay/replay.py run tools/replay/default.txt --play airship
 
 At 60 fps a fast machine has room to spare, so the climb shows first in p99 and max, phase to phase,
 before the mean moves. With `FFXI_PROFILE=1` the client's log has it directly: the cache's size
@@ -88,7 +88,7 @@ shadows, every lamp with shadows from the nearest four, bounce light and ambient
 quality, specular, sun shafts, bloom and depth of field. `FFXI_FX=0` turns the older effects path
 off, which the file can't (fx is read only at start). Any scene plays with it:
 
-    FFXI_FX=0 FFXI_FX_FILE="$PWD/tools/replay/showcase-fx.txt" python3 tools/replay.py play tools/replay/default.txt
+    FFXI_FX=0 FFXI_FX_FILE="$PWD/tools/replay/showcase-fx.txt" python3 tools/replay/replay.py play tools/replay/default.txt
 
 ## The reference set
 
@@ -111,11 +111,11 @@ Each file's first line records what made it and what was trimmed:
 Record the whole set again (above), so that every scene comes from one server, client and addon.
 Then:
 
-    python3 tools/replay.py keep generated/replay/*.jsonl --lsb <LandSandBoat commit> --build <game build>
+    python3 tools/replay/replay.py keep generated/replay/*.jsonl --lsb <LandSandBoat commit> --build <game build>
 
 `keep` writes what playback reads into `scenes/`: the server's packets from the zone-in to the
 zone-out and the markers, with the character renamed `Replay`, trimmed, and the meta line above
-(`--build` as `meta/builds.json` names it). The client's own packets, including the GM commands it
+(`--build` as `recomp/meta/builds.json` names it). The client's own packets, including the GM commands it
 typed, are left out. Keep the raw recordings, since trimmed packets can't be restored from `scenes/`,
 and pass only the recordings `default.txt` names.
 
@@ -158,7 +158,7 @@ line, as is an unknown flag, weather or spell.
 A server's AI walks a spawned crowd home, so crowds need `--hold`; it can't put many players in one
 place, so `--players` makes them.
 
-    python3 tools/replayserver.py --huffman <dir with compress.dat> --suite suite.txt
+    python3 tools/replay/replayserver.py --huffman <dir with compress.dat> --suite suite.txt
     build/host64 --game "<FINAL FANTASY XI>" --server 127.0.0.1 --user replay --pass x \
         --authport 55231 --dataport 55230 --viewport 55001
 
@@ -195,20 +195,20 @@ frame log's `m,` lines.
 
 ## Measure
 
-    python3 tools/replayreport.py frames-20261003-165743.csv [--json]
+    python3 tools/replay/replayreport.py frames-20261003-165743.csv [--json]
 
 prints each scene's phases (one marker to the next) and its measured window (start marker to end
 marker): frames, fps, mean, p50/p95/p99, max, frames over 33 ms.
 
 ## Unattended
 
-`tools/replay.py` runs it all with nobody at the screen: the server, host64 with its control port
+`tools/replay/replay.py` runs it all with nobody at the screen: the server, host64 with its control port
 (`FFXI_CONTROL`) to get through the lobby (Enter, as each choice is the default) and to load the
 addon, the frame log, and the report.
 
-    python3 tools/replay.py run suite.txt [--play "city effects"]   # then generated/runs/<date>-suite/report.txt
-    python3 tools/replay.py shots suite.txt                          # a frame capture at each READY
-    python3 tools/replay.py play suite.txt                           # a session to watch: !replay in chat
+    python3 tools/replay/replay.py run suite.txt [--play "city effects"]   # then generated/runs/<date>-suite/report.txt
+    python3 tools/replay/replay.py shots suite.txt                          # a frame capture at each READY
+    python3 tools/replay/replay.py play suite.txt                           # a session to watch: !replay in chat
 
 `--game` (or `FFXI_GAME`), `--huffman` (or `FFXI_HUFFMAN`), `--client` (default `build/host64`),
 `--data-dir` (default host64's); arguments after `--` go to host64. The game's own frame cap and
@@ -222,7 +222,7 @@ takes a frame capture. Each scene gets `NN-<scene>.png` and `NN-<scene>.prof.jso
 their frame-weighted mean); the run gets `prof.json` and `prof.txt`, passes down and scenes across.
 Read the passes, not `frame`: it sums the command buffers' GPU time, which overcounts on Apple GPUs.
 
-    FFXI_FX_FILE=<fx.txt> python3 tools/replay.py prof tools/replay/default.txt --control-port 54390 \
+    FFXI_FX_FILE=<fx.txt> python3 tools/replay/replay.py prof tools/replay/default.txt --control-port 54390 \
         --auth-port 56231 --data-port 56230 --view-port 56001 --zone-port 56232 \
         -- --reg-final <settings.reg> --fps-limit 120
 

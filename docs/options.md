@@ -7,14 +7,22 @@ Graphics, Shadows, Lighting, Atmosphere, Water, Interface, Gamepad and Addons. T
 Sources, as the tables abbreviate them:
 
 - **Menu**: its row under Config › Advanced, as *page › row* (a group heading in brackets)
-- **fx**: its key in `fx.txt` (`runtime/portable/gfx_fx.c`), also `FFXI_FX_<KEY>` in the environment; read again while the game runs
+- **fx**: its key in `fx.txt` (`runtime/portable/gfx/gfx_fx.c`), also `FFXI_FX_<KEY>` in the environment; read again while the game runs
 - **CLI**: a `host64` flag (`host/host64.c`)
 - **App**: an app-bundle default (`app_default`, read when the flag is absent)
 - **Env**: an `FFXI_*` environment variable
 
-Defaults are the code's. `fx = 0` (the default) turns every scene effect off; the keys below it keep
-their values for when it is on. On Android the rows set through scene effects are not shown, nor
-the Lighting and Atmosphere pages.
+Not every addition works on every client build. `recomp/meta/features.json` gives each one the builds it
+works on (a first or last build, a list, or the hooks and patches it needs from `recomp/meta/builds.json`);
+a build's own entry there can override it. A feature that does not apply to the running build is
+never switched on, whatever the menu, `fx.txt` or the command line say: the log says which and why
+(`[recomp] feature draw_distance off for build 2009-07-09: needs a client from 2025-11-12 or later`),
+`host64 --features` prints the table as JSON, and `runtime.json` beside a build carries it for the
+launcher. See [Features by client build](#features-by-client-build) at the end.
+
+Defaults are the code's. `fx` is on (1); `FFXI_FX=0` turns every scene effect off, and the keys below it keep
+their values for when it is on. Android builds have no Graphics, Shadows, Lighting, Atmosphere or
+Water page and no Display › FPS Counter row; Addons shows only with `--android-addons 1`.
 
 ---
 
@@ -28,7 +36,7 @@ the Lighting and Atmosphere pages.
 | UI scale | Display › [Scaling] UI Scale | | | `FFXIMenuResolution` | list |
 | Interface shape | Display › [Scaling] Interface Shape | | `--ui-aspect` | `FFXIUIAspect` | off; Full / 16:9 / 4:3 |
 | Background (render) resolution | Display › [Scaling] Background Resolution | | | `FFXIBackground` | 2048 / 4096 / 6144 / 8192, next start |
-| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped (the last three only in game builds with frame sites in `meta/builds.json`, from `tools/frame_sites.py`; in others `--fps-divisor 0` is the game's own uncapped pacing, the world as fast as the frames). 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
+| Frame rate | Display › [Performance] Frame Rate | | `--fps-divisor`, `--fps-limit` | | 30 (as shipped), 60 (default), 120, 144 or Uncapped (the last three only in game builds with frame sites in `recomp/meta/builds.json`, from `tools/version/frame_sites.py`; in others `--fps-divisor 0` is the game's own uncapped pacing, the world as fast as the frames). 120 and 144 run uncapped held to that rate (`--fps-limit n`; `FFXI_FPS_LIMIT=n` overrides); uncapped keeps the world at its speed. `FFXI_VSYNC=0` lets it past the display. The menus before the game keep the pace they have at 30 fps |
 | FPS counter | Display › [Performance] FPS Counter | `fps` | | | 1 shown |
 | GPU pick (Vulkan) | | | | | `FFXI_GPU` env |
 
@@ -46,6 +54,11 @@ the Lighting and Atmosphere pages.
 | Color grading | Graphics › [Color] Color Grading | `grade` | 1.0 (0–1) |
 | Saturation | Graphics › [Color] Saturation | `sat` | 1.25 (0.5–1.5) |
 | Contrast | Graphics › [Color] Contrast | `contrast` | 0.4 (0–0.5) |
+| PS2 accuracy: what the PC version draws wrong drawn as the PS2 does (after [portfix](https://github.com/voetre/portfix)): shine, summons' halos, disintegrate, Port Bastok's sea and the menu buttons' rims, each below | Graphics › [Quality] PS2 Accuracy | `fix_ps2` | 1 PS2; 0 all of them as the PC draws them. Each one's own setting turns it alone off (0) while this is on |
+| Shine as on the PS2: sphere-mapped metal at the PS2's mapping and strength, the light's highlight on weapons and armour, and the shiny batches some weapon files lost drawn shiny again (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with PS2 Accuracy | `fix_shine` | 1 PS2; 0 as the PC draws it (dull, half strength) |
+| Disintegrate as on the PS2: effects that break a model up (the Shadow Lord's change of form, Eald'Narche's, Kam'lanaut's, Selh'teus's) take it apart into tumbling pieces with smoke and a heat haze (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with PS2 Accuracy | `fix_disintegrate` | 1 PS2; 0 as the PC draws it (the model stays whole) |
+| Summons' halos (Carbuncle's) soft, as on the PS2: drawn from the full-size silhouette, not its 256×256 copy (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with PS2 Accuracy | `fix_summon_halos` | 1 PS2; 0 as the PC draws them (a thin stepped rim) |
+| Summons' halos capped in reach: how far the halo's ghosts may sit from the model, in yalms, so a distant summon keeps its close-up outline (the PS2 doesn't cap it; portfix's `/portfix halomax`) | (fx.txt only), with the halos | `fix_halo_max` | 0 no cap, as on the PS2; portfix's `on` is 0.018 |
 
 ## 3. Lighting and shadows
 
@@ -122,6 +135,7 @@ the Lighting and Atmosphere pages.
 | Clarity depth | | `water_clarity` | 3.0 |
 | Soft edge | | `water_soft` | 0.15 |
 | Ripple tilt / density | | `water_ripple`, `water_scale` | 0.25 / 0.6 |
+| Port Bastok's sea keeps its tint near the camera: its ripple layer drawn after the tint, as the PS2 does (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with Graphics › PS2 Accuracy | `fix_water_layers` | 1 PS2; 0 as the PC draws it (black close up) |
 
 ## 7. World detail and distance
 
@@ -145,6 +159,7 @@ the Lighting and Atmosphere pages.
 | Hide Unity | Interface › [Menus: Status Pages] Unity | | | Show |
 | Hide Job Points | Interface › [Menus: Status Pages] Job Points | | | Show |
 | Hide Alter Ego Points | Interface › [Menus: Status Pages] Alter Ego Points | | | Show |
+| Menu buttons without the PC's light rim on their top and left edges, as on the PS2 (after [portfix](https://github.com/voetre/portfix)) | (fx.txt only), with Graphics › PS2 Accuracy | | fx `fix_button_rims` | 1 PS2; 0 as the PC draws them |
 | Addon scale | Interface › [Addons] Addon Scale | | | 1 (0.5–3), apart from UI Scale; modern.cfg `addon_scale`. Addons draw, place and get the mouse in their own pixels, the back buffer's over this (Windower's UI resolution, Ashita's screen size); the overlay scales them up, ImGui's text made at that size |
 | Command key (macOS, iOS) | Interface › [Keyboard] Command Key | | | Command / Ctrl; modern.cfg `cmd_ctrl`. Ctrl: Command is the game's Ctrl on its side (DirectInput and window messages), and a Ctrl bind of an addon fires with it; the overlay's own text fields keep Command. On macOS the menu bar's Command shortcuts (Hide, Close, Minimize, Settings) are off while it is on, all but Quit (Command-Q) |
 
@@ -154,23 +169,48 @@ The game's own button map, registry `padsin000`, which on Windows only `FFXiPadC
 Gamepad buttons in the title screen's Config window and in Config (item 13) open **Config › Gamepad**
 in its place; it is also in the Advanced list. Each row is a function, set to a button (None, A, B, X,
 Y, LB, RB, LT, RT, L Stick, R Stick, Start, Back, the D-pad). A button given to one function is taken
-from the function that had it, which gets the old one's. A change is written at once and the game
+from the function that had it, which is left with none. A change is written at once and the game
 reads the map again (window message `0x800b`), so it applies without a restart. Button names are an
 Xbox pad's; SDL lays every pad out as one (A is the bottom face button).
 
 | Rows | Default |
 |---|---|
 | [Buttons] Select / Confirm, Cancel, Active Window, Main Menu, Autorun, Macro Palette (Ctrl), Macro Palette (Alt), Heal / Lock Target, Change View, Target Nearby NPC, Map, Hide Menus, Logout, Soft Keyboard (not on iOS) | A, B, Y, X, LB, LT, RT, L Stick, R Stick, none, none, Back, Start, RB |
+| [Sticks] Left Stick Across, Left Stick Up / Down, Right Stick Across, Right Stick Up / Down | what SDL reads them as |
 | [Menu Directions] Up, Down, Left, Right | the D-pad |
 
-The sticks (movement and camera) and the button combinations (`padexsin000`) are not on the page.
+Select (a click, Enter, or the pad's confirm) on a row listens: its box says what to do, and the next
+button pressed on the controller (a trigger too) is that function's; Escape cancels and Backspace or
+Delete clears the row to None. The game ignores the controller while a row listens. Left and right
+still step through the list.
+
+Sticks is not the game's map but the controller's own: which of its axes each stick axis is
+(`host/padmap.c`), for a controller SDL reads wrong (a handheld's built-in sticks). Select a row and
+push that stick right or down (pushed the other way, the axis is saved reversed), or step through Axis
+0-7 and each reversed with left and right. It is an SDL gamepad mapping for that controller (its
+GUID), applied at once and kept in `gamepads.txt` in the data folder, which is read at the next start.
+The page scrolls when it is taller than the interface (as Config › Addons does): up from its top row
+or down from its bottom one, or the mouse wheel.
+
+What the game's sticks do (movement and camera) and the button combinations (`padexsin000`) are not
+on the page.
+
+**The 2009 client** has no Config › Advanced (its menu addresses aren't found), so **F12** opens the
+same rows in an overlay window instead (`host/addons/gui.cpp` `xi_gui_gamepad`, `host/modern.c`): pick a
+button from each row's list, or Record and press it on the controller; Clear sets None; F12 or Escape
+closes it (Escape first cancels a recording). Its window has no `0x800b` message, so a change is
+applied by running the game's own pad-settings reader again (`recomp/meta/builds.json` `pad_config`,
+`pad_reload`). That client reads the pad only through DirectInput, where a `padsin000` value is a
+DirectInput button: there host64's DirectInput pad numbers its 16 buttons as the XInput codes above
+(`dinput_pad`, `runtime/portable/winapi/dinput.c`), so ffxi.reg's map and this window's mean the same buttons
+as on today's clients.
 
 ## 9. Textures & game data
 
 | Setting | CLI | App / Env | Notes |
 |---|---|---|---|
 | Texture packs | `--textures <dir>` (×8) | `FFXI_BUNDLED_TEXTURES` | default `<data dir>/textures`, then bundled `assets/textures` (font, slot bar) |
-| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/vicons.c`). A texture pack's entry for the same icon wins |
+| Vector status icons | | `FFXI_VECTOR_ICONS=0` turns them off | on: every buff and debuff icon redrawn from vector art of our own (templates for the designs many effects share, one-off art in `host/vicons_art_*.inc` for the rest) at 128×128 with mipmaps, so they stay sharp at any UI scale (`host/ui/vicons.c`). A texture pack's entry for the same icon wins |
 | DAT overlays (XIPivot-style) | `--dats <dir>` (×8) | `FFXIDats` | first folder wins |
 | Custom server items | `--cexi off\|items\|full` | `FFXICexi` | CatsEyeXI-style ids |
 
@@ -249,6 +289,7 @@ Config
     │   ├── [Upscaling] ..... Upscaling, Render Scale, Upscale Sharpening
     │   ├── [Color] ......... High Dynamic Range, Tone Mapping, Exposure, Color Grading, Saturation,
     │   │                     Contrast
+    │   ├── [PS2 Accuracy] .. Summon Halos, Shine, Disintegrate
     │   └── [World Detail] .. Draw Distance, Character Distance
     ├── Shadows
     │   ├── [Sun and Moon] .. Shadows, Softness, Sun Size, Soft Quality, Detail
@@ -266,11 +307,12 @@ Config
     │   ├── [Bloom] ......... Strength, Effect Glow, Lamp Glow
     │   └── [Depth of Field]  Strength, Sharp Distance
     ├── Water
-    │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift
+    │   └── [Water] ......... Modern Water, Reflection, Sun Highlight, Foam, Surface Lift, Layer Order
     ├── Interface
     │   ├── [Nameplates] .... Shape, Size
     │   ├── [Menus: Content]  Trust, Mounts, Geomancy
     │   ├── [Menus: Status Pages] Master Levels, Unity, Job Points, Alter Ego Points
+    │   ├── [Menus: Buttons]  Button Edges
     │   ├── [Addons] ........ Addon Scale
     │   └── [Keyboard] ...... Command Key (macOS, iOS)
     ├── Gamepad (also the game's Gamepad buttons)
@@ -284,3 +326,33 @@ Config
 Set before the game starts, so not in the game's menus: server and sign-in, game data (texture
 packs, DAT overlays, `--cexi`), integrations (Discord) and paths (sections 9, 11, 12 and 13), and
 the developer switches (section 14).
+
+## Features by client build
+
+`recomp/meta/features.json` is the list; `tools/buildinfo.py` (`features()`) resolves it for the build
+`tools/prepare.py` chose, and `tools/build.py` writes the result to `generated/build.h` as
+`FFXI_FEATURE_<ID>` (1 or 0) and `FFXI_FEATURE_TABLE`. A feature's rules, all of which must hold:
+
+| key | meaning |
+| --- | --- |
+| `min_build`, `max_build` | the first or last build label (the PE timestamp date `recomp/meta/builds.json` is keyed by) it works on |
+| `builds` | only these build labels |
+| `needs` | keys the build's `recomp/meta/builds.json` entry must have: `hooks.lod_pick`, `patches.frame60`, `addresses.scene_mgr`, or `modern` (every Config › Modern address) |
+
+A build's entry in `recomp/meta/builds.json` may override the result: `"features": {"<id>": true}` turns it
+on (tested on that build), `{"<id>": "<why>"}` turns it off with that reason. To gate a new
+addition, add it to `recomp/meta/features.json` and test `FFXI_FEATURE_<ID>` where it switches on; the
+launcher reads `features` from `runtime.json` (or `host64 --features`) to show it as unavailable
+rather than offer it.
+
+The clients from 2009 and 2010 have, of host64's additions: the widescreen view (`aspect`), 60 fps
+in the world (`frame60`: a translated variant of their frame loop, as they have no frame divisor),
+draw distance, nameplates, the modern effects' post-processing (`modern_fx`) and PS2 Accuracy's
+fixes to the game's draws (`ps2_draws`, not tried on them); the 2009 one also
+`dinput_pad` (the gamepad's buttons in XInput's numbering, and Config › Gamepad's rows on F12); the rest need
+hooks those builds don't have. They have no addons (`addons`): Ashita's and Windower's libraries
+read today's packets, resources and memory, and on those clients they get them wrong (battlemod
+read the 2009 client's action packets with today's field widths and named Gust Slash "Viruna").
+The addon host still runs for host64's own parts (the control port, the 60 fps login check), but
+no addon or startup script (`boot`, `default`, `init`) is loaded.
+

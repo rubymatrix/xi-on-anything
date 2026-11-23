@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 NAMES = ('sdl3', 'mbedtls', 'luajit', 'imgui', 'luasocket', 'lfs', 'sqlite')
 MIN_MACOS = '12.0'
-# the compilers: clang, or what XI_CC / XI_CXX name (the Linux kit's zig cc, tools/linux/kit.sh)
+# the compilers: clang, or what XI_CC / XI_CXX name (the Linux kit's zig cc, platforms/linux/kit.sh)
 CC = shlex.split(os.environ.get('XI_CC', 'clang'))
 CXX = shlex.split(os.environ.get('XI_CXX', 'clang++'))
 AR = shlex.split(os.environ.get('XI_AR', 'ar'))

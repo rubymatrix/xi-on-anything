@@ -1,6 +1,6 @@
 """A window for tools/setup_switch.py: the game folder and the SD card picked with folder pickers, the server
-filled in from the player's launcher, one button to build and install. switch/setup-switch.bat (with no options)
-and switch/setup-switch.sh (with a display) open it.
+filled in from the player's launcher, one button to build and install. platforms/switch/setup-switch.bat (with no options)
+and platforms/switch/setup-switch.sh (with a display) open it.
 
   python tools/setup_switch_gui.py
 
