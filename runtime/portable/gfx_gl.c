@@ -119,6 +119,10 @@ typedef struct RProf
     uint64_t ch_ns, ch_setup_ns, ch_ring_ns, ch_bind_ns, ch_draw_ns, ch_max_ns, ch_max_kind, ch_slow;
     uint64_t ch_items, ch_pals, ch_pal_bytes, ch_states, ch_new_tbo, ch_tex;
     uint64_t ch_k_ns[9], ch_k_max[9], ch_k_slow[9]; /* the binds by kind: blocks 0-2, vb, uv, texture, sampler, EBO; 8 none */
+    /* the draws fewer draws would make (chars_merge_count): the items drawn, the mirrored copies right after their own
+     * (one instanced draw for the two), the lists next to the one before them (the same all but the indices, which go
+     * on from its), the strips */
+    uint64_t ch_drawn, ch_pairs, ch_next, ch_strips, ch_made;
     uint64_t ring_bytes, units, tex_stream, tex_stage, tex_other, samps, ubos, ebos, progs, fixed, waits;
 } RProf;
 
@@ -174,7 +178,7 @@ static uint32_t g_prof_ready;
     } while (0)
 
 /* a second line in a slot of its own (the render thread's split), taken after the first */
-static char g_prof_line2[2048];
+static char g_prof_line2[4096];
 static uint32_t g_prof_ready2;
 #define PROF_LOG2(s)                                                                                                  \
     do                                                                                                                \
@@ -206,6 +210,97 @@ int gfx_gl_prof_take(char* out, size_t n)
 #define PROF_LOG LOG
 #endif
 
+/* FFXI_PROFILE: the GPU's time a frame, by timestamps (GL_TIMESTAMP) at the frame's start and end and around each of
+ * the characters' batches; read when their slot comes round again, GT_FRAMES presents later, long done (a result not
+ * yet there would make the driver flush, as a fence's wait does on nouveau: those frames are left out, counted).
+ * FFXI_GL_GPU_TIMES=0: none. */
+enum
+{
+    GT_FRAMES = 4,
+    GT_MAX = 512,
+    GT_LABELS = 24
+};
+static struct
+{
+    int on; /* -1 not read */
+    uint32_t slot; /* the frame's */
+    GLuint q[GT_FRAMES][GT_MAX];
+    uint32_t n[GT_FRAMES]; /* marks made in the frame in that slot */
+    uint8_t kind[GT_FRAMES][GT_MAX]; /* 0 start, 1 the characters' begin, 2 their end, 3 the frame's end, 4 a target */
+    uint8_t aux[GT_FRAMES][GT_MAX];  /* kind 4: the target's label (lab) */
+    uint64_t frame_ns, chars_ns, frames, late, batches;
+    /* the targets drawn into, by size and format (screen: the window, at the present's blit): the GPU's time from a
+     * switch to one until the next mark's, and the switches */
+    struct
+    {
+        uint32_t w, h, fmt, screen, id, depth; /* (id: the color texture's; depth: one attached) */
+        uint64_t ns, n;
+    } lab[GT_LABELS];
+    uint32_t nlab;
+    /* the switches by what changed: the depth attachment alone (the same color), the color, the face or level alone */
+    uint64_t sw_depth, sw_color, sw_other;
+    uint32_t last_cid, last_did, last_face, last_level;
+    uint64_t before_ns; /* from the frame's start to its first switch */
+} g_gt = { -1 };
+
+static void gt_mark_aux(int kind, uint32_t aux)
+{
+    if (g_gt.on <= 0 || !gfx_profiling)
+        return;
+    uint32_t s = g_gt.slot, i = g_gt.n[s];
+    if (i == 0 && kind != 0)
+        return; /* (a frame begun before profiling was) */
+    if (i + (kind == 3 ? 1u : kind == 1 ? 3u : 2u) > GT_MAX) /* (room kept for the batch's end and the frame's) */
+        return;
+    gl.QueryCounter(g_gt.q[s][i], GL_TIMESTAMP);
+    g_gt.kind[s][i] = (uint8_t)kind, g_gt.aux[s][i] = (uint8_t)aux, g_gt.n[s] = i + 1;
+}
+static void gt_mark(int kind) { gt_mark_aux(kind, 0); }
+
+/* at the present, after the swap: the next slot's frame (GT_FRAMES back) read, then the next frame begun in it */
+static void gt_present(void)
+{
+    if (g_gt.on < 0)
+    {
+        const char* e = getenv("FFXI_GL_GPU_TIMES");
+        g_gt.on = !(e && *e == '0') && gl.GenQueries && gl.QueryCounter && gl.GetQueryObjectiv && gl.GetQueryObjectui64v;
+        if (g_gt.on)
+            gl.GenQueries(GT_FRAMES * GT_MAX, &g_gt.q[0][0]);
+    }
+    if (g_gt.on <= 0 || !gfx_profiling)
+        return;
+    uint32_t s = g_gt.slot = (g_gt.slot + 1) % GT_FRAMES, n = g_gt.n[s];
+    if (n >= 2 && g_gt.kind[s][0] == 0 && g_gt.kind[s][n - 1] == 3)
+    {
+        GLint ready = 0;
+        gl.GetQueryObjectiv(g_gt.q[s][n - 1], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (ready)
+        {
+            GLuint64 t[GT_MAX];
+            for (uint32_t i = 0; i < n; ++i)
+                gl.GetQueryObjectui64v(g_gt.q[s][i], GL_QUERY_RESULT, &t[i]);
+            g_gt.frame_ns += t[n - 1] - t[0], g_gt.frames++;
+            for (uint32_t i = 1; i + 1 < n; ++i)
+                if (g_gt.kind[s][i] == 1 && g_gt.kind[s][i + 1] == 2)
+                    g_gt.chars_ns += t[i + 1] - t[i], g_gt.batches++;
+            int cur = -1; /* (the target until the frame's first switch isn't known) */
+            for (uint32_t i = 0; i + 1 < n; ++i)
+            {
+                if (g_gt.kind[s][i] == 4)
+                    cur = g_gt.aux[s][i], g_gt.lab[cur].n++;
+                if (cur < 0)
+                    g_gt.before_ns += t[i + 1] - t[i];
+                else
+                    g_gt.lab[cur].ns += t[i + 1] - t[i];
+            }
+        }
+        else
+            g_gt.late++;
+    }
+    g_gt.n[s] = 0;
+    gt_mark(0);
+}
+
 static void prof_frame(uint64_t present_start)
 {
     uint64_t now = gfx_now_ns();
@@ -227,7 +322,7 @@ static void prof_frame(uint64_t present_start)
     {
         const RProf* r = &g_rp;
         double dr = (double)r->op_ns[GFX_RT_DRAW], dg = (double)(r->prep_ns + r->call_ns);
-        static char line[2048];
+        static char line[4096];
         snprintf(line, sizeof line,
             "[gfx]   render thread, ms/frame: draws %.2f (decoding %.2f, preparing %.2f of it %.2f waiting for the ring and "
             "%.2f writing %.0f KB into it, the GL draw calls %.2f; preparing: setup %.2f (the ring's room %.2f, the target %.2f, the program's lookup %.2f), streams %.2f, uniforms %.2f, "
@@ -264,6 +359,55 @@ static void prof_frame(uint64_t present_start)
         for (int k = 0; k < 9 && at < sizeof line; ++k)
             at += (size_t)snprintf(line + at, sizeof line - at, " %s %.2f/%.2f/%.2f", kn[k], (double)r->ch_k_ns[k] * ms,
                 (double)r->ch_k_max[k] * 1e-6, (double)r->ch_k_slow[k] / f);
+        /* the GPU's own time (gt_present): the frames timed and those whose results weren't in yet */
+        if (g_gt.frames && at < sizeof line)
+            at += (size_t)snprintf(line + at, sizeof line - at,
+                " | the GPU, ms a frame: all %.2f, the characters %.2f in %.1f batches (%llu frames timed, %llu not done in time)",
+                (double)g_gt.frame_ns * 1e-6 / (double)g_gt.frames, (double)g_gt.chars_ns * 1e-6 / (double)g_gt.frames,
+                (double)g_gt.batches / (double)g_gt.frames, (unsigned long long)g_gt.frames, (unsigned long long)g_gt.late);
+        if (g_gt.frames && at < sizeof line)
+        {
+            at += (size_t)snprintf(line + at, sizeof line - at,
+                " | the GPU by target, ms a frame (switches a frame), most first: before the first %.2f",
+                (double)g_gt.before_ns * 1e-6 / (double)g_gt.frames);
+            uint8_t done[GT_LABELS] = { 0 };
+            for (uint32_t m = 0; m < g_gt.nlab && at < sizeof line; ++m)
+            {
+                int best = -1;
+                for (uint32_t k = 0; k < g_gt.nlab; ++k)
+                    if (!done[k] && (best < 0 || g_gt.lab[k].ns > g_gt.lab[best].ns))
+                        best = (int)k;
+                if (best < 0 || !g_gt.lab[best].n)
+                    break;
+                done[best] = 1;
+                if (g_gt.lab[best].screen)
+                    at += (size_t)snprintf(line + at, sizeof line - at, ", the window %.2f (%.1f)",
+                        (double)g_gt.lab[best].ns * 1e-6 / (double)g_gt.frames, (double)g_gt.lab[best].n / (double)g_gt.frames);
+                else
+                    at += (size_t)snprintf(line + at, sizeof line - at, ", #%u %ux%u format %u %s %.2f (%.1f)", g_gt.lab[best].id,
+                        g_gt.lab[best].w, g_gt.lab[best].h, g_gt.lab[best].fmt, g_gt.lab[best].depth ? "+depth" : "no depth",
+                        (double)g_gt.lab[best].ns * 1e-6 / (double)g_gt.frames, (double)g_gt.lab[best].n / (double)g_gt.frames);
+            }
+        }
+        if (g_gt.frames && at < sizeof line)
+            at += (size_t)snprintf(line + at, sizeof line - at,
+                "; switches a frame: the depth alone %.1f, the color %.1f, face or level %.1f",
+                (double)g_gt.sw_depth / f, (double)g_gt.sw_color / f, (double)g_gt.sw_other / f);
+        g_gt.sw_depth = g_gt.sw_color = g_gt.sw_other = 0;
+        /* (the labels kept only while drawn into: a texture's id is new when it is made again) */
+        uint32_t kept = 0;
+        for (uint32_t k = 0; k < g_gt.nlab; ++k)
+            if (g_gt.lab[k].n)
+                g_gt.lab[kept] = g_gt.lab[k], g_gt.lab[kept].ns = g_gt.lab[kept].n = 0, ++kept;
+        g_gt.nlab = kept;
+        g_gt.before_ns = 0;
+        g_gt.frame_ns = g_gt.chars_ns = g_gt.frames = g_gt.late = g_gt.batches = 0;
+        if (r->ch_drawn && at < sizeof line)
+            at += (size_t)snprintf(line + at, sizeof line - at,
+                " | the characters' items a frame %.1f, of them mirrored copies right after their own %.1f, lists going on "
+                "from the one before %.1f, strips %.1f; draws made %.1f",
+                (double)r->ch_drawn / f, (double)r->ch_pairs / f, (double)r->ch_next / f, (double)r->ch_strips / f,
+                (double)r->ch_made / f);
         if (at < sizeof line)
             snprintf(line + at, sizeof line - at, "\n");
         PROF_LOG2(line);
@@ -914,11 +1058,43 @@ static GfxTex* depth_attachment(void)
 }
 
 /* the current targets bound to draw to; 0 when there is no color target */
+/* FFXI_PROFILE: a switch of the draw target, marked for the GPU's time by target (t NULL: the window) */
+static void gt_pass(const GfxTex* t, const GfxTex* d, uint32_t face, uint32_t level)
+{
+    if (g_gt.on <= 0 || !gfx_profiling)
+        return;
+    uint32_t w = t ? t->w : 0, h = t ? t->h : 0, fmt = t ? t->fmt : 0, scr = !t, id = t ? t->id : 0, dep = d != NULL, k = 0;
+    uint32_t did = d ? d->id : 0;
+    if (id == g_gt.last_cid && did != g_gt.last_did)
+        g_gt.sw_depth++;
+    else if (id != g_gt.last_cid)
+        g_gt.sw_color++;
+    else if (face != g_gt.last_face || level != g_gt.last_level)
+        g_gt.sw_other++;
+    g_gt.last_cid = id, g_gt.last_did = did, g_gt.last_face = face, g_gt.last_level = level;
+    while (k < g_gt.nlab && !(g_gt.lab[k].w == w && g_gt.lab[k].h == h && g_gt.lab[k].fmt == fmt && g_gt.lab[k].screen == scr &&
+                                g_gt.lab[k].id == id && g_gt.lab[k].depth == dep))
+        ++k;
+    if (k == g_gt.nlab)
+    {
+        if (k == GT_LABELS)
+            k = GT_LABELS - 1; /* (the last holds the rest) */
+        else
+            g_gt.lab[k].w = w, g_gt.lab[k].h = h, g_gt.lab[k].fmt = fmt, g_gt.lab[k].screen = scr, g_gt.lab[k].id = id,
+            g_gt.lab[k].depth = dep, g_gt.nlab++;
+    }
+    gt_mark_aux(4, k);
+}
+
 static int bind_target(void)
 {
     if (!g_rt)
         return 0;
-    st_draw_fbo(fbo_for(g_rt, g_rt_face, g_rt_level, depth_attachment()));
+    GfxTex* d = depth_attachment();
+    GLuint f = fbo_for(g_rt, g_rt_face, g_rt_level, d);
+    if (S.draw_fbo != f)
+        gt_pass(g_rt, d, g_rt_face, g_rt_level);
+    st_draw_fbo(f);
     return 1;
 }
 
@@ -2218,6 +2394,8 @@ void gfx_present(GfxTex* backbuffer)
 #endif
         int sh = ctx_surface_h(); /* window rows count from the surface's bottom; the picture is at its top */
         st_read_fbo(fbo_for(backbuffer, 0, 0, NULL));
+        if (S.draw_fbo != 0)
+            gt_pass(NULL, NULL, 0, 0);
         st_draw_fbo(0);
         st_scissor(0, 0, 0, 0, 0);
         st_cmask(15);
@@ -2237,9 +2415,11 @@ void gfx_present(GfxTex* backbuffer)
         uint64_t ts = rp_now();
         if (ts)
             g_rp.blit_ns += ts - t0;
+        gt_mark(3);
         ctx_swap(dw, dh);
         rp_add(&g_rp.swap_ns, ts);
     }
+    gt_present();
     /* the next frame in a segment of its own (ring_next); FFXI_GL_RING_FRAME=0: only when one is full */
     static int ring_frame = -1;
     if (ring_frame < 0)
@@ -2438,7 +2618,7 @@ static const char CHARS_GL[] =
     "  vec3 na = vw4(b + 8).xyz, nb = vw4(b + 12).xyz;\n"
     "  uint bones = texelFetch(vbt, b + 16).x, mir = texelFetch(vbt, b + 17).x;\n"
     "  uint ba = bones & 0xffu, bb = (bones >> 8) & 0xffu;\n"
-    "  if (D.at.z != 0u) {\n"
+    "  if ((D.at.z != 0u) != (gl_InstanceID != 0)) {\n"
     "    ba = (bones >> 16) & 0xffu, bb = bones >> 24;\n"
     "    vec3 sa = SIGN[mir & 3u], sb = SIGN[(mir >> 2) & 3u];\n"
     "    va.xyz *= sa; vb4.xyz *= sb; na *= sa; nb *= sb;\n"
@@ -2521,6 +2701,47 @@ static void ch_kind(uint64_t* t, int k)
 static GLuint g_chars_prog;
 static int g_chars_failed;
 
+/* FFXI_PROFILE: two items one draw could make (all but the indices and the mirror the same) */
+static int chars_same(const GfxCharItem* a, const GfxCharItem* b)
+{
+    return a->vb == b->vb && a->uv == b->uv && a->ib == b->ib && a->index_size == b->index_size && a->prim == b->prim &&
+        a->palette == b->palette && a->state == b->state && a->tex == b->tex && a->env == b->env && a->env_tex == b->env_tex &&
+        !memcmp(&a->samp, &b->samp, sizeof a->samp) && !memcmp(&a->env_samp, &b->env_samp, sizeof a->env_samp);
+}
+
+/* the item about to be drawn, against the one drawn before it and the last unmirrored one */
+static void chars_merge_count(const GfxCharItem* it, const GfxCharItem* prev, const GfxCharItem* prev0)
+{
+    g_rp.ch_drawn++;
+    g_rp.ch_strips += it->prim == GFX_TRIANGLESTRIP;
+    if (it->mirror && prev && !prev->mirror && chars_same(prev, it) && prev->first == it->first && prev->count == it->count)
+        g_rp.ch_pairs++;
+    else if (!it->mirror && prev0 && it->prim == GFX_TRIANGLELIST && chars_same(prev0, it) &&
+             it->first == prev0->first + prev0->count * 3)
+        g_rp.ch_next++;
+}
+
+/* FFXI_GL_CHARS_MERGE=0: an item a draw. Otherwise a mirrored copy right after its own is the same draw's second
+ * instance (instance 1 mirrored), and lists that go on from the one before, the same in all else, one draw: on the
+ * Switch a draw cost the GPU ~7 us whatever was in it (one triangle, every bind kept: as much), and these were half of a
+ * crowd's ~470 draws. */
+static int chars_merge(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_GL_CHARS_MERGE");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+/* b drawn as a's mirrored copy (the item right after it) */
+static int chars_pair(const GfxCharItem* a, const GfxCharItem* b)
+{
+    return !a->mirror && b->mirror && chars_same(a, b) && a->first == b->first && a->count == b->count;
+}
+
 int gfx_chars_env(void) { return 1; }
 
 int gfx_chars_draw(const GfxCharFrame* f)
@@ -2528,6 +2749,7 @@ int gfx_chars_draw(const GfxCharFrame* f)
     if (!g_up || !f->nitem || !f->nbones || g_chars_failed)
         return 0;
     uint64_t t0 = gfx_now_ns();
+    int merge = chars_merge(), pairs = merge && gl.DrawElementsInstanced;
     if (!g_chars_prog && !(g_chars_prog = program_from(CHARS_GL)))
     {
         g_chars_failed = 1, g_failures++;
@@ -2555,6 +2777,7 @@ int gfx_chars_draw(const GfxCharFrame* f)
         return 0;
     }
     GfxTex* depth = depth_attachment();
+    gt_mark(1);
     st_program(g_chars_prog);
     st_cmask(15);
     st_cap(GL_BLEND, &S.blend, 0);
@@ -2581,6 +2804,21 @@ int gfx_chars_draw(const GfxCharFrame* f)
     st_texture(UNIT0 + 1, GL_TEXTURE_2D, g_dummy2d->name);
     st_texture(UNIT0 + 2, GL_TEXTURE_CUBE_MAP, g_dummycube->name);
     uint32_t last_state = ~0u, state_at = 0, last_pal = ~0u, pal_at = 0, pal_size = 0;
+    if (gfx_profiling) /* (every item drawn, counted for what merges: chars_merge_count) */
+    {
+        const GfxCharItem *prev = NULL, *prev0 = NULL;
+        for (uint32_t i = 0; i < f->nitem; ++i)
+        {
+            const GfxCharItem* it = &f->item[i];
+            if (!it->vb || !it->uv || !it->ib || !it->tex || !it->count || it->tex->type != GFX_TEX_2D ||
+                it->state >= f->nstate || it->palette >= f->nbones)
+                continue;
+            chars_merge_count(it, prev, prev0);
+            prev = it;
+            if (!it->mirror)
+                prev0 = it;
+        }
+    }
     int drew = 0;
     GfxTex* last_tex = NULL;
     uint64_t tl = rp_now();
@@ -2652,11 +2890,34 @@ int gfx_chars_draw(const GfxCharFrame* f)
         ch_kind(&tk, 6);
         st_ebo(it->ib->name);
         ch_kind(&tk, 7);
-        uint32_t n = vertex_count(it->prim, it->count);
+        /* this item's draw, with its mirrored copy as its second instance and the lists going on from it (merge) */
+        uint32_t count = it->count, inst = 1, used = 1;
+        if (pairs && i + 1 < f->nitem && chars_pair(it, &f->item[i + 1]))
+            inst = 2, used = 2;
+        if (merge && it->prim == GFX_TRIANGLELIST)
+            for (;;)
+            {
+                uint32_t k = i + used;
+                const GfxCharItem* nx = k < f->nitem ? &f->item[k] : NULL;
+                if (!nx || !nx->count || nx->mirror != it->mirror || nx->prim != GFX_TRIANGLELIST || !chars_same(it, nx) ||
+                    nx->first != it->first + count * 3)
+                    break;
+                int nx_pair = pairs && k + 1 < f->nitem && chars_pair(nx, &f->item[k + 1]);
+                if (nx_pair != (inst == 2)) /* (its copy drawn as ours, or the two apart) */
+                    break;
+                used += inst, count += nx->count;
+            }
+        uint32_t n = vertex_count(it->prim, count);
         uint64_t tc = rp_now();
-        gl.DrawElements(it->prim == GFX_TRIANGLESTRIP ? GL_TRIANGLE_STRIP : GL_TRIANGLES, (GLsizei)n,
-            it->index_size == 4 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT, (const void*)(uintptr_t)(it->first * it->index_size));
-        ++drew;
+        GLenum mode = it->prim == GFX_TRIANGLESTRIP ? GL_TRIANGLE_STRIP : GL_TRIANGLES;
+        GLenum itype = it->index_size == 4 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+        const void* ioff = (const void*)(uintptr_t)(it->first * it->index_size);
+        if (inst == 2)
+            gl.DrawElementsInstanced(mode, (GLsizei)n, itype, ioff, 2);
+        else
+            gl.DrawElements(mode, (GLsizei)n, itype, ioff);
+        ++drew, g_rp.ch_made++;
+        i += used - 1;
         if (ta)
         {
             uint64_t td = gfx_now_ns(), part[3] = { tb - ta, tc - tb, td - tc };
@@ -2668,6 +2929,7 @@ int gfx_chars_draw(const GfxCharFrame* f)
         }
     }
     g_prof.draws += (uint64_t)drew;
+    gt_mark(2);
     uint64_t te = gfx_now_ns();
     g_prof.render_ns += te - t0;
     if (gfx_profiling)

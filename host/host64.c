@@ -1122,7 +1122,7 @@ static void switch_fps(void)
         on = e && *e && *e != '0';
     }
     extern int gfx_gl_prof_take(char* out, size_t n); /* gfx_gl.c: its FFXI_PROFILE line, from the render thread */
-    char line[2048];
+    char line[4096]; /* (the render thread's split line runs past 2 KB) */
     if (gfx_gl_prof_take(line, sizeof line))
         rt_log("%s", line);
     if (!on)
