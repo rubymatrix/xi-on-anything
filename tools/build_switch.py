@@ -244,6 +244,19 @@ MBEDTLS_CONFIG = ['-I' + (ROOT / 'platforms' / 'switch').as_posix(), '-DTF_PSA_C
                   '-DMBEDTLS_USER_CONFIG_FILE=<mbedtls_config.h>']
 
 
+def uam_archive(thirdparty):
+    """uam (third_party/uam, deko3d's shader compiler) for the Switch: thirdparty.py's archive with its calls to the C
+    library's output functions renamed to runtime/portable/gfx/dk_uam.c's (third_party/uam/xi_redefine.txt), which
+    keep what it prints instead (stdio from another thread than the main one breaks the main one's). The archive's
+    path: build/switch/third_party/uam-nx.a."""
+    raw = Path(thirdparty.build('uam'))
+    out = raw.with_name('uam-nx.a')
+    redef = ROOT / 'third_party' / 'uam' / 'xi_redefine.txt'
+    if not out.exists() or out.stat().st_mtime < max(raw.stat().st_mtime, redef.stat().st_mtime):
+        run([tc.tool('objcopy'), '--redefine-syms=' + str(redef), raw, out])
+    return out
+
+
 def desktop_tools():
     """build.py / build_posix.py / thirdparty.py, with the third-party libraries (mbedtls) compiled by
     devkitA64 into build/switch/third_party: thirdparty.py reads its compilers when it is imported."""

@@ -1,9 +1,9 @@
 /* uamtest: uam (the deko3d shader compiler) as a library on the Switch, against uam.exe on the PC.
  *
  * Every shader listed in romfs:/list.txt ("<name> <stage>", stage 0 vertex, 4 fragment) is compiled from
- * romfs:/glsl/<name>.glsl with uam_compile, twice (a cold and a warm compile, timed), and its DKSH compared byte for
+ * romfs:/glsl/<name>.glsl with dk_uam_compile (runtime/portable/gfx/dk_uam.c), twice (a cold and a warm compile, timed), and its DKSH compared byte for
  * byte with romfs:/ref/<name>.dksh, which uam.exe made from the same text. The results go to
- * sdmc:/switch/uamtest/uamtest.log; uam's own messages (stderr) to sdmc:/switch/uamtest/uam-stderr.txt. Then it
+ * sdmc:/switch/uamtest/uamtest.log, with what uam says (its messages kept by dk_uam.c, not printed). Then it
  * waits for + to quit. */
 #include <stdint.h>
 #include <stdio.h>
@@ -14,6 +14,7 @@
 #include <switch.h>
 
 #include "uam_api.h"
+#include "gfx/dk_uam.h" /* dk_uam_compile: uam's messages kept */
 #include "gfx/gfx_msl.h" /* gfx_dk_generate */
 
 #define DIR "sdmc:/switch/uamtest"
@@ -108,12 +109,14 @@ static void game_keys(FILE* log)
             char path[160];
             snprintf(path, sizeof path, DIR "/game/%04d_%s.glsl", i, st ? "fs" : "vs");
             write_file(path, src, strlen(src));
-            fprintf(stderr, "--- game %d %s\n", i, st ? "fs" : "vs");
             void* out = NULL;
             size_t on = 0;
             u64 t0 = armGetSystemTick();
-            int ok = uam_compile(st ? UAM_FRAGMENT : UAM_VERTEX, src, &out, &on);
+            char* msgs = NULL;
+            int ok = dk_uam_compile(!st, src, &out, &on, &msgs);
             double ms = ms_since(t0);
+            if (msgs)
+                fprintf(log, "game %4d %s: uam says: %s\n", i, st ? "fs" : "vs", msgs), free(msgs);
             ++stages, ms_sum += ms;
             if (ms > ms_max)
                 ms_max = ms;
@@ -123,7 +126,7 @@ static void game_keys(FILE* log)
                 write_file(path, out, on);
             }
             else
-                fprintf(log, "game %4d %s: FAILED to compile (%.1f ms; uam-stderr.txt has why)\n", i, st ? "fs" : "vs", ms),
+                fprintf(log, "game %4d %s: FAILED to compile (%.1f ms)\n", i, st ? "fs" : "vs", ms),
                     ++stage_failed;
             free(out), free(src);
         }
@@ -146,7 +149,6 @@ int main(int argc, char** argv)
     romfsInit();
     mkdir(DIR, 0777);
     FILE* log = fopen(DIR "/uamtest.log", "w");
-    freopen(DIR "/uam-stderr.txt", "w", stderr);
     if (!log)
         log = stdout;
 
@@ -175,22 +177,24 @@ int main(int argc, char** argv)
         }
         void* out = NULL;
         size_t on = 0;
-        fprintf(stderr, "--- %s\n", name);
         u64 t0 = armGetSystemTick();
-        int ok = uam_compile(stage, glsl, &out, &on);
+        char* msgs = NULL;
+        int ok = dk_uam_compile(stage == 0, glsl, &out, &on, &msgs);
         double cold = ms_since(t0);
+        if (msgs)
+            fprintf(log, "%-8s uam says: %s\n", name, msgs), free(msgs);
         double warm = -1;
         if (ok)
         {
             void* out2 = NULL;
             size_t on2 = 0;
             t0 = armGetSystemTick();
-            if (uam_compile(stage, glsl, &out2, &on2))
+            if (dk_uam_compile(stage == 0, glsl, &out2, &on2, NULL))
                 warm = ms_since(t0);
             free(out2);
         }
         if (!ok)
-            fprintf(log, "%-8s FAILED to compile (%.1f ms; uam-stderr.txt has why)\n", name, cold), ++failed;
+            fprintf(log, "%-8s FAILED to compile (%.1f ms)\n", name, cold), ++failed;
         else if (!ref)
             fprintf(log, "%-8s compiled, %zu bytes, %.1f ms cold, %.1f warm; no reference\n", name, on, cold, warm);
         else if (rn == on && !memcmp(ref, out, on))
