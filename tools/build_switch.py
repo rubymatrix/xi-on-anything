@@ -286,6 +286,26 @@ GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
 #   - XI_SWITCH_MESA=0, or neither: switch-mesa
 # Only gfx_gl.c includes EGL and GL, so only it is compiled again; the link takes its libraries (egl.pc's, with
 # no libdrm_nouveau) ahead of portlibs'.
+# XI_SWITCH_GFX=deko3d: the graphics on deko3d (gfx_deko3d.c, being brought up), with uam (third_party/uam) to
+# compile the generator's shaders on the console; no Mesa. XI_SWITCH_DK_DEBUG=0: deko3d's release library
+# (libdeko3d.a) instead of its debug one, whose checks gfx_deko3d.c logs.
+DK_GFX = ['runtime/portable/gfx/gfx_deko3d.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
+          'runtime/portable/gfx/gfx_fx.c', 'runtime/portable/gfx/dk_uam.c']
+
+
+def gfx_choice():
+    g = os.environ.get('XI_SWITCH_GFX', 'gl').lower()
+    if g not in ('gl', 'deko3d'):
+        raise SystemExit(f'XI_SWITCH_GFX={g}: gl or deko3d')
+    print('graphics:', 'deko3d' if g == 'deko3d' else 'OpenGL', flush=True)
+    return g
+
+
+def dk_libs():
+    debug = os.environ.get('XI_SWITCH_DK_DEBUG', '1') != '0'
+    return ['-ldeko3dd' if debug else '-ldeko3d', '-lstdc++']
+
+
 MESA_NAME = 'mesa-switch-26.2.4-0ff5207'
 MESA_RELEASE = ('https://github.com/hasanzainul10/xi-on-anything/releases/download/switch-mesa-26.2.4/'
                 + MESA_NAME + '.zip')
@@ -348,7 +368,9 @@ def fetch_mesa(_a=None):
 def host(a):
     """The game: build/switch/xi-on-anything.nro."""
     tc.require()
-    pick_mesa()
+    dk = gfx_choice() == 'deko3d'
+    if not dk:
+        pick_mesa()
     OUT.mkdir(parents=True, exist_ok=True)
     build, bp, thirdparty = desktop_tools()
     if build.BUILD is None:
@@ -365,10 +387,10 @@ def host(a):
     tls = thirdparty.flags('mbedtls') + MBEDTLS_CONFIG
     # ours first: its errors show in seconds, the translation's compile takes a while
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
-    hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + GFX + [
+    hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + (DK_GFX if dk else GFX) + [
         'platforms/switch/sdl_nx.c', 'platforms/switch/tls_nx.c', 'runtime/portable/sampler_nx.c', 'host/addons_none.c']
-    # the render queue: GL's context is its render thread's, and the game calls from several threads
-    queue = ['-DGFX_GL', '-DGFX_QUEUE']
+    # the render queue: GL's context (deko3d's device) is its render thread's, and the game calls from several threads
+    queue = ['-DGFX_DEKO3D', '-DGFX_QUEUE', '-I' + str(ROOT / 'third_party/uam/source')] if dk else ['-DGFX_GL', '-DGFX_QUEUE']
     ours = bp.PORTABLE + hosts + ['runtime/portable/gfx/gfx_queue.c']
     gen_all, gen_ffxi = bp.generated('all'), bp.generated('ffxi')
     phase('compile')
@@ -389,7 +411,11 @@ def host(a):
     objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
     phase('app')
     # (--wrap: switch_main.c sees the threads pthread_create makes - Mesa's - FFXI_SWITCH_PTHREAD_CORE)
-    nro = link_nro(objs, 'xi-on-anything', ['-Wl,--wrap=__syscall_thread_create', thirdparty.archive('mbedtls')] + GFX_LIBS + ['-lnx', '-lm'])
+    gfx_libs = [uam_archive(thirdparty)] + dk_libs() if dk else GFX_LIBS
+    # (deko3d's beside GL's in the card's folder, the same run.args and game: xi-on-anything-dk.nro)
+    nro = link_nro(objs, 'xi-on-anything-dk' if dk else 'xi-on-anything',
+                   ['-Wl,--wrap=__syscall_thread_create', thirdparty.archive('mbedtls')] + gfx_libs + ['-lnx', '-lm'],
+                   title=TITLE + ' (deko3d)' if dk else TITLE)
     settings(a)
     # what it was built from (version, commit, game build): put on the card beside it, where the launcher or a
     # later setup reads whether the card's app is current

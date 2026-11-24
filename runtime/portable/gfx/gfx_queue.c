@@ -21,11 +21,11 @@
 #endif
 
 /* The back end can be called only from the render thread: WebGPU in the browser (the page gives it the
- * canvas), and OpenGL, whose context is current there alone (gfx_gl.c). Its device is brought up there,
+ * canvas), OpenGL, whose context is current there alone (gfx_gl.c), and deko3d (gfx_deko3d.c). Its device is brought up there,
  * and the calls that answer the game (reads, finish, failures) go over to it (call_wait) rather than
  * running on the game's thread once it has caught up (drain). Elsewhere the back ends may be called from
  * any thread. */
-#if defined(__EMSCRIPTEN__) || defined(GFX_GL)
+#if defined(__EMSCRIPTEN__) || defined(GFX_GL) || defined(GFX_DEKO3D)
 #define GFXQ_OWNED 1
 #endif
 

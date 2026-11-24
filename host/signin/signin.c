@@ -2225,6 +2225,16 @@ int signin_run(const SigninSetup* setup, SigninResult* out)
     {
         build(u);
         discord_signin_frame();
+#ifdef __SWITCH__
+        {
+            /* the render thread's log lines (gfx_gl.c's or gfx_deko3d.c's), written here: its own stdio would
+             * break this thread's; in the game, host64.c's switch_fps takes them */
+            extern int gfx_gl_prof_take(char* out, size_t n);
+            char line[4096];
+            while (gfx_gl_prof_take(line, sizeof line))
+                fprintf(stderr, "%s", line);
+        }
+#endif
         SDL_Event e;
         while (SDL_PollEvent(&e))
         {
