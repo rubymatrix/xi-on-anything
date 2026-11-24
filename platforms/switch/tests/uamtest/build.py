@@ -44,8 +44,12 @@ def main():
         lines.append(f'{name} {stage}')
     (romfs / 'list.txt').write_text('\n'.join(lines) + '\n')
     dc.OUT = OUT  # (drawcost's link writes beside its OUT)
-    obj = dc.compile_c(HERE / 'main.c', OUT / 'obj' / 'main.o', ['-I' + str(UAM / 'source')])
-    dc.link('uamtest', 'uamtest', [obj, UAM_LIB], ['-lstdc++', '-lnx', '-lm'],
+    inc = ['-I' + str(UAM / 'source'), '-I' + str(ROOT / 'runtime' / 'portable')]
+    objs = [dc.compile_c(HERE / 'main.c', OUT / 'obj' / 'main.o', inc)]
+    # the game's shader generator (its deko3d dialect, gfx_dk_generate), for the programs of DIR/keys.bin
+    for src in ('gfx_msl.c', 'gfx_msl_shaders.c'):
+        objs.append(dc.compile_c(ROOT / 'runtime' / 'portable' / 'gfx' / src, OUT / 'obj' / (src[:-2] + '.o'), inc))
+    dc.link('uamtest', 'uamtest', objs + [UAM_LIB], ['-lstdc++', '-lnx', '-lm'],
             [dc.PORTLIBS / 'lib', dc.LIBNX / 'lib'], romfs=romfs)
 
 

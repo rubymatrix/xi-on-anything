@@ -51,6 +51,7 @@
 #include <SDL3/SDL.h>
 
 #include "../gfx.h"
+#include "../plat.h" /* (FFXI_GL_KEYLOG: keylog_put) */
 #include "gfx_fx.h"
 #include "gfx_gl_api.h"
 #include "gfx_msl.h"
@@ -1484,7 +1485,36 @@ static GLuint program_from(const char* text)
     return p;
 }
 
-static GLuint program_for(const LibKey* k, const uint32_t* vs, const uint32_t* ps)
+/* FFXI_GL_KEYLOG=<file>: every program made, recorded as "XKL1", sizeof(LibKey), the key, then the vertex and pixel
+ * shaders' token counts and tokens (words) - what the deko3d back end's compiler is checked with
+ * (platforms/switch/tests/uamtest). Written on the render thread through the platform's files, not stdio. */
+static void keylog_put(const LibKey* k, const uint32_t* vs, uint32_t nvs, const uint32_t* ps, uint32_t nps)
+{
+    static int on = -1;
+    static PlatFile* f;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_GL_KEYLOG");
+        on = e && *e && (f = plat_file_open(e, PLAT_WRITE | PLAT_CREATE | PLAT_TRUNCATE)) != NULL;
+    }
+    if (!on)
+        return;
+    if (!vs)
+        nvs = 0;
+    if (!ps)
+        nps = 0;
+    uint32_t head[2] = { 0x314c4b58u /* XKL1 */, (uint32_t)sizeof *k };
+    plat_file_write(f, head, sizeof head);
+    plat_file_write(f, k, sizeof *k);
+    plat_file_write(f, &nvs, 4);
+    if (nvs)
+        plat_file_write(f, vs, nvs * 4);
+    plat_file_write(f, &nps, 4);
+    if (nps)
+        plat_file_write(f, ps, nps * 4);
+}
+
+static GLuint program_for(const LibKey* k, const uint32_t* vs, uint32_t nvs, const uint32_t* ps, uint32_t nps)
 {
     /* the last two keys asked for (most draws repeat the one before; a per-pixel draw asks for two) */
     static LibKey last[2];
@@ -1503,6 +1533,7 @@ static GLuint program_for(const LibKey* k, const uint32_t* vs, const uint32_t* p
         last[last_next] = *k, last_p[last_next] = got, last_ok[last_next] = 1, last_next ^= 1;
         return got;
     }
+    keylog_put(k, vs, nvs, ps, nps);
     char* src = gfx_gl_generate(&k->vs, &k->fs, vs, ps);
     GLuint p = src ? program_from(src) : 0;
     free(src);
@@ -1524,12 +1555,12 @@ static GLuint program(const GfxDraw* d)
     if (g_fxs.fx != 0.0f && g_fxs.light != 0.0f && d->vs.lighting && !d->vs.rhw && !d->vs.prog && !d->vs.flat)
     {
         k.vs.pixel = g_fxs.light >= 2.0f ? 2 : 1;
-        GLuint p = program_for(&k, d->vs_tokens, d->ps_tokens);
+        GLuint p = program_for(&k, d->vs_tokens, d->vs_token_count, d->ps_tokens, d->ps_token_count);
         if (p)
             return p;
         k.vs.pixel = 0;
     }
-    return program_for(&k, d->vs_tokens, d->ps_tokens);
+    return program_for(&k, d->vs_tokens, d->vs_token_count, d->ps_tokens, d->ps_token_count);
 }
 
 /* the stages' texture kinds, two bits each (0 none, 1 2D, 2 cube) */

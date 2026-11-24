@@ -11,7 +11,7 @@ typedef struct Sb
 {
     char* s;
     size_t len, cap;
-    int glsl; /* the dialect being written: 0 MSL, 1 Vulkan GLSL, 2 WGSL (WebGPU), 3 OpenGL GLSL */
+    int glsl; /* the dialect being written: 0 MSL, 1 Vulkan GLSL, 2 WGSL (WebGPU), 3 OpenGL GLSL, 4 deko3d GLSL */
 } Sb;
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -41,6 +41,12 @@ char* gfx_glsl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* 
  * is D3D's top row, and z from D3D's 0..1 to GL's -1..1 unless the back end defines GFX_GL_CLIP01
  * (glClipControl). No #version line; the back end adds it and GFX_VS or GFX_FS. */
 char* gfx_gl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
+
+/* The same for deko3d (gfx_deko3d.c, compiled by uam): OpenGL's text with its differences - the interface block
+ * at location 0 (uam compiles each stage alone, nothing matches blocks by name), and clip space left as D3D's (y
+ * up, z 0..1, the upper-left origin: deko3d's defaults). No #version line; the back end adds "#version 460" and
+ * GFX_VS or GFX_FS, and compiles each stage on its own. */
+char* gfx_dk_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens);
 
 /* The same as WGSL for WebGPU (gfx_webgpu.c): one module with vs_main and fs_main. Bindings, all
  * in group 0: 0 the uniforms, 1-4 the vertex streams (storage, read), 5 the shadow matrix, 8-15 the
