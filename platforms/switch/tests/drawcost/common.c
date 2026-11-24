@@ -9,6 +9,7 @@
 #include <switch.h>
 
 const DcMode dc_modes[] = {
+    { "game", DC_GAME },     /* the game's frame (common.h) */
     { "full", DC_BIND_ALL }, /* the D3D8-like draw: everything rebound */
     { "none", 0 },           /* draws only, nothing rebound */
     { "ubo", DC_BIND_UBO },
@@ -25,11 +26,61 @@ DcConfig dc_cfg = {
     .sync = 1,
     .sweep = 1,
     .sweep_secs = 6,
-    .pthread_core = 1,
+    .pthread_core = -2,
     .mode = 0,
 };
 
 static const char* g_path_name = "?";
+static int g_main_core;
+DcCounts dc_cnt;
+
+/* --- the game mode's frame -------------------------------------------------------------------------------- */
+DcGameDraw dc_game[DC_G_DRAWS];
+
+void dc_game_plan(void)
+{
+    memset(dc_game, 0, sizeof dc_game);
+    for (int i = 0; i < DC_G_DRAWS; ++i)
+    {
+        DcGameDraw* d = &dc_game[i];
+        d->prog = (uint8_t)((i / DC_G_PROG_EVERY) % DC_G_NPROG);
+        d->tex0 = (uint8_t)((i / 2) % DC_NTEX);
+        d->tex1 = (uint8_t)((i / 8 + 5) % DC_NTEX);
+        d->samp0 = (uint8_t)((i / 55) % DC_G_NSAMP);
+        d->src = (uint8_t)((i * 2 / 5) % (DC_G_NSTATIC + 1));
+        d->kind = i % 80 == 3 ? DC_K_STATIC_IDX : i % 4 == 1 ? DC_K_RING_IDX : DC_K_ARRAYS;
+        d->ib = (uint8_t)((i / 80) % DC_NIB);
+        d->state = i % 3 == 0 ? (uint8_t)(DC_ST_BLEND + (i / 3) % 4) : DC_ST_NONE;
+        d->rt = DC_RT_MAIN;
+    }
+    /* the visits away from the main target: 25 to the side target, 10 to the probe (cleared), 5 to the 256x256 */
+    for (int v = 0; v < DC_G_NVISITS; ++v)
+    {
+        int at = 12 + v * 27, k = v % 8;
+        int rt = k < 5 ? DC_RT_SIDE : k < 7 ? DC_RT_PROBE : DC_RT_256;
+        for (int j = 0; j < DC_G_VISIT_LEN && at + j < DC_G_DRAWS; ++j)
+            dc_game[at + j].rt = (uint8_t)rt;
+        dc_game[at].clear = rt == DC_RT_PROBE;
+    }
+}
+
+void dc_game_words(int mesh, int indexed, uint32_t* out)
+{
+    DcVertex v[DC_NVERT];
+    dc_mesh(mesh, v);
+    int n = indexed ? DC_NVERT : DC_G_ARRAY_VERTS;
+    for (int i = 0; i < n; ++i)
+        memcpy(out + 4 * i, &v[indexed ? i : dc_indices[i]], sizeof(DcVertex));
+}
+
+void dc_game_uniforms(int draw, int base_words, float* block)
+{
+    DcUniforms u;
+    dc_uniforms(draw, &u);
+    memcpy(block, u.xform, 32);
+    int32_t base[4] = { base_words, 0, 0, 0 };
+    memcpy(block + 8, base, 16);
+}
 
 /* --- the scene ---------------------------------------------------------------------------------------- */
 const uint16_t dc_indices[DC_NIDX] = {
@@ -122,6 +173,8 @@ int __wrap___syscall_thread_create(struct __pthread_t** thread, void* (*func)(vo
     svcGetThreadPriority(&prio, h);
     int moved = -1;
     int want = dc_cfg.pthread_core;
+    if (want == -2)
+        want = (g_main_core + 1) % 3;
     if (want >= 0 && want <= 2 && R_SUCCEEDED(svcSetThreadCoreMask(h, want, 1ull << want)))
         moved = want;
     uint32_t i = __atomic_fetch_add(&g_pt.n, 1, __ATOMIC_RELAXED);
@@ -272,6 +325,8 @@ const char* dc_dir(void) { return dir; }
 void dc_init(int argc, char** argv, const char* path_name, const char* log_name)
 {
     g_path_name = path_name;
+    g_main_core = (int)svcGetCurrentProcessorNumber();
+    dc_game_plan();
     /* the folder the .nro is in (argv[0], sdmc:/switch/drawcost/x.nro), else sdmc:/switch/drawcost/ */
     if (argc > 0 && argv[0] && strchr(argv[0], '/'))
     {
@@ -324,6 +379,7 @@ typedef struct
     uint64_t record_ns, submit_ns, done_ns, present_ns;
     uint64_t cpu0_main, cpu0_thr[DC_MAX_THREADS];
     int nthr;
+    uint64_t cnt[sizeof(DcCounts) / sizeof(uint32_t)]; /* dc_cnt's, summed */
 } Acc;
 
 static void acc_begin(Acc* a)
@@ -347,6 +403,9 @@ static void acc_add(Acc* a, const DcFrame* f)
     a->present_ns += f->present_ns;
     if (f->done_ns)
         a->sync_frames++, a->sync_draws += (uint64_t)f->draws, a->done_ns += f->done_ns;
+    const uint32_t* c = (const uint32_t*)&dc_cnt;
+    for (size_t i = 0; i < sizeof a->cnt / sizeof a->cnt[0]; ++i)
+        a->cnt[i] += c[i];
 }
 
 static void acc_line(Acc* a, const char* tag, uint64_t t_ns)
@@ -368,13 +427,22 @@ static void acc_line(Acc* a, const char* tag, uint64_t t_ns)
            (int)(a->draws / (uint64_t)a->frames), a->frames, period_ms > 0 ? 1e3 / period_ms : 0.0, period_ms,
            (double)a->record_ns / 1e3 / d, (double)a->submit_ns / 1e3 / d, complete,
            (double)a->present_ns / 1e6 / (double)a->frames, cpu);
+    if (a->cnt[0])
+    {
+        double n = (double)a->frames;
+        dc_log("%s   a frame: draws=%.0f programs=%.0f stage_tex=%.0f samplers=%.0f stream_tex=%.0f uniforms=%.0f state=%.0f"
+               " index_buf=%.0f targets=%.0f ring=%.2fMB",
+               tag, (double)a->cnt[0] / n, (double)a->cnt[1] / n, (double)a->cnt[2] / n, (double)a->cnt[3] / n,
+               (double)a->cnt[4] / n, (double)a->cnt[5] / n, (double)a->cnt[6] / n, (double)a->cnt[7] / n, (double)a->cnt[8] / n,
+               (double)a->cnt[9] / n / 1e6);
+    }
 }
 
 /* the sweep: each step sweep_secs, the first 2 s not counted */
 static const struct
 {
     int mode, sync;
-} g_steps[] = { { 0, 1 }, { 1, 1 }, { 2, 1 }, { 3, 1 }, { 4, 1 }, { 5, 1 }, { 0, 0 } };
+} g_steps[] = { { 0, 1 }, { 1, 1 }, { 2, 1 }, { 3, 1 }, { 4, 1 }, { 5, 1 }, { 6, 1 }, { 0, 0 }, { 1, 0 } };
 static int g_step = -1;
 static uint64_t g_t0, g_step_t0, g_iv_t0;
 static Acc g_iv, g_st;
@@ -386,7 +454,15 @@ static void sweep_apply(void)
     dc_cfg.sync = g_steps[g_step].sync;
 }
 
+static void frame(const DcFrame* f);
+
 void dc_frame(const DcFrame* f)
+{
+    frame(f);
+    memset(&dc_cnt, 0, sizeof dc_cnt);
+}
+
+static void frame(const DcFrame* f)
 {
     uint64_t now = f->start_ns;
     if (!g_t0)
@@ -398,7 +474,7 @@ void dc_frame(const DcFrame* f)
             g_step = 0;
             sweep_apply();
             dc_log("sweep: %d steps of %d s (2 s warm-up each), then %s", (int)(sizeof g_steps / sizeof g_steps[0]),
-                   dc_cfg.sweep_secs, "full sync until + is pressed");
+                   dc_cfg.sweep_secs, "game sync until + is pressed");
         }
         return; /* this frame was drawn before the sweep's first mode */
     }

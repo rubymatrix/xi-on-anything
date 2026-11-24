@@ -66,22 +66,32 @@ def c_string(text):
     return '\n'.join(out)
 
 
+# (the source, its C name in gen/shader_src.h, its .dksh name, uam's stage, how many PROG variants)
+SHADERS = [('vs.glsl', 'dc_vs_src', 'vs', 'vert', 4), ('fs.glsl', 'dc_fs_src', 'fs', 'frag', 4),
+           ('game_vs.glsl', 'dc_game_vs_src', 'gvs', 'vert', 8), ('game_fs.glsl', 'dc_game_fs_src', 'gfs', 'frag', 8),
+           ('char_vs.glsl', 'dc_char_vs_src', 'cvs', 'vert', 1), ('char_fs.glsl', 'dc_char_fs_src', 'cfs', 'frag', 1)]
+
+
 def shaders():
-    """gen/shader_src.h for the GL path, and romfs/shaders/{vs,fs}<p>.dksh by uam for deko3d, from vs.glsl and fs.glsl."""
-    vs, fs = (HERE / 'vs.glsl').read_text(), (HERE / 'fs.glsl').read_text()
+    """gen/shader_src.h for the GL path, and romfs/shaders/<name><p>.dksh by uam for deko3d, from the .glsl files."""
     gen = OUT / 'gen'
     gen.mkdir(parents=True, exist_ok=True)
-    (gen / 'shader_src.h').write_text('/* made by build.py from vs.glsl and fs.glsl */\n'
-                                      'static const char dc_vs_src[] =\n' + c_string(vs) + ';\n'
-                                      'static const char dc_fs_src[] =\n' + c_string(fs) + ';\n')
     glsl, romfs = OUT / 'glsl', OUT / 'romfs' / 'shaders'
     glsl.mkdir(parents=True, exist_ok=True)
     romfs.mkdir(parents=True, exist_ok=True)
-    for p in range(4):
-        for name, stage, body in (('vs', 'vert', vs), ('fs', 'frag', fs)):
+    header = '/* made by build.py from the .glsl files */\n'
+    for src, cname, name, stage, n in SHADERS:
+        body = (HERE / src).read_text()
+        header += f'static const char {cname}[] =\n' + c_string(body) + ';\n'
+        for p in range(n):
             g = glsl / f'{name}{p}.glsl'
-            g.write_text(f'#version 460\n#define PROG {p}\n' + body)
-            run([TOOLS / 'uam.exe', '-s', stage, '-o', romfs / f'{name}{p}.dksh', g])
+            text = f'#version 460\n#define PROG {p}\n' + body
+            out = romfs / f'{name}{p}.dksh'
+            if g.exists() and g.read_text() == text and out.exists():
+                continue
+            g.write_text(text)
+            run([TOOLS / 'uam.exe', '-s', stage, '-o', out, g])
+    (gen / 'shader_src.h').write_text(header)
 
 
 def link(name, title, objs, libs, lib_dirs, romfs=None):
