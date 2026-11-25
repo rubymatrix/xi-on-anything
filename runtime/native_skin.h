@@ -247,4 +247,17 @@ RT_INLINE void rt_xform3(unsigned char* gb, unsigned cw, uint32_t m, uint32_t v,
     }
 }
 
+/* FFXiMain's 4x4 matrix products (recomp/x86c.py MAT_FNS), called inline: out = l * r (rows of l times r), written
+ * once both were read, so out may be either. Each kind keeps the order its x87 code adds an element's four products
+ * in, its rounding and its stores to float. At the x87's 53-bit precision a product of two floats is exact in a
+ * double, so a fused multiply-add rounds as the multiply and the add do: the NEON version gives the same bits. */
+enum { RT_MAT_THIS_ARG, RT_MAT_ARG_THIS, RT_MAT_STDCALL };
+void rt_mat_mul(unsigned char* gb, unsigned cw, uint32_t out, uint32_t l, uint32_t r, int kind); /* runtime.c */
+void rt_mat_mul_c(unsigned char* gb, unsigned cw, uint32_t out, uint32_t l, uint32_t r, int kind); /* (without NEON) */
+RT_INLINE void rt_mat_copy(unsigned char* gb, uint32_t out, uint32_t in)
+{
+    for (uint32_t k = 0; k < 16; ++k) /* (in order: the two may overlap) */
+        wr32_b(gb, out + 4u * k, rd32_b(gb, in + 4u * k));
+}
+
 #endif

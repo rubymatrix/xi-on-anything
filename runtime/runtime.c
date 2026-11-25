@@ -4,6 +4,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 /* rt_table (table.c, generated): every translated function, sorted by guest address. */
 int rt_index(uint32_t addr)
@@ -33,6 +36,90 @@ void rt_set_native_handler(RtNativeHandler h) { g_native = h; }
 uint32_t rt_reloc_delta;
 int rt_native_check = -1; /* native_skin.h: FFXI_SKIN_CHECK, read at the first native loop */
 uint32_t rt_image_lo, rt_image_hi;
+
+/* native_skin.h: the order each row's four products are added in, by kind */
+static const uint8_t mat_order[3][4][4] = {
+    { { 2, 1, 0, 3 }, { 1, 2, 0, 3 }, { 2, 0, 3, 1 }, { 0, 3, 2, 1 } }, /* this_arg */
+    { { 2, 1, 3, 0 }, { 0, 2, 3, 1 }, { 3, 2, 1, 0 }, { 3, 1, 2, 0 } }, /* arg_this */
+    { { 0, 1, 2, 3 }, { 0, 1, 2, 3 }, { 0, 1, 2, 3 }, { 0, 1, 2, 3 } }, /* stdcall: from 0.0 */
+};
+
+void rt_mat_mul_c(unsigned char* gb, unsigned cw, uint32_t out, uint32_t l, uint32_t r, int kind)
+{
+    float m[16];
+    for (uint32_t i = 0; i < 4; ++i)
+        for (uint32_t j = 0; j < 4; ++j)
+        {
+            double s = 0.0;
+            for (int k = 0; k < 4; ++k)
+            {
+                uint32_t e = mat_order[kind][i][k];
+                double p = fr_cw(cw, (double)rdf32_b(gb, l + 16u * i + 4u * e) * rdf32_b(gb, r + 16u * e + 4u * j));
+                s = k || kind == RT_MAT_STDCALL ? fr_cw(cw, s + p) : p;
+            }
+            m[4 * i + j] = (float)s;
+        }
+    for (uint32_t k = 0; k < 16; ++k)
+        wrf32_b(gb, out + 4u * k, m[k]);
+}
+
+#if defined(__aarch64__)
+/* (both halves of a row of r, times an element of l) */
+#define MAT_FIRST(e) lo = vmulq_n_f64(rl[e], m[e]), hi = vmulq_n_f64(rh[e], m[e])
+#define MAT_ADD(e) lo = vfmaq_n_f64(lo, rl[e], m[e]), hi = vfmaq_n_f64(hi, rh[e], m[e])
+#define MAT_ZERO(e) lo = hi = vdupq_n_f64(0.0), MAT_ADD(e)
+#define MAT_ROW(i, first, a, b, c, d)                                                                                  \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        double m[4];                                                                                                   \
+        for (uint32_t k = 0; k < 4; ++k)                                                                               \
+            m[k] = rdf32_b(gb, l + 16u * (i) + 4u * k);                                                                \
+        first(a), MAT_ADD(b), MAT_ADD(c), MAT_ADD(d);                                                                  \
+        res[i] = vcvt_high_f32_f64(vcvt_f32_f64(lo), hi);                                                              \
+    } while (0)
+#endif
+
+void rt_mat_mul(unsigned char* gb, unsigned cw, uint32_t out, uint32_t l, uint32_t r, int kind)
+{
+#if defined(__aarch64__)
+    if ((cw >> 8) & 3u)
+    {
+        float64x2_t rl[4], rh[4], lo, hi;
+        float32x4_t res[4];
+        for (uint32_t k = 0; k < 4; ++k)
+        {
+            float32x4_t v = vld1q_f32((const float*)(gb + (uint32_t)(r + 16u * k)));
+            rl[k] = vcvt_f64_f32(vget_low_f32(v)), rh[k] = vcvt_high_f64_f32(v);
+        }
+        if (kind == RT_MAT_THIS_ARG)
+        {
+            MAT_ROW(0, MAT_FIRST, 2, 1, 0, 3);
+            MAT_ROW(1, MAT_FIRST, 1, 2, 0, 3);
+            MAT_ROW(2, MAT_FIRST, 2, 0, 3, 1);
+            MAT_ROW(3, MAT_FIRST, 0, 3, 2, 1);
+        }
+        else if (kind == RT_MAT_ARG_THIS)
+        {
+            MAT_ROW(0, MAT_FIRST, 2, 1, 3, 0);
+            MAT_ROW(1, MAT_FIRST, 0, 2, 3, 1);
+            MAT_ROW(2, MAT_FIRST, 3, 2, 1, 0);
+            MAT_ROW(3, MAT_FIRST, 3, 1, 2, 0);
+        }
+        else
+        {
+            MAT_ROW(0, MAT_ZERO, 0, 1, 2, 3);
+            MAT_ROW(1, MAT_ZERO, 0, 1, 2, 3);
+            MAT_ROW(2, MAT_ZERO, 0, 1, 2, 3);
+            MAT_ROW(3, MAT_ZERO, 0, 1, 2, 3);
+        }
+        for (uint32_t k = 0; k < 4; ++k)
+            vst1q_f32((float*)(gb + (uint32_t)(out + 16u * k)), res[k]);
+        return;
+    }
+#endif
+    rt_mat_mul_c(gb, cw, out, l, r, kind);
+}
+
 static volatile uint32_t g_lookup_gen = 1; /* rt_lookup_any's cache: bumped when code is placed */
 
 void rt_set_image(uint32_t runtime_base)

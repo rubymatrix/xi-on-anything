@@ -14,6 +14,7 @@ Model (see runtime/guest.h):
 Anything not handled becomes RT_UNIMPL(addr, "text"), which traps at run time; the recompiler
 counts them so coverage can be measured over the whole binary.
 """
+import hashlib
 import os
 import re
 
@@ -83,6 +84,7 @@ def x87_locals(lines):
 # frame and the return address) is not written.
 FTOL_BYTES = bytes.fromhex('558bec83c4f49bd97dfe9b668b45fe80cc0c668945fcd96dfcdf7df4d96dfe8b45f48b55f8c9c3')
 FTOL_INLINE = os.environ.get('XI_FTOL_INLINE', '1') != '0'
+MAT_INLINE = os.environ.get('XI_MAT_INLINE', '1') != '0'
 
 
 def ftol_inline():
@@ -104,6 +106,29 @@ XFORM_BYTES = {
 def xform_inline(point):
     return ['{ uint32_t o_ = rd32(esp), v_ = rd32(esp + 4u); rt_xform3(RT_GB, g->fcw, ecx, v_, o_, %d); '
             'eax = v_; edx = o_; esp += 8; }' % point]
+
+
+# FFXiMain's 4x4 matrix products and its matrix copy, translated inline at each call too, as rt_mat_mul and rt_mat_copy
+# (runtime/native_skin.h): length and SHA-256 of the function's bytes (its relocations, and the address it calls, zeroed;
+# a call is to the copy, a relocation the 0.0f a sum starts with). ecx is the matrix for the thiscalls; nothing is
+# written below esp, and the flags are left (no caller reads them).
+MAT_FNS = {
+    'copy': (101, '887a0b8b7b4e2ec2e79fdb29777c6b7e4a27d6ac8d730546fb0d4cbb469f3424', (), None),          # this = arg (0x10027800 in 2025-12-26)
+    'this_arg': (193, '040a39cae5c4192e67ce12646fcfa70eefa2cbbdd764bc525b90250f559b1c78', (), 0xb4),  # this = this * arg (0x10027b20)
+    'arg_this': (193, '9bda40f2947fca4d306c1e92bc72fbc83ad2a33ef3508c0a1f756c897b183740', (), 0xb4),  # this = arg * this (0x10027ca0)
+    'stdcall': (135, '4beabd886c2cf8cd474d89728933cf5deadc30d48b8a4bbbcfa8cc2e774c401b', (0x34,), None),  # out = a * b (0x1006d080)
+}
+
+
+def mat_inline(kind):
+    if kind == 'stdcall':
+        return ['{ uint32_t o_ = rd32(esp); rt_mat_mul(RT_GB, g->fcw, o_, rd32(esp + 4u), rd32(esp + 8u), RT_MAT_STDCALL); '
+                'eax = o_; ecx = 0; edx = 0; esp += 12; }']
+    do = {'copy': 'rt_mat_copy(RT_GB, ecx, a_);',
+          'this_arg': 'rt_mat_mul(RT_GB, g->fcw, ecx, ecx, a_, RT_MAT_THIS_ARG);',
+          'arg_this': 'rt_mat_mul(RT_GB, g->fcw, ecx, a_, ecx, RT_MAT_ARG_THIS);'}[kind]
+    # (eax and edx: the copy's last two elements)
+    return ['{ uint32_t a_ = rd32(esp); ' + do + ' eax = rd32(ecx + 0x3Cu); edx = rd32(ecx + 0x38u); esp += 4; }']
 
 
 def mask(bits):
@@ -334,6 +359,32 @@ class FunctionTranslator:
                     cache[target] = kind
         return cache[target]
 
+    def mat_kind(self, target):
+        """which of MAT_FNS the function at target is, None for anything else"""
+        cache = self.ctx.__dict__.setdefault('mat_at', {})
+        if target not in cache:
+            cache[target] = None
+            for kind, (n, digest, relocs, call) in MAT_FNS.items():
+                code = bytearray(self.ctx.read(target, n))
+                if len(code) != n:
+                    continue
+                if tuple(sorted(a - target for a in self.ctx.relocs if target <= a < target + n)) != relocs:
+                    continue
+                if call is not None:
+                    to = (target + call + 4 + int.from_bytes(code[call:call + 4], 'little')) & 0xFFFFFFFF
+                    code[call:call + 4] = bytes(4)
+                zeros = [int.from_bytes(code[r:r + 4], 'little') for r in relocs]
+                for r in relocs:
+                    code[r:r + 4] = bytes(4)
+                if hashlib.sha256(bytes(code)).hexdigest() != digest:
+                    continue
+                if call is not None and self.mat_kind(to) != 'copy':
+                    continue
+                if any(bytes(self.ctx.read(z, 4)) != bytes(4) for z in zeros):
+                    continue
+                cache[target] = kind
+        return cache[target]
+
     def is_ftol(self, target):
         cache = self.ctx.__dict__.setdefault('ftol_at', {})
         if target not in cache:
@@ -386,6 +437,24 @@ class FunctionTranslator:
             out.append((ins, stmts, falls))
         return out
 
+    def mat_entry(self, emitted):
+        """a matrix product called through a pointer too (MAT_FNS): native from its entry on, to its ret"""
+        kind = self.mat_kind(self.entry) if MAT_INLINE else None
+        if kind in (None, 'copy'):
+            return emitted
+        ret = self.entry + MAT_FNS[kind][0] - 3
+        if not any(i.address == ret and i.mnemonic == 'ret' for i, _, _ in emitted):
+            return emitted
+        self.labels.add(ret)
+        out = []
+        for ins, stmts, falls in emitted:
+            if ins.address == self.entry:
+                # (the arguments above the return address, which ret takes with them)
+                stmts = ['{ uint32_t sp_ = esp; esp += 4; ' + ' '.join(mat_inline(kind)) +
+                         ' esp = sp_; goto L_%08x; }' % ret] + stmts
+            out.append((ins, stmts, falls))
+        return out
+
     def x87_effect(self, target):
         """what the function at target does to the x87 stack's depth (x87_slots.net_effect), None if unknown"""
         cache = self.ctx.__dict__.setdefault('x87_effects', {})
@@ -404,6 +473,7 @@ class FunctionTranslator:
     def translate(self):
         emitted = self.emit()
         emitted = self.native_loops(emitted)
+        emitted = self.mat_entry(emitted)
         # the x87 stack in fixed locals by its depth, where the function allows it (recomp/x87_slots.py); else
         # x87_locals' rotating ones, below
         plan = None
@@ -685,6 +755,9 @@ class FunctionTranslator:
                     xf = self.xform_kind(tgt) if FTOL_INLINE else None
                     if xf is not None:
                         return xform_inline(xf), True
+                    mat = self.mat_kind(tgt) if MAT_INLINE else None
+                    if mat is not None:
+                        return mat_inline(mat), True
                     return self.call(tgt, nxt), True
                 return ['RT_BADJUMP(%s);' % hexu(tgt)], False
             # (the flags go in: some of the functions that read them at entry are called through pointers)

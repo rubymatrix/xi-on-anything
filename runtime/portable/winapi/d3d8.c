@@ -1820,16 +1820,26 @@ void d3d8_set_after_present(void (*fn)(void)) { g_after_present = fn; }
  * had (gfxq_record_hook) - else at once. data is copied. From the game's threads, under the guest lock. */
 void d3d8_host_call(void (*fn)(const void* data), const void* data, uint32_t bytes)
 {
-    if (g_w.threaded && !d3dw_on_worker() && bytes <= (4u << 20)) /* (the characters' batch: ~100 KB in a town) */
+    void* to = d3d8_host_call_begin(fn, bytes);
+    if (to)
     {
-        WHost* h = (WHost*)d3dw_rec(W_HOST, (uint32_t)sizeof *h + bytes);
-        h->fn = fn, h->n = bytes, h->pad = 0;
-        memcpy(h + 1, data, bytes);
-        d3dw_done();
+        memcpy(to, data, bytes);
+        d3d8_host_call_end();
         return;
     }
     fn(data);
 }
+
+void* d3d8_host_call_begin(void (*fn)(const void* data), uint32_t bytes)
+{
+    if (!g_w.threaded || d3dw_on_worker() || bytes > (4u << 20)) /* (the characters' batch: ~100 KB in a town) */
+        return NULL;
+    WHost* h = (WHost*)d3dw_rec(W_HOST, (uint32_t)sizeof *h + bytes);
+    h->fn = fn, h->n = bytes, h->pad = 0;
+    return h + 1;
+}
+
+void d3d8_host_call_end(void) { d3dw_done(); }
 
 void d3d8_set_overlay(void (*fn)(GfxTex* backbuffer, uint32_t w, uint32_t h)) { g_overlay = fn; }
 

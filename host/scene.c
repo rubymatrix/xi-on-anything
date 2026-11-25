@@ -1747,9 +1747,10 @@ static void chars_send(void)
         static size_t cap;
         size_t n = sizeof(CharsRec) + (size_t)g_npal * 64 + (size_t)g_ncstates * sizeof *g_cstates +
             (size_t)g_ncitems * sizeof *g_citems + (size_t)g_ncenv * sizeof *g_cenv;
-        if (n > cap)
+        uint8_t* to = (uint8_t*)d3d8_host_call_begin(chars_run, (uint32_t)n);
+        if (!to && n > cap)
             cap = n * 2, buf = (uint8_t*)realloc(buf, cap);
-        CharsRec* h = (CharsRec*)buf;
+        CharsRec* h = (CharsRec*)(to ? to : buf);
         h->nbones = g_npal, h->nstate = g_ncstates, h->nitem = g_ncitems, h->nenv = g_ncenv, h->mask = g_cmask;
         uint8_t* p = (uint8_t*)(h + 1);
         memcpy(p, g_pal, (size_t)g_npal * 64), p += (size_t)g_npal * 64;
@@ -1757,7 +1758,10 @@ static void chars_send(void)
         memcpy(p, g_citems, (size_t)g_ncitems * sizeof *g_citems), p += (size_t)g_ncitems * sizeof *g_citems;
         if (g_ncenv)
             memcpy(p, g_cenv, (size_t)g_ncenv * sizeof *g_cenv);
-        d3d8_host_call(chars_run, buf, (uint32_t)n);
+        if (to)
+            d3d8_host_call_end();
+        else
+            d3d8_host_call(chars_run, buf, (uint32_t)n);
         g_cs_sends++, g_cs_items += g_ncitems;
     }
     chars_reset();
