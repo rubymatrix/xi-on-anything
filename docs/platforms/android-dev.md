@@ -9,7 +9,7 @@ hosts; the desktop Metal, D3D12 and C Vulkan back ends keep their own build path
 The APK is a debug client. It opens on the sign-in screen, as the desktop and iPhone builds do, or
 signs in to a LandSandBoat server with `--user` and `--pass` from `run.args`. `--session` and
 `--auth` are refused. Remember Password encrypts each password with an AES key that the Android
-Keystore makes and holds (`MainActivity.keychainSet`, `host/signin/keychain.c`). Only the ciphertext is
+Keystore makes and holds (`GameActivity.keychainSet`, `host/signin/keychain.c`). Only the ciphertext is
 stored, in the app's private preferences; no password is written in the clear.
 
 The APK contains no password, game files, captures or generated game code: bring your own client
@@ -146,7 +146,7 @@ These are the iPhone build's ([ios.md](ios-dev.md)), shared through `FFXI_MOBILE
   controller while a row records. The result is an SDL gamepad mapping for that controller, applied
   at once and kept in `gamepads.txt` in the data folder. The page scrolls when it is taller than the
   interface.
-- **Drawing:** the controls are drawn by a view over the game's surface (`MainActivity.Overlay`,
+- **Drawing:** the controls are drawn by a view over the game's surface (`GameActivity.Overlay`,
   fed by `platforms/android/android_overlay.c`), not by the Vulkan back end. They keep the display's rate when
   the game runs slower, and their labels use the system font. Touches pass through to SDL.
 - **Back:** Android's Back, gesture or button, is Escape. It never closes the app, and Escape on the

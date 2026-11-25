@@ -251,7 +251,7 @@ int keychain_available(void) { return ss(); }
 #include <jni.h>
 #include <SDL3/SDL.h>
 
-/* The activity's keychainGet/Set/Delete (MainActivity.java): an AES key the Android Keystore keeps,
+/* The activity's keychainGet/Set/Delete (GameActivity.java): an AES key the Android Keystore keeps,
  * the passwords only ever stored encrypted with it, in the app's private preferences. Any thread:
  * SDL attaches it to the VM, and the activity's own class is used (an attached thread's FindClass
  * can't see the app's classes). */

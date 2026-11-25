@@ -2,7 +2,7 @@
  * under one service), the Windows Credential Manager (generic credentials), the freedesktop Secret
  * Service on Linux (GNOME Keyring, KWallet, KeePassXC: through libsecret, loaded when first used, so
  * it is no build dependency), the Android Keystore (passwords kept only encrypted with a key it
- * holds, MainActivity.java), or the credential locker in the UWP app (platforms/xbox/app/Keychain.cpp).
+ * holds, GameActivity.java), or the credential locker in the UWP app (platforms/xbox/app/Keychain.cpp).
  * Without one (no libsecret, no Secret Service running) every call fails and the player types the
  * password each time. */
 #pragma once
