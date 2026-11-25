@@ -4,6 +4,44 @@ The macOS host on UIKit: the same recompiled client and Metal back end, with SDL
 and controllers, and touch controls over the game. No emulator and no JIT: LuaJIT runs as its
 interpreter, since iOS forbids writable code. Developer notes are in [ios-dev.md](ios-dev.md).
 
+There are two ways to play on an iPhone or iPad:
+
+- **The XI on Anything app** (below): the launcher and the game in one app, installed with
+  [Sideloadly](https://sideloadly.io/). It manages your game installs and makes the game on the
+  phone from your own copy of FINAL FANTASY XI. Nothing of Square Enix's is in the app.
+- **A build of your own** on a Mac with Xcode ([What you need](#what-you-need) on): the game alone,
+  your install's translation built into it.
+
+## The XI on Anything app (Sideloadly)
+
+1. **Install it.** Open `XI-on-Anything.ipa` in Sideloadly with the iPhone connected, sign in with
+   your Apple Account (a free one works; its apps run for 7 days, then install again: your
+   accounts, installs and the game the app made stay). On the iPhone, trust the account in
+   Settings > General > VPN & Device Management, and turn on Developer Mode (Settings > Privacy &
+   Security) if it asks.
+2. **Add your game.** In the app's Installs tab: download it from Square Enix (about 8 GB, then
+   updated from PlayOnline), get a private server's client from its mirror (a `.zip`, `.tar` or
+   `.tar.gz` of the game folder, or a folder served as a listing), copy a FINAL FANTASY XI folder
+   in from Files (iCloud Drive, a USB drive or card reader, On My iPhone), or put one in the app's
+   own folder with Finder (your iPhone > Files > XI on Anything) and use it where it is.
+3. **Add your signing certificate.** iOS runs only code signed by the Apple Account the app was
+   installed with, so the app signs the game it makes with your development certificate: Settings >
+   Game on this iPhone > Signing certificate, then pick its `.p12` in Files and give its password.
+   - A paid Apple Developer account: Keychain Access > My Certificates > "Apple Development: …" >
+     Export (a `.p12` with a password of your choosing), then AirDrop it or put it in iCloud Drive.
+   - A free account: Sideloadly keeps its key on your computer, so export one from a tool that
+     gives it to you (AltStore or SideStore's Export Certificate, or Impactor's Export P12), signed
+     in with the same Apple Account.
+   The certificate's team has to be the app's: the app says if it isn't.
+4. **Play.** The first Play makes the game: it translates your FFXiMain.dll and FFXi.dll, compiles
+   and links them with the app's own compiler, and signs the result (a few minutes; an iPhone 17 Pro
+   takes under three). After that Play starts at once, until the game or the app is updated.
+
+Settings > Game on this iPhone > Make the game again makes it again on the next Play. Without a
+certificate there is one other way: build `XIGame.dylib` on a Mac (`python3 tools/build_ios.py kit
+--sdk iphoneos`, from your own prepared install) and add it in Sideloadly's Advanced Options >
+Inject dylibs/frameworks: the app plays it as it is.
+
 ## What you need
 
 - A Mac with Xcode 15 or later and the iOS SDK (deployment target iOS 17.0 or later).

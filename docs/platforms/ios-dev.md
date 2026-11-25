@@ -28,6 +28,39 @@ Objects go to `build/ios-<sdk>/obj`; the desktop objects in `build/` are left al
 `third_party/sdl3-ios` is SDL 3.4.16's UIKit tree, vendored by `tools/vendor.py sdl3-ios` (as
 `tools/vendor.py sdl3` vendors the Cocoa tree).
 
+## The launcher's app: making the game on the phone
+
+The launcher (xi-on-mac-launcher's iOS app) carries no game code. It makes the game on the phone
+the way Android's does (build_android.py `--split-game`), with what iOS allows: no program of an
+app's may be started, and no code loaded that isn't signed.
+
+- `tools/build_ios.py kit --sdk <sdk>` (`game_kit`): `build/ios-<sdk>/kit`, the host without the
+  game and without the sources that name a build's addresses (`libxi.a` and the libraries'
+  archives), the SDK headers and stubs (`.tbd`) those compiles and the link need, LLVM 18's own
+  headers, `host.json` (the 15 build.h sources and their flags), `cflags.txt`, `link.json`; and
+  `build/ios-<sdk>/phone`, the translator. Every kit source is syntax-checked against the kit's
+  headers. `XIGame.dylib` beside them is the same library linked on the Mac: the check that the
+  kit links, and what a player's Mac can inject instead.
+- `tools/build_ios_deps.sh`: LLVM 18 (clang and lld as static libraries), CPython 3.14 for iOS
+  (its own `Apple/` build) and capstone, for device and simulator, in `build/` (an hour or so).
+- `tools/build_ios.py toolchain --sdk <sdk>`: `build/ios-<sdk>/bundle`, what the launcher's Xcode
+  project links and copies in: `libxitoolchain.a` (`platforms/ios/ios_toolchain.cpp`: clang's cc1
+  and lld called in the app's process; `ios_sign.c`: the CodeDirectory and CMS signature with the
+  player's `.p12`, Apple's public chain in `apple_certs.h`; `ios_python.c`: CPython run in the
+  process), `Python.xcframework` (its tests and GUI left out), `site/` (pefile, capstone's
+  binding), `libcapstone.dylib`, and the kit and translator as `xi/`.
+- On the phone (the launcher's `ios_build.rs`): `phone_kit.py --target ios` translates into the
+  app's data folder (its steps run in the same interpreter), the sources compile on up to six
+  threads, lld links `XIGame.dylib` (`-adhoc_codesign`, the signature then replaced), and the
+  launcher `dlopen`s it and calls `xi_ios_play`. A later Play in the same run loads a fresh copy of
+  the file: the host keeps state of its own that a second run in the same image trips over.
+- `ios_main.c` reads `Documents/run.args` only as the standalone app, never when the launcher starts
+  the game.
+
+Measured (2026-11-24): the iPhone 17 Pro compiles and links build 2026-11-02 in under three
+minutes; iOS 27 loads a library signed with a development certificate of the app's team from the
+app's data folder.
+
 ## Device builds
 
 ```sh

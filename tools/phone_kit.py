@@ -42,7 +42,21 @@ def sha256(path):
 def step(args, what):
     start = time.monotonic()
     print('>', what, flush=True)
-    subprocess.run([sys.executable] + args, check=True)
+    if sys.platform == 'ios':
+        # iOS starts no program of an app's: the script runs in this interpreter (ios_python.c)
+        import runpy
+        saved = sys.argv[:], sys.path[:]
+        sys.argv = list(args)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(args[0])))
+        try:
+            runpy.run_path(args[0], run_name='__main__')
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                raise SystemExit('%s failed: %s' % (what, e.code))
+        finally:
+            sys.argv, sys.path[:] = saved[0], saved[1]
+    else:
+        subprocess.run([sys.executable] + args, check=True)
     print('  %s: %.1f s' % (what, time.monotonic() - start), flush=True)
 
 
@@ -56,6 +70,8 @@ def main():
     ap.add_argument('--game', required=True, help='the FINAL FANTASY XI folder')
     ap.add_argument('--kit', required=True)
     ap.add_argument('--recomp', default=os.path.join(HERE, '..', 'recomp', 'recomp.py'))
+    ap.add_argument('--target', choices=['android', 'ios'], default='android',
+                    help='android: android-all, with the Android wraps; ios: all, as the Mac\'s (Metal)')
     a = ap.parse_args()
 
     paths = [os.path.join(a.game, name) for name in ('FFXiMain.dll', 'FFXi.dll')]
@@ -82,7 +98,12 @@ def main():
     ffxi_image = os.path.join(work, 'FFXi.unpacked.dll')
     step([unpack, paths[0], main_image], 'unpack FFXiMain.dll')
     step([unpack, paths[1], ffxi_image], 'unpack FFXi.dll')
-    config = android_translation.android_build(buildinfo.current(), image=main_image, retail=paths[0])
+    if a.target == 'ios':
+        import copy
+        config = copy.deepcopy(buildinfo.current())
+    else:
+        config = android_translation.android_build(buildinfo.current(), image=main_image, retail=paths[0])
+    part = 'all' if a.target == 'ios' else 'android-all'
 
     for f in ('src.id', 'src.game'):  # gone until the sources are whole again
         try:
@@ -97,7 +118,7 @@ def main():
     src = os.path.join(a.kit, 'src')
     shutil.rmtree(src, ignore_errors=True)
     args = [a.recomp, '--meta', config['ffximain_meta'], '--image', main_image,
-            '--retail', paths[0], '--out', os.path.join(src, 'android-all'), '--all']
+            '--retail', paths[0], '--out', os.path.join(src, part), '--all']
     for key in ('wraps', 'hooks'):
         if config[key]:
             args += ['--' + key, ','.join(k + '=' + v for k, v in config[key].items())]

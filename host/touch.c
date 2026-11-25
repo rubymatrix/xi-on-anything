@@ -171,16 +171,37 @@ static void escape(SDL_WindowID window, const char* why)
     fprintf(stderr, "[touch] %s: Escape\n", why);
 }
 
+/* The game's frames so far (touch_frame). A press is let go only once the game has drawn two frames
+ * with it down, besides its least time: it reads the mouse, the pad and the keyboard once a frame, and
+ * where a frame is slow (the simulator, a phone loading) a press and its release would both fall
+ * between two reads, seen by neither. At most WAIT_MS, though: screens that draw no game frames
+ * (the sign-in) would otherwise hold it down for good. */
+static SDL_AtomicInt g_frames;
+enum
+{
+    SEEN_FRAMES = 2,
+    RECHECK_MS = 16, /* how often a release waiting for those frames looks again */
+    WAIT_MS = 400,
+};
+static int seen(int frame, Uint64 at)
+{
+    return SDL_GetAtomicInt(&g_frames) - frame >= SEEN_FRAMES || SDL_GetTicks() - at >= WAIT_MS;
+}
+
 #define CLICK_MOUSE ((SDL_MouseID)0x58490001) /* our clicks' mouse: the game's (keep_event) */
 static struct
 {
     SDL_WindowID window;
     float x, y;
+    int frame; /* g_frames at the press */
+    Uint64 at; /* and SDL_GetTicks */
 } g_click;
 
 static Uint32 SDLCALL click_up(void* unused, SDL_TimerID timer, Uint32 interval)
 {
     (void)unused, (void)timer, (void)interval;
+    if (!seen(g_click.frame, g_click.at))
+        return RECHECK_MS; /* again in a moment: the game has not seen it down yet */
     SDL_Event m;
     SDL_zero(m);
     m.type = SDL_EVENT_MOUSE_BUTTON_UP;
@@ -194,10 +215,12 @@ static Uint32 SDLCALL click_up(void* unused, SDL_TimerID timer, Uint32 interval)
 }
 
 /* A left click at (x, y), in points, as a mouse's (not a touch's: the filter keeps it) */
+/* A left click at (x, y), in points, as a mouse's (not a touch's: the filter keeps it) */
 static void click(SDL_WindowID window, float x, float y)
 {
     x *= g_scale, y *= g_scale; /* the window's coordinates */
-    g_click.window = window, g_click.x = x, g_click.y = y;
+    g_click.window = window, g_click.x = x, g_click.y = y, g_click.frame = SDL_GetAtomicInt(&g_frames),
+    g_click.at = SDL_GetTicks();
     SDL_Event m;
     SDL_zero(m);
     m.type = SDL_EVENT_MOUSE_MOTION;
@@ -564,6 +587,7 @@ enum
     HOLD_MS = 80,
 };
 static Uint64 g_pressed_at[GFX_TOUCH_MAX]; /* SDL_GetTicks of each control's press */
+static int g_pressed_frame[GFX_TOUCH_MAX]; /* and g_frames then */
 static SDL_WindowID g_key_window;
 
 static void apply(const Control* c, int down)
@@ -576,12 +600,22 @@ static void apply(const Control* c, int down)
         want_axis(c->btn, down ? SDL_JOYSTICK_AXIS_MAX : SDL_JOYSTICK_AXIS_MIN);
 }
 
-static Uint32 SDLCALL release_later(void* control, SDL_TimerID timer, Uint32 interval)
+typedef struct
+{
+    Control c; /* as it was pressed: the layout may be made again since */
+    int frame; /* g_frames at the press */
+    Uint64 at; /* and SDL_GetTicks */
+} Release;
+
+static Uint32 SDLCALL release_later(void* release, SDL_TimerID timer, Uint32 interval)
 {
     (void)timer, (void)interval;
+    Release* r = (Release*)release;
+    if (!seen(r->frame, r->at))
+        return RECHECK_MS;
     SDL_LockMutex(g_lock);
-    Control c = *(const Control*)control; /* as it was pressed: the layout may be made again since */
-    SDL_free(control);
+    Control c = r->c;
+    SDL_free(r);
     apply(&c, 0);
     SDL_UnlockMutex(g_lock);
     return 0;
@@ -595,14 +629,14 @@ static void press(int i, int down, SDL_WindowID window)
     g_key_window = window;
     Uint64 now = SDL_GetTicks(), held = now - g_pressed_at[i];
     if (down)
-        g_pressed_at[i] = now, apply(c, 1);
-    else if (held >= HOLD_MS)
+        g_pressed_at[i] = now, g_pressed_frame[i] = SDL_GetAtomicInt(&g_frames), apply(c, 1);
+    else if (held >= HOLD_MS && seen(g_pressed_frame[i], g_pressed_at[i]))
         apply(c, 0);
     else
     {
-        Control* later = (Control*)SDL_malloc(sizeof *later);
-        *later = *c;
-        SDL_AddTimer((Uint32)(HOLD_MS - held), release_later, later);
+        Release* later = (Release*)SDL_malloc(sizeof *later);
+        later->c = *c, later->frame = g_pressed_frame[i], later->at = g_pressed_at[i];
+        SDL_AddTimer(held < HOLD_MS ? (Uint32)(HOLD_MS - held) : RECHECK_MS, release_later, later);
     }
 }
 
@@ -953,6 +987,7 @@ void touch_frame(int in_game)
 {
     static int frames;
     (void)in_game;
+    SDL_AddAtomicInt(&g_frames, 1);
     if (!g_lock)
         return;
     SDL_LockMutex(g_lock);

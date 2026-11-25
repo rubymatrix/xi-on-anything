@@ -8,6 +8,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <SDL3/SDL.h>
+#ifdef XI_IOS_EMBED
+/* In the launcher's app the launcher owns the app (UIApplicationMain): no SDL_main here */
+#define SDL_MAIN_HANDLED
+#endif
 #include <SDL3/SDL_main.h>
 
 #include "../../host/appdefaults.h"
@@ -83,7 +87,9 @@ static int has_arg(int argc, char** argv, const char* name)
     return 0;
 }
 
-int main(int argc, char** argv)
+/* argc/argv: the arguments; embedded: called by the launcher on the main thread, returning when the
+ * game ends; otherwise SDL_main, the app ending with the game. */
+static int run_game(int argc, char** argv, int embedded)
 {
     const char* home = getenv("HOME"); /* the app's container */
     char docs[1024], path[1100];
@@ -102,8 +108,13 @@ int main(int argc, char** argv)
     int n = 0;
     for (int i = 0; i < argc && n < MAX_ARGS; ++i)
         args[n++] = argv[i];
-    snprintf(path, sizeof path, "%s/run.args", docs);
-    n += read_args(path, args + n, MAX_ARGS - 2 - n);
+    /* run.args: the standalone app's arguments; the launcher gives its own (and a leftover file there
+     * would override them, a server's address among them) */
+    if (!embedded)
+    {
+        snprintf(path, sizeof path, "%s/run.args", docs);
+        n += read_args(path, args + n, MAX_ARGS - 2 - n);
+    }
     static char game[1100];
     struct stat st;
     snprintf(game, sizeof game, "%s/FINAL FANTASY XI", docs);
@@ -125,8 +136,26 @@ int main(int argc, char** argv)
     fprintf(stderr, "[ios] host64 with %d arguments\n", n - 1);
     int ret = xi_host_main(n, args);
     fprintf(stderr, "[ios] host exit %d\n", ret);
+    fflush(NULL);
+    if (embedded)
+        return ret;
     /* the game ended (Shutdown, or Exit at its main menu): the app too. Returning from SDL_main
      * leaves an iOS app running, its window black. */
-    fflush(NULL);
     exit(ret);
 }
+
+#ifdef XI_IOS_EMBED
+/* The launcher's Play (the launcher app, its own UIKit loop running): SDL is told main is ready and
+ * the game runs here, on the main thread, SDL pumping the run loop as it goes. The launcher's view
+ * comes back when it returns. */
+int xi_ios_play(int argc, char** argv)
+{
+    SDL_SetMainReady();
+    return run_game(argc, argv, 1);
+}
+#else
+int main(int argc, char** argv)
+{
+    return run_game(argc, argv, 0);
+}
+#endif
