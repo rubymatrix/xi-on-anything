@@ -164,7 +164,7 @@ static struct
 {
     uint64_t since, front_ns, shim_ns, rt_ns[64], acquire_ns, submit_ns, sync_ns, draw_ns, prog_wait_ns;
     uint32_t frames, draws, drawn, clears, copies, skips, pending, targets, tex_made, buf_made, uploads, barriers,
-        syncs, reads, cmd_more, shader_binds, chars_items, chars_draws;
+        syncs, reads, async_reads, cmd_more, shader_binds, chars_items, chars_draws;
     uint64_t upload_bytes, ring_bytes, chars_ns;
 } g_prof;
 
@@ -634,12 +634,15 @@ static void cmd_open(void)
 }
 
 /* what is recorded so far sent, and the GPU waited for (staging or the ring full, a read): then all is free */
+static uint32_t g_syncs; /* how many: what was recorded before one is done after it */
+
 static void cmd_sync(void)
 {
     uint64_t t0 = gfx_now_ns();
     cmd_open();
     dkQueueSubmitCommands(g_q, dkCmdBufFinishList(g_cb));
     dkQueueWaitIdle(g_q);
+    ++g_syncs;
     for (uint32_t s = 0; s < CMD_SLOTS; ++s)
         garbage_release(s);
     cmd_begin_memory();
@@ -694,6 +697,7 @@ struct GfxTex
     int desc;      /* its image descriptor (sampled) */
     int type, use, has_stencil, dropped;
     uint32_t fmt, w, h, levels, layers, block, bpp, id;
+    struct AsyncRead* rd; /* gfx_tex_read_async's copies */
 };
 
 static uint32_t g_tex_ids;
@@ -829,6 +833,8 @@ GfxTex* gfx_tex_create(int type, uint32_t d3dfmt, uint32_t w, uint32_t h, uint32
     return t;
 }
 
+static void async_free(GfxTex* t);
+
 void gfx_tex_destroy(GfxTex* t)
 {
     if (!t)
@@ -837,6 +843,7 @@ void gfx_tex_destroy(GfxTex* t)
         g_rt = NULL, g_bound = 0;
     if (g_ds == t)
         g_ds = NULL, g_bound = 0;
+    async_free(t);
     heap_free(&t->mem);
     desc_free(t->desc);
     --g_tex_live;
@@ -923,15 +930,89 @@ void gfx_tex_read(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t 
     g_prof.reads++;
 }
 
-/* not yet without waiting (phase 3): zeros, as the occlusion probes' "not seen" */
+/* The newest copy of the level the GPU has finished, and a new one recorded with this frame's work (three in flight
+ * at most); only the first read of a level waits. A copy is done once its frame's slot comes round again (cmd_open
+ * has waited for that frame's fence) or the GPU was waited for since (cmd_sync): no fence of its own. FFXI's
+ * occlusion probes: 16x16, the sun's read about every frame. */
+typedef struct AsyncRead
+{
+    uint32_t face, level, size;
+    uint8_t* last; /* the newest copy taken, its rows tight */
+    struct
+    {
+        Mem mem;
+        uint32_t frame, sync, pending;
+    } slot[3];
+} AsyncRead;
+
+static void async_free(GfxTex* t)
+{
+    AsyncRead* r = t->rd;
+    if (!r)
+        return;
+    for (int i = 0; i < 3; ++i)
+        heap_free(&r->slot[i].mem);
+    free(r->last);
+    free(r);
+    t->rd = NULL;
+}
+
 void gfx_tex_read_async(GfxTex* t, uint32_t face, uint32_t level, void* dst, uint32_t pitch)
 {
-    if (!t || !dst || level >= t->levels)
+    if (!g_up || !t || !dst || t->use == GFX_USE_DEPTH || t->dropped || level >= t->levels || face >= t->layers)
         return;
-    uint32_t row, rows = rect_rows(t, level_dim(t->w, level), level_dim(t->h, level), &row);
-    (void)face;
+    uint32_t lw = level_dim(t->w, level), lh = level_dim(t->h, level);
+    uint32_t row, rows = rect_rows(t, lw, lh, &row), size = row * rows;
+    AsyncRead* r = t->rd;
+    if (r && (r->face != face || r->level != level))
+        async_free(t), r = NULL;
+    if (!r)
+    {
+        r = (AsyncRead*)calloc(1, sizeof *r);
+        uint8_t* last = (uint8_t*)calloc(1, size);
+        if (!r || !last)
+        {
+            free(r), free(last);
+            return;
+        }
+        r->face = face, r->level = level, r->size = size, r->last = last;
+        t->rd = r;
+        gfx_tex_read(t, face, level, r->last, row); /* the first: now */
+    }
+    cmd_open(); /* (this slot's frame before is done from here) */
+    int best = -1, idle = -1;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!r->slot[i].pending)
+            continue;
+        if (r->slot[i].sync == g_syncs && g_slot - r->slot[i].frame < CMD_SLOTS)
+            continue;
+        if (best < 0 || (int32_t)(r->slot[i].frame - r->slot[best].frame) >= 0)
+            best = i;
+    }
+    if (best >= 0)
+    {
+        memcpy(r->last, mem_cpu(&r->slot[best].mem), size);
+        for (int i = 0; i < 3; ++i) /* (it, and any older one it overtook) */
+            if (r->slot[i].pending && (int32_t)(r->slot[best].frame - r->slot[i].frame) >= 0)
+                r->slot[i].pending = 0;
+    }
+    uint8_t* d = (uint8_t*)dst;
     for (uint32_t y = 0; y < rows; ++y)
-        memset((uint8_t*)dst + (size_t)y * pitch, 0, row < pitch ? row : pitch);
+        memcpy(d + (size_t)y * pitch, r->last + (size_t)y * row, row < pitch ? row : pitch);
+    for (int i = 0; i < 3 && idle < 0; ++i)
+        if (!r->slot[i].pending)
+            idle = i;
+    if (idle < 0 || (!r->slot[idle].mem.mem && !heap_alloc(&g_data_heap, size, 256, &r->slot[idle].mem)))
+        return;
+    work_kind(WK_XFER);
+    DkImageView v;
+    tex_view(&v, t, face, level);
+    DkImageRect rect = { 0, 0, 0, lw, lh, 1 };
+    DkCopyBuf cb = { mem_gpu(&r->slot[idle].mem), row, 0 };
+    dkCmdBufCopyImageToBuffer(g_cb, &v, &rect, &cb, 0);
+    r->slot[idle].frame = g_slot, r->slot[idle].sync = g_syncs, r->slot[idle].pending = 1;
+    g_prof.async_reads++;
 }
 
 /* --- buffers: in CPU-written memory; an upload goes into fresh memory (the frames in flight keep the old) -- */
@@ -1791,6 +1872,7 @@ void gfx_draw(const GfxDraw* d)
  * draw's block (D.at.x, .y); a mirrored copy right after its own item is the same draw's second instance, and lists
  * going on from the one before are one draw (as gfx_gl.c's chars_merge). */
 static Prog* g_chars;
+static void crt_start(void);
 
 static int chars_same(const GfxCharItem* a, const GfxCharItem* b)
 {
@@ -2102,6 +2184,7 @@ int gfx_init(void* sdl_window, int vsync)
     g_chars->text_hash = hash64(g_chars->text, strlen(g_chars->text), 1469598103934665603ull ^ 0xC4A5u);
     g_chars->state = P_QUEUED;
     prog_queue(g_chars);
+    crt_start();
     g_vsync = vsync;
     set_interval();
     g_up = 1;
@@ -2154,16 +2237,93 @@ static void prof_frame(void)
         g_prof.chars_items / f, g_prof.chars_draws / f, (double)g_prof.chars_ns / f * 1e-6,
         (double)g_prof.acquire_ns / f * 1e-6, (double)g_prof.submit_ns / f * 1e-6);
     LOG("[dk]   programs: %u known, %u queued so far, %u compiled (%.0f ms each), %u from the card, %u failed, %u "
-        "installed; %u syncs (%.1f ms), %u reads, %u command memory added, %.1f ms waiting for programs; textures %u "
+        "installed; %u syncs (%.1f ms), %u reads, %u without waiting, %u command memory added, %.1f ms waiting for programs; textures %u "
         "live, buffers %u; memory: images %.1f MB in %u blocks + %.1f MB own, buffers %.1f MB in %u blocks + %.1f MB "
         "own; %u samplers; %u deko3d errors\n",
         g_progs_n, g_pstat.queued, g_pstat.compiled, g_pstat.compiled ? g_pstat.compile_ms / g_pstat.compiled : 0.0,
-        g_pstat.cached, g_pstat.failed, g_pstat.installed, g_prof.syncs, (double)g_prof.sync_ns * 1e-6, g_prof.reads,
+        g_pstat.cached, g_pstat.failed, g_pstat.installed, g_prof.syncs, (double)g_prof.sync_ns * 1e-6, g_prof.reads, g_prof.async_reads,
         g_prof.cmd_more, (double)g_prof.prog_wait_ns * 1e-6, g_tex_live, g_buf_live, g_img_heap.used / 1048576.0,
         g_img_heap.n, g_img_heap.own / 1048576.0, g_data_heap.used / 1048576.0, g_data_heap.n,
         g_data_heap.own / 1048576.0, g_samp_n, g_dk_errors);
     memset(&g_prof, 0, sizeof g_prof);
     g_prof.since = now;
+}
+
+/* --- the CRT filter: the present through dk_shaders/crt.glsl (gfx_gl.c's) --------------------------------
+ * FFXI_CRT=1 scanlines, 2 with an aperture grille too; FFXI_CRT_CURVE=1 the glass's curve. Until its program is
+ * compiled (the first frames) the picture is blitted as without it. */
+static int g_crt, g_crt_curve;
+static Prog* g_crt_prog;
+
+static void crt_start(void)
+{
+    const char* e = getenv("FFXI_CRT");
+    g_crt = e ? atoi(e) : 0;
+    g_crt = g_crt < 0 ? 0 : g_crt > 2 ? 2 : g_crt;
+    g_crt_curve = env_on("FFXI_CRT_CURVE");
+    if (!g_crt || !(g_crt_prog = (Prog*)calloc(1, sizeof *g_crt_prog)))
+        return;
+    g_crt_prog->text = strdup(DK_CRT_GLSL);
+    g_crt_prog->text_hash = hash64(g_crt_prog->text, strlen(g_crt_prog->text), 1469598103934665603ull ^ 0xC27u);
+    g_crt_prog->state = P_QUEUED;
+    prog_queue(g_crt_prog);
+    LOG("[gfx] CRT filter: %s%s\n", g_crt == 2 ? "scanlines and aperture grille" : "scanlines", g_crt_curve ? ", curved" : "");
+}
+
+static int crt_ready(void)
+{
+    if (!g_crt || !g_crt_prog)
+        return 0;
+    int st = __atomic_load_n(&g_crt_prog->state, __ATOMIC_ACQUIRE);
+    if (st == P_COMPILED)
+        prog_install(g_crt_prog), st = g_crt_prog->state;
+    if (st == P_FAILED)
+    {
+        LOG("[gfx] CRT filter: its shader did not compile: off\n");
+        g_crt = 0;
+    }
+    return st == P_READY;
+}
+
+/* the picture at a whole multiple of its height when it is half the screen's or less (even scanlines) */
+static void crt_fit(const GfxTex* b, int dw, int dh, int* rx, int* ry, int* rw, int* rh)
+{
+    int k = *rh / (int)b->h;
+    if (k < 2)
+        return;
+    int h = (int)b->h * k, w = (int)((long long)h * *rw / *rh);
+    if (w > dw)
+        return;
+    *rx = (dw - w) / 2, *ry = (dh - h) / 2, *rw = w, *rh = h;
+}
+
+/* the back buffer into the rectangle of the bound swapchain image, its constants in the ring at ubo */
+static void crt_present(GfxTex* b, DkGpuAddr ubo, int x, int y, int w, int h)
+{
+    DkCmdBuf cb = g_cb;
+    DkShader const* sh[2] = { &g_crt_prog->sh[0], &g_crt_prog->sh[1] };
+    dkCmdBufBindShaders(cb, DkStageFlag_GraphicsMask, sh, 2);
+    DkColorState cs;
+    dkColorStateDefaults(&cs);
+    cs.blendEnableMask = 0;
+    dkCmdBufBindColorState(cb, &cs);
+    DkDepthStencilState ds;
+    dkDepthStencilStateDefaults(&ds);
+    ds.depthTestEnable = ds.depthWriteEnable = ds.stencilTestEnable = 0;
+    dkCmdBufBindDepthStencilState(cb, &ds);
+    DkRasterizerState rs;
+    dkRasterizerStateDefaults(&rs);
+    rs.cullMode = DkFace_None, rs.depthBiasEnableMask = 0;
+    dkCmdBufBindRasterizerState(cb, &rs);
+    DkViewport vp = { (float)x, (float)y, (float)w, (float)h, 0.0f, 1.0f };
+    dkCmdBufSetViewports(cb, 0, &vp, 1);
+    ubo_both(0, ubo, 32);
+    GfxSampler k;
+    memset(&k, 0, sizeof k);
+    k.addr_u = k.addr_v = k.addr_w = 3, k.mag = k.min = 2;
+    dkCmdBufBindTexture(cb, DkStage_Fragment, 0, dkMakeTextureHandle((uint32_t)b->desc, sampler(&k)));
+    dkCmdBufDraw(cb, DkPrimitive_Triangles, 3, 1, 0, 0);
+    S.valid = 0;
 }
 
 void gfx_present(GfxTex* backbuffer)
@@ -2189,8 +2349,24 @@ void gfx_present(GfxTex* backbuffer)
                 rw = (int)(dh * bw / bh) & ~1, rx = (dw - rw) / 2;
         }
     }
+    int show = backbuffer && backbuffer->use == GFX_USE_RT && rw > 0 && rh > 0;
+    int crt = show && backbuffer->desc >= 0 && crt_ready();
+    if (crt)
+        crt_fit(backbuffer, dw, dh, &rx, &ry, &rw, &rh);
     nx_present_rect(rx, ry, rw, rh);
     cmd_open();
+    DkGpuAddr crt_ubo = 0;
+    if (crt && !ring_reserve(32 + 256))
+        crt = 0;
+    if (crt) /* (before the image is bound: a full ring starts another list) */
+    {
+        /* the scanlines' depth: full at two of the screen's lines a row, none at one */
+        float per_row = (float)rh / (float)backbuffer->h;
+        float depth = per_row <= 1.0f ? 0.0f : per_row >= 2.0f ? 1.0f : per_row - 1.0f;
+        float c[8] = { (float)backbuffer->w, (float)backbuffer->h, 1.0f / (float)backbuffer->w, 1.0f / (float)backbuffer->h,
+                       (float)g_crt, (float)g_crt_curve, depth, 0.0f };
+        crt_ubo = g_ring_gpu + ring_put(c, sizeof c, 256);
+    }
     uint64_t t0 = gfx_now_ns();
     int img = dkQueueAcquireImage(g_q, g_sc);
     uint64_t t1 = gfx_now_ns();
@@ -2204,7 +2380,6 @@ void gfx_present(GfxTex* backbuffer)
     dkCmdBufSetScissors(g_cb, 0, &sc, 1);
     DkColorWriteState cws = { 0xF };
     dkCmdBufBindColorWriteState(g_cb, &cws);
-    int show = backbuffer && backbuffer->use == GFX_USE_RT && rw > 0 && rh > 0;
     if (show)
         dkCmdBufClearColorFloat(g_cb, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
     else
@@ -2214,7 +2389,12 @@ void gfx_present(GfxTex* backbuffer)
         pulse = pulse < 0.5f ? pulse * 2.0f : 2.0f - pulse * 2.0f;
         dkCmdBufClearColorFloat(g_cb, 0, DkColorMask_RGBA, 0.02f, 0.03f, 0.10f + 0.15f * pulse, 1.0f);
     }
-    if (show)
+    if (show && crt)
+    {
+        barrier(); /* (the picture drawn, then sampled) */
+        crt_present(backbuffer, crt_ubo, rx, ry, rw, rh);
+    }
+    else if (show)
     {
         work_kind(WK_XFER);
         DkImageView bv;
