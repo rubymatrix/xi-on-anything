@@ -1942,7 +1942,7 @@ int gfx_chars_draw(const GfxCharFrame* f)
     dkCmdBufBindColorWriteState(cb, &cws);
     DkDepthStencilState ds;
     dkDepthStencilStateDefaults(&ds);
-    ds.depthTestEnable = depth != NULL, ds.depthWriteEnable = depth != NULL;
+    ds.depthTestEnable = ds.depthWriteEnable = depth != NULL && !f->mask;
     ds.depthCompareOp = DkCompareOp_Lequal, ds.stencilTestEnable = 0;
     dkCmdBufBindDepthStencilState(cb, &ds);
     DkRasterizerState rs;
@@ -2005,7 +2005,7 @@ int gfx_chars_draw(const GfxCharFrame* f)
         {
             float params[4];
             uint32_t at[4];
-        } u = { { f->alpha_ref, f->pixel[0], f->pixel[1], 0.0f }, { it->vb->mem.off / 4, it->uv->mem.off / 4, it->mirror, 0 } };
+        } u = { { f->alpha_ref, f->pixel[0], f->pixel[1], f->mask ? 1.0f : 0.0f }, { it->vb->mem.off / 4, it->uv->mem.off / 4, it->mirror, 0 } };
         ubo_both(0, g_ring_gpu + ring_put(&u, sizeof u, 256), sizeof u);
         DkResHandle hv = dkMakeTextureHandle((uint32_t)it->vb->mem.desc, 0);
         DkResHandle hu = dkMakeTextureHandle((uint32_t)it->uv->mem.desc, 0);

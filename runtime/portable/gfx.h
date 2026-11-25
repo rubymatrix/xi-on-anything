@@ -451,6 +451,7 @@ typedef struct GfxCharFrame
     uint32_t nitem;
     const GfxCharEnv* env; /* items' env - 1 (an index past nenv: the item drawn without it) */
     uint32_t nenv;
+    uint32_t mask;         /* flat 0x80ffffff, no depth: an actor's shadow picture (gfx_deko3d.c alone) */
 } GfxCharFrame;
 /* Draws a batch of characters into the current targets; 0 when it drew nothing. */
 int gfx_chars_draw(const GfxCharFrame* f);

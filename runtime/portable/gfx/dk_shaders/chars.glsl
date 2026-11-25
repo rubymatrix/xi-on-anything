@@ -78,6 +78,10 @@ layout(location = 2) in float o_z;
 layout(location = 3) in vec3 o_env;
 layout(location = 0) out vec4 oc;
 void main() {
+  if (D.params.w > 0.5) { // an actor's shadow picture: flat, the factor the game draws it with (0x80ffffff)
+    oc = vec4(1.0, 1.0, 1.0, 128.0 / 255.0);
+    return;
+  }
   vec4 tx = texture(t, o_uv), tf = S.tf;
   vec3 c;
   float a;

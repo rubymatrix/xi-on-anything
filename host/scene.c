@@ -926,6 +926,8 @@ enum
     MESH_SLOTS = 4096
 };
 static Mesh g_meshes[MESH_SLOTS];
+static int g_chars_only; /* FFXI_SCENE_CHARS=1: the characters only (chars_flush) */
+static uint32_t g_cmask; /* this batch is an actor's shadow picture's (self_shadow) */
 static GfxCharItem* g_citems;
 static GfxCharItem* g_soitems; /* casting only: meshes the game draws (environment-mapped), their shadows ours */
 static uint32_t g_nsoitems, g_capsoitems;
@@ -1161,6 +1163,29 @@ static int take_env(void)
     return on;
 }
 
+/* The actors with a shadow of their own shape (the player: [FFXI_SCENE_SHADOW_MODE] 1, through the whole actor's draw):
+ * 1002da20 draws each of their lists as any actor's, then again between 10033610 and 10033880, flat and without depth
+ * into the actor's shadow picture as the light sees it (self_shadow). Taken too where the back end draws that (deko3d's);
+ * FFXI_SCENE_SELF=0 leaves those actors to the game. The addresses are 2025-12-26's. */
+#if defined(GFX_DEKO3D) && FFXI_SCENE_SHADOW_MODE == 0x1045960a
+#define HAVE_SELF 1
+#define SELF_BEGIN 0x10033610u /* thiscall (the actor's model + 0x48; 0x104594d8, the texture factor to put back): 1 when
+                                * the picture is the target now, cleared the first time, and the light's camera set */
+#define SELF_END 0x10033880u   /* thiscall (the same; 0): the target, the camera and the states as they were */
+#define SELF_TEXTURES 0x104594d8u
+#endif
+static int self_on(void)
+{
+#if defined(HAVE_SELF)
+    static int on = -1;
+    if (on < 0)
+        on = g_chars_only && !(getenv("FFXI_SCENE_SELF") && atoi(getenv("FFXI_SCENE_SELF")) == 0);
+    return on;
+#else
+    return 0;
+#endif
+}
+
 /* one mesh draw taken (1 and the draw items recorded) or left to the game (0; an environment-mapped one's items recorded
  * to cast only, where the back end doesn't draw their layer) */
 static int chars_take(Guest* g, uint32_t res, uint32_t model)
@@ -1171,7 +1196,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     if (!vbuf || !cmd || !counts || !rd8(vbuf + 0x68) || !rd32(vbuf + 0x40) || !rd32(vbuf + 0x4c))
         return ++g_ccount.buf_why[!vbuf || !cmd || !counts ? 0 : !rd8(vbuf + 0x68) ? 1 : 2], ++g_ccount.why[1], 0;
     uint32_t tint = rd32(FFXI_SCENE_TINT);
-    if ((tint >> 24) != 0x80 || rd8(FFXI_SCENE_SHINE) || rd8(FFXI_SCENE_SHADOW_MODE) == 1)
+    if ((tint >> 24) != 0x80 || rd8(FFXI_SCENE_SHINE) || (rd8(FFXI_SCENE_SHADOW_MODE) == 1 && !self_on()))
         return ++g_ccount.state_why[(tint >> 24) != 0x80 ? 0 : rd8(FFXI_SCENE_SHINE) ? 1 : 2], ++g_ccount.why[2],
                0; /* a fading actor (its own target), the shine pass, the silhouette shadows */
     if (d3d8_disint_capturing(rd32(FFXI_SCENE_PALETTE)))
@@ -1421,11 +1446,78 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
 }
 
 static int g_chars_off;  /* FFXI_SCENE_CHARS=0: the zone only */
-static int g_chars_only; /* FFXI_SCENE_CHARS=1: the characters only (chars_flush) */
 /* a take running (its game calls - the resource and texture lookups - may reach d3d8's front flush, which waits for it
  * to end: the take's items point into the arrays it would send and empty) */
 static int g_taking, g_send_put_off;
 static void chars_send(void);
+static void chars_flush(void);
+
+#if defined(HAVE_SELF)
+static GfxCharItem* g_self_items; /* the mesh's items as taken, for its shadow picture */
+static uint32_t g_self_n, g_self_cap, g_self_nb;
+static float g_self_pal[128 * 16];
+
+/* after a take in shadow mode 1, before anything can send the batch: the items from n0 on and their palette kept */
+static void self_keep(uint32_t n0)
+{
+    g_self_n = g_ncitems > n0 ? g_ncitems - n0 : 0;
+    if (!g_self_n)
+        return;
+    if (g_self_n > g_self_cap)
+        g_self_cap = g_self_n * 2, g_self_items = (GfxCharItem*)realloc(g_self_items, g_self_cap * sizeof *g_self_items);
+    memcpy(g_self_items, g_citems + n0, g_self_n * sizeof *g_self_items);
+    uint32_t base = g_self_items[0].palette; /* (one palette a mesh, the last in the batch) */
+    g_self_nb = g_npal - base;
+    if (g_self_nb > 128)
+        g_self_n = 0;
+    else
+        memcpy(g_self_pal, g_pal + 16 * (size_t)base, (size_t)g_self_nb * 64);
+}
+
+static void self_send(void) { d3d8_world_front() ? chars_send() : chars_flush(); }
+
+static void self_shadow(uint32_t model)
+{
+    if (!g_self_n)
+        return;
+    uint32_t tf = 0x80808080u;
+    d3d8_get_render_state(60, &tf);
+    self_send(); /* (what is recorded so far, into the target as it is) */
+    if (!(guest_thiscall(SELF_BEGIN, model + 0x48, 2, (uint32_t[]){ SELF_TEXTURES, tf }) & 0xff))
+        return; /* (too far for one, or no picture: the game draws none) */
+    float W[16], V[16], P[16], WV[16];
+    if (d3d8_get_transform(256, W) && d3d8_get_transform(2, V) && d3d8_get_transform(3, P))
+    {
+        if (g_npal + g_self_nb > g_cappal)
+            g_cappal = (g_npal + g_self_nb) * 2 + 1024, g_pal = (float*)realloc(g_pal, (size_t)g_cappal * 64);
+        memcpy(g_pal + 16 * (size_t)g_npal, g_self_pal, (size_t)g_self_nb * 64);
+        if (g_ncstates == g_capcstates)
+            g_capcstates = g_capcstates ? g_capcstates * 2 : 256,
+            g_cstates = (GfxCharState*)realloc(g_cstates, g_capcstates * sizeof *g_cstates);
+        GfxCharState* s = &g_cstates[g_ncstates];
+        memset(s, 0, sizeof *s);
+        mat_mul(WV, W, V);
+        mat_mul(s->wvp, WV, P);
+        memcpy(s->world, W, sizeof s->world);
+        s->fog[1] = 1.0f;
+        if (g_ncitems + g_self_n > g_capcitems)
+            g_capcitems = (g_ncitems + g_self_n) * 2,
+            g_citems = (GfxCharItem*)realloc(g_citems, g_capcitems * sizeof *g_citems);
+        for (uint32_t i = 0; i < g_self_n; ++i)
+        {
+            GfxCharItem* it = &g_citems[g_ncitems++];
+            *it = g_self_items[i];
+            it->palette = g_npal, it->state = g_ncstates, it->env = 0, it->env_tex = NULL;
+        }
+        g_npal += g_self_nb, ++g_ncstates;
+        g_cmask = 1;
+        chars_pending();
+        self_send();
+        g_cmask = 0;
+    }
+    guest_thiscall(SELF_END, model + 0x48, 1, (uint32_t[]){ 0 });
+}
+#endif
 
 static void mesh_draw(Guest* g)
 {
@@ -1441,7 +1533,16 @@ static void mesh_draw(Guest* g)
     ++g_taking;
     uint32_t why0[8], sil0 = g_ccount.state_why[2];
     memcpy(why0, g_ccount.why, sizeof why0);
+#if defined(HAVE_SELF)
+    uint32_t n0 = g_ncitems;
+    int self = rd8(FFXI_SCENE_SHADOW_MODE) == 1;
+    g_self_n = 0;
+#endif
     int took = chars_take(g, res, model);
+#if defined(HAVE_SELF)
+    if (took && self)
+        self_keep(n0);
+#endif
     --g_taking;
     if (g_send_put_off)
         g_send_put_off = 0, chars_send(); /* (a flush that came during the take, from the game's own calls in it) */
@@ -1479,6 +1580,10 @@ static void mesh_draw(Guest* g)
         }
         return;
     }
+#if defined(HAVE_SELF)
+    if (self)
+        self_shadow(model);
+#endif
     rt_return(g, 0, 0x18);
 }
 
@@ -1531,6 +1636,7 @@ static int chars_frame_of(GfxCharFrame* fp, const uint32_t vp[6], const uint32_t
     f.alpha_ref = 69.0f; /* the model state's ALPHAREF 0x45, GREATER */
     f.palette = g_pal, f.nbones = g_npal, f.state = g_cstates, f.nstate = g_ncstates, f.item = g_citems, f.nitem = g_ncitems;
     f.env = g_cenv, f.nenv = g_ncenv;
+    f.mask = g_cmask;
     *fp = f;
     return 1;
 }
@@ -1575,7 +1681,7 @@ static void chars_flush(void)
  * are at that point of the frame, and draws. */
 typedef struct CharsRec
 {
-    uint32_t nbones, nstate, nitem, nenv;
+    uint32_t nbones, nstate, nitem, nenv, mask, pad[3];
 } CharsRec;
 
 /* FFXI_SCENELOG: what the worker made of the batches (counted there, logged from the game's thread: a thread's stdio
@@ -1621,7 +1727,7 @@ static void chars_run(const void* data)
     f.pixel[0] = gvp[2] ? 1.0f / (float)gvp[2] : 0.0f, f.pixel[1] = gvp[3] ? 1.0f / (float)gvp[3] : 0.0f;
     f.alpha_ref = 69.0f; /* the model state's ALPHAREF 0x45, GREATER (chars_frame_of's) */
     f.palette = pal, f.nbones = h->nbones, f.state = st, f.nstate = h->nstate, f.item = it, f.nitem = h->nitem;
-    f.env = env, f.nenv = h->nenv;
+    f.env = env, f.nenv = h->nenv, f.mask = h->mask;
     gfx_chars_draw(&f);
 }
 
@@ -1644,7 +1750,7 @@ static void chars_send(void)
         if (n > cap)
             cap = n * 2, buf = (uint8_t*)realloc(buf, cap);
         CharsRec* h = (CharsRec*)buf;
-        h->nbones = g_npal, h->nstate = g_ncstates, h->nitem = g_ncitems, h->nenv = g_ncenv;
+        h->nbones = g_npal, h->nstate = g_ncstates, h->nitem = g_ncitems, h->nenv = g_ncenv, h->mask = g_cmask;
         uint8_t* p = (uint8_t*)(h + 1);
         memcpy(p, g_pal, (size_t)g_npal * 64), p += (size_t)g_npal * 64;
         memcpy(p, g_cstates, (size_t)g_ncstates * sizeof *g_cstates), p += (size_t)g_ncstates * sizeof *g_cstates;
