@@ -25,6 +25,11 @@
 #define APP_DIR "sdmc:/switch/xi-on-anything"
 #endif
 #define GAME_NRO APP_DIR "/xi-on-anything.nro"
+/* the deko3d build (XI_SWITCH_GFX=deko3d): a folder of its own, as the homebrew menu lists one .nro a folder, or beside */
+#ifndef DK_NRO
+#define DK_NRO APP_DIR "-dk/xi-on-anything-dk.nro"
+#endif
+#define DK_NRO_BESIDE APP_DIR "/xi-on-anything-dk.nro"
 #define RUN_ARGS APP_DIR "/run.args"
 #define DATA_REG APP_DIR "/data/settings.reg"
 #define MAX_LINES 128
@@ -57,10 +62,12 @@ static const char* const CPU_NAMES[] = { "Boost while loading", "No boost", "Ful
 static const char* const RELOGIN_NAMES[] = { "Back to the sign-in screen", "Close the game" };
 static const char* const CRT_NAMES[] = { "Off", "Scanlines", "CRT (scanlines and grille)" };
 static const char* const CURVE_NAMES[] = { "Off", "On" };
+static const char* const GFX_NAMES[] = { "OpenGL", "deko3d (experimental)" };
 static const char* const COUNTER_NAMES[] = { "Off", "On" };
 
 enum
 {
+    O_GFX,
     O_RES,
     O_UI,
     O_BG,
@@ -87,6 +94,8 @@ typedef struct
 } Opt;
 static const char* g_res_names[NRES];
 static Opt g_opt[NOPTS] = {
+    { "Graphics", 2, 0, GFX_NAMES,
+        "The version Save and start runs. deko3d: less work for the CPU and GPU; it needs xi-on-anything-dk.nro on the card." },
     { "Resolution", NRES, 0, g_res_names,
         "The size the game draws at, fitted to the screen. Lower is faster. 4:3 sizes get black bars at the sides." },
     { "Interface size", 3, 0, UI_NAMES, "How large the menus and text are. Large reads well on a TV and in handheld." },
@@ -326,6 +335,8 @@ static void load(void)
     const char* fps = args_value("--fps-divisor");
     const char* adapt = args_env("FFXI_FPS_ADAPT");
     g_opt[O_FPS].cur = !fps || !strcmp(fps, "0") ? (adapt && atoi(adapt) > 0 ? 1 : 0) : !strcmp(fps, "1") ? 2 : 3;
+    const char* gfx = args_env("FFXI_SWITCH_GFX");
+    g_opt[O_GFX].cur = gfx && !strcmp(gfx, "deko3d");
     const char* counter = args_env("FFXI_FPS");
     g_opt[O_COUNTER].cur = counter && atoi(counter) > 0;
     const char* layout = args_value("--switch-layout");
@@ -362,6 +373,7 @@ static int save(void)
     args_set_env("FFXI_SWITCH_BG", b ? bgs : NULL);
     args_set("--fps-divisor", FPS_VALUES[g_opt[O_FPS].cur]);
     args_set_env("FFXI_FPS_ADAPT", g_opt[O_FPS].cur == 1 ? "1" : NULL);
+    args_set_env("FFXI_SWITCH_GFX", g_opt[O_GFX].cur ? "deko3d" : NULL); /* (read here alone) */
     args_set_env("FFXI_FPS", g_opt[O_COUNTER].cur ? "1" : NULL);
     args_set("--switch-layout", g_opt[O_LAYOUT].cur ? "xbox" : "nintendo");
     args_set_env("FFXI_SWITCH_LOADBOOST", g_opt[O_CPU].cur == 1 ? "0" : NULL);
@@ -420,12 +432,24 @@ static void draw(int row, const char* status)
     consoleUpdate(NULL);
 }
 
-static int start_game(void)
+/* the chosen version's .nro on the card, NULL when it isn't there */
+static const char* game_nro(void)
 {
     struct stat st;
-    if (stat(GAME_NRO, &st) != 0 || !envHasNextLoad())
-        return 0;
-    return R_SUCCEEDED(envSetNextLoad(GAME_NRO, "\"" GAME_NRO "\""));
+    if (!g_opt[O_GFX].cur)
+        return stat(GAME_NRO, &st) == 0 ? GAME_NRO : NULL;
+    return stat(DK_NRO, &st) == 0 ? DK_NRO : stat(DK_NRO_BESIDE, &st) == 0 ? DK_NRO_BESIDE : NULL;
+}
+
+/* 1 started; 0 it can't be from here; -1 the chosen version isn't on the card */
+static int start_game(void)
+{
+    const char* nro = game_nro();
+    if (!nro)
+        return -1;
+    char argv[256];
+    snprintf(argv, sizeof argv, "\"%s\"", nro);
+    return envHasNextLoad() && R_SUCCEEDED(envSetNextLoad(nro, argv));
 }
 
 int main(int argc, char** argv)
@@ -484,9 +508,13 @@ int main(int argc, char** argv)
                 draw(row, status);
                 continue;
             }
-            if (act == A_START && !start_game())
+            int started = act == A_START ? start_game() : 1;
+            if (started <= 0)
             {
-                status = "Saved. Start XI on Anything from the homebrew menu (hold R over a game).";
+                status = started == 0 ? "Saved. Start XI on Anything from the homebrew menu (hold R over a game)."
+                    : g_opt[O_GFX].cur
+                    ? "Saved, not started: no xi-on-anything-dk.nro in /switch/xi-on-anything-dk. Choose OpenGL, or copy it there."
+                    : "Saved, not started: no xi-on-anything.nro in /switch/xi-on-anything.";
                 dirty = 0;
                 draw(row, status);
                 continue;

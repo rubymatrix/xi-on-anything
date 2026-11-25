@@ -193,6 +193,7 @@ when you save).
 
 | Setting | Choices | Where it goes |
 | --- | --- | --- |
+| Graphics | OpenGL (the default), deko3d (experimental): which version **Save and start** runs. deko3d's `.nro` is looked for in `/switch/xi-on-anything-dk/`, then beside the OpenGL one. The homebrew menu and a HOME icon start the version they name, whatever is chosen here | `run.args`: `FFXI_SWITCH_GFX=deko3d` |
 | Resolution | The screen's (the default: 1280x720 handheld, 1920x1080 docked, following a dock), or 1920x1080, 1600x900, 1280x720, 960x540, 640x480 and 512x448 (the PS2's size) whichever the screen. A 4:3 size is drawn with black bars at the sides. | `data/settings.reg` (0001, 0002); a fixed size also `FFXI_SWITCH_FIT=0` in `run.args` |
 | Interface size | Large (2x), Medium (1.5x), Small (1x): the menus' resolution is the game's over it, 512x448 at least | `data/settings.reg` (0037, 0038) |
 | Background | The screen's (the default), 2048, 1024, 512: the world's resolution before it is fitted to the screen | `run.args`: `FFXI_SWITCH_BG=<size>` |
