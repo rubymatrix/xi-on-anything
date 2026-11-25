@@ -57,6 +57,7 @@ static const char* const CPU_NAMES[] = { "Boost while loading", "No boost", "Ful
 static const char* const RELOGIN_NAMES[] = { "Back to the sign-in screen", "Close the game" };
 static const char* const CRT_NAMES[] = { "Off", "Scanlines", "CRT (scanlines and grille)" };
 static const char* const CURVE_NAMES[] = { "Off", "On" };
+static const char* const COUNTER_NAMES[] = { "Off", "On" };
 
 enum
 {
@@ -64,6 +65,7 @@ enum
     O_UI,
     O_BG,
     O_FPS,
+    O_COUNTER,
     O_CRT,
     O_CURVE,
     O_LAYOUT,
@@ -93,6 +95,7 @@ static Opt g_opt[NOPTS] = {
     { "Frame rate", 4, 0, FPS_NAMES,
         "Uncapped keeps the world at its real speed at any frame rate (with this game version's frame sites). 30 when "
         "slow: an even 30 while frames can't keep above 40, uncapped again when they can." },
+    { "FPS counter", 2, 0, COUNTER_NAMES, "The frame rate in the top left corner. The deko3d version only." },
     { "CRT filter", 3, 0, CRT_NAMES,
         "An old TV's look: a scanline per row, and with CRT the screen's red, green and blue stripes. Best at 512x448 or 640x480, docked." },
     { "Screen curve", 2, 0, CURVE_NAMES, "With the CRT filter: the glass's curve and darker corners." },
@@ -323,6 +326,8 @@ static void load(void)
     const char* fps = args_value("--fps-divisor");
     const char* adapt = args_env("FFXI_FPS_ADAPT");
     g_opt[O_FPS].cur = !fps || !strcmp(fps, "0") ? (adapt && atoi(adapt) > 0 ? 1 : 0) : !strcmp(fps, "1") ? 2 : 3;
+    const char* counter = args_env("FFXI_FPS");
+    g_opt[O_COUNTER].cur = counter && atoi(counter) > 0;
     const char* layout = args_value("--switch-layout");
     g_opt[O_LAYOUT].cur = layout && !strcmp(layout, "xbox");
     const char* cpu = args_env("FFXI_SWITCH_CPU");
@@ -357,6 +362,7 @@ static int save(void)
     args_set_env("FFXI_SWITCH_BG", b ? bgs : NULL);
     args_set("--fps-divisor", FPS_VALUES[g_opt[O_FPS].cur]);
     args_set_env("FFXI_FPS_ADAPT", g_opt[O_FPS].cur == 1 ? "1" : NULL);
+    args_set_env("FFXI_FPS", g_opt[O_COUNTER].cur ? "1" : NULL);
     args_set("--switch-layout", g_opt[O_LAYOUT].cur ? "xbox" : "nintendo");
     args_set_env("FFXI_SWITCH_LOADBOOST", g_opt[O_CPU].cur == 1 ? "0" : NULL);
     args_set_env("FFXI_SWITCH_CPU", g_opt[O_CPU].cur == 2 ? "1785" : NULL);

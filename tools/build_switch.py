@@ -288,7 +288,7 @@ GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
 # no libdrm_nouveau) ahead of portlibs'.
 # XI_SWITCH_GFX=deko3d: the graphics on deko3d (gfx_deko3d.c, being brought up), with uam (third_party/uam) to
 # compile the generator's shaders on the console; no Mesa. XI_SWITCH_DK_DEBUG=1: deko3d's debug library
-# (libdeko3d.a) instead of its debug one, whose checks gfx_deko3d.c logs.
+# (libdeko3dd.a), whose checks gfx_deko3d.c logs.
 DK_GFX = ['runtime/portable/gfx/gfx_deko3d.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
           'runtime/portable/gfx/gfx_fx.c', 'runtime/portable/gfx/dk_uam.c']
 

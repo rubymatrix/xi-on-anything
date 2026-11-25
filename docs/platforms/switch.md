@@ -197,6 +197,7 @@ when you save).
 | Interface size | Large (2x), Medium (1.5x), Small (1x): the menus' resolution is the game's over it, 512x448 at least | `data/settings.reg` (0037, 0038) |
 | Background | The screen's (the default), 2048, 1024, 512: the world's resolution before it is fitted to the screen | `run.args`: `FFXI_SWITCH_BG=<size>` |
 | Frame rate | Uncapped (the default), Uncapped with 30 when slow, 60, 30 | `run.args`: `--fps-divisor`; `FFXI_FPS_ADAPT=1` for 30 when slow (an even 30 while frames can't keep above 40 fps, uncapped again when they can) |
+| FPS counter | Off (the default), On: the frame rate in the top left corner, in the deko3d build only | `run.args`: `FFXI_FPS=1` |
 | CRT filter | Off (the default), Scanlines, CRT (scanlines and an aperture grille): an old TV's look, best at 512x448 or 640x480 docked, where a row's scanline is two of the TV's lines | `run.args`: `FFXI_CRT=1` or `2` |
 | Screen curve | Off (the default), On: with the CRT filter, the glass's curve and darker corners | `run.args`: `FFXI_CRT_CURVE=1` |
 | Buttons | Nintendo, Xbox | `run.args`: `--switch-layout` |

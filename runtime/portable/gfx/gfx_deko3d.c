@@ -2189,6 +2189,9 @@ int gfx_init(void* sdl_window, int vsync)
     set_interval();
     g_up = 1;
     fx_config();
+    const char* show_fps = getenv("FFXI_FPS"); /* (the Switch's is 0 unless run.args says) */
+    if (show_fps && show_fps[0] == '0')
+        g_fxs.fps = 0.0f;
     make_dummies();
     LOG("[dk] gfx: deko3d up: %d swapchain images of %dx%d, %u KB of command memory, %u KB of staging, %u KB of "
         "ring; programs compiled by uam on a thread of their own%s, kept in %s; milestone 3: draws\n",
@@ -2326,6 +2329,61 @@ static void crt_present(GfxTex* b, DkGpuAddr ubo, int x, int y, int w, int h)
     S.valid = 0;
 }
 
+/* --- the frame-rate counter (FFXI_FPS=1; Config's FPS Counter): the presents of the last half second, at the
+ * screen's top left - the other back ends' 5x7 font, each run of its pixels a scissored clear --------------- */
+static void fps_draw(int dh)
+{
+    static const uint8_t font[13][7] = {
+        { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E }, { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
+        { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F }, { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E },
+        { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E },
+        { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
+        { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C },
+        { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 }, { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 },
+        { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E }, /* F P S */
+    };
+    static uint64_t since;
+    static uint32_t frames;
+    static char text[16] = "-- FPS";
+    uint64_t now = gfx_now_ns();
+    if (!since)
+        since = now;
+    ++frames;
+    if (now - since >= 500000000ull)
+    {
+        snprintf(text, sizeof text, "%.0f FPS", frames * 1e9 / (double)(now - since));
+        since = now, frames = 0;
+    }
+    if (g_fxs.fps == 0.0f)
+        return;
+    uint32_t k = dh >= 1000 ? 3 : 2, n = (uint32_t)strlen(text), x0 = 4, y0 = 4;
+    work_kind(WK_DRAW);
+    DkScissor box = { x0, y0, (6 * n + 3) * k, 11 * k };
+    dkCmdBufSetScissors(g_cb, 0, &box, 1);
+    dkCmdBufClearColorFloat(g_cb, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        char c = text[i];
+        int g = c >= '0' && c <= '9' ? c - '0' : c == 'F' ? 10 : c == 'P' ? 11 : c == 'S' ? 12 : -1;
+        for (uint32_t y = 0; g >= 0 && y < 7; ++y)
+            for (uint32_t x = 0; x < 5;)
+            {
+                uint32_t w = 0;
+                while (x + w < 5 && font[g][y] >> (4 - x - w) & 1)
+                    ++w;
+                if (!w)
+                {
+                    ++x;
+                    continue;
+                }
+                DkScissor r = { x0 + (2 + 6 * i + x) * k, y0 + (2 + y) * k, w * k, k };
+                dkCmdBufSetScissors(g_cb, 0, &r, 1);
+                dkCmdBufClearColorFloat(g_cb, 0, DkColorMask_RGBA, 1.0f, 0.85f, 0.2f, 1.0f);
+                x += w;
+            }
+    }
+}
+
 void gfx_present(GfxTex* backbuffer)
 {
     if (!g_up)
@@ -2404,6 +2462,7 @@ void gfx_present(GfxTex* backbuffer)
         int same = rw == (int)backbuffer->w && rh == (int)backbuffer->h;
         dkCmdBufBlitImage(g_cb, &bv, &sr, &fbv, &dr, same ? DkBlitFlag_FilterNearest : DkBlitFlag_FilterLinear, 0);
     }
+    fps_draw(dh);
     /* flushed: the caches' writes are out when it signals, as the slot's memory is written again after */
     dkCmdBufSignalFence(g_cb, &g_fence[g_cur], true);
     dkQueueSubmitCommands(g_q, dkCmdBufFinishList(g_cb));
