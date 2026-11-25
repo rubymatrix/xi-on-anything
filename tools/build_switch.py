@@ -287,7 +287,7 @@ GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
 # Only gfx_gl.c includes EGL and GL, so only it is compiled again; the link takes its libraries (egl.pc's, with
 # no libdrm_nouveau) ahead of portlibs'.
 # XI_SWITCH_GFX=deko3d: the graphics on deko3d (gfx_deko3d.c, being brought up), with uam (third_party/uam) to
-# compile the generator's shaders on the console; no Mesa. XI_SWITCH_DK_DEBUG=0: deko3d's release library
+# compile the generator's shaders on the console; no Mesa. XI_SWITCH_DK_DEBUG=1: deko3d's debug library
 # (libdeko3d.a) instead of its debug one, whose checks gfx_deko3d.c logs.
 DK_GFX = ['runtime/portable/gfx/gfx_deko3d.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
           'runtime/portable/gfx/gfx_fx.c', 'runtime/portable/gfx/dk_uam.c']
@@ -319,7 +319,7 @@ def dk_shaders_header():
 
 
 def dk_libs():
-    debug = os.environ.get('XI_SWITCH_DK_DEBUG', '1') != '0'
+    debug = os.environ.get('XI_SWITCH_DK_DEBUG', '0') != '0'
     return ['-ldeko3dd' if debug else '-ldeko3d', '-lstdc++']
 
 

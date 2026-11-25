@@ -19,6 +19,8 @@ what has been verified, and what is left.
 | `platforms/switch/app.json` | the application NPDM (for the forwarder) | hbloader's |
 | `platforms/switch/tests/switch_plat_test.c` | the platform layer's self-test, as its own `.nro` | — |
 | `runtime/portable/gfx/gfx_gl.c`, `gfx_gl_api.h` | graphics: OpenGL 4.3 core on Mesa's nouveau through EGL; also builds on the desktop (SDL3's GL context) for testing | `gfx_webgpu.c`, `gfx_vulkan.c` |
+| `runtime/portable/gfx/gfx_deko3d.c`, `dk_uam.c`, `dk_shaders/` | graphics on deko3d instead (`XI_SWITCH_GFX=deko3d`, below) | `gfx_gl.c` |
+| `third_party/uam` | deko3d's shader compiler as a library for the console; its changes are in `XI_CHANGES.md` | devkitPro's uam 1.1.0 |
 | `platforms/switch/tests/switch_gfx_test.c` | `tests/gfx/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
 
 The translation is the desktop one (`generated/all`, `generated/ffxi`). The generated C is portable, and
@@ -50,6 +52,44 @@ never waits keeps the others off its core. Finished threads are kept for reuse (
 FFXiMain starts a thread for every sound, and a Horizon thread that ends unjoined keeps its 8 MB stack and
 its place in the thread limit: without the pool, CreateThread failed after 73 sounds and later effects
 were silent. The `[audio]` line counts the pool (`threads N (M idle)`).
+
+## Graphics on deko3d
+
+`XI_SWITCH_GFX=deko3d python tools/build_switch.py host` builds the game on deko3d, with no Mesa in it, as
+`build/switch/xi-on-anything-dk.nro`; OpenGL is the default. Put it in a folder of its own on the card (the homebrew
+menu shows one `.nro` a folder); it uses the same `sdmc:/switch/xi-on-anything` data. `XI_SWITCH_DK_DEBUG=1` links
+deko3d's debug library, which checks every call.
+
+- **Same shape as OpenGL's**: the render thread owns the device (`GFXQ_OWNED`), streams are buffer textures, and the
+  shaders are the generator's GL text in a dialect of its own (`gfx_dk_generate`). deko3d's conventions are D3D's, so
+  nothing is flipped or remapped. The scene effects, water, shadows and ray tracing are not drawn, as on OpenGL.
+- **Programs** are compiled by uam on a thread (75-160 ms each on the console) and kept in
+  `shader-cache/dk/<hash>.bin`; a draw whose program isn't ready is skipped. Change `CACHE_MAGIC` when uam's output
+  changes. `FFXI_DK_SYNC=1` waits for programs; `FFXI_DK_CACHE=<folder>` moves the cache.
+- **Two frames in flight**, each with its own commands, staging and ring. What a frame frees is reused once its fence
+  has passed.
+- **The log**: `[dk]` lines every 5 seconds (`FFXI_PROFILE=1`), and `[switch] heap:` every 30. The run before's log is
+  `host64.prev.log`.
+
+Bugs found in the libraries, worked around or fixed here:
+
+| Where | What | Here |
+| --- | --- | --- |
+| uam (Mesa 19's scheduler) | a block's last instruction that sets a dependency barrier stalled one clock, not two: the next block could read its result too early. In Mhaura, slivers of lamp light for single frames | `nv50_ir_emit_gm107.cpp`: two clocks |
+| deko3d, `dkCmdBufClear` | keeps only the newest of a list's 1 KB control chunks; the rest leak, ~3 KB a frame | taken back in `cbAlloc` (`ctl_reclaim`) |
+| deko3d, the copy engine | the first level's tile height isn't shrunk as the sampler shrinks it: images 6-8 rows (of blocks) tall came out wrong in their right part | a custom tile size at creation |
+| deko3d, `dkCmdBufCopyImage` | takes a compressed image's rectangle in blocks | converted in `gfx_copy` |
+
+Measured in Mhaura at 1020/307 MHz, uncapped, in scenes of 400-700 character draw items (2026-11-25; one short
+run each, the camera not the same, OpenGL's only 5 samples):
+
+| | OpenGL | deko3d |
+| --- | --- | --- |
+| fps | 32 | 38 |
+| GPU busy | 77% | 46% |
+| idle over those runs, cores 0 / 1 / 2 | 8 / 27 / 42% | 6 / 85 / 54% |
+
+The game's own thread (core 0) is the limit on both. Zcull and depth compression made no difference.
 
 ## Audio
 

@@ -100,6 +100,11 @@ writes `build/switch/xi-on-anything.nro`. The first build compiles about 6 milli
 and takes a while; later builds compile only what changed. `XI_SWITCH_JOBS` (default 6) is how many
 generated files compile at once; lower it if the PC runs out of memory.
 
+**Experimental: deko3d.** With `XI_SWITCH_GFX=deko3d` set, `host` builds the game on the console's own graphics library
+in place of OpenGL, as `build/switch/xi-on-anything-dk.nro`. Put it in a folder of its own, `/switch/xi-on-anything-dk/`,
+on a card the game is already set up on. In a busy town it has been a little faster, with much less work for the CPU
+and GPU. On the first run things can be invisible for a moment while their shaders compile; they are kept on the card.
+
 ### 2. Put it on the SD card
 
 ```
