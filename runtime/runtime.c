@@ -182,6 +182,12 @@ void rt_call_indirect(Guest* g, uint32_t target)
 #if defined(RT_WATERMARK)
     watermark_probe(g, target);
 #endif
+#if defined(__SWITCH__)
+    /* an import's or a COM method's thunk (thunk.h, THUNK_BASE): above any image or module, so never translated and
+     * never in the cache below, which every D3D call missed */
+    if (target >= 0xFFF00000u && g_native && g_native(g, target))
+        return;
+#endif
     GuestFn fn = rt_lookup_any(target);
     if (fn)
     {

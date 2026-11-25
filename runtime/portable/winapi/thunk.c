@@ -254,6 +254,11 @@ int thunk_dispatch(Guest* g, uint32_t target)
         }
         return 1;
     }
+    if (!thunk_timer) /* (the depth is the timer's; a thread-local's every access is a call on the Switch) */
+    {
+        s(g);
+        return 1;
+    }
     t_depth++;
     s(g);
     t_depth--;
