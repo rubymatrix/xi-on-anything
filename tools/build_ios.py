@@ -166,7 +166,7 @@ class Target:
             f.write(key)
 
 
-def host(t, embed=False):
+def host(t, embed=False, split=False):
     """host64 for iOS: build/ios-<sdk>/host64. embed: instead the game as a library for the launcher's
     app (its Play calls xi_ios_play, platforms/ios/ios_main.c): build/ios-<sdk>/embed/libxi.a, with
     embed/link.json, what else the app links (the libraries' archives and the frameworks)."""
@@ -184,8 +184,9 @@ def host(t, embed=False):
         frameworks += [x for x in f if x not in frameworks or x in ('-framework', '-weak_framework')]
     base = ['-O2', '-std=c11', '-g', '-DRT_GUEST_WINDOW', '-DFFXI_IOS', '-DFFXI_MOBILE', '-fno-strict-aliasing', '-I', 'runtime',
             '-I', 'runtime/portable', '-I', 'generated', '-I', 'third_party/stb']
-    objs = t.compile(build_posix.generated('all'), 'all', base + build_posix.GEN_WARNINGS + ['-I', 'generated/all'], True)
-    objs += t.compile(build_posix.generated('ffxi'), 'ffxi', base + build_posix.GEN_WARNINGS + ['-I', 'generated/ffxi'], True)
+    game = {part: t.compile(build_posix.generated(part), part, base + build_posix.GEN_WARNINGS + ['-I', 'generated/' + part], True)
+            for part in ('all', 'ffxi')}
+    objs = [] if split else game['all'] + game['ffxi']
     # the PlayOnline client, when XI_POL names it (build_posix.pol)
     pol_sources, pol_flags, pol_libs = build_posix.pol(
         'aarch64-apple-ios' + ('-sim' if t.sdk == 'iphonesimulator' else ''), t.out, {'IPHONEOS_DEPLOYMENT_TARGET': MIN_IOS})
@@ -193,8 +194,15 @@ def host(t, embed=False):
         objs += t.compile(pol_sources, 'pol', base + pol_flags + build_posix.POL_CFLAGS)
     ours = base + inc + pol_flags + ['-I', 'host/addons', '-DIMGUI_USER_CONFIG="imconfig_xi.h"']
     sources = build_posix.PORTABLE + build_posix.HOST_SOURCES + build_posix.ADDON_SOURCES
-    objs += t.compile([s for s in sources if s != 'host/host64.c'], 'host', ours)
-    objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
+    # split: the sources that name a game build's addresses (build.h) are compiled on the phone with the
+    # player's build's build.h (game_kit), as Android's are (build_android.py --split-game)
+    device = [s for s in sources if split and not s.startswith('generated/') and build_posix.names_build(s)]
+    objs += t.compile([s for s in sources if s != 'host/host64.c' and s not in device], 'host', ours)
+    if 'host/host64.c' not in device:
+        objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
+    device_objs = t.compile([s for s in device if s != 'host/host64.c'], 'host', ours)
+    if 'host/host64.c' in device:
+        device_objs += t.compile(['host/host64.c'], 'host64', ours + ['-Dmain=xi_host_main'])
     objs += t.compile(['platforms/ios/ios_main.c', 'host/touch.c', 'host/display_fit.c'], 'embed' if embed else 'entry',
                       ours + (['-DXI_IOS_EMBED'] if embed else []))  # iOS only
     fw = sum((['-framework', f] for f in FRAMEWORKS), [])
@@ -212,6 +220,9 @@ def host(t, embed=False):
         with open(path, 'wb') as f:
             plistlib.dump({'application-identifier': 'SIMULATOR.' + t.bundle_id}, f)
         sim = ['-Wl,-sectcreate,__TEXT,__entitlements,' + path]
+    if split:
+        return game_kit(t, objs, game, device, device_objs, base, ours, archives + list(pol_libs),
+                        frameworks + fw + ['-lc++', '-lm'])
     if embed:
         out = os.path.join(t.out, 'embed')
         os.makedirs(out, exist_ok=True)
@@ -226,6 +237,334 @@ def host(t, embed=False):
     run(t.cc + ['-o', exe] + objs + archives + hidden + sim + ['-lc++'] + frameworks + fw + ['-lm', '-lpthread',
                                                                                   '-Wl,-export_dynamic'])
     return exe, bool(pol_libs)
+
+
+LLVM_RESOURCE = os.path.join(ROOT, 'build', 'ios-llvm', 'ios', 'lib', 'clang', '18', 'include')
+
+
+def tbd_for_arm64(text):
+    """An SDK stub (.tbd) that lists arm64 wherever it lists arm64e: iOS 27's SDK stubs name only arm64e
+    (and arm64e.x1, which LLVM 18 doesn't know), which Xcode's linker accepts for an arm64 link and lld
+    doesn't."""
+    import re
+
+    def fix(m):
+        items = [x.strip() for x in m.group(1).split(',') if x.strip()]
+        items = [x for x in items if '.x1' not in x]
+        for x in list(items):
+            if x.startswith('arm64e-') and x.replace('arm64e-', 'arm64-') not in items:
+                items.append(x.replace('arm64e-', 'arm64-'))
+        return 'targets: [ ' + ', '.join(items) + ' ]'
+    return re.sub(r'targets:\s*\[([^\]]*)\]', fix, text)
+
+
+def game_kit(t, objs, game, device, device_objs, base, ours, archives, link_flags):
+    """kit: what the phone needs to make the game library (XIGame.dylib) itself, none of it game code.
+
+    build/ios-<sdk>/kit: lib/ (libxi.a, the host without the game and without the sources that name a
+    build's addresses, and the libraries' archives), sdk/ (the SDK headers those compiles include and
+    the stubs the link reads), resource/ (LLVM 18's own headers: the phone's compiler is LLVM 18),
+    tree/ and inc/ (our headers and the build.h sources, as in this checkout), cflags.txt (the
+    translation's), host.json (the build.h sources and their flags), link.json, kit.id; the phone's
+    translation writes gen/build.h and src/. build/ios-<sdk>/phone: the translator (recomp/, unpack.py,
+    phone_kit.py and what it imports, recomp/meta). build/ios-<sdk>/XIGame.dylib: the same library linked
+    here from this checkout's translation, which checks that the kit links, and is what a player's Mac
+    puts in the app instead (Sideloadly's dylib injection, docs/platforms/ios.md)."""
+    import re
+    import shlex
+    kit = os.path.join(t.out, 'kit')
+    shutil.rmtree(kit, ignore_errors=True)
+    os.makedirs(os.path.join(kit, 'lib'))
+    sdk = os.path.realpath(xcrun(t.sdk, '--show-sdk-path'))
+    resource = os.path.realpath(subprocess.run(t.cc + ['-print-resource-dir'], capture_output=True, text=True,
+                                               check=True).stdout.strip())
+    root = os.path.realpath(ROOT)
+    generated = os.path.join(root, 'generated')
+    flags_all = base + ours
+    outside = sorted({os.path.realpath(os.path.join(ROOT, f[2:] if len(f) > 2 else ''))
+                      for f in flags_all if f.startswith('-I') and len(f) > 2}
+                     | {os.path.realpath(os.path.join(ROOT, flags_all[i + 1])) for i, f in enumerate(flags_all) if f == '-I'},
+                     key=lambda d: -len(d))
+    outside = [d for d in outside if not (d + os.sep).startswith(root + os.sep)]
+
+    def place(h):
+        h = os.path.realpath(h)
+        if h.startswith(sdk + os.sep):
+            return os.path.join(kit, 'sdk', os.path.relpath(h, sdk))
+        if h.startswith(resource + os.sep):
+            return os.path.join(kit, 'resource', os.path.relpath(h, resource))
+        if os.path.dirname(h) == generated:
+            return None if os.path.basename(h) == 'build.h' else os.path.join(kit, 'gen', os.path.basename(h))
+        if h.startswith(generated + os.sep):
+            return None  # a part's own headers (funcs.h): the phone's translation makes them
+        if os.path.basename(h) == 'build.h':
+            raise RuntimeError('%s: a build.h other than generated/build.h' % h)
+        if h.startswith(root + os.sep):
+            return os.path.join(kit, 'tree', os.path.relpath(h, root))
+        for n, d in enumerate(outside):
+            if h.startswith(d + os.sep):
+                return os.path.join(kit, 'inc', str(n), os.path.relpath(h, d))
+        raise RuntimeError('%s: in no include folder' % h)
+
+    def listed(cmd):
+        r = subprocess.run(cmd + ['-M', '-E', '-o', os.devnull, '-MF', '/dev/stdout'], cwd=ROOT, capture_output=True,
+                           text=True, check=True)
+        deps = shlex.split(r.stdout.replace('\\\n', ' ').split(':', 1)[-1])
+        return [d if os.path.isabs(d) else os.path.join(ROOT, d) for d in deps]
+
+    def kit_flags(flags):
+        """flags with this Mac's paths as the kit's (@KIT@), -g and the include folders' order kept."""
+        out, i = [], 0
+        while i < len(flags):
+            f = flags[i]
+            if f == '-I' or (f.startswith('-I') and len(f) > 2):
+                d = flags[i + 1] if f == '-I' else f[2:]
+                i += 2 if f == '-I' else 1
+                full = os.path.realpath(os.path.join(ROOT, d))
+                if full == generated:
+                    out.append('-I@KIT@/gen')
+                elif full.startswith(generated + os.sep):
+                    out.append('-I@KIT@/src/' + os.path.relpath(full, generated))
+                elif (full + os.sep).startswith(root + os.sep):
+                    out.append('-I@KIT@/tree/' + os.path.relpath(full, root) if full != root else '-I@KIT@/tree')
+                else:
+                    out.append('-I@KIT@/inc/%d' % outside.index(full))
+                continue
+            if f != '-g':
+                out.append(f)
+            i += 1
+        return out
+
+    wanted = set()
+    for part, part_objs in game.items():
+        srcs = build_posix.generated(part)
+        wanted.update(listed(t.cc + base + build_posix.GEN_WARNINGS + ['-I', 'generated/' + part, srcs[0]])[1:])
+    host = []
+    for s in device:
+        extra = ['-Dmain=xi_host_main'] if s == 'host/host64.c' else []
+        wanted.update(listed(t.cc + ours + extra + [s])[1:])
+        host.append({'source': s, 'flags': kit_flags(ours + extra)})
+    # and every header beside ours: what this build's build.h leaves out (#if) another build's includes
+    for folder in {os.path.dirname(os.path.realpath(f)) for f in wanted}:
+        if folder.startswith(root + os.sep) and not folder.startswith(generated):
+            wanted.update(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(('.h', '.inc', '.hpp')))
+    llvm = os.path.isdir(LLVM_RESOURCE)
+    for h in sorted(wanted):
+        dest = place(h)
+        if dest is None:
+            continue
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        src = h
+        if dest.startswith(os.path.join(kit, 'resource', 'include') + os.sep) and llvm:
+            src = os.path.join(LLVM_RESOURCE, os.path.relpath(dest, os.path.join(kit, 'resource', 'include')))
+            if not os.path.exists(src):
+                continue  # Apple's clang's own (the LLVM 18 one includes no such header)
+        shutil.copyfile(src, dest)
+    if llvm:  # the whole of LLVM 18's but the x86 intrinsics: its headers include each other
+        os.makedirs(os.path.join(kit, 'resource', 'include'), exist_ok=True)
+        for f in os.listdir(LLVM_RESOURCE):
+            full = os.path.join(LLVM_RESOURCE, f)
+            if os.path.isfile(full) and f.endswith('.h') and not re.search(r'intrin|^avx|^x86|^amx|^ia32|^sse|^mm|^pmm|^tmm|^emm|^xmm|^smm|^nmm|^wmm|^ammintrin|^f16c|^fma|^bmi|^lzcnt|^popcnt|^rtm|^xsave|^xop|^tbm|^sha|^adx|^cet|^clflush|^clwb|^clzero|^enqcmd|^gfni|^hreset|^invpcid|^keylocker|^lwp|^movdir|^mwaitx|^pconfig|^pku|^prfchw|^ptwrite|^rdpru|^rdseed|^serialize|^sgx|^shstk|^tsxldtrk|^uintr|^vaes|^vpclmul|^waitpkg|^wbnoinvd|^cldemote|^cmpccxadd|^crc32|^raoint|^prfchi|^usermsr|^avxifma|^avxvnni', f):
+                dest = os.path.join(kit, 'resource', 'include', f)
+                if not os.path.exists(dest):
+                    shutil.copyfile(full, dest)
+    else:
+        print('no build/ios-llvm (build it first): the kit has Xcode clang\'s headers, not LLVM 18\'s')
+
+    # the phone's clang: this SDK's target, the kit's headers in place of the SDK's and Xcode's
+    prefix = ['-target', t.arch[1], '-isysroot', '@KIT@/sdk', '-resource-dir', '@KIT@/resource', '-Wno-unknown-warning-option']
+    for h in host:
+        h['flags'] = prefix + h['flags']
+    for f in ('SDKSettings.json', 'SDKSettings.plist'):  # the driver reads the SDK's version here
+        if os.path.exists(os.path.join(sdk, f)):
+            os.makedirs(os.path.join(kit, 'sdk'), exist_ok=True)
+            shutil.copyfile(os.path.join(sdk, f), os.path.join(kit, 'sdk', f))
+    with open(os.path.join(kit, 'cflags.txt'), 'w') as f:
+        f.write('\n'.join(prefix + kit_flags(base + build_posix.GEN_WARNINGS)) + '\n')
+    with open(os.path.join(kit, 'host.json'), 'w') as f:
+        json.dump(host, f, indent=1)
+
+    # the libraries: ours whole (-force_load: addons find functions by name), the rest as archives
+    xi = os.path.join(kit, 'lib', 'libxi.a')
+    run([t.ar, 'rcs', xi] + objs)
+    names = []
+    for a in archives:
+        dest = os.path.join(kit, 'lib', os.path.basename(a))
+        shutil.copyfile(a, dest)
+        names.append(os.path.basename(a))
+    rt = os.path.join(resource, 'lib', 'darwin', 'libclang_rt.%s.a' % ('iossim' if t.sdk == 'iphonesimulator' else 'ios'))
+    shutil.copyfile(rt, os.path.join(kit, 'lib', os.path.basename(rt)))
+    names.append(os.path.basename(rt))
+    for a in [xi] + [os.path.join(kit, 'lib', n) for n in names if n != os.path.basename(rt)]:  # no debug information on the phone
+        subprocess.run(['xcrun', 'strip', '-S', a], check=True, capture_output=True)
+
+    # the stubs: libSystem, libc++ and the frameworks, and what each re-exports
+    stubs, todo = {}, ['/usr/lib/libSystem.B.dylib', '/usr/lib/libc++.1.dylib', '/usr/lib/libobjc.A.dylib']
+    i = 0
+    while i < len(link_flags):
+        if link_flags[i] in ('-framework', '-weak_framework'):
+            todo.append('/System/Library/Frameworks/%s.framework/%s' % (link_flags[i + 1], link_flags[i + 1]))
+            i += 2
+        else:
+            i += 1
+    while todo:
+        name = todo.pop()
+        if name in stubs:
+            continue
+        path = os.path.join(sdk, name.lstrip('/'))
+        path = os.path.splitext(path)[0] + '.tbd' if path.endswith('.dylib') else path + '.tbd'
+        if not os.path.exists(path):
+            stubs[name] = None
+            continue
+        text = open(path).read()
+        stubs[name] = path
+        dest = os.path.join(kit, 'sdk', os.path.relpath(path, sdk))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, 'w') as f:
+            f.write(tbd_for_arm64(text) if t.sdk == 'iphoneos' else text)
+        for block in re.findall(r're-?exported-libraries:(.*?)(?:\n\S|\Z)', text, re.S):
+            todo += re.findall(r"'?(/[^',\s\]]+)'?", block)
+    # libSystem.B is the stub under libSystem's name, -lSystem's file
+    for alias, real in (('usr/lib/libSystem.tbd', 'usr/lib/libSystem.B.tbd'), ('usr/lib/libc++.tbd', 'usr/lib/libc++.1.tbd'),
+                        ('usr/lib/libobjc.tbd', 'usr/lib/libobjc.A.tbd')):
+        if os.path.exists(os.path.join(kit, 'sdk', real)):
+            shutil.copyfile(os.path.join(kit, 'sdk', real), os.path.join(kit, 'sdk', alias))
+    sdk_version = xcrun(t.sdk, '--show-sdk-version')
+    with open(os.path.join(kit, 'link.json'), 'w') as f:
+        json.dump({'force_load': ['libxi.a'], 'archives': names, 'flags': link_flags, 'min': MIN_IOS,
+                   'sdk_version': sdk_version, 'simulator': t.sdk == 'iphonesimulator'}, f, indent=1)
+
+    # the translator's side
+    phone = os.path.join(t.out, 'phone')
+    shutil.rmtree(phone, ignore_errors=True)
+    os.makedirs(os.path.join(phone, 'recomp'))
+    os.makedirs(os.path.join(phone, 'tools'))
+    for f in ('recomp/recomp.py', 'recomp/x86c.py', 'tools/unpack.py', 'tools/phone_kit.py', 'tools/build.py',
+              'tools/buildinfo.py', 'tools/android_translation.py'):
+        shutil.copyfile(os.path.join(ROOT, f), os.path.join(phone, f))
+    shutil.copytree(os.path.join(ROOT, 'recomp', 'meta'), os.path.join(phone, 'recomp', 'meta'),
+                    ignore=shutil.ignore_patterns('.*', 'discovery'))
+    shutil.copyfile(os.path.join(ROOT, 'runtime.json'), os.path.join(phone, 'runtime.json'))
+
+    digest = hashlib.sha256()
+    for b in (kit, phone):
+        for d, _, files in sorted(os.walk(b)):
+            for f in sorted(files):
+                full = os.path.join(d, f)
+                digest.update(os.path.relpath(full, t.out).encode() + b'\0' + open(full, 'rb').read())
+    with open(os.path.join(kit, 'kit.id'), 'w') as f:
+        f.write(digest.hexdigest()[:16] + '\n')
+
+    # the kit's headers are enough: each of its sources (and a translated one) checked with its flags
+    # here, the kit's paths for @KIT@ and this checkout's translation for the phone's own
+    def here(flags, part=None):
+        out = [f.replace('@KIT@/gen', generated).replace('@KIT@/src', generated).replace('@KIT@', kit) for f in flags]
+        return out + (['-I' + os.path.join(generated, part)] if part else [])
+    checks = [(here(h['flags']), os.path.join(kit, 'tree', h['source'])) for h in host]
+    with open(os.path.join(kit, 'cflags.txt')) as f:
+        cflags = f.read().split()
+    checks += [(here(cflags, part), os.path.join(ROOT, build_posix.generated(part)[0])) for part in game]
+    bad = []
+    for flags, src in checks:
+        r = subprocess.run(t.cc[:1] + ['-fsyntax-only'] + flags + [src], capture_output=True, text=True)
+        if r.returncode:
+            bad.append('%s:\n%s' % (src, r.stderr[-1500:]))
+    if bad:
+        raise SystemExit('the kit misses headers its sources need:\n' + '\n'.join(bad[:3]))
+
+    # the check, and the Mac-built game library
+    dylib = os.path.join(t.out, 'XIGame.dylib')
+    every = game['all'] + game['ffxi'] + device_objs
+    run(t.cc + ['-dynamiclib', '-install_name', '@rpath/XIGame.dylib', '-o', dylib] + every
+        + ['-Wl,-force_load,' + xi] + [os.path.join(kit, 'lib', n) for n in names] + link_flags)
+    size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(kit) for f in fs)
+    print('kit %s (%s, %.0f MB): %d host sources for the phone; %s' % (kit, open(os.path.join(kit, 'kit.id')).read().strip(),
+                                                                       size / 1e6, len(host), dylib))
+    return dylib, False
+
+
+LLVM_SRC = os.path.join(ROOT, 'build', 'android-llvm', 'src', 'llvm-project-18.1.8.src')
+PYTHON_XCF = os.path.join(ROOT, 'build', 'ios-python', 'cross-build', 'iOS', 'Python.xcframework')
+CAPSTONE = os.path.join(ROOT, 'build', 'ios-capstone')
+
+
+def toolchain(t):
+    """What the launcher's app needs to make the game on the phone, none of it game code, in
+    build/ios-<sdk>/bundle: libxitoolchain.a (platforms/ios/ios_toolchain.cpp, ios_sign.c,
+    ios_python.c) and toolchain.json (the LLVM archives and the rest it links), Python.xcframework
+    (CPython for iOS, build/ios-python: CPython's Apple/ build), site/ (pefile and capstone's binding),
+    libcapstone.dylib, and the kit and the translator (game_kit) as xi/. The launcher's Xcode project
+    links and copies them in (its scripts/ios-bundle.sh)."""
+    llvm = os.path.join(ROOT, 'build', 'ios-llvm', 'sim' if t.sdk == 'iphonesimulator' else 'ios')
+    if not os.path.isdir(os.path.join(llvm, 'lib')):
+        raise SystemExit('no %s: build LLVM for iOS first (build/ios-llvm/build%s.sh)' % (llvm, '-sim' if t.sdk == 'iphonesimulator' else ''))
+    if not os.path.isdir(PYTHON_XCF):
+        raise SystemExit('no %s: build CPython for iOS first (its Apple/ build)' % PYTHON_XCF)
+    out = os.path.join(t.out, 'bundle')
+    os.makedirs(out, exist_ok=True)
+    slice_ = 'ios-arm64_x86_64-simulator' if t.sdk == 'iphonesimulator' else 'ios-arm64'
+    pyheaders = os.path.join(PYTHON_XCF, slice_, 'Python.framework', 'Headers')
+    llvm_inc = ['-I' + os.path.join(LLVM_SRC, d) for d in ('llvm/include', 'clang/include', 'lld/include')]
+    llvm_inc += ['-I' + os.path.join(llvm, d) for d in ('include', 'tools/clang/include', 'tools/lld/include')]
+    objs = t.compile(['platforms/ios/ios_toolchain.cpp'], 'toolchain-cxx', ['-O2', '-fno-rtti', '-fno-exceptions', '-w'] + llvm_inc)
+    objs += t.compile(['platforms/ios/ios_sign.c', 'platforms/ios/ios_python.c'], 'toolchain-c',
+                      ['-O2', '-std=c11', '-I', pyheaders, '-I', 'platforms/ios'])
+    lib = os.path.join(out, 'libxitoolchain.a')
+    if os.path.exists(lib):
+        os.remove(lib)
+    run([t.ar, 'rcs', lib] + objs)
+    archives = sorted(os.path.join(llvm, 'lib', f) for f in os.listdir(os.path.join(llvm, 'lib')) if f.endswith('.a'))
+    # the Python framework the app embeds: this SDK's slice, copied whole
+    xcf = os.path.join(out, 'Python.xcframework')
+    shutil.rmtree(xcf, ignore_errors=True)
+    shutil.copytree(PYTHON_XCF, xcf, symlinks=True)
+    # the standard library but its tests, GUI, docs and installer (most of its size)
+    for d, _, files in list(os.walk(xcf)):
+        base = os.path.basename(d)
+        if base in ('test', 'tests', 'idle_test', 'idlelib', 'tkinter', 'turtledemo', 'ensurepip', 'pydoc_data',
+                    '__pycache__', '_pyrepl', 'venv') and 'python3.' in d:
+            shutil.rmtree(d, ignore_errors=True)
+            continue
+        for f in files:
+            if base == 'lib-dynload' and f.startswith(('_test', 'xx', '_ctypes_test', '_xxtest')):
+                os.remove(os.path.join(d, f))
+    utils = os.path.join(xcf, 'build', 'utils.sh')
+    with open(utils) as f:
+        text = f.read()
+    # an app named with spaces ("XI on Anything.app"): CPython's script leaves one path unquoted
+    with open(utils, 'w') as f:
+        f.write(text.replace('> ${FULL_EXT%.so}.fwork', '> "${FULL_EXT%.so}.fwork"'))
+    with open(os.path.join(out, 'toolchain.json'), 'w') as f:
+        json.dump({'library': lib, 'archives': archives,
+                   'flags': ['-F' + os.path.join(xcf, slice_), '-framework', 'Python', '-framework', 'Security', '-lc++', '-lz'],
+                   'python_slice': slice_}, f, indent=1)
+    # the translator's Python packages: pefile, and capstone's binding finding libcapstone.dylib in Frameworks
+    import capstone as host_capstone
+    import pefile as host_pefile
+    site = os.path.join(out, 'site')
+    shutil.rmtree(site, ignore_errors=True)
+    os.makedirs(site)
+    shutil.copyfile(host_pefile.__file__, os.path.join(site, 'pefile.py'))
+    shutil.copytree(os.path.join(os.path.dirname(host_pefile.__file__), 'ordlookup'), os.path.join(site, 'ordlookup'),
+                    ignore=shutil.ignore_patterns('__pycache__'))
+    shutil.copytree(os.path.dirname(host_capstone.__file__), os.path.join(site, 'capstone'),
+                    ignore=shutil.ignore_patterns('__pycache__', 'lib', 'include'))
+    init = os.path.join(site, 'capstone', '__init__.py')
+    with open(init) as f:
+        text = f.read()
+    # iOS's Python says 'ios', and the library is a .dylib there too (LIBCAPSTONE_PATH: the app's Frameworks)
+    with open(init, 'w') as f:
+        f.write(text.replace("if sys.platform == 'darwin':", "if sys.platform in ('darwin', 'ios'):", 1))
+    dylib = os.path.join(CAPSTONE, t.sdk, 'libcapstone.5.0.9.dylib')
+    shutil.copyfile(dylib, os.path.join(out, 'libcapstone.dylib'))
+    run(['install_name_tool', '-id', '@rpath/libcapstone.dylib', os.path.join(out, 'libcapstone.dylib')])
+    # the kit and the translator
+    xi = os.path.join(out, 'xi')
+    shutil.rmtree(xi, ignore_errors=True)
+    os.makedirs(xi)
+    shutil.copytree(os.path.join(t.out, 'kit'), os.path.join(xi, 'kit'))
+    shutil.copytree(os.path.join(t.out, 'phone'), os.path.join(xi, 'phone'))
+    print('toolchain in %s' % out)
 
 
 def info_plist(t):
@@ -391,7 +730,7 @@ def simulator(name):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('target', choices=['app', 'run', 'install', 'lib'])
+    ap.add_argument('target', choices=['app', 'run', 'install', 'lib', 'kit', 'toolchain'])
     ap.add_argument('--sdk', choices=['iphonesimulator', 'iphoneos'], default='iphonesimulator')
     ap.add_argument('--sign-identity')
     ap.add_argument('--profile')
@@ -408,6 +747,13 @@ def main():
     t = Target(a.sdk, a.bundle_id)
     if a.target == 'lib':  # the game for the launcher's app (host's embed)
         print(host(t, embed=True)[0])
+        return
+    if a.target == 'kit':  # the launcher's app builds the game itself (game_kit)
+        host(t, embed=True, split=True)
+        return
+    if a.target == 'toolchain':  # and what it builds with (toolchain): the kit first
+        host(t, embed=True, split=True)
+        toolchain(t)
         return
     bundle = app(t, a)
     if a.target == 'install':

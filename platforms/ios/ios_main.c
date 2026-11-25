@@ -108,8 +108,13 @@ static int run_game(int argc, char** argv, int embedded)
     int n = 0;
     for (int i = 0; i < argc && n < MAX_ARGS; ++i)
         args[n++] = argv[i];
-    snprintf(path, sizeof path, "%s/run.args", docs);
-    n += read_args(path, args + n, MAX_ARGS - 2 - n);
+    /* run.args: the standalone app's arguments; the launcher gives its own (and a leftover file there
+     * would override them, a server's address among them) */
+    if (!embedded)
+    {
+        snprintf(path, sizeof path, "%s/run.args", docs);
+        n += read_args(path, args + n, MAX_ARGS - 2 - n);
+    }
     static char game[1100];
     struct stat st;
     snprintf(game, sizeof game, "%s/FINAL FANTASY XI", docs);
