@@ -359,6 +359,10 @@ static void sh_socket(Guest* g)
     RET(GUEST_INVALID_SOCKET, 3);
 }
 
+#if defined(__SWITCH__)
+static void net_closed(host_sock h);
+#endif
+
 static void sh_closesocket(Guest* g)
 {
     Sock* s = sock(ARG(0));
@@ -368,6 +372,9 @@ static void sh_closesocket(Guest* g)
     host_sock h = s->h;
     s->used = 0;
     unlock();
+#if defined(__SWITCH__)
+    net_closed(h);
+#endif
     host_close(h);
     RET(0, 1);
 }
@@ -634,11 +641,99 @@ static void sh_recv(Guest* g)
     RET((uint32_t)n, 4);
 }
 
+#if defined(__SWITCH__)
+/* A non-blocking datagram socket with nothing to read: each of the game's polls is a trip to the system's network
+ * service on its own thread (0.35 ms a frame at 1020 MHz), nearly all for "nothing yet". After such an answer a helper
+ * thread waits on the socket, and the polls are answered here until it has something. One socket (the game's); a real
+ * read at least every 100 ms all the same. FFXI_NET_WATCH=0 turns it off. */
+enum
+{
+    NW_READ, /* ask the system */
+    NW_DRY   /* nothing when last asked: the helper is waiting on it */
+};
+static volatile uint32_t g_nw;
+static volatile int g_nw_h = -1;
+static uint64_t g_nw_at; /* the last real read */
+
+static void net_watch(void* unused)
+{
+    (void)unused;
+    for (;;)
+    {
+        if (g_nw != NW_DRY)
+        {
+            plat_wait32(&g_nw, NW_READ);
+            continue;
+        }
+        int h = g_nw_h;
+        fd_set rd;
+        FD_ZERO(&rd);
+        struct timeval t = { 0, 50000 };
+        if (h >= 0 && h < FD_SETSIZE)
+            FD_SET(h, &rd);
+        if (h < 0 || h >= FD_SETSIZE || host_select(h + 1, &rd, NULL, NULL, &t) != 0) /* something to read, or an error for
+                                                                                       * the game's own call to find */
+            plat_atomic_cas32(&g_nw, NW_DRY, NW_READ);
+    }
+}
+
+static int net_watch_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_NET_WATCH");
+        on = !(e && *e == '0') && plat_thread_start_core(net_watch, NULL, 2);
+    }
+    return on;
+}
+
+/* 1: nothing to read (answered without the system) */
+static int net_dry(const Sock* s, uint32_t flags)
+{
+    return g_nw == NW_DRY && s->h == g_nw_h && !flags && rt_monotonic_ns() - g_nw_at < 100000000ull;
+}
+
+static void net_read_done(const Sock* s, uint32_t flags, int would_block)
+{
+    if (s->type != 2 || !s->nonblocking || s->event || flags || !net_watch_on())
+        return;
+    g_nw_at = rt_monotonic_ns();
+    if (!would_block)
+    {
+        if (s->h == g_nw_h)
+            plat_atomic_cas32(&g_nw, NW_DRY, NW_READ);
+        return;
+    }
+    g_nw_h = s->h;
+    if (plat_atomic_cas32(&g_nw, NW_READ, NW_DRY) == NW_READ)
+        plat_wake_all32(&g_nw);
+}
+
+static void net_closed(host_sock h)
+{
+    if (h == g_nw_h)
+    {
+        g_nw_h = -1;
+        plat_atomic_cas32(&g_nw, NW_DRY, NW_READ);
+    }
+}
+#else
+#define net_dry(s, f) 0
+#define net_read_done(s, f, w) ((void)0)
+#endif
+
 static void sh_recvfrom(Guest* g)
 {
     Sock* s = sock(ARG(0));
     if (!s)
         RET(GUEST_SOCKET_ERROR, 6);
+    if (net_dry(s, ARG(3)))
+    {
+        io_done(s, FD_READ, 0);
+        gt_set_error(WSAEWOULDBLOCK);
+        RET(GUEST_SOCKET_ERROR, 6);
+    }
     struct sockaddr_in a;
     socklen_t len = sizeof a;
     int nb = s->nonblocking;
@@ -648,6 +743,7 @@ static void sh_recvfrom(Guest* g)
     int e = host_errno();
     if (!nb)
         gt_lock();
+    net_read_done(s, ARG(3), n < 0 && wsa_error(e) == WSAEWOULDBLOCK);
     io_done(s, FD_READ, 0);
     if (net_trace() && n > 0)
         trace_bytes("recvfrom", s, &a, (const uint8_t*)ARGP(1), n);
