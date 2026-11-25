@@ -77,6 +77,9 @@
  * defaults to <data dir>/settings.reg, loaded when no --reg-final is given. Its window becomes the
  * game's. */
 #include <math.h>
+#if defined(__SWITCH__)
+#include <malloc.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1288,6 +1291,14 @@ static void switch_fps(void)
     {
         rt_log("[switch] %.1f fps, longest frame %.1f ms\n", frames * 1e9 / (double)(now - since), longest * 1e-6);
         since = now, frames = 0, longest = 0;
+        /* the C heap (capped, plat_posix.c): what is in use, every 30 seconds */
+        static int nth;
+        if (nth++ % 6 == 0)
+        {
+            struct mallinfo mi = mallinfo();
+            rt_log("[switch] heap: %.1f MB in use of %.1f MB taken (%.1f MB free in it)\n", (double)(size_t)mi.uordblks / 1048576.0,
+                (double)(size_t)mi.arena / 1048576.0, (double)(size_t)mi.fordblks / 1048576.0);
+        }
     }
 }
 #endif

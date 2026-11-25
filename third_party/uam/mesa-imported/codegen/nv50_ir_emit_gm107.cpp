@@ -4539,6 +4539,12 @@ SchedDataCalculatorGM107::visit(BasicBlock *bb)
    }
 
    next = (i >= func->bbCount - 1) ? NULL : func->bbArray[i + 1]->getEntry();
+   // xi-on-anything: a barrier takes a clock more to become active, and the
+   // next block's first instruction waits on them all - but its wait bits are
+   // only emitted when that block is visited, so setDelay doesn't see them and
+   // a barrier from a block's last instruction could be missed.
+   if (getWrDepBar(insn) != 7 || getRdDepBar(insn) != 7)
+      bbDelay = MAX2(bbDelay, 2);
    setDelay(insn, bbDelay, next);
    cycle += getStall(insn);
 

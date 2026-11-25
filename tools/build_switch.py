@@ -301,6 +301,23 @@ def gfx_choice():
     return g
 
 
+def dk_shaders_header():
+    """build/switch/gen/dk_shaders.h: gfx_deko3d.c's fixed shaders (runtime/portable/gfx/dk_shaders/*.glsl) as C
+    strings, DK_<NAME>_GLSL; written only when it changes (its includers' depfiles then see it newer)."""
+    src = ROOT / 'runtime/portable/gfx/dk_shaders'
+    out = OUT / 'gen' / 'dk_shaders.h'
+    lines = ['/* made by tools/build_switch.py from runtime/portable/gfx/dk_shaders/: not to be edited */']
+    for f in sorted(src.glob('*.glsl')):
+        # (each line a C string: JSON's escapes are C's for these files' characters - quotes, backslashes, tabs)
+        body = ''.join('    ' + json.dumps(ln + '\n') + '\n' for ln in f.read_text().splitlines())
+        lines.append(f'static const char DK_{f.stem.upper()}_GLSL[] =\n{body}    "";')
+    text = '\n'.join(lines) + '\n'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not out.exists() or out.read_text() != text:
+        out.write_text(text)
+    return out
+
+
 def dk_libs():
     debug = os.environ.get('XI_SWITCH_DK_DEBUG', '1') != '0'
     return ['-ldeko3dd' if debug else '-ldeko3d', '-lstdc++']
@@ -390,7 +407,7 @@ def host(a):
     hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + (DK_GFX if dk else GFX) + [
         'platforms/switch/sdl_nx.c', 'platforms/switch/tls_nx.c', 'runtime/portable/sampler_nx.c', 'host/addons_none.c']
     # the render queue: GL's context (deko3d's device) is its render thread's, and the game calls from several threads
-    queue = ['-DGFX_DEKO3D', '-DGFX_QUEUE', '-I' + str(ROOT / 'third_party/uam/source')] if dk else ['-DGFX_GL', '-DGFX_QUEUE']
+    queue = ['-DGFX_DEKO3D', '-DGFX_QUEUE', '-I' + str(ROOT / 'third_party/uam/source'), '-I' + str(dk_shaders_header().parent)] if dk else ['-DGFX_GL', '-DGFX_QUEUE']
     ours = bp.PORTABLE + hosts + ['runtime/portable/gfx/gfx_queue.c']
     gen_all, gen_ffxi = bp.generated('all'), bp.generated('ffxi')
     phase('compile')

@@ -10,6 +10,8 @@ As that licence asks, the altered files are marked here:
 - `source/compiler_iface.h`, `source/compiler_iface.cpp`: `DekoCompiler::OutputDkshMem`, the same bytes as
   `OutputDksh` writes to a file, into a malloc'd buffer instead.
 - `source/uam_api.cpp`, `source/uam_api.h` (new): `uam_compile`, one GLSL stage to its DKSH in memory.
+- `mesa-imported/codegen/nv50_ir_emit_gm107.cpp`: a block's last instruction that sets a dependency barrier stalls two
+  clocks, as one inside a block does (the next block's wait was missed, and its register read too early).
 - `generated/`: the files uam's meson build makes with bison, flex and Python (the GLSL parser and lexer, the
   preprocessor's, `ir_expression_operation*.h`), made once so the build needs none of those tools.
 - `manifest.json`: its sources and flags for `tools/thirdparty.py` (the meson build is kept, unused).

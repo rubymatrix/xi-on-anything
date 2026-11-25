@@ -565,6 +565,9 @@ int main(int argc, char** argv)
     chdir(APP_DIR);
     /* emptied, then both streams opened to append: with stderr at its own offset ("w"), its lines and
      * stdout's (OutputDebugString) wrote over each other */
+    /* the run before's log kept (a crash's would be gone at the next start) */
+    remove(APP_DIR "/host64.prev.log");
+    rename(APP_DIR "/host64.log", APP_DIR "/host64.prev.log");
     FILE* empty = fopen(APP_DIR "/host64.log", "w");
     if (empty)
         fclose(empty);

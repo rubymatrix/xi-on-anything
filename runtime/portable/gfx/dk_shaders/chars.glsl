@@ -1,9 +1,10 @@
 // The deko3d back end's characters (gfx_deko3d.c gfx_chars_draw): gfx_gl.c's CHARS_GL in uam's rules - each
 // stage compiled on its own (GFX_VS or GFX_FS defined ahead of this, after "#version 460"), the varyings at fixed
 // locations, and clip space left as D3D's (deko3d's defaults: y up, z 0..1), so no y negation or z remap.
-// Bindings as GL's: blocks 0 the draw's (alpha ref, pixel; mirror), 1 the state (GfxCharState), 2 the palette,
-// 3 the environment layer (GfxCharEnv); textures 1 and 2 the vertex and coordinate buffers (buffer images of
-// words), 8 the texture, 9 and 10 the environment layer's (2D, cube).
+// Bindings as GL's: blocks 0 the draw's (alpha ref, pixel; the buffers' places, mirror), 1 the state (GfxCharState),
+// 2 the palette, 3 the environment layer (GfxCharEnv); textures 1 and 2 the vertex and coordinate buffers (buffer
+// images of words over their heap blocks: D.at.x and D.at.y the buffers' first words in them), 8 the texture, 9 and
+// 10 the environment layer's (2D, cube).
 #define sat(x) clamp(x, 0.0, 1.0)
 layout(std140, binding = 0) uniform CU { vec4 params; uvec4 at; } D;
 struct CL { vec4 pos, dir, diffuse, ambient, att; };
@@ -20,7 +21,7 @@ layout(location = 3) out vec3 o_env;
 const vec3 SIGN[4] = vec3[4](vec3(1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(1.0, 1.0, -1.0));
 vec4 vw4(int b) { return uintBitsToFloat(uvec4(texelFetch(vbt, b).x, texelFetch(vbt, b + 1).x, texelFetch(vbt, b + 2).x, texelFetch(vbt, b + 3).x)); }
 void main() {
-  int vid = gl_VertexID, b = vid * 18;
+  int vid = gl_VertexID, b = int(D.at.x) + vid * 18;
   vec4 va = vw4(b), vb4 = vw4(b + 4);
   vec3 na = vw4(b + 8).xyz, nb = vw4(b + 12).xyz;
   uint bones = texelFetch(vbt, b + 16).x, mir = texelFetch(vbt, b + 17).x;
@@ -40,7 +41,8 @@ void main() {
   pos.x += pos.w * D.params.y;
   pos.y -= pos.w * D.params.z;
   gl_Position = pos;
-  o_uv = uintBitsToFloat(uvec2(texelFetch(uvt, 2 * vid).x, texelFetch(uvt, 2 * vid + 1).x));
+  int ub = int(D.at.y) + 2 * vid;
+  o_uv = uintBitsToFloat(uvec2(texelFetch(uvt, ub).x, texelFetch(uvt, ub + 1).x));
   o_env = vec3(0.0);
   if (E.kind.x > 0.0) {
     vec3 ne = normalize(mat3(E.wv) * n);
