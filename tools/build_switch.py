@@ -61,6 +61,8 @@ TITLE = 'XI on Anything'
 # XI_SWITCH_HEAP_SITES=1: the C heap followed by allocation site (platforms/switch/heap_sites.c; FFXI_HEAP_SITES=1 in
 # run.args turns it on), a test aid
 HEAP_SITES = os.environ.get('XI_SWITCH_HEAP_SITES') == '1'
+# the Switch's translation, apart from the other ports' generated/all and generated/ffxi (XI_TRANSLATE_FAST: host())
+GEN_ALL, GEN_FFXI = 'generated/switch-all', 'generated/switch-ffxi'
 AUTHOR = 'xi-on-anything'
 
 ARCH = ['-march=armv8-a+crc+crypto', '-mtune=cortex-a57', '-mtp=soft', '-fPIE']
@@ -398,10 +400,13 @@ def host(a):
     print(f'game build {build.BUILD["build"]}', flush=True)
     if not a.no_translate:
         phase('translate')
-        # the desktop translation, shared with host64 (generated/all) and FFXi.dll's (generated/ffxi)
-        bp.translate()
+        # the Switch's own translation (generated/switch-all, generated/switch-ffxi): with the faster forms
+        # measured on it (XI_TRANSLATE_FAST, recomp/x86c.py), which the other ports' (generated/all) leave out
+        os.environ.setdefault('XI_TRANSLATE_FAST', '1')
+        build.write_build_h()
+        build.recomp(GEN_ALL, ['--all'])
         bp.run([sys.executable, 'recomp/recomp.py', '--meta', build.FFXI_META, '--image', bp.GEN_FFXI_IMAGE,
-                '--retail', build.FFXI_RETAIL, '--module', 'ffxi', '--out', 'generated/ffxi', '--all'])
+                '--retail', build.FFXI_RETAIL, '--module', 'ffxi', '--out', GEN_FFXI, '--all'])
     build.write_build_h()  # generated/build.h: this game build's addresses (translate() writes it too)
     thirdparty.build('mbedtls')
     tls = thirdparty.flags('mbedtls') + MBEDTLS_CONFIG
@@ -413,7 +418,7 @@ def host(a):
     # the render queue: GL's context (deko3d's device) is its render thread's, and the game calls from several threads
     queue = ['-DGFX_DEKO3D', '-DGFX_QUEUE', '-I' + str(ROOT / 'third_party/uam/source'), '-I' + str(dk_shaders_header().parent)] if dk else ['-DGFX_GL', '-DGFX_QUEUE']
     ours = bp.PORTABLE + hosts + ['runtime/portable/gfx/gfx_queue.c']
-    gen_all, gen_ffxi = bp.generated('all'), bp.generated('ffxi')
+    gen_all, gen_ffxi = bp.generated(GEN_ALL.split('/')[1]), bp.generated(GEN_FFXI.split('/')[1])
     phase('compile')
     plan_progress(len(ours) + 1 + len(gen_all) + len(gen_ffxi))
     objs = compile_many(ours, 'host', sdl + tls + queue + ['-Dmain=xi_host_main'] + (['-DHEAP_SITES'] if HEAP_SITES else []))
@@ -428,8 +433,8 @@ def host(a):
     # switching it needs the generated objects rebuilt (they are compiled again only when their source changes)
     if os.environ.get('XI_REGS_CHECK') == '1':
         warn += ['-DRT_REGS_CHECK']
-    objs += compile_many(gen_all, 'all', ['-I' + str(ROOT / 'generated/all')] + warn, jobs)
-    objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / 'generated/ffxi')] + warn, jobs)
+    objs += compile_many(gen_all, 'all', ['-I' + str(ROOT / GEN_ALL)] + warn, jobs)
+    objs += compile_many(gen_ffxi, 'ffxi', ['-I' + str(ROOT / GEN_FFXI)] + warn, jobs)
     phase('app')
     # (--wrap: switch_main.c sees the threads pthread_create makes - Mesa's - FFXI_SWITCH_PTHREAD_CORE)
     gfx_libs = [uam_archive(thirdparty)] + dk_libs() if dk else GFX_LIBS
@@ -727,7 +732,7 @@ def main():
     sub.add_parser('settings')
     sub.add_parser('mesa', help='download our build of Mesa 26 (the shader cache) into build/switch/mesa/')
     h = sub.add_parser('host')
-    h.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
+    h.add_argument('--no-translate', action='store_true', help='keep generated/switch-all and switch-ffxi as they are')
     s = sub.add_parser('setup')
     s.add_argument('--mtp', nargs='?', const='Switch', help="the console over USB MTP (DBI's MTP responder), by its "
                    "name in This PC (default Switch); Windows only")
@@ -736,7 +741,7 @@ def main():
     s.add_argument('--nro')
     card_options(s)
     i = sub.add_parser('install')
-    i.add_argument('--no-translate', action='store_true', help='keep generated/all and generated/ffxi as they are')
+    i.add_argument('--no-translate', action='store_true', help='keep generated/switch-all and switch-ffxi as they are')
     card_options(i)
     r = sub.add_parser('run')
     r.add_argument('nro', nargs='?')

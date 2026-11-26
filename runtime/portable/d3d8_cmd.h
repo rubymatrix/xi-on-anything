@@ -125,10 +125,12 @@ static void d3dw_worker(void* arg)
         {
             /* (asleep first, then head read again: d3dw_flush moves head, then reads asleep - one of the two sees
              * the other's write, so a batch handed over is never left without a wake) */
-            __atomic_store_n(&g_w.asleep, 1, __ATOMIC_SEQ_CST);
-            if (__atomic_load_n(&g_w.head, __ATOMIC_SEQ_CST) == h)
+            /* (the platform's atomics, full barriers everywhere: MSVC has no __atomic builtins; asleep is the worker's
+             * alone to write) */
+            plat_atomic_cas32(&g_w.asleep, 0, 1);
+            if (plat_atomic_add32(&g_w.head, 0) == h)
                 plat_wait32(&g_w.head, h);
-            __atomic_store_n(&g_w.asleep, 0, __ATOMIC_SEQ_CST);
+            plat_atomic_cas32(&g_w.asleep, 1, 0);
             continue;
         }
         D3dwBatch* b = g_w.slots[g_w.tail % D3DW_NSLOTS];
@@ -226,7 +228,7 @@ static void d3dw_flush(void)
     }
     g_w.slots[g_w.head % D3DW_NSLOTS] = b;
     plat_atomic_add32(&g_w.head, 1);
-    if (__atomic_load_n(&g_w.asleep, __ATOMIC_SEQ_CST))
+    if (plat_atomic_add32(&g_w.asleep, 0))
         plat_wake_all32(&g_w.head);
 }
 

@@ -243,6 +243,10 @@ static void dat_forget(const char* host)
         }
 }
 
+#define IO_UNLOCK() gt_unlock()
+#define IO_LOCK() gt_lock()
+#define IO_DIRECT 1
+
 static void file_close(void* f)
 {
     for (int i = 0; i < DAT_KEEP; ++i)
@@ -255,6 +259,9 @@ static void file_close(void* f)
 }
 #else
 static void file_close(void* f) { plat_file_close((PlatFile*)f); }
+#define IO_UNLOCK() ((void)0)
+#define IO_LOCK() ((void)0)
+#define IO_DIRECT 0
 #endif
 
 /* FFXI_RECOMP_TRACE=1: the guest path of every file open or search that fails */
@@ -305,14 +312,14 @@ static void sh_CreateFileA(Guest* g)
     case 5: flags |= PLAT_TRUNCATE; break;               /* TRUNCATE_EXISTING */
     default: gt_set_error(ERROR_INVALID_PARAMETER); RET(INVALID_HANDLE, 7);
     }
-    /* the disk without the guest lock (10-28 ms an open on the Switch's card, the game thread waiting) */
-    gt_unlock();
+    /* the disk without the guest lock on the Switch (10-28 ms an open on its card, the game thread waiting) */
+    IO_UNLOCK();
     /* whether it was there: only CREATE_ALWAYS and OPEN_ALWAYS say (a trip to the disk saved otherwise) */
     PlatStat st;
     int existed = (disp == 2 || disp == 4) && plat_stat(host, &st);
     PlatFile* f = plat_file_open(host, flags);
     PlatError err = f ? (PlatError)0 : plat_error(); /* (before gt_lock, which may change it) */
-    gt_lock();
+    IO_LOCK();
     if (!f)
     {
         gt_set_error(win32_error(err));
@@ -657,11 +664,12 @@ static void sh_FindFirstFileA(Guest* g)
     /* The host's part without the guest lock (the game's loader thread asks for one DAT at a time, and held it
      * 8-30 ms each on the Switch's card while the game thread waited). One name without wildcards: looked at
      * directly, which finds it whatever its case where the file system ignores case (the Switch's card, macOS,
-     * Windows); listing the folder (hundreds of DATs) to match it is for where that fails. */
-    gt_unlock();
+     * Windows); listing the folder (hundreds of DATs) to match it is for where that fails. Both the Switch's: elsewhere
+     * the folder is listed with the lock held, as before. */
+    IO_UNLOCK();
     const char* first = NULL;
     PlatStat first_st;
-    if (!wildcard)
+    if (!wildcard && IO_DIRECT)
     {
         char host[1700];
         snprintf(host, sizeof host, "%s%c%s", f->dir_host, plat_path_sep, pattern);
@@ -675,7 +683,7 @@ static void sh_FindFirstFileA(Guest* g)
     if (!first)
         find_list(f, pattern, wildcard && strlen(full) > 3);
     int found = first || find_next_stat(f, &first, &first_st);
-    gt_lock();
+    IO_LOCK();
     if (!found && f->listed < 0)
     {
         free(f);

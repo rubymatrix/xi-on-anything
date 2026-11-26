@@ -680,7 +680,8 @@ static void consume(uint32_t t)
         plat_atomic_add32(&g_tail, 1);
         plat_wake_all32(&g_tail);
         /* one grown for a large texture upload made small again: kept at that size, the batches held 51 MB after a
-         * long session (heap_sites.c) */
+         * long session (heap_sites.c, the Switch's) */
+#if defined(__SWITCH__)
         if (b->cap > FLUSH_BYTES * 4)
         {
             uint8_t* p = (uint8_t*)malloc(FLUSH_BYTES * 2);
@@ -690,6 +691,7 @@ static void consume(uint32_t t)
                 b->p = p, b->cap = FLUSH_BYTES * 2;
             }
         }
+#endif
         if (g_fhead - g_ftail < NSLOTS)
         {
             g_free[g_fhead % NSLOTS] = b;
@@ -954,10 +956,13 @@ void gfxq_copy(GfxTex* src, uint32_t sface, uint32_t slevel, uint32_t sx, uint32
 void gfxq_set_targets(GfxTex* color, uint32_t face, uint32_t level, GfxTex* depth)
 {
     /* d3d8.c sets the targets before every draw: the same ones again, with only draws recorded since (draws don't
-     * change them), need no command - which would also end a batch (above) at every draw */
+     * change them), need no command - which would also end a batch (above) at every draw. (The Switch's: elsewhere
+     * each is recorded, as before) */
+#if defined(__SWITCH__)
     if (g_targets_valid && g_targets.color == color && g_targets.depth == depth && g_targets.face == face &&
         g_targets.level == level)
         return;
+#endif
     uint8_t* p = (uint8_t*)rec(OP_SET_TARGETS, 2 * sizeof(void*) + 8);
     g_targets.color = color, g_targets.depth = depth, g_targets.face = face, g_targets.level = level;
     g_targets_valid = 1;
@@ -1241,6 +1246,9 @@ static size_t u_delta(const GfxDraw* d, size_t need, uint64_t* mask)
         }
         else
             differs = memcmp(a + at, b + at, len) != 0;
+#if !defined(__SWITCH__)
+        differs = 1; /* (measured on the Switch alone: elsewhere every piece is sent, as before) */
+#endif
         if (!g_u_shadow_ok || differs)
             m |= 1ull << i, bytes += len;
     }

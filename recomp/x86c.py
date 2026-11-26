@@ -26,9 +26,22 @@ import native_loops
 import regs_across_calls
 import x87_slots
 
+# The translation's faster forms, measured on the Switch: on with XI_TRANSLATE_FAST=1 (tools/build_switch.py sets it,
+# into a translation of its own), each on or off by its own variable as well; the other ports' translation stays as
+# it was.
+def fast(name):
+    return os.environ.get(name, os.environ.get('XI_TRANSLATE_FAST', '0')) == '1'
+
+
 # XI_X87_SLOTS=0: every function keeps x87_locals' rotating stack (to compare against recomp/x87_slots.py's)
-X87_SLOTS = __import__('os').environ.get('XI_X87_SLOTS', '1') != '0'
-REGS_CALLS = os.environ.get('XI_REGS_CALLS', '1') != '0'  # recomp/regs_across_calls.py
+X87_SLOTS = fast('XI_X87_SLOTS')
+REGS_CALLS = fast('XI_REGS_CALLS')  # recomp/regs_across_calls.py
+FLAGS_CALLS = fast('XI_FLAGS_CALLS')  # recomp/flags_across_calls.py: the arithmetic flags across a call only if read
+
+
+class _Every:
+    def __contains__(self, _):
+        return True
 
 R32 = ('eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi')
 R16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
@@ -83,8 +96,8 @@ def x87_locals(lines):
 # same result and flags (those of its `or ah, 0xc`), the control word unchanged; what it leaves below esp (its
 # frame and the return address) is not written.
 FTOL_BYTES = bytes.fromhex('558bec83c4f49bd97dfe9b668b45fe80cc0c668945fcd96dfcdf7df4d96dfe8b45f48b55f8c9c3')
-FTOL_INLINE = os.environ.get('XI_FTOL_INLINE', '1') != '0'
-MAT_INLINE = os.environ.get('XI_MAT_INLINE', '1') != '0'
+FTOL_INLINE = fast('XI_FTOL_INLINE')
+MAT_INLINE = fast('XI_MAT_INLINE')
 
 
 def ftol_inline():
@@ -393,11 +406,12 @@ class FunctionTranslator:
 
     def flag_entry(self):
         if getattr(self.ctx, 'flag_entry', None) is None:
-            self.ctx.flag_entry = flags_across_calls.entry_readers(self.ctx)
+            # (FLAGS_CALLS off: every function as if it read them, so every call stores them all)
+            self.ctx.flag_entry = flags_across_calls.entry_readers(self.ctx) if FLAGS_CALLS else _Every()
         return self.ctx.flag_entry
 
     def load_after(self, ret_addr):
-        clean = flags_across_calls.scan(self.ctx, ret_addr) == flags_across_calls.CLEAN
+        clean = FLAGS_CALLS and flags_across_calls.scan(self.ctx, ret_addr) == flags_across_calls.CLEAN
         return 'REGS_LOAD_CALL;' if clean else 'REGS_LOAD;'
 
     # ------------------------------------------------------------------ translation

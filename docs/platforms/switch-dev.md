@@ -23,8 +23,10 @@ what has been verified, and what is left.
 | `third_party/uam` | deko3d's shader compiler as a library for the console; its changes are in `XI_CHANGES.md` | devkitPro's uam 1.1.0 |
 | `platforms/switch/tests/switch_gfx_test.c` | `tests/gfx/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
 
-The translation is the desktop one (`generated/all`, `generated/ffxi`). The generated C is portable, and
-the Switch adds no wraps or hooks. Compile flags: `-D__SWITCH__ -DRT_GUEST_WINDOW -DFFXI_SWITCH
+The translation is the Switch's own (`generated/switch-all`, `generated/switch-ffxi`): the desktop one with the
+faster forms measured on the console turned on (`XI_TRANSLATE_FAST=1`, `recomp/x86c.py`: native hot loops and matrix
+products, x87 in fixed locals, registers kept across calls, ftol inline), which the other ports leave out. The
+generated C is portable, and the Switch adds no wraps or hooks. Compile flags: `-D__SWITCH__ -DRT_GUEST_WINDOW -DFFXI_SWITCH
 -DFFXI_GUEST_2GB`, libnx's `-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE`, GCC (devkitA64).
 The addon host is not built (`host/addons_none.c`), as in the browser build. Discord is off.
 

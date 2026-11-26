@@ -7,12 +7,13 @@ loop's head) the translation calls the native version; when it ran the loop (it 
 precision), the function goes on at the exit with the registers it gives back. With FFXI_SKIN_CHECK=1 it only
 computes, the translated loop runs, and the exit compares the two (runtime/native_skin.h).
 
-XI_NATIVE_LOOPS=0 when translating leaves them all to the translation.
+On with XI_TRANSLATE_FAST=1 (the Switch's build sets it) or XI_NATIVE_LOOPS=1; XI_NATIVE_LOOPS=0 leaves them all to
+the translation.
 """
 import hashlib
 import os
 
-ON = os.environ.get('XI_NATIVE_LOOPS', '1') != '0'
+ON = os.environ.get('XI_NATIVE_LOOPS', os.environ.get('XI_TRANSLATE_FAST', '0')) == '1'
 
 # FFXiMain's two-bone skinning loop (0x1002f273-0x1002f7a1 in 2025-12-26, inside f_1002efe0): 4% of the game thread
 # on the Switch in a crowd. The globals: the matrix table's pointer, and the index and count words.
