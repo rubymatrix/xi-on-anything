@@ -679,6 +679,17 @@ static void consume(uint32_t t)
             g_render_busy_ns += gfx_now_ns() - t0;
         plat_atomic_add32(&g_tail, 1);
         plat_wake_all32(&g_tail);
+        /* one grown for a large texture upload made small again: kept at that size, the batches held 51 MB after a
+         * long session (heap_sites.c) */
+        if (b->cap > FLUSH_BYTES * 4)
+        {
+            uint8_t* p = (uint8_t*)malloc(FLUSH_BYTES * 2);
+            if (p)
+            {
+                free(b->p);
+                b->p = p, b->cap = FLUSH_BYTES * 2;
+            }
+        }
         if (g_fhead - g_ftail < NSLOTS)
         {
             g_free[g_fhead % NSLOTS] = b;

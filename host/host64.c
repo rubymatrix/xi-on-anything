@@ -1306,8 +1306,15 @@ static void switch_fps(void)
         if (nth++ % 6 == 0)
         {
             struct mallinfo mi = mallinfo();
-            rt_log("[switch] heap: %.1f MB in use of %.1f MB taken (%.1f MB free in it)\n", (double)(size_t)mi.uordblks / 1048576.0,
-                (double)(size_t)mi.arena / 1048576.0, (double)(size_t)mi.fordblks / 1048576.0);
+            uint32_t made = 0, idle = 0;
+            plat_thread_counts(&made, &idle);
+            rt_log("[switch] heap: %.1f MB in use of %.1f MB taken (%.1f MB free in it); pool threads %u (%u idle)\n",
+                (double)(size_t)mi.uordblks / 1048576.0, (double)(size_t)mi.arena / 1048576.0,
+                (double)(size_t)mi.fordblks / 1048576.0, made, idle);
+#if defined(HEAP_SITES)
+            extern void heap_sites_report(void); /* platforms/switch/heap_sites.c (XI_SWITCH_HEAP_SITES=1, FFXI_HEAP_SITES=1) */
+            heap_sites_report();
+#endif
         }
     }
 }
@@ -1949,6 +1956,12 @@ int main(int argc, char** argv)
     display_fit_start(g_signin_window, data_dir); /* the game's size from the screen, whatever the file says (its UI Scale the player's) */
     soft_keyboard_off();
 #elif defined(__SWITCH__)
+#if defined(HEAP_SITES)
+    {
+        extern void heap_sites_start(void); /* platforms/switch/heap_sites.c (XI_SWITCH_HEAP_SITES=1, FFXI_HEAP_SITES=1) */
+        heap_sites_start();
+    }
+#endif
     {
         /* the sizes the game draws at, from ffxi.reg and Config's saved settings (settings.reg) */
         static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";

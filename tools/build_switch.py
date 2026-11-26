@@ -58,6 +58,9 @@ from switch_toolchain import OUT, ROOT
 APP_DIR = 'switch/xi-on-anything'  # on the SD card: the .nro, run.args, the game, the logs
 SETTINGS = 'xi-on-anything-settings'  # the settings app: its .nro, in switch/<it>/ on the card
 TITLE = 'XI on Anything'
+# XI_SWITCH_HEAP_SITES=1: the C heap followed by allocation site (platforms/switch/heap_sites.c; FFXI_HEAP_SITES=1 in
+# run.args turns it on), a test aid
+HEAP_SITES = os.environ.get('XI_SWITCH_HEAP_SITES') == '1'
 AUTHOR = 'xi-on-anything'
 
 ARCH = ['-march=armv8-a+crc+crypto', '-mtune=cortex-a57', '-mtp=soft', '-fPIE']
@@ -405,14 +408,15 @@ def host(a):
     # ours first: its errors show in seconds, the translation's compile takes a while
     sdl = ['-I' + str(ROOT / 'third_party/sdl3/include')]
     hosts = [s for s in bp.HOST_SOURCES if s not in bp.GFX_SOURCES and s != 'host/discord.c'] + (DK_GFX if dk else GFX) + [
-        'platforms/switch/sdl_nx.c', 'platforms/switch/tls_nx.c', 'runtime/portable/sampler_nx.c', 'host/addons_none.c']
+        'platforms/switch/sdl_nx.c', 'platforms/switch/tls_nx.c', 'runtime/portable/sampler_nx.c', 'host/addons_none.c'] + (
+        ['platforms/switch/heap_sites.c'] if HEAP_SITES else [])
     # the render queue: GL's context (deko3d's device) is its render thread's, and the game calls from several threads
     queue = ['-DGFX_DEKO3D', '-DGFX_QUEUE', '-I' + str(ROOT / 'third_party/uam/source'), '-I' + str(dk_shaders_header().parent)] if dk else ['-DGFX_GL', '-DGFX_QUEUE']
     ours = bp.PORTABLE + hosts + ['runtime/portable/gfx/gfx_queue.c']
     gen_all, gen_ffxi = bp.generated('all'), bp.generated('ffxi')
     phase('compile')
     plan_progress(len(ours) + 1 + len(gen_all) + len(gen_ffxi))
-    objs = compile_many(ours, 'host', sdl + tls + queue + ['-Dmain=xi_host_main'])
+    objs = compile_many(ours, 'host', sdl + tls + queue + ['-Dmain=xi_host_main'] + (['-DHEAP_SITES'] if HEAP_SITES else []))
     objs += compile_many(['platforms/switch/switch_main.c'], 'entry', sdl)
     # GCC's names for the generated C's warnings (GEN_WARNINGS is clang's)
     warn = ['-w']
@@ -431,7 +435,10 @@ def host(a):
     gfx_libs = [uam_archive(thirdparty)] + dk_libs() if dk else GFX_LIBS
     # (OpenGL's in a folder of its own on the card, the same run.args and game: xi-on-anything-gl.nro)
     nro = link_nro(objs, 'xi-on-anything' if dk else 'xi-on-anything-gl',
-                   ['-Wl,--wrap=__syscall_thread_create', thirdparty.archive('mbedtls')] + gfx_libs + ['-lnx', '-lm'],
+                   # (and newlib's allocators with XI_SWITCH_HEAP_SITES=1: heap_sites.c)
+                   ['-Wl,--wrap=__syscall_thread_create'] + (
+                       ['-Wl,--wrap=_%s_r' % f for f in ('malloc', 'calloc', 'realloc', 'memalign', 'free')] if HEAP_SITES else [])
+                   + [thirdparty.archive('mbedtls')] + gfx_libs + ['-lnx', '-lm'],
                    title=TITLE if dk else TITLE + ' (OpenGL)')
     settings(a)
     # what it was built from (version, commit, game build): put on the card beside it, where the launcher or a

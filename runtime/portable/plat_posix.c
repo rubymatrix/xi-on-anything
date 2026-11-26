@@ -315,9 +315,16 @@ typedef struct NxWorker
     int core;
     CondVar cv;
     volatile uint32_t started;
+    void* stack;
+    int pooled;
 } NxWorker;
+/* The pool's idle threads kept for the next job; one more ends when its job does, and reap frees its Thread and
+ * stack (8 MB, taken from the heap, all of it memory) at the next start. The pool had grown to 28 in a long session,
+ * 18 of them idle: 144 MB held for nothing (heap_sites.c found it) */
+#define POOL_KEEP 6u
 static Mutex g_pool_lock;
 static NxWorker* g_idle;
+static NxWorker* g_dead; /* ended, their Thread not yet closed */
 static uint32_t g_workers, g_idle_n;
 
 /* the jobs the threads were given, in order (g_pool_lock): plat_thread_list, for the main thread to print */
@@ -364,6 +371,14 @@ static void worker_main(void* p)
         svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)w->prio); /* a job may have raised it (sdl_nx's audio) */
         mutexLock(&g_pool_lock);
         w->fn = NULL;
+        if (w->pooled == 1 && g_idle_n >= POOL_KEEP)
+        {
+            w->next = g_dead;
+            g_dead = w;
+            g_workers--;
+            mutexUnlock(&g_pool_lock);
+            return; /* (libnx's entry ends the thread) */
+        }
         w->next = g_idle;
         g_idle = w;
         g_idle_n++;
@@ -410,10 +425,27 @@ int plat_thread_start_render(void (*fn)(void*), void* arg)
 #endif
 }
 
+#if defined(__SWITCH__)
+/* (g_pool_lock held) the threads that ended: each has, or is about to (it let go of the lock last) */
+static void reap(void)
+{
+    while (g_dead)
+    {
+        NxWorker* d = g_dead;
+        g_dead = d->next;
+        threadWaitForExit(&d->t);
+        threadClose(&d->t);
+        free(d->stack);
+        free(d);
+    }
+}
+#endif
+
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
 #if defined(__SWITCH__)
     mutexLock(&g_pool_lock);
+    reap();
     NxWorker* w = g_idle;
     if (w)
     {
@@ -467,7 +499,7 @@ static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled
         mutexUnlock(&g_pool_lock);
         return 0;
     }
-    w->fn = fn, w->arg = arg, w->prio = prio, w->core = core;
+    w->fn = fn, w->arg = arg, w->prio = prio, w->core = core, w->stack = stack, w->pooled = pooled;
     condvarInit(&w->cv);
     if (R_FAILED(threadCreate(&w->t, worker_main, w, stack, stack_sz, prio, core)) || R_FAILED(threadStart(&w->t)))
     {
@@ -483,7 +515,7 @@ static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled
     /* until it has started (as libnx's pthread_create waits) */
     while (!__atomic_load_n(&w->started, __ATOMIC_SEQ_CST))
         svcWaitForAddress((void*)&w->started, ArbitrationType_WaitIfEqual, 0, 1000000000ll);
-    return 1; /* its Thread and stack are kept for the next start */
+    return 1; /* its Thread and stack are kept for the next start (up to POOL_KEEP idle) */
 }
 #endif
 
