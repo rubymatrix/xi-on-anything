@@ -95,7 +95,8 @@ a build without them logs `has no frame delta sites` at the start): it finds the
 `recomp/meta/builds.json`. With them the Switch runs uncapped with the world at its real speed; without them, at
 30 fps ([Performance](#performance)). If it can't find them it says so and changes nothing: skip it.
 
-`host` translates the game (the desktop translation, `generated/all`, shared with the PC builds) and
+`host` translates the game (the Switch's own translation, `generated/switch-all`, with the faster forms the PC
+builds leave out by default) and
 writes `build/switch/xi-on-anything.nro`. The first build compiles about 6 million lines of generated C
 and takes a while; later builds compile only what changed. `XI_SWITCH_JOBS` (default 6) is how many
 generated files compile at once; lower it if the PC runs out of memory.
