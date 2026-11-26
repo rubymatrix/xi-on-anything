@@ -3487,6 +3487,10 @@ static void menu_apply(int mw, int mh)
     wr32(gfx + 0x1e0, 0), wr32(gfx + 0x1e8, 0);
     if (mw != bw || mh != bh)
     {
+        /* the render target's out pointer: modern_frame makes the room every 30 frames, and a window
+         * the compositor resizes at once (a phone's) brings display_apply here on the first */
+        if (!g_scratch)
+            g_scratch = gheap_alloc(64, 1);
         uint32_t tex = guest_thiscall(DISP_RT, gfx, 5, (uint32_t[]){ (uint32_t)mw, (uint32_t)mh, g_scratch + 48, 1, 0 });
         uint32_t depth = tex ? guest_thiscall(DISP_DEPTH, gfx, 2, (uint32_t[]){ (uint32_t)mw, (uint32_t)mh }) : 0;
         if (tex && depth)

@@ -18,8 +18,10 @@ import buildinfo
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def android_build(original):
-    """The desktop build configuration (buildinfo.current()) with this build's Android wraps added."""
+def android_build(original, image=None, retail=None):
+    """The desktop build configuration (buildinfo.current()) with this build's Android wraps added.
+    image and retail: the unpacked and retail FFXiMain.dll checked (this checkout's generated/ ones,
+    else the phone's: tools/phone_kit.py)."""
     if not original:
         raise ValueError('prepare the local game translation first')
     result = copy.deepcopy(original)
@@ -27,8 +29,8 @@ def android_build(original):
     if extra:
         if original['build'] != '2025-11-12':
             raise ValueError('no validated Android probe layout for this client')
-        image = ROOT / 'generated/FFXiMain.unpacked.dll'
-        retail = ROOT / 'generated/FFXiMain.retail.dll'
+        image = Path(image or ROOT / 'generated/FFXiMain.unpacked.dll')
+        retail = Path(retail or ROOT / 'generated/FFXiMain.retail.dll')
         if (
             hashlib.sha256(image.read_bytes()).hexdigest()
             != '85398cd8ddb142e8d7435c9e78370e0504218da409d8f4abde0e29615aebffe5'

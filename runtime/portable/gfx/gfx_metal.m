@@ -16,7 +16,12 @@
  * Built without ARC: every object here is retained and released by hand, and each entry point runs
  * in its own autorelease pool (the callers are guest threads with none). */
 #import <Metal/Metal.h>
+#if __has_include(<MetalFX/MetalFX.h>)
 #import <MetalFX/MetalFX.h>
+#define XI_METALFX 1 /* the upscaler; not in every SDK (the iOS simulator's, Xcode 27): without it, none */
+#else
+#define XI_METALFX 0
+#endif
 #import <QuartzCore/CAMetalLayer.h>
 #include <SDL3/SDL.h>
 #include <TargetConditionals.h>
@@ -8171,8 +8176,10 @@ static int up_available(void)
     if (g_up.ok >= 0)
         return g_up.ok;
     g_up.ok = 0;
+#if XI_METALFX
     if (@available(macOS 13.0, iOS 16.0, *))
         g_up.ok = [MTLFXTemporalScalerDescriptor supportsDevice:g_dev] && [MTLFXSpatialScalerDescriptor supportsDevice:g_dev];
+#endif
     if (!g_up.ok)
     {
         fprintf(stderr, "[recomp] gfx: upscaling: MetalFX is not on this system (macOS 13 or iOS 16, and an Apple GPU)\n");
@@ -8406,6 +8413,7 @@ static id up_scaler(int temporal, MTLPixelFormat cf, MTLPixelFormat df, uint32_t
     [*sc release];
     *sc = nil;
     memcpy(k, key, sizeof key);
+#if XI_METALFX
     if (temporal)
     {
         MTLFXTemporalScalerDescriptor* d = [[MTLFXTemporalScalerDescriptor alloc] init];
@@ -8429,6 +8437,7 @@ static id up_scaler(int temporal, MTLPixelFormat cf, MTLPixelFormat df, uint32_t
         *sc = [d newSpatialScalerWithDevice:g_dev];
         [d release];
     }
+#endif
     if (!*sc)
         fprintf(stderr, "[recomp] gfx: upscaling: MetalFX made no %s scaler for %ux%u to %ux%u\n", temporal ? "temporal" : "spatial",
             iw, ih, g_up.out_w, g_up.out_h);
@@ -8460,6 +8469,7 @@ static void up_run(GfxTex* color, const GfxScene* s)
         uint32_t cw = s->vp[2] && s->vp[0] + s->vp[2] <= ct.width ? s->vp[2] : (uint32_t)ct.width;
         uint32_t ch = s->vp[3] && s->vp[1] + s->vp[3] <= ct.height ? s->vp[3] : (uint32_t)ct.height;
         int done = 0;
+#if XI_METALFX
         if (@available(macOS 13.0, iOS 16.0, *))
         {
             id<MTLTexture> zt = temporal ? up_zcopy(depth) : nil;
@@ -8560,6 +8570,7 @@ static void up_run(GfxTex* color, const GfxScene* s)
                 }
             }
         }
+#endif
         if (!done)
             return;
         color->up_serial = g_serial;

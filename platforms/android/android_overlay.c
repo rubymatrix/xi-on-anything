@@ -1,5 +1,5 @@
 /* The touch controls and the wallpaper on Android (docs/platforms/android-dev.md): drawn by a view over the game's
- * surface (MainActivity.Overlay), not into the frame, so they keep the display's rate whatever the
+ * surface (GameActivity.Overlay), not into the frame, so they keep the display's rate whatever the
  * game's, and labels come in the system font. gfx_set_touch_shapes and gfx_set_wallpaper (gfx.h) are
  * these here, for host/touch.c and android_mobile_init; the C++ Vulkan back end only presents into
  * the rectangle display_fit.c chooses (gfx_set_present_rect), which the view is told too, for the
