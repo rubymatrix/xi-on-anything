@@ -1243,7 +1243,16 @@ static void chat_keyboard(void)
 /* The game drawn at the screen's size: 1280x720 in the hand (not 1920x1080 made smaller: less than half the
  * pixels, for the battery and the frame rate), 1920x1080 on a TV, following a dock or undock as it happens.
  * The menus keep the size they had at the start (the registry's, 960x540 at 2x), the same on either screen.
- * FFXI_SWITCH_FIT=0 leaves the size to Config > Display. */
+ * FFXI_SWITCH_DOCK=<w>x<h> draws at that size on a TV instead, fitted to it. FFXI_SWITCH_FIT=0 leaves the size to
+ * Config > Display. */
+static void switch_screen(int* w, int* h)
+{
+    const char* e = getenv("FFXI_SWITCH_DOCK");
+    int dw = 0, dh = 0;
+    if (*h >= 1080 && e && sscanf(e, "%dx%d", &dw, &dh) == 2 && dw >= 640 && dh >= 360 && dw <= *w && dh <= *h)
+        *w = dw & ~1, *h = dh & ~1;
+}
+
 static int g_switch_menu_w, g_switch_menu_h; /* at the start: the registry's 0037/0038 */
 static void switch_fit(void)
 {
@@ -1258,8 +1267,9 @@ static void switch_fit(void)
     if (!win || !SDL_GetWindowSizeInPixels(win, &w, &h) || (w == last_w && h == last_h))
         return;
     last_w = w, last_h = h;
+    switch_screen(&w, &h);
     modern_window_size(w, h, g_switch_menu_w, g_switch_menu_h);
-    rt_log("[switch] the game at %dx%d (the screen's), menus %dx%d\n", w, h, g_switch_menu_w, g_switch_menu_h);
+    rt_log("[switch] the game at %dx%d (the screen's, or FFXI_SWITCH_DOCK's), menus %dx%d\n", w, h, g_switch_menu_w, g_switch_menu_h);
 }
 
 /* FFXI_FRAMELOG (run.args: --switch-env FFXI_FRAMELOG=1): the frames presented, every 5 seconds, with the
@@ -1943,7 +1953,7 @@ int main(int argc, char** argv)
         /* the sizes the game draws at, from ffxi.reg and Config's saved settings (settings.reg) */
         static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";
         /* The world's background (the game draws its 3D into it, then makes it the screen's size): the
-         * screen's size by default, 1280x720 started handheld and 1920x1080 docked, read once at the start
+         * screen's size by default, 1280x720 started handheld and 1920x1080 docked (or FFXI_SWITCH_DOCK's), read once at the start
          * (a dock or undock keeps it until the next). Config's smallest is 2048x2048, 4.5 times the handheld's
          * pixels: the stock GPU's whole frame at 60 fps (docs/switch.md). Never saved.
          * FFXI_SWITCH_BG=<w>[x<h>] (run.args) another size; FFXI_SWITCH_BG=config Config's own. */
@@ -1964,6 +1974,9 @@ int main(int argc, char** argv)
         {
             int sw = 0, sh = 0; /* sdl_nx.c: the screen, whatever the window */
             SDL_GetWindowSizeInPixels(NULL, &sw, &sh);
+            const char* fit = getenv("FFXI_SWITCH_FIT"); /* (a fixed size has no docked one) */
+            if (!(fit && *fit == '0'))
+                switch_screen(&sw, &sh);
             bw = (unsigned)sw, bh = (unsigned)sh, why = "the screen's";
         }
         if (bw >= 256 && bh >= 256 && bw <= 8192 && bh <= 8192)

@@ -51,6 +51,9 @@ static const Res RES[] = {
     { "512x448 (4:3, the PS2's)", 512, 448 },
 };
 #define NRES (int)(sizeof RES / sizeof RES[0])
+/* the first: the screen's, no FFXI_SWITCH_DOCK */
+static const char* const DOCK_NAMES[] = { "1920x1080", "1600x900", "1280x720" };
+#define NDOCK (int)(sizeof DOCK_NAMES / sizeof DOCK_NAMES[0])
 static const float UI_SCALE[] = { 2.0f, 1.5f, 1.0f };
 static const char* const UI_NAMES[] = { "Large (2x)", "Medium (1.5x)", "Small (1x)" };
 static const int BG[] = { 0, 2048, 1024, 512 };
@@ -69,6 +72,7 @@ enum
 {
     O_GFX,
     O_RES,
+    O_DOCK,
     O_UI,
     O_BG,
     O_FPS,
@@ -98,6 +102,8 @@ static Opt g_opt[NOPTS] = {
         "The version Save and start runs. deko3d: less work for the CPU and GPU; it needs xi-on-anything-dk.nro on the card." },
     { "Resolution", NRES, 0, g_res_names,
         "The size the game draws at, fitted to the screen. Lower is faster. 4:3 sizes get black bars at the sides." },
+    { "Docked resolution", NDOCK, 0, DOCK_NAMES,
+        "On a TV, with Resolution at The screen's: lower is faster and softer. Start the game docked for the world to use it." },
     { "Interface size", 3, 0, UI_NAMES, "How large the menus and text are. Large reads well on a TV and in handheld." },
     { "Background", 4, 0, BG_NAMES,
         "The world's resolution before it is fitted to the screen. Lower uses less memory and looks softer." },
@@ -321,6 +327,11 @@ static void load(void)
             if (RES[i].w == w && RES[i].h == h)
                 r = i;
     g_opt[O_RES].cur = r;
+    const char* dock = args_env("FFXI_SWITCH_DOCK");
+    g_opt[O_DOCK].cur = 0;
+    for (int i = 1; dock && i < NDOCK; ++i)
+        if (!strcmp(dock, DOCK_NAMES[i]))
+            g_opt[O_DOCK].cur = i;
     if (!r)
         w = 1920; /* the interface's size is the docked screen's over the scale */
     float scale = mw > 0 ? (float)w / (float)mw : 2.0f;
@@ -370,6 +381,7 @@ static int save(void)
     char bgs[16];
     snprintf(bgs, sizeof bgs, "%d", b);
     args_set_env("FFXI_SWITCH_FIT", r->w ? "0" : NULL);
+    args_set_env("FFXI_SWITCH_DOCK", g_opt[O_DOCK].cur ? DOCK_NAMES[g_opt[O_DOCK].cur] : NULL);
     args_set_env("FFXI_SWITCH_BG", b ? bgs : NULL);
     args_set("--fps-divisor", FPS_VALUES[g_opt[O_FPS].cur]);
     args_set_env("FFXI_FPS_ADAPT", g_opt[O_FPS].cur == 1 ? "1" : NULL);
