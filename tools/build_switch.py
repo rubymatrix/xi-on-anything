@@ -286,15 +286,15 @@ GFX_LIBS = ['-lEGL', '-lglapi', '-ldrm_nouveau']
 #   - XI_SWITCH_MESA=0, or neither: switch-mesa
 # Only gfx_gl.c includes EGL and GL, so only it is compiled again; the link takes its libraries (egl.pc's, with
 # no libdrm_nouveau) ahead of portlibs'.
-# XI_SWITCH_GFX=deko3d: the graphics on deko3d (gfx_deko3d.c, being brought up), with uam (third_party/uam) to
-# compile the generator's shaders on the console; no Mesa. XI_SWITCH_DK_DEBUG=1: deko3d's debug library
-# (libdeko3dd.a), whose checks gfx_deko3d.c logs.
+# The graphics on deko3d (gfx_deko3d.c, the default), with uam (third_party/uam) to compile the generator's shaders
+# on the console; no Mesa. XI_SWITCH_GFX=gl: on Mesa's OpenGL instead (gfx_gl.c), the fallback, as
+# xi-on-anything-gl.nro. XI_SWITCH_DK_DEBUG=1: deko3d's debug library (libdeko3dd.a), whose checks gfx_deko3d.c logs.
 DK_GFX = ['runtime/portable/gfx/gfx_deko3d.c', 'runtime/portable/gfx/gfx_msl.c', 'runtime/portable/gfx/gfx_msl_shaders.c',
           'runtime/portable/gfx/gfx_fx.c', 'runtime/portable/gfx/dk_uam.c']
 
 
 def gfx_choice():
-    g = os.environ.get('XI_SWITCH_GFX', 'gl').lower()
+    g = os.environ.get('XI_SWITCH_GFX', 'deko3d').lower()
     if g not in ('gl', 'deko3d'):
         raise SystemExit(f'XI_SWITCH_GFX={g}: gl or deko3d')
     print('graphics:', 'deko3d' if g == 'deko3d' else 'OpenGL', flush=True)
@@ -383,7 +383,7 @@ def fetch_mesa(_a=None):
 
 
 def host(a):
-    """The game: build/switch/xi-on-anything.nro."""
+    """The game: build/switch/xi-on-anything.nro (on OpenGL, XI_SWITCH_GFX=gl: xi-on-anything-gl.nro)."""
     tc.require()
     dk = gfx_choice() == 'deko3d'
     if not dk:
@@ -429,10 +429,10 @@ def host(a):
     phase('app')
     # (--wrap: switch_main.c sees the threads pthread_create makes - Mesa's - FFXI_SWITCH_PTHREAD_CORE)
     gfx_libs = [uam_archive(thirdparty)] + dk_libs() if dk else GFX_LIBS
-    # (deko3d's beside GL's in the card's folder, the same run.args and game: xi-on-anything-dk.nro)
-    nro = link_nro(objs, 'xi-on-anything-dk' if dk else 'xi-on-anything',
+    # (OpenGL's in a folder of its own on the card, the same run.args and game: xi-on-anything-gl.nro)
+    nro = link_nro(objs, 'xi-on-anything' if dk else 'xi-on-anything-gl',
                    ['-Wl,--wrap=__syscall_thread_create', thirdparty.archive('mbedtls')] + gfx_libs + ['-lnx', '-lm'],
-                   title=TITLE + ' (deko3d)' if dk else TITLE)
+                   title=TITLE if dk else TITLE + ' (OpenGL)')
     settings(a)
     # what it was built from (version, commit, game build): put on the card beside it, where the launcher or a
     # later setup reads whether the card's app is current

@@ -19,7 +19,7 @@ what has been verified, and what is left.
 | `platforms/switch/app.json` | the application NPDM (for the forwarder) | hbloader's |
 | `platforms/switch/tests/switch_plat_test.c` | the platform layer's self-test, as its own `.nro` | — |
 | `runtime/portable/gfx/gfx_gl.c`, `gfx_gl_api.h` | graphics: OpenGL 4.3 core on Mesa's nouveau through EGL; also builds on the desktop (SDL3's GL context) for testing | `gfx_webgpu.c`, `gfx_vulkan.c` |
-| `runtime/portable/gfx/gfx_deko3d.c`, `dk_uam.c`, `dk_shaders/` | graphics on deko3d instead (`XI_SWITCH_GFX=deko3d`, below) | `gfx_gl.c` |
+| `runtime/portable/gfx/gfx_deko3d.c`, `dk_uam.c`, `dk_shaders/` | graphics on deko3d, the default (OpenGL with `XI_SWITCH_GFX=gl`, below) | `gfx_gl.c` |
 | `third_party/uam` | deko3d's shader compiler as a library for the console; its changes are in `XI_CHANGES.md` | devkitPro's uam 1.1.0 |
 | `platforms/switch/tests/switch_gfx_test.c` | `tests/gfx/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
 
@@ -55,9 +55,10 @@ were silent. The `[audio]` line counts the pool (`threads N (M idle)`).
 
 ## Graphics on deko3d
 
-`XI_SWITCH_GFX=deko3d python tools/build_switch.py host` builds the game on deko3d, with no Mesa in it, as
-`build/switch/xi-on-anything-dk.nro`; OpenGL is the default. Put it in a folder of its own on the card (the homebrew
-menu shows one `.nro` a folder); it uses the same `sdmc:/switch/xi-on-anything` data. `XI_SWITCH_DK_DEBUG=1` links
+`python tools/build_switch.py host` builds the game on deko3d, the default since 2026-11-26, with no Mesa in it, as
+`build/switch/xi-on-anything.nro`. `XI_SWITCH_GFX=gl` builds the OpenGL one instead, as `xi-on-anything-gl.nro`, for a
+folder of its own on the card (the homebrew menu shows one `.nro` a folder); it uses the same `sdmc:/switch/xi-on-anything`
+data. `XI_SWITCH_DK_DEBUG=1` links
 deko3d's debug library, which checks every call.
 
 - **Same shape as OpenGL's**: the render thread owns the device (`GFXQ_OWNED`), streams are buffer textures, and the

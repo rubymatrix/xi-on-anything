@@ -388,9 +388,10 @@ def build():
             note(line.strip())
 
     env = dict(os.environ, FFXI_PROGRESS='1', PYTHONUNBUFFERED='1')
-    # Mesa 26, for the shader cache (the first time a download of 12 MB); without it the build links devkitPro's
+    # (the OpenGL build alone, XI_SWITCH_GFX=gl) Mesa 26, for the shader cache (the first time a download of 12 MB);
+    # without it the build links devkitPro's
     # switch-mesa, which plays the same with a hitch the first time each effect is seen in every session
-    if os.environ.get('XI_SWITCH_MESA') != '0':
+    if os.environ.get('XI_SWITCH_MESA') != '0' and os.environ.get('XI_SWITCH_GFX', '').lower() == 'gl':
         try:
             run([sys.executable, HERE / 'build_switch.py', 'mesa'], None, env)
             note('Mesa 26: shaders are kept on the card, so each compiles once rather than every session')
