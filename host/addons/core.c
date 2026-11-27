@@ -329,17 +329,27 @@ char* xi_host_path(const char* in, char* out, size_t n)
     }
     size_t o = 0;
     const char* p = in;
+#if defined(_WIN32)
+    /* our own paths are Windows paths here: keep the drive letter, every separator a backslash */
+    const char sep = '\\';
+#else
     /* a drive letter an addon put in front of our own paths (they are never Windows paths) */
+    const char sep = '/';
     if (isalpha((unsigned char)p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/'))
         p += 2;
+#endif
     for (; *p && o + 1 < n; ++p)
     {
-        char c = *p == '\\' ? '/' : *p;
+        char c = (*p == '\\' || *p == '/') ? sep : *p;
 #if defined(_WIN32)
-        if (*p == '/')
-            c = '\\';
+        /* "\\\\server\\share", "\\\\?\\C:\\": the leading pair stays */
+        if (c == sep && o == 1 && out[0] == sep)
+        {
+            out[o++] = c;
+            continue;
+        }
 #endif
-        if ((c == '/' || c == '\\') && o && (out[o - 1] == '/' || out[o - 1] == '\\'))
+        if (c == sep && o && out[o - 1] == sep)
             continue; /* "a\\\\b", "dir/" .. "/file" */
         out[o++] = c;
     }
@@ -684,6 +694,9 @@ static int addon_file(int kind, const char* name, char* dir, size_t dn, char* fi
         return 0;
     snprintf(dir, dn, "%s", file);
     char* slash = strrchr(dir, '/');
+    char* back = strrchr(dir, '\\');
+    if (back && (!slash || back > slash))
+        slash = back;
     if (slash)
         slash[1] = 0;
     return 1;
