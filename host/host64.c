@@ -1455,6 +1455,22 @@ static void log_flusher(void* unused)
  * screen (switch_main.c goes back to the sign-in screen then) */
 int xi_host_game_started;
 
+/* A Windows path in its verbatim form ("\\?\C:\...", "\\?\UNC\server\share\..."), as Rust's
+ * canonicalize and Tauri's resource folder give them, made the plain one ("C:\...",
+ * "\\server\share\..."), in place. The game sees host paths as its own on Windows, and neither it
+ * nor vfs.c knows the verbatim form: vfs_full_path made "\\?\C:\FFXI" into "C:\?\C:\FFXI", where
+ * no file is, and GameStart gave up before it opened a window. */
+static void plain_windows_path(char* p)
+{
+    if (strncmp(p, "\\\\?\\", 4) != 0 && strncmp(p, "//?/", 4) != 0)
+        return;
+    if ((p[4] == 'U' || p[4] == 'u') && (p[5] == 'N' || p[5] == 'n') && (p[6] == 'C' || p[6] == 'c') &&
+        (p[7] == '\\' || p[7] == '/'))
+        memmove(p + 1, p + 7, strlen(p + 7) + 1); /* "\\?\UNC\server" -> "\\server" */
+    else if (((p[4] >= 'A' && p[4] <= 'Z') || (p[4] >= 'a' && p[4] <= 'z')) && p[5] == ':')
+        memmove(p, p + 4, strlen(p + 4) + 1); /* "\\?\C:\" -> "C:\" */
+}
+
 int main(int argc, char** argv)
 {
     for (int i = 1; i < argc; ++i)
@@ -1463,6 +1479,10 @@ int main(int argc, char** argv)
             print_features();
             return 0;
         }
+#ifdef _WIN32
+    for (int i = 1; i < argc; ++i)
+        plain_windows_path(argv[i]);
+#endif
 #if defined(_WIN32) && !defined(_MSC_VER)
     setvbuf(stdout, NULL, _IOFBF, 1 << 16);
     setvbuf(stderr, NULL, _IOFBF, 1 << 16);
@@ -1893,6 +1913,8 @@ int main(int argc, char** argv)
      * where a retail install puts them. */
     char exe[700], path[700], guest_game[700], host_game[700];
     snprintf(host_game, sizeof host_game, "%s", game);
+    if (plat_path_sep == '\\')
+        plain_windows_path(host_game); /* from the sign-in screen or appdefaults too, not only argv */
     for (size_t n = strlen(host_game); n > 1 && (host_game[n - 1] == '/' || host_game[n - 1] == '\\'); --n)
         host_game[n - 1] = 0;
     if (plat_path_sep == '\\')
