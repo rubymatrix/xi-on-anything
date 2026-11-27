@@ -219,6 +219,9 @@ static Face* face_for(const char* family, int bold, int italic)
     if (!load_face(f, path))
         return NULL;
     const char* base = strrchr(path, '/');
+    const char* back = strrchr(path, '\\');
+    if (back && (!base || back > base))
+        base = back;
     base = base ? base + 1 : path;
     f->fake_bold = bold && !contains_ci(base, "bold");
     f->fake_italic = italic && !contains_ci(base, "italic") && !contains_ci(base, "oblique");
