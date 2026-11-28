@@ -68,6 +68,8 @@ static void packet(int outgoing, const char* hex)
     size_t padded = ((size_t)n + 3) & ~(size_t)3;
     memset(buf, 0, sizeof buf);
     memcpy(buf + 0x1C, p, (size_t)n);
+    /* the buffer's sequence number is the one its packet carries, as in the game's buffers */
+    buf[0] = p[2], buf[1] = p[3];
     uint16_t h = (uint16_t)((buf[0x1C] | buf[0x1D] << 8) & 0x1FF) | (uint16_t)((padded / 4) << 9);
     buf[0x1C] = (uint8_t)h, buf[0x1D] = (uint8_t)(h >> 8);
     size_t w = xi_packets_process(outgoing, buf, 0x1C + padded, out, sizeof out);
