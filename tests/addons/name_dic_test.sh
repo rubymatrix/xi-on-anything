@@ -7,7 +7,9 @@
 # refuses every name itself (FFXI-3322) and asks the server nothing. An install that has its own keeps it.
 #
 # The game is reached through a link beside the test's own PlayOnlineViewer folder, so the test never
-# reads the machine's viewer.
+# reads the machine's viewer. On Windows the link is a junction to the game folder. Elsewhere it is a
+# folder of links to the game's files: a link to the folder itself would resolve the game's ".." to the
+# real install's parent, and with it the machine's viewer.
 #
 #   tests/addons/name_dic_test.sh --game <FFXI folder> [--update]
 set -e
@@ -28,7 +30,8 @@ data=$(mktemp -d "${TMPDIR:-/tmp}/namedic.XXXXXX")
 link="$data/FINAL FANTASY XI"
 # the link goes first (cmd's rmdir removes a junction and leaves what it points at), then the folder
 unlink_game() {
-    if command -v cygpath > /dev/null; then cmd //c rmdir "$(cygpath -w "$link")" 2> /dev/null || true; else rm -f "$link"; fi
+    if command -v cygpath > /dev/null; then cmd //c rmdir "$(cygpath -w "$link")" 2> /dev/null || true
+    elif [ -d "$link" ]; then find "$link" -mindepth 1 -maxdepth 1 -type l -exec rm -f {} + && rmdir "$link"; fi
 }
 trap 'unlink_game; [ -e "$link" ] || rm -rf "$data"' EXIT
 mkdir -p "$data/PlayOnlineViewer"
@@ -36,7 +39,8 @@ if command -v cygpath > /dev/null; then
     cmd //c mklink //J "$(cygpath -w "$link")" "$(cygpath -w "$game")" > /dev/null
     viewer="$(cygpath -w "$data")\\PlayOnlineViewer"
 else
-    ln -s "$game" "$link"
+    mkdir "$link"
+    for e in "$game"/*; do ln -s "$e" "$link/"; done
     viewer='C:\PlayOnline\SquareEnix\PlayOnlineViewer'
 fi
 game=$link
