@@ -577,7 +577,9 @@ static size_t process(int outgoing, const uint8_t* buf, size_t size, uint8_t* ou
     }
     memcpy(out, buf, 0x1C);
     size_t o = 0x1C, off = 0x1C;
-    uint16_t seq = 0;
+    /* the buffer's sequence number, which each packet in it carries: the server drops a packet numbered as an
+     * earlier buffer's as one it has seen, and a buffer may hold no packet of the game's to take it from */
+    const uint16_t seq = (uint16_t)(buf[0] | buf[1] << 8);
     uint64_t now = rt_monotonic_ns() / 1000000ull;
     while (off + 4 <= size)
     {
@@ -586,7 +588,6 @@ static size_t process(int outgoing, const uint8_t* buf, size_t size, uint8_t* ou
         if (n < 4 || off + n > size)
             break;
         uint16_t id = (uint16_t)((p[0] | p[1] << 8) & 0x1FF);
-        seq = (uint16_t)(p[2] | p[3] << 8);
         size_t w = one_packet(outgoing, p, n, buf + 0x1C, size - 0x1C, 0, out + o, cap - o);
         if (w)
         {
@@ -603,8 +604,7 @@ static size_t process(int outgoing, const uint8_t* buf, size_t size, uint8_t* ou
         memcpy(out + o, buf + off, size - off);
         o += size - off;
     }
-    /* the addons' own packets, with the buffer's last sequence number; those injected meanwhile wait
-     * for the next buffer */
+    /* the addons' own packets; those injected meanwhile wait for the next buffer */
     Inject* list = g_inject[outgoing];
     g_inject[outgoing] = NULL;
     ++g_handling;
