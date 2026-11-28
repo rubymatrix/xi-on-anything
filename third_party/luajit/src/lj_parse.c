@@ -2277,8 +2277,17 @@ static void expr_simple(LexState *ls, ExpDesc *v, int eflags)
     return;
   }
   lj_lex_next(ls);
-  if (v->k != VCALL)  /* FFXIRecompile (Windower dialect): not for '...'. */
-    expr_litsuffix(ls, v, eflags, 0);
+  if (v->k == VCALL) {
+    /* FFXIRecompile (Windower dialect): '...' followed by '.', '[' or ':'
+    ** is its first value, as (...), e.g. ... and ...:lower(). A ':' that
+    ** ends a ternary branch leaves '...' untouched.
+    */
+    if (!(ls->tok == '.' || ls->tok == '[' ||
+	  (ls->tok == ':' && !(eflags & EXPR_F_NOCOLON))))
+      return;
+    expr_discharge(ls->fs, v);
+  }
+  expr_litsuffix(ls, v, eflags, 0);  /* FFXIRecompile (Windower dialect). */
 }
 
 /* Manage syntactic levels to avoid blowing up the stack. */

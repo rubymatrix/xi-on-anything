@@ -16,7 +16,8 @@ Recheck with `python3 tools/lua_parse_corpus.py <dirs>`.
    suffix chain: `'%d':format(n)`, `"x":color(1)`, `0x01:char()`, `1:exp()`, `true:fn()`,
    `{a, b}[i]`, `{'p%i', 'a%i'}[k]:format(i)`. After a literal these tokens are never valid in
    standard Lua. Inside the middle of a `c ? a : b` ternary (a LuaJIT extension), `:` still ends
-   the branch, as it does after a name.
+   the branch, as it does after a name. The vararg `...` takes the same suffixes and then stands
+   for its first value, as `(...)` does: `... and ...:lower()` (AutoSkillchains).
 2. **Calling a function expression directly** (`expr_litsuffix`, `call` argument):
    `function(x) ... end(x)` works only when the `(` is on the same line as the `end`. A `(` on
    the next line starts a new statement, as in standard Lua. Exception: standard Lua reads
