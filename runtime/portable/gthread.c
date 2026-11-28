@@ -21,15 +21,32 @@ static uint64_t g_acquired_at;
 #define GAME_QUANTUM_NS 8000000ull
 static RT_TLS uint64_t t_quantum_ns;
 
+static RT_TLS uint64_t t_wait_ns; /* gt_wait_ns */
+static RT_TLS const char* t_hold_in; /* this thread's longest shim since it took the lock (gt_note_shim) */
+static RT_TLS uint64_t t_hold_in_ns;
+static GtHold g_long_hold; /* gt_take_long_hold */
+static uint32_t g_watch_tid;
+
+void gt_watch(uint32_t tid) { g_watch_tid = tid; }
+
+uint64_t gt_wait_ns(void) { return t_wait_ns; }
+
 void gt_lock(void)
 {
     plat_atomic_add32(&rt_lock_contended, 1);
     uint32_t t = plat_atomic_add32(&g_next_ticket, 1);
+    uint64_t w0 = 0;
     for (unsigned spin = 0;; ++spin)
     {
         uint32_t cur = g_now_serving;
         if (cur == t)
+        {
+            if (w0)
+                t_wait_ns += rt_monotonic_ns() - w0;
             break;
+        }
+        if (!w0)
+            w0 = rt_monotonic_ns();
         if (spin < 128)
             plat_yield();
         else
@@ -38,10 +55,31 @@ void gt_lock(void)
     plat_atomic_add32(&rt_lock_contended, (uint32_t)-1);
     t_held = 1;
     g_acquired_at = rt_monotonic_ns();
+    t_hold_in = NULL, t_hold_in_ns = 0;
+}
+
+void gt_note_shim(const char* name, uint64_t ns)
+{
+    if (t_held && ns > t_hold_in_ns)
+        t_hold_in_ns = ns, t_hold_in = name;
+}
+
+void gt_take_long_hold(GtHold* h)
+{
+    *h = g_long_hold;
+    g_long_hold.ns = 0;
 }
 
 void gt_unlock(void)
 {
+    if (g_watch_tid)
+    {
+        /* the longest hold by a thread other than the watched one (the game's), and the shim it spent longest in */
+        uint64_t held = rt_monotonic_ns() - g_acquired_at;
+        if (held > g_long_hold.ns && plat_thread_id() != g_watch_tid)
+            g_long_hold.ns = held, g_long_hold.tid = plat_thread_id(), g_long_hold.in = t_hold_in,
+            g_long_hold.in_ns = t_hold_in_ns;
+    }
     t_held = 0;
     plat_atomic_add32(&g_now_serving, 1);
     if (rt_lock_contended)

@@ -77,6 +77,9 @@
  * defaults to <data dir>/settings.reg, loaded when no --reg-final is given. Its window becomes the
  * game's. */
 #include <math.h>
+#if defined(__SWITCH__)
+#include <malloc.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,7 +104,7 @@
 #include "addons/addons.h"
 #include "addons/game.h"
 #include "addons/host.h"
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__SWITCH__)
 #include "sampler.h"
 #endif
 #include "../runtime/portable/winapi/thunk.h"
@@ -1023,12 +1026,29 @@ static int g_addons_on; /* the addon host (host/addons/): off with FFXI_ADDONS=0
 
 /* The player's place for the sun's near shadow map (gfx_set_focus): entity_t.Movement.LocalPosition
  * (+4 in Ashita's SDK), x, height, z, the world's own coordinates. */
+/* (the render queue's, through d3d8_host_call: with the d3d8 worker on, a queue call from the game's thread waits for
+ * it to finish the frame so far) */
+typedef struct FocusWeather
+{
+    float p[3];
+    int has_p, set_weather, weather;
+} FocusWeather;
+static void focus_weather_set(const void* data)
+{
+    const FocusWeather* f = (const FocusWeather*)data;
+    gfx_set_focus(f->has_p ? f->p : NULL);
+    if (f->set_weather)
+        gfx_set_weather(f->weather);
+}
+
 static void shadow_focus(void)
 {
     int32_t pi = xi_game_player_index();
     uint32_t e = pi >= 0 ? xi_game_entity((uint32_t)pi) : 0;
-    float p[3];
-    gfx_set_focus(e && xi_game_rd(e + 4, p, sizeof p) && isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]) ? p : NULL);
+    FocusWeather f;
+    memset(&f, 0, sizeof f);
+    float* p = f.p;
+    f.has_p = e && xi_game_rd(e + 4, p, 3 * sizeof *p) && isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]);
     /* the weather, from the newer of the zone-in (0x00A, +0x68) and the weather change (0x057, +0x08), as the addon host
      * keeps them (none without it) */
     if (g_addons_on)
@@ -1040,8 +1060,9 @@ static void shadow_focus(void)
         size_t nb = xi_packet_last(0, 0x057, b, sizeof b, &tb);
         if (nb > 0x08 && (!na || tb >= ta))
             w = b[0x08];
-        gfx_set_weather(w);
+        f.set_weather = 1, f.weather = w;
     }
+    d3d8_host_call(focus_weather_set, &f, (uint32_t)sizeof f);
 }
 
 #if !defined(__APPLE__) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
@@ -1218,6 +1239,85 @@ static void chat_keyboard(void)
     SDL_StartTextInputWithProperties(win, p);
     SDL_DestroyProperties(p);
 }
+
+/* The game drawn at the screen's size: 1280x720 in the hand (not 1920x1080 made smaller: less than half the
+ * pixels, for the battery and the frame rate), 1920x1080 on a TV, following a dock or undock as it happens.
+ * The menus keep the size they had at the start (the registry's, 960x540 at 2x), the same on either screen.
+ * FFXI_SWITCH_DOCK=<w>x<h> draws at that size on a TV instead, fitted to it. FFXI_SWITCH_FIT=0 leaves the size to
+ * Config > Display. */
+static void switch_screen(int* w, int* h)
+{
+    const char* e = getenv("FFXI_SWITCH_DOCK");
+    int dw = 0, dh = 0;
+    if (*h >= 1080 && e && sscanf(e, "%dx%d", &dw, &dh) == 2 && dw >= 640 && dh >= 360 && dw <= *w && dh <= *h)
+        *w = dw & ~1, *h = dh & ~1;
+}
+
+static int g_switch_menu_w, g_switch_menu_h; /* at the start: the registry's 0037/0038 */
+static void switch_fit(void)
+{
+    static int on = -1, last_w, last_h;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_SWITCH_FIT");
+        on = !(e && *e == '0');
+    }
+    SDL_Window* win = on ? (SDL_Window*)user32_sdl_window(d3d8_window()) : NULL;
+    int w = 0, h = 0;
+    if (!win || !SDL_GetWindowSizeInPixels(win, &w, &h) || (w == last_w && h == last_h))
+        return;
+    last_w = w, last_h = h;
+    switch_screen(&w, &h);
+    modern_window_size(w, h, g_switch_menu_w, g_switch_menu_h);
+    rt_log("[switch] the game at %dx%d (the screen's, or FFXI_SWITCH_DOCK's), menus %dx%d\n", w, h, g_switch_menu_w, g_switch_menu_h);
+}
+
+/* FFXI_FRAMELOG (run.args: --switch-env FFXI_FRAMELOG=1): the frames presented, every 5 seconds, with the
+ * longest one (a hitch) */
+static void switch_fps(void)
+{
+    static int on = -1;
+    static uint64_t since, last, longest;
+    static unsigned frames;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_FRAMELOG");
+        on = e && *e && *e != '0';
+    }
+    extern int gfx_gl_prof_take(char* out, size_t n); /* gfx_gl.c: its FFXI_PROFILE line, from the render thread */
+    char line[4096]; /* (the render thread's split line runs past 2 KB) */
+    if (gfx_gl_prof_take(line, sizeof line))
+        rt_log("%s", line);
+    if (!on)
+        return;
+    uint64_t now = rt_monotonic_ns();
+    if (last && now - last > longest)
+        longest = now - last;
+    last = now;
+    if (!since)
+        since = now;
+    ++frames;
+    if (now - since >= 5000000000ull)
+    {
+        rt_log("[switch] %.1f fps, longest frame %.1f ms\n", frames * 1e9 / (double)(now - since), longest * 1e-6);
+        since = now, frames = 0, longest = 0;
+        /* the C heap (capped, plat_posix.c): what is in use, every 30 seconds */
+        static int nth;
+        if (nth++ % 6 == 0)
+        {
+            struct mallinfo mi = mallinfo();
+            uint32_t made = 0, idle = 0;
+            plat_thread_counts(&made, &idle);
+            rt_log("[switch] heap: %.1f MB in use of %.1f MB taken (%.1f MB free in it); pool threads %u (%u idle)\n",
+                (double)(size_t)mi.uordblks / 1048576.0, (double)(size_t)mi.arena / 1048576.0,
+                (double)(size_t)mi.fordblks / 1048576.0, made, idle);
+#if defined(HEAP_SITES)
+            extern void heap_sites_report(void); /* platforms/switch/heap_sites.c (XI_SWITCH_HEAP_SITES=1, FFXI_HEAP_SITES=1) */
+            heap_sites_report();
+#endif
+        }
+    }
+}
 #endif
 
 /* host/ui/vicons.c reads the install through the DAT overlays, as the game would */
@@ -1267,6 +1367,10 @@ static void present_hook(void)
     touch_frame(1);
 #elif defined(__SWITCH__)
     chat_keyboard();
+    switch_fit();
+    switch_fps();
+    extern void switch_clock_frame(void); /* switch_main.c: the loading boost, the CPU's clock */
+    switch_clock_frame();
 #endif
 #if defined(__EMSCRIPTEN__)
     extern void web_frame(void); /* sdl_web.c */
@@ -1376,6 +1480,10 @@ static void log_flusher(void* unused)
     }
 }
 #endif
+
+/* 1 once the game has started (IFFXiEntry::GameStart): what ends after it is a game, not the sign-in
+ * screen (switch_main.c goes back to the sign-in screen then) */
+int xi_host_game_started;
 
 /* A Windows path in its verbatim form ("\\?\C:\...", "\\?\UNC\server\share\..."), as Rust's
  * canonicalize and Tauri's resource folder give them, made the plain one ("C:\...",
@@ -1899,6 +2007,54 @@ int main(int argc, char** argv)
 #endif
     display_fit_start(g_signin_window, data_dir); /* the game's size from the screen, whatever the file says (its UI Scale the player's) */
     soft_keyboard_off();
+#elif defined(__SWITCH__)
+#if defined(HEAP_SITES)
+    {
+        extern void heap_sites_start(void); /* platforms/switch/heap_sites.c (XI_SWITCH_HEAP_SITES=1, FFXI_HEAP_SITES=1) */
+        heap_sites_start();
+    }
+#endif
+    {
+        /* the sizes the game draws at, from ffxi.reg and Config's saved settings (settings.reg) */
+        static const char KEY[] = "HKEY_LOCAL_MACHINE\\SOFTWARE\\PlayOnlineUS\\SquareEnix\\FinalFantasyXI";
+        /* The world's background (the game draws its 3D into it, then makes it the screen's size): the
+         * screen's size by default, 1280x720 started handheld and 1920x1080 docked (or FFXI_SWITCH_DOCK's), read once at the start
+         * (a dock or undock keeps it until the next). Config's smallest is 2048x2048, 4.5 times the handheld's
+         * pixels: the stock GPU's whole frame at 60 fps (docs/switch.md). Never saved.
+         * FFXI_SWITCH_BG=<w>[x<h>] (run.args) another size; FFXI_SWITCH_BG=config Config's own. */
+        uint32_t v[6] = { 0 };
+        static const char* const names[6] = { "0001", "0002", "0003", "0004", "0037", "0038" };
+        for (int i = 0; i < 6; ++i)
+            reg_get_dword(KEY, names[i], &v[i]);
+        const char* bg = getenv("FFXI_SWITCH_BG");
+        unsigned bw = 0, bh = 0;
+        const char* why = "Config's";
+        if (bg && *bg && strcmp(bg, "config"))
+        {
+            if (sscanf(bg, "%ux%u", &bw, &bh) < 2)
+                bh = bw;
+            why = "FFXI_SWITCH_BG";
+        }
+        else if (!bg || !*bg)
+        {
+            int sw = 0, sh = 0; /* sdl_nx.c: the screen, whatever the window */
+            SDL_GetWindowSizeInPixels(NULL, &sw, &sh);
+            const char* fit = getenv("FFXI_SWITCH_FIT"); /* (a fixed size has no docked one) */
+            if (!(fit && *fit == '0'))
+                switch_screen(&sw, &sh);
+            bw = (unsigned)sw, bh = (unsigned)sh, why = "the screen's";
+        }
+        if (bw >= 256 && bh >= 256 && bw <= 8192 && bh <= 8192)
+        {
+            v[2] = bw & ~1u, v[3] = bh & ~1u;
+            reg_override_dword(KEY, "0003", v[2]), reg_override_dword(KEY, "0004", v[3]);
+        }
+        else
+            why = "Config's";
+        rt_log("[switch] resolution: the game %ux%u, the world (background) %ux%u (%s), the interface %ux%u\n", v[0], v[1],
+            v[2], v[3], why, v[4], v[5]);
+        g_switch_menu_w = (int)v[4], g_switch_menu_h = (int)v[5]; /* switch_fit keeps them */
+    }
 #endif
     {
         /* The install folders are where the game is now, whatever the imported registry says (it
@@ -2087,13 +2243,14 @@ int main(int argc, char** argv)
 
     /* IFFXiEntry::GameStart(pCore, &pFFXiMessage): the game runs inside this call */
     rt_log("[recomp] GameStart\n");
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__SWITCH__)
     /* FFXI_SAMPLE=<file>: where this thread's time goes, sampled (tools/debug/sample_report.py) */
     if (getenv("FFXI_SAMPLE") && getenv("FFXI_SAMPLE")[0])
         rt_log("[recomp] sampling the game thread to %s: %s\n", getenv("FFXI_SAMPLE"),
             sampler_start(getenv("FFXI_SAMPLE")) ? "on" : "cannot write it");
 #endif
     uint32_t start[2] = { gamecore_object(), out };
+    xi_host_game_started = 1;
     hr = com_call(entry, 3, 2, start);
     const char* message = NULL;
     int32_t code = gamecore_exit_code(&message);

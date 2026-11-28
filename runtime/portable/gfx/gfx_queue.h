@@ -47,6 +47,7 @@ void gfxq_clear(uint32_t nrects, const int32_t* rects, uint32_t flags, uint32_t 
     const uint32_t vp[6]);
 void gfxq_draw(const GfxDraw* d);
 void gfxq_scene_done(GfxTex* color, const GfxScene* s);
+void gfxq_chars_draw(const GfxCharFrame* f);
 void gfxq_fx_set(const char* key, float v);
 void gfxq_present(GfxTex* backbuffer);
 void gfxq_finish(void);
@@ -54,6 +55,10 @@ void gfxq_set_sync_pipelines(int on);
 uint32_t gfxq_failures(void);
 void gfxq_set_focus(const float* pos);
 void gfxq_set_moghouse(int in);
+/* Called before every call is recorded or waited on: one thread records at a time. d3d8.c's worker thread
+ * (FFXI_D3D_WORKER=1) records the game's draws; a call from the game's thread while it may be recording first
+ * waits for it (d3dw_gfx_hook). */
+extern void (*gfxq_record_hook)(void);
 void gfxq_trace_dump(const char* path);
 
 /* The browser: the page's main thread runs what the game recorded, from requestAnimationFrame.
@@ -98,6 +103,7 @@ void gfxq_call_result(GfxqCall* call, int result);
 #define gfx_set_focus gfxq_set_focus
 #define gfx_set_moghouse gfxq_set_moghouse
 #define gfx_trace_dump gfxq_trace_dump
+#define gfx_chars_draw(f) (gfxq_chars_draw(f), (int)((f)->nitem > 0))
 /* gfx_fx_get, gfx_sun_shadows_shown and gfx_sun_prime read the back end's CPU-side state, and stay
  * direct calls from the game's thread */
 #endif

@@ -1,0 +1,10 @@
+fprintf uam_fprintf
+printf uam_printf
+vfprintf uam_vfprintf
+fputs uam_fputs
+puts uam_puts
+fwrite uam_fwrite
+fputc uam_fputc
+putc uam_putc
+putchar uam_putchar
+fflush uam_fflush

@@ -14,10 +14,34 @@ Model (see runtime/guest.h):
 Anything not handled becomes RT_UNIMPL(addr, "text"), which traps at run time; the recompiler
 counts them so coverage can be measured over the whole binary.
 """
+import hashlib
+import os
 import re
 
 import capstone
 from capstone import x86_const as X
+
+import flags_across_calls
+import native_loops
+import regs_across_calls
+import x87_slots
+
+# The translation's faster forms, measured on the Switch: on with XI_TRANSLATE_FAST=1 (tools/build_switch.py sets it,
+# into a translation of its own), each on or off by its own variable as well; the other ports' translation stays as
+# it was.
+def fast(name):
+    return os.environ.get(name, os.environ.get('XI_TRANSLATE_FAST', '0')) == '1'
+
+
+# XI_X87_SLOTS=0: every function keeps x87_locals' rotating stack (to compare against recomp/x87_slots.py's)
+X87_SLOTS = fast('XI_X87_SLOTS')
+REGS_CALLS = fast('XI_REGS_CALLS')  # recomp/regs_across_calls.py
+FLAGS_CALLS = fast('XI_FLAGS_CALLS')  # recomp/flags_across_calls.py: the arithmetic flags across a call only if read
+
+
+class _Every:
+    def __contains__(self, _):
+        return True
 
 R32 = ('eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi')
 R16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
@@ -51,7 +75,10 @@ def x87_locals(lines):
             out.append(line[:len(line) - len(code)] + 'X87_STORE; ' + code + ' X87_LOAD;')
             continue
         s = line.replace('REGS_DECL;', 'REGS_DECL; X87_DECL;').replace('REGS_LOAD;', 'REGS_LOAD; X87_LOAD;')
-        s = s.replace('REGS_STORE;', 'REGS_STORE; X87_STORE;')
+        s = s.replace('REGS_STORE;', 'REGS_STORE; X87_STORE;').replace('REGS_STORE_CALL;', 'REGS_STORE_CALL; X87_STORE;')
+        s = s.replace('REGS_LOAD_CALL;', 'REGS_LOAD_CALL; X87_LOAD;')
+        s = re.sub(r'(REGS_PUT\(0x[0-9A-F]+u\);)', r'\1 X87_STORE;', s)
+        s = re.sub(r'(REGS_GET\(0x[0-9A-F]+u\);)', r'\1 X87_LOAD;', s)
         s = re.sub(r'\bST\(([0-7])\)', r'x87_s\1', s)
         s = s.replace('fpush(g, ', 'X87_PUSH(').replace('fpop(g)', 'X87_POP()').replace('fr(g, ', 'fr_cw(x87_cw, ')
         for f in ('frnd', 'fist16', 'fist32', 'fist64'):
@@ -59,6 +86,62 @@ def x87_locals(lines):
         s = s.replace('fstsw(g)', 'fstsw_top(g, x87_top)').replace('g->fcw', 'x87_cw')
         out.append(s)
     return out
+
+
+# MSVC's _ftol (ST0 to the int64 in edx:eax, truncated), recognized by its bytes: push ebp; mov ebp, esp;
+# add esp, -0xc; wait; fnstcw [ebp-2]; wait; mov ax, [ebp-2]; or ah, 0xc; mov [ebp-4], ax; fldcw [ebp-4];
+# fistp qword [ebp-0xc]; fldcw [ebp-2]; mov eax, [ebp-0xc]; mov edx, [ebp-8]; leave; ret. FFXiMain calls it at
+# 961 places, and as a translated function each call stored and reloaded every register and the x87 stack
+# around a dozen instructions (1.5% of the game thread on the Switch). A call to it is translated inline: the
+# same result and flags (those of its `or ah, 0xc`), the control word unchanged; what it leaves below esp (its
+# frame and the return address) is not written.
+FTOL_BYTES = bytes.fromhex('558bec83c4f49bd97dfe9b668b45fe80cc0c668945fcd96dfcdf7df4d96dfe8b45f48b55f8c9c3')
+FTOL_INLINE = fast('XI_FTOL_INLINE')
+MAT_INLINE = fast('XI_MAT_INLINE')
+
+
+def ftol_inline():
+    return ['{ int64_t v = fist64_cw(g->fcw | 0xC00u, fpop(g)); eax = (uint32_t)v; edx = (uint32_t)((uint64_t)v >> 32); }',
+            '{ uint8_t r = (uint8_t)((g->fcw >> 8) | 0xCu); cf = 0; of = 0; af = 0; zf = 0; sf = r >> 7; pf = PARITY(r); }']
+
+
+# FFXiMain's point and direction transforms (thiscall: ecx the matrix; out and the vector on the stack, popped):
+# translated inline at each call as rt_xform3 (runtime/native_skin.h), the same results, eax and edx as they leave
+# them, the flags untouched (their x87 code changes none); nothing is written below esp.
+XFORM_BYTES = {
+    1: bytes.fromhex('8b4424088b542404d94120d84808d94110d84804dec1d900d809dec1d84130d91ad94124d84808d94114d84804dec1'
+                     'd94104d808dec1d84134d95a04d94128d84808d94118d84804dec1d94108d808dec1d84138d95a08c20800'),
+    0: bytes.fromhex('8b4424088b542404d94120d84808d94110d84804dec1d900d809dec1d91ad94124d84808d94114d84804dec1d94104'
+                     'd808dec1d95a04d94128d84808d94118d84804dec1d94108d808dec1d95a08c20800'),
+}
+
+
+def xform_inline(point):
+    return ['{ uint32_t o_ = rd32(esp), v_ = rd32(esp + 4u); rt_xform3(RT_GB, g->fcw, ecx, v_, o_, %d); '
+            'eax = v_; edx = o_; esp += 8; }' % point]
+
+
+# FFXiMain's 4x4 matrix products and its matrix copy, translated inline at each call too, as rt_mat_mul and rt_mat_copy
+# (runtime/native_skin.h): length and SHA-256 of the function's bytes (its relocations, and the address it calls, zeroed;
+# a call is to the copy, a relocation the 0.0f a sum starts with). ecx is the matrix for the thiscalls; nothing is
+# written below esp, and the flags are left (no caller reads them).
+MAT_FNS = {
+    'copy': (101, '887a0b8b7b4e2ec2e79fdb29777c6b7e4a27d6ac8d730546fb0d4cbb469f3424', (), None),          # this = arg (0x10027800 in 2025-12-26)
+    'this_arg': (193, '040a39cae5c4192e67ce12646fcfa70eefa2cbbdd764bc525b90250f559b1c78', (), 0xb4),  # this = this * arg (0x10027b20)
+    'arg_this': (193, '9bda40f2947fca4d306c1e92bc72fbc83ad2a33ef3508c0a1f756c897b183740', (), 0xb4),  # this = arg * this (0x10027ca0)
+    'stdcall': (135, '4beabd886c2cf8cd474d89728933cf5deadc30d48b8a4bbbcfa8cc2e774c401b', (0x34,), None),  # out = a * b (0x1006d080)
+}
+
+
+def mat_inline(kind):
+    if kind == 'stdcall':
+        return ['{ uint32_t o_ = rd32(esp); rt_mat_mul(RT_GB, g->fcw, o_, rd32(esp + 4u), rd32(esp + 8u), RT_MAT_STDCALL); '
+                'eax = o_; ecx = 0; edx = 0; esp += 12; }']
+    do = {'copy': 'rt_mat_copy(RT_GB, ecx, a_);',
+          'this_arg': 'rt_mat_mul(RT_GB, g->fcw, ecx, ecx, a_, RT_MAT_THIS_ARG);',
+          'arg_this': 'rt_mat_mul(RT_GB, g->fcw, ecx, a_, ecx, RT_MAT_ARG_THIS);'}[kind]
+    # (eax and edx: the copy's last two elements)
+    return ['{ uint32_t a_ = rd32(esp); ' + do + ' eax = rd32(ecx + 0x3Cu); edx = rd32(ecx + 0x38u); esp += 4; }']
 
 
 def mask(bits):
@@ -252,24 +335,177 @@ class FunctionTranslator:
             self.ctx.setjmp_sites.append(ret_addr)
             return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
                     'REGS_STORE; %s%08x(g); RT_SETJMP(%s + RD); REGS_LOAD;' % (self.ctx.prefix, target, hexu(ret_addr))]
-        return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr), 'REGS_STORE; %s%08x(g); REGS_LOAD;' % (self.ctx.prefix, target)]
+        # the arithmetic flags go in only to a function that reads them at entry, and come back only where the code
+        # after the call may read them (guest.h, REGS_STORE_CALL; recomp/flags_across_calls.py); returns store them
+        # all, a tail jump (goto above) too
+        flags_in = target in self.flag_entry()
+        rw = self.regs()
+        if rw is not None and target in rw[0]:
+            # only the registers the callee may use or change go in, only those it may change come back
+            # (recomp/regs_across_calls.py, guest.h REGS_PUT); the flags as before
+            w, u = rw[0][target], rw[1][target]
+            put = w | u | regs_across_calls.ESP | (regs_across_calls.FLAGS_BIT if flags_in else 0)
+            clean = flags_across_calls.scan(self.ctx, ret_addr) == flags_across_calls.CLEAN
+            get = w | regs_across_calls.ESP | (0 if clean else regs_across_calls.FLAGS_BIT)
+            return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
+                    'REGS_PUT(0x%Xu); %s%08x(g); REGS_GET(0x%Xu); RT_REGS_CHECK_CALL(0x%Xu, 0x%08Xu);'
+                    % (put, self.ctx.prefix, target, get, get, ret_addr - 5)]
+        store = 'REGS_STORE;' if flags_in else 'REGS_STORE_CALL;'
+        return ['esp -= 4; wr32(esp, %s + RD);' % hexu(ret_addr),
+                '%s %s%08x(g); %s' % (store, self.ctx.prefix, target, self.load_after(ret_addr))]
+
+    def regs(self):
+        """(W, U) of every function (recomp/regs_across_calls.py), once per translation; None when off"""
+        if not REGS_CALLS:
+            return None
+        if getattr(self.ctx, 'regs_w', None) is None:
+            regs_across_calls.analyze(self.ctx, FunctionTranslator)
+        return self.ctx.regs_w, self.ctx.regs_u
+
+    def xform_kind(self, target):
+        """1 for the game's point transform, 0 for its direction transform (XFORM_BYTES), None for anything else"""
+        cache = self.ctx.__dict__.setdefault('xform_at', {})
+        if target not in cache:
+            cache[target] = None
+            for kind, code in XFORM_BYTES.items():
+                if bytes(self.ctx.read(target, len(code))) == code:
+                    cache[target] = kind
+        return cache[target]
+
+    def mat_kind(self, target):
+        """which of MAT_FNS the function at target is, None for anything else"""
+        cache = self.ctx.__dict__.setdefault('mat_at', {})
+        if target not in cache:
+            cache[target] = None
+            for kind, (n, digest, relocs, call) in MAT_FNS.items():
+                code = bytearray(self.ctx.read(target, n))
+                if len(code) != n:
+                    continue
+                if tuple(sorted(a - target for a in self.ctx.relocs if target <= a < target + n)) != relocs:
+                    continue
+                if call is not None:
+                    to = (target + call + 4 + int.from_bytes(code[call:call + 4], 'little')) & 0xFFFFFFFF
+                    code[call:call + 4] = bytes(4)
+                zeros = [int.from_bytes(code[r:r + 4], 'little') for r in relocs]
+                for r in relocs:
+                    code[r:r + 4] = bytes(4)
+                if hashlib.sha256(bytes(code)).hexdigest() != digest:
+                    continue
+                if call is not None and self.mat_kind(to) != 'copy':
+                    continue
+                if any(bytes(self.ctx.read(z, 4)) != bytes(4) for z in zeros):
+                    continue
+                cache[target] = kind
+        return cache[target]
+
+    def is_ftol(self, target):
+        cache = self.ctx.__dict__.setdefault('ftol_at', {})
+        if target not in cache:
+            cache[target] = bytes(self.ctx.read(target, len(FTOL_BYTES))) == FTOL_BYTES
+        return cache[target]
+
+    def flag_entry(self):
+        if getattr(self.ctx, 'flag_entry', None) is None:
+            # (FLAGS_CALLS off: every function as if it read them, so every call stores them all)
+            self.ctx.flag_entry = flags_across_calls.entry_readers(self.ctx) if FLAGS_CALLS else _Every()
+        return self.ctx.flag_entry
+
+    def load_after(self, ret_addr):
+        clean = FLAGS_CALLS and flags_across_calls.scan(self.ctx, ret_addr) == flags_across_calls.CLEAN
+        return 'REGS_LOAD_CALL;' if clean else 'REGS_LOAD;'
 
     # ------------------------------------------------------------------ translation
 
-    def translate(self):
+    def emit(self):
+        """each instruction's statements: [(ins, statements, whether it falls through)]"""
         self.decode()
-        body = []
-        prev_falls_to = None
-        for k, ins in enumerate(self.insns):
-            if prev_falls_to is not None and prev_falls_to != ins.address:
-                body.append('    ' + self.goto(prev_falls_to, None))
-            body.append(('L_%08x:' % ins.address, ins))
+        emitted = []
+        for ins in self.insns:
             try:
                 stmts, falls = self.one(ins)
             except Unsupported as e:
                 text = '%s %s' % (ins.mnemonic, ins.op_str)
                 self.unimpl.append((ins.address, ins.mnemonic, str(e)))
                 stmts, falls = ['RT_UNIMPL(%s, "%s");' % (hexu(ins.address), text.replace('"', "'"))], False
+            emitted.append((ins, stmts, falls))
+        return emitted
+
+    def native_loops(self, emitted):
+        """the game loops with a native version (recomp/native_loops.py): called after their first instruction,
+        going on at their exit when it ran"""
+        found = native_loops.sites(self.ctx)
+        if not found:
+            return emitted
+        here = {a: v for a, v in found.items() if a in self.addrs and v[1] in self.addrs}
+        if not here:
+            return emitted
+        exits = {v[1]: v[0] for v in here.values()}
+        out = []
+        for ins, stmts, falls in emitted:
+            if ins.address in exits:
+                stmts = [native_loops.at_exit(exits[ins.address])] + stmts
+            if ins.address in here and falls:
+                loop, exit_, g = here[ins.address]
+                stmts = stmts + native_loops.call(loop, exit_, g)
+                self.labels.add(exit_)
+            out.append((ins, stmts, falls))
+        return out
+
+    def mat_entry(self, emitted):
+        """a matrix product called through a pointer too (MAT_FNS): native from its entry on, to its ret"""
+        kind = self.mat_kind(self.entry) if MAT_INLINE else None
+        if kind in (None, 'copy'):
+            return emitted
+        ret = self.entry + MAT_FNS[kind][0] - 3
+        if not any(i.address == ret and i.mnemonic == 'ret' for i, _, _ in emitted):
+            return emitted
+        self.labels.add(ret)
+        out = []
+        for ins, stmts, falls in emitted:
+            if ins.address == self.entry:
+                # (the arguments above the return address, which ret takes with them)
+                stmts = ['{ uint32_t sp_ = esp; esp += 4; ' + ' '.join(mat_inline(kind)) +
+                         ' esp = sp_; goto L_%08x; }' % ret] + stmts
+            out.append((ins, stmts, falls))
+        return out
+
+    def x87_effect(self, target):
+        """what the function at target does to the x87 stack's depth (x87_slots.net_effect), None if unknown"""
+        cache = self.ctx.__dict__.setdefault('x87_effects', {})
+        if target not in cache:
+            cache[target] = None
+            if target in self.ctx.functions:
+                saved = set(self.ctx.referenced)
+                t = FunctionTranslator(self.ctx, target, self.ctx.functions[target])
+                em = t.emit()
+                self.ctx.referenced = saved
+                cache[target] = x87_slots.net_effect(
+                    target, t.insns, {i.address: st for i, st, _ in em}, {i.address: f for i, _, f in em},
+                    lambda ins: [x for x in t.jump_targets(ins) if x in t.addrs], self.ctx.prefix)
+        return cache[target]
+
+    def translate(self):
+        emitted = self.emit()
+        emitted = self.native_loops(emitted)
+        emitted = self.mat_entry(emitted)
+        # the x87 stack in fixed locals by its depth, where the function allows it (recomp/x87_slots.py); else
+        # x87_locals' rotating ones, below
+        plan = None
+        if self.uses_x87 and X87_SLOTS and not any(i.address in self.ctx.hooks for i in self.insns):
+            plan = x87_slots.plan(self.entry, self.insns, {i.address: s for i, s, _ in emitted},
+                                  {i.address: f for i, _, f in emitted},
+                                  lambda ins: [t for t in self.jump_targets(ins) if t in self.addrs], self.ctx.prefix,
+                                  self.x87_effect)
+        body = []
+        prev_falls_to = None
+        prev = None
+        for ins, stmts, falls in emitted:
+            if prev_falls_to is not None and prev_falls_to != ins.address:
+                line = '    ' + self.goto(prev_falls_to, None)
+                body.append(plan.tail(prev.address, line) if plan else line)
+            body.append(('L_%08x:' % ins.address, ins))
+            if plan:
+                stmts = plan.rewrite(ins.address, stmts)
             hook = self.ctx.hooks.get(ins.address)
             if hook:
                 # A host hook point (recomp.py --hooks): the host sees and may change the guest's
@@ -283,10 +519,14 @@ class FunctionTranslator:
                     body.append('        ' + s)
                 body.append('    }')
             prev_falls_to = ins.address + ins.size if falls else None
+            prev = ins
         if prev_falls_to is not None:
-            body.append('    ' + self.goto(prev_falls_to, None))
+            line = '    ' + self.goto(prev_falls_to, None)
+            body.append(plan.tail(prev.address, line) if plan else line)
 
         out = ['void %s%08x(Guest* g)' % (self.ctx.prefix, self.entry), '{', '    REGS_DECL;', '    REGS_LOAD;']
+        if plan:
+            out[2:4] = ['    REGS_DECL; X87S_DECL;', '    REGS_LOAD; X87S_LOAD;']
         if self.insns and self.insns[0].address != self.entry:
             out.append('    goto L_%08x;' % self.entry)
             self.labels.add(self.entry)
@@ -298,6 +538,9 @@ class FunctionTranslator:
             else:
                 out.append(item)
         out.append('}')
+        if plan:
+            self.used_x87_slots = True
+            return out
         return x87_locals(out) if self.uses_x87 else out
 
     def one(self, ins):
@@ -520,12 +763,30 @@ class FunctionTranslator:
                 if tgt == nxt:  # call $+5 ; pop r  (get EIP)
                     return ['esp -= 4; wr32(esp, %s + RD);' % hexu(nxt)], True
                 if tgt in self.ctx.entries:
+                    if FTOL_INLINE and self.is_ftol(tgt):
+                        self.uses_x87 = True
+                        return ftol_inline(), True
+                    xf = self.xform_kind(tgt) if FTOL_INLINE else None
+                    if xf is not None:
+                        return xform_inline(xf), True
+                    mat = self.mat_kind(tgt) if MAT_INLINE else None
+                    if mat is not None:
+                        return mat_inline(mat), True
                     return self.call(tgt, nxt), True
                 return ['RT_BADJUMP(%s);' % hexu(tgt)], False
-            return pro + ['{ uint32_t t = %s; esp -= 4; wr32(esp, %s + RD); REGS_STORE; rt_call_indirect(g, t); REGS_LOAD; }'
-                          % (self.rd(ins, t, 32), hexu(nxt))], True
+            # (the flags go in: some of the functions that read them at entry are called through pointers)
+            return pro + ['{ uint32_t t = %s; esp -= 4; wr32(esp, %s + RD); REGS_STORE; rt_call_indirect(g, t); %s }'
+                          % (self.rd(ins, t, 32), hexu(nxt), self.load_after(nxt))], True
         if mn == 'ret':
             n = ops[0].imm if ops else 0
+            rw = self.regs()
+            if rw is not None and self.entry in rw[0]:
+                # the registers this function may have changed, those it (or a callee) may have left in the guest's
+                # changed (regs_across_calls.dirtied: put in for a call, then restored), and the flags (returns store
+                # them all)
+                return ['esp += %d; REGS_PUT(0x%Xu); return;' % (4 + n, rw[0][self.entry] | self.ctx.regs_d[self.entry]
+                                                                  | regs_across_calls.ESP |
+                                                                  regs_across_calls.FLAGS_BIT)], False
             return ['esp += %d; REGS_STORE; return;' % (4 + n)], False
 
         raise Unsupported(mn)

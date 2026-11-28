@@ -28,6 +28,7 @@
 #include "build.h"
 #include "../runtime/portable/winapi/d3d8.h"
 #include "gfx.h"
+#include "../runtime/portable/gfx/gfx_queue.h" /* -DGFX_QUEUE: the calls go through the render queue (the characters' buffers and draws) */
 #include "gthread.h"
 #include "gwin.h"
 #include "scene.h"
@@ -36,6 +37,20 @@
     defined(FFXI_SCENE_SUN) && defined(FFXI_SCENE_SUN_PAIR) && defined(FFXI_SCENE_AMBIENT) && \
     defined(FFXI_SCENE_ZBIAS_BLEND) && defined(FFXI_SCENE_ZBIAS_OPAQUE) && defined(FFXI_HOOK_LOD_PICK)
 #define HAVE_SCENE 1
+#endif
+/* the characters (below), which also run without the zone's addresses: FFXI_SCENE_CHARS=1 draws them alone, the game
+ * drawing its zone (a build with the characters' addresses but not the zone's: 2025-12-26's) */
+#if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_RES_GET) && defined(FFXI_SCENE_PALETTE) && \
+    defined(FFXI_SCENE_BONES) && defined(FFXI_SCENE_ACTOR_LIGHTS) && defined(FFXI_SCENE_ACTOR_AMBIENT) && \
+    defined(FFXI_SCENE_ACTOR_MATERIAL) && defined(FFXI_SCENE_TINT) && defined(FFXI_SCENE_SHINE) && defined(FFXI_SCENE_SHADOW_MODE) && \
+    defined(FFXI_SCENE_TEX_MGR) && defined(FFXI_SCENE_TEX_FIND) && defined(FFXI_SCENE_DEV) && defined(FFXI_SCENE_LIGHT_FACTOR)
+#define HAVE_CHARS 1
+/* the environment-mapped materials' stage 1 (1002da20's material record, 2025-12-26): taken where the back end draws
+ * it (gfx_chars_env) */
+#if defined(FFXI_SCENE_ENV_NORMAL) && defined(FFXI_SCENE_ENV_NORMAL_XF) && defined(FFXI_SCENE_ENV_CUBE) && \
+    defined(FFXI_SCENE_ENV_CUBE_XF)
+#define HAVE_CHARS_ENV 1
+#endif
 #endif
 
 /* CTsZoneMap (mgr) and its instances, models and submeshes (2026-09-03) */
@@ -286,6 +301,8 @@ typedef struct EnvLight
     float sun_dir[4], sun_col[4], sun2_dir[4], sun2_col[4], ambient[4], fog[4], fog_col[4];
 } EnvLight;
 
+#endif /* HAVE_SCENE */
+#if defined(HAVE_SCENE) || defined(HAVE_CHARS)
 /* how much it is day, 0..1, eased through dusk and dawn: from the sun's height (the environment's +0xa4, its direction
  * as placed by the clock; the game's y is down and the sun is the main light while that y is at least 0, so it rises
  * through 0). 1 where the zone's lights are fixed (no sky, no night) or there is no environment. */
@@ -321,6 +338,8 @@ static void night_grade(float* c, float day)
         c[i] = (c[i] + (l * cool[i] - c[i]) * w) * e;
 }
 
+#endif
+#ifdef HAVE_SCENE
 static void env_light(EnvLight* e, uint32_t env, uint32_t mgr)
 {
     memset(e, 0, sizeof *e);
@@ -386,7 +405,7 @@ static int32_t frame_light(uint32_t entry, uint32_t* seen, uint32_t* nlights)
     return (int32_t)(*nlights)++;
 }
 
-#if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_TEX_FIND)
+#ifdef HAVE_CHARS
 static int chars_frame_of(GfxCharFrame* f, const uint32_t vp[6], const uint32_t gvp[6]);
 static void chars_reset(void);
 static void chars_shadow_reset(void);
@@ -892,11 +911,8 @@ done:
  * Meshes with an environment map, the shine pass, the silhouette shadows or a fading actor (drawn into its own target)
  * stay the game's; those with an environment map (shiny plate armour) are still recorded, to cast in the scene
  * renderer's shadows (g_soitems), or the shadow had their pieces missing. */
-#if defined(FFXI_WRAP_MESH_DRAW) && defined(FFXI_SCENE_RES_MGR) && defined(FFXI_SCENE_RES_GET) && defined(FFXI_SCENE_PALETTE) && \
-    defined(FFXI_SCENE_BONES) && defined(FFXI_SCENE_ACTOR_LIGHTS) && defined(FFXI_SCENE_ACTOR_AMBIENT) && \
-    defined(FFXI_SCENE_ACTOR_MATERIAL) && defined(FFXI_SCENE_TINT) && defined(FFXI_SCENE_SHINE) && defined(FFXI_SCENE_SHADOW_MODE) && \
-    defined(FFXI_SCENE_TEX_MGR) && defined(FFXI_SCENE_TEX_FIND)
-#define HAVE_CHARS 1
+#endif /* HAVE_SCENE */
+#ifdef HAVE_CHARS
 extern GuestFn rt_wrap_mesh_draw;
 extern const GuestFn rt_orig_mesh_draw;
 
@@ -910,10 +926,14 @@ enum
     MESH_SLOTS = 4096
 };
 static Mesh g_meshes[MESH_SLOTS];
+static int g_chars_only; /* FFXI_SCENE_CHARS=1: the characters only (chars_flush) */
+static uint32_t g_cmask; /* this batch is an actor's shadow picture's (self_shadow) */
 static GfxCharItem* g_citems;
 static GfxCharItem* g_soitems; /* casting only: meshes the game draws (environment-mapped), their shadows ours */
 static uint32_t g_nsoitems, g_capsoitems;
 static GfxCharState* g_cstates;
+static GfxCharEnv* g_cenv; /* the items' environment layers (GfxCharItem.env) */
+static uint32_t g_ncenv, g_capcenv;
 static float* g_pal;
 static uint32_t g_ncitems, g_capcitems, g_ncstates, g_capcstates, g_npal, g_cappal; /* g_npal in bones */
 static float g_wf[3];  /* the windowed brightness factor per channel this frame (1000be50), 0 when it is off */
@@ -921,7 +941,20 @@ static struct
 {
     uint32_t meshes, left, items, built, why[8]; /* why left: not kind 0, buffers, state, stream, vb, uv, ib, palette */
     uint32_t stale; /* draws where the game's current palette was another actor's (theirs used) */
+    uint32_t state_why[3]; /* why[2] by kind: a fading actor, the shine pass, the silhouette shadows */
+    uint32_t buf_why[3];   /* why[1] by kind: no buffer, command stream or counts; +0x68 not set; no index or other buffer */
+    uint64_t left_ns[8];   /* FFXI_SCENELOG: the game's own draw of the ones left, by why */
+    uint32_t env_meshes;   /* taken with their environment layer (take_env) */
 } g_ccount;
+
+/* a batch to draw before the work after it: d3d8's world flush finds it, or with the worker on d3d8 calls the front
+ * flush for it (chars_send) */
+static void chars_pending(void)
+{
+    g_pending = 1;
+    if (d3d8_world_front())
+        d3d8_world_front_mark();
+}
 
 /* the hide flags a mesh's header byte (+0x33) sets on its model (CYyModel +0xa8 + class), as 1002dc10's jump table */
 static void hide_set(uint32_t model, uint8_t v)
@@ -1075,30 +1108,102 @@ static uint32_t char_state(const float* W, const float* WV, const float* P, uint
     s->tfactor[2] = (float)(tf & 255) / 255.0f, s->tfactor[3] = (float)(tf >> 24) / 255.0f;
     float fsf, fef;
     memcpy(&fsf, &fs, 4), memcpy(&fef, &fe, 4);
-    s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on && gfx_fx_get("fog_modern") <= 0.0f ? 1.0f : 0.0f;
+    /* (read once a frame: gfx_fx_get compares names, and this ran for every material, 0.08 ms a frame on the Switch) */
+    static uint32_t modern_at = ~0u;
+    static float modern;
+    if (modern_at != g_frame_no)
+        modern_at = g_frame_no, modern = gfx_fx_get("fog_modern");
+    s->fog[0] = fsf, s->fog[1] = fef > fsf ? fef : fsf + 1.0f, s->fog[2] = fog_on && modern <= 0.0f ? 1.0f : 0.0f;
     s->fog_col[0] = (float)((fog_col >> 16) & 255) / 255.0f, s->fog_col[1] = (float)((fog_col >> 8) & 255) / 255.0f;
     s->fog_col[2] = (float)(fog_col & 255) / 255.0f;
     s->fog_col[3] = f; /* (the material's light scale, for the back end's lamps) */
     return g_ncstates++;
 }
 
+/* an environment-mapped material's stage 1 as 1002da20 sets it from its record (rec): 0 none (not one, or the device's
+ * environment mapping off: the game draws it as any other), 1 the camera-space normal with [[[ENV_NORMAL]]+0x30]'s texture
+ * through ENV_NORMAL_XF, 2 the reflection vector with [ENV_CUBE]'s through ENV_CUBE_XF; its texture's interface (0 none:
+ * the game's stage 1 keeps what it had), D3DTS_TEXTURE1's address, and the texture factor's alpha */
+static int env_of(uint32_t rec, uint32_t* iface, uint32_t* xf, uint32_t* alpha)
+{
+#ifdef HAVE_CHARS_ENV
+    uint32_t dev = rd32(FFXI_SCENE_DEV);
+    if (!dev || rd8(dev + 0x921) != 1) /* (1002da48) */
+        return 0;
+    uint32_t a = rd32(FFXI_SCENE_ENV_NORMAL), b = a ? rd32(a) : 0, o;
+    int k;
+    if (rd16(rec + 0xe) && b)
+        k = 1, o = rd32(b + 0x30), *xf = FFXI_SCENE_ENV_NORMAL_XF;
+    else if (rdf32(rec + 0x28) != 0.0f)
+        k = 2, o = rd32(FFXI_SCENE_ENV_CUBE), *xf = FFXI_SCENE_ENV_CUBE_XF;
+    else
+        return 0;
+    *iface = !o ? 0 : rd32(o + 0x40) ? rd32(o + 0x40) : rd32(o + 0x44);
+    *alpha = ((uint32_t)(int32_t)(rdf32(rec + 0x24) * 0.5f) & 0xffu) << 24; /* (truncated, as its ftol) */
+    return k;
+#else
+    (void)rec, (void)iface, (void)xf, (void)alpha;
+    return 0;
+#endif
+}
+
+/* the environment-mapped materials drawn here (the back end draws their layer, and FFXI_CHARS_ENV isn't 0) */
+static int take_env(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char* e = getenv("FFXI_CHARS_ENV");
+#ifdef HAVE_CHARS_ENV
+        on = gfx_chars_env() && !(e && *e == '0');
+#else
+        (void)e, on = 0;
+#endif
+    }
+    return on;
+}
+
+/* The actors with a shadow of their own shape (the player: [FFXI_SCENE_SHADOW_MODE] 1, through the whole actor's draw):
+ * 1002da20 draws each of their lists as any actor's, then again between 10033610 and 10033880, flat and without depth
+ * into the actor's shadow picture as the light sees it (self_shadow). Taken too where the back end draws that (deko3d's);
+ * FFXI_SCENE_SELF=0 leaves those actors to the game. The addresses are 2025-12-26's. */
+#if defined(GFX_DEKO3D) && FFXI_SCENE_SHADOW_MODE == 0x1045960a
+#define HAVE_SELF 1
+#define SELF_BEGIN 0x10033610u /* thiscall (the actor's model + 0x48; 0x104594d8, the texture factor to put back): 1 when
+                                * the picture is the target now, cleared the first time, and the light's camera set */
+#define SELF_END 0x10033880u   /* thiscall (the same; 0): the target, the camera and the states as they were */
+#define SELF_TEXTURES 0x104594d8u
+#endif
+static int self_on(void)
+{
+#if defined(HAVE_SELF)
+    static int on = -1;
+    if (on < 0)
+        on = g_chars_only && !(getenv("FFXI_SCENE_SELF") && atoi(getenv("FFXI_SCENE_SELF")) == 0);
+    return on;
+#else
+    return 0;
+#endif
+}
+
 /* one mesh draw taken (1 and the draw items recorded) or left to the game (0; an environment-mapped one's items recorded
- * to cast only) */
+ * to cast only, where the back end doesn't draw their layer) */
 static int chars_take(Guest* g, uint32_t res, uint32_t model)
 {
     if (!res || rd8(res + 0x30) > 1 || (rd8(res + 0x32) & 0x7f) != 0)
         return ++g_ccount.why[0], 0;
     uint32_t vbuf = rd32(res + 0x5e), cmd = rd32(res + 0x36), counts = rd32(res + 0x42);
     if (!vbuf || !cmd || !counts || !rd8(vbuf + 0x68) || !rd32(vbuf + 0x40) || !rd32(vbuf + 0x4c))
-        return ++g_ccount.why[1], 0;
+        return ++g_ccount.buf_why[!vbuf || !cmd || !counts ? 0 : !rd8(vbuf + 0x68) ? 1 : 2], ++g_ccount.why[1], 0;
     uint32_t tint = rd32(FFXI_SCENE_TINT);
-    if ((tint >> 24) != 0x80 || rd8(FFXI_SCENE_SHINE) || rd8(FFXI_SCENE_SHADOW_MODE) == 1)
-        return ++g_ccount.why[2], 0; /* a fading actor (its own target), the shine pass, the silhouette shadows */
+    if ((tint >> 24) != 0x80 || rd8(FFXI_SCENE_SHINE) || (rd8(FFXI_SCENE_SHADOW_MODE) == 1 && !self_on()))
+        return ++g_ccount.state_why[(tint >> 24) != 0x80 ? 0 : rd8(FFXI_SCENE_SHINE) ? 1 : 2], ++g_ccount.why[2],
+               0; /* a fading actor (its own target), the shine pass, the silhouette shadows */
     if (d3d8_disint_capturing(rd32(FFXI_SCENE_PALETTE)))
         return ++g_ccount.why[2], 0; /* breaking up (disintegrate): the game's draws, which d3d8.c takes apart */
     uint32_t total = rd16(counts) + rd16(counts + 2) + rd32(vbuf + 0x60);
     /* the command stream once without drawing: no environment maps, a texture before every draw, nothing unknown */
-    int have_tex = 0, envmap = 0;
+    int have_tex = 0, envmap = 0, envs = take_env(), env_mats = 0;
     for (uint32_t p = cmd, guard = 0; guard < 100000; ++guard)
     {
         uint16_t op = rd16(p);
@@ -1107,11 +1212,25 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         if (op & 0x8000)
         {
             uint32_t k = (op >> 4) & 15;
-            if (k == 1)
+            uint32_t ei = 0, ex, ea;
+            if (k == 1 && envs && env_of(p + 2, &ei, &ex, &ea))
             {
-                if (rd16(p + 2 + 0xe) || rdf32(p + 2 + 0x28) != 0.0f)
+                if (!ei)
+                    return ++g_ccount.why[3], 0;
+                ++env_mats; /* (taken with its layer: a draw needs its texture as any other's) */
+                p += 0x2e;
+            }
+            else if (k == 1)
+            {
+                if (!envs && (rd16(p + 2 + 0xe) || rdf32(p + 2 + 0x28) != 0.0f))
                 {
-                    if (gfx_fx_get("scene_shadow_envmap") <= 0.0f)
+                    /* (the setting read once a frame: gfx_fx_get compares the name with each setting's, and this
+                     * ran for every environment-mapped mesh, 0.2 ms of a busy town's frame on the Switch) */
+                    static uint32_t envmap_at = ~0u;
+                    static float envmap_on;
+                    if (envmap_at != g_frame_no)
+                        envmap_at = g_frame_no, envmap_on = gfx_fx_get("scene_shadow_envmap");
+                    if (envmap_on <= 0.0f)
                         return ++g_ccount.why[3], 0;
                     envmap = 1; /* environment-mapped: the game draws it, it casts */
                 }
@@ -1142,7 +1261,12 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     GfxBuf* uv = NULL;
     GfxBuf* vb = mesh_vb(res, vbuf, total, &uv);
     uint32_t uvsize = total * 8, ibsize = 0, isize = 2;
-    GfxBuf* ib = d3d8_world_ibuf(rd32(vbuf + 0x40), &ibsize, &isize);
+    /* with the worker on, the batch is sent from here (d3d8_world_front): its index buffer and textures are the game's
+     * interfaces until the worker resolves them (chars_run), carried in the items' pointers */
+    int front = d3d8_world_front();
+    uint32_t ib_iface = rd32(vbuf + 0x40);
+    GfxBuf* ib = !front ? d3d8_world_ibuf(ib_iface, &ibsize, &isize)
+                        : d3d8_world_ibuf_info(ib_iface, &ibsize, &isize) ? (GfxBuf*)(uintptr_t)ib_iface : NULL;
     /* the mesh's own skeleton: the part of its model whose mesh list holds it (CYyModel +0x44 -> CYyModelBase, next +4;
      * meshes at +0x20, next +4; the CYySkl at +8: Sk2 handle +0xc, palette +0x14). The game's current palette
      * ([0x1045ec20]) is the last actor it posed: in a crowd its animation level of detail skips posing some actors
@@ -1199,6 +1323,10 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
     GfxTex* tex = NULL;
     uint32_t tex_iface = 0;
     int hidden = 0;
+    /* the material's environment layer (env_of): its kind, texture, D3DTS_TEXTURE1, factor alpha; made at its first draw */
+    int cur_env = 0;
+    uint32_t env_iface = 0, env_xf = 0, env_alpha = 0, env_index = 0;
+    GfxTex* env_tex = NULL;
     for (uint32_t p = cmd, guard = 0; guard < 100000; ++guard)
     {
         uint16_t op = rd16(p);
@@ -1215,6 +1343,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                 hidden = rd8(model + 0xa8 + cls) != 0;
                 g_mat_color = rd32(rec), g_mat_f = rdf32(rec + 0x10);
                 cur_state = ~0u; /* made at its first draw */
+                cur_env = env_mats ? env_of(rec, &env_iface, &env_xf, &env_alpha) : 0, env_index = 0;
                 p += 0x2e;
             }
             else
@@ -1229,7 +1358,7 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                 if (o) /* none found: the game sets none, and draws on with the texture set before it */
                 {
                     tex_iface = rd32(o + 0x40) ? rd32(o + 0x40) : rd32(o + 0x44);
-                    tex = tex_iface ? d3d8_world_texture(tex_iface) : NULL;
+                    tex = !tex_iface ? NULL : front ? (GfxTex*)(uintptr_t)tex_iface : d3d8_world_texture(tex_iface);
                 }
                 p += 0x12;
             }
@@ -1240,7 +1369,30 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         {
             uint32_t nidx = op == 0x54 ? n * 3 : n + 2;
             if (!hidden && tex && idx + nidx <= ibsize / isize && cur_state == ~0u)
+            {
                 cur_state = char_state(W, WV, P, amb, mat, tint, fog_on, fog_col, fs, fe);
+                if (cur_env)
+                {
+                    /* the factor 1002da20 sets for it: the tint over 0x80808080 ([0x1034f5cc]), the record's alpha;
+                     * the layer: world x view, D3DTS_TEXTURE1 as the game has it now, the texture */
+                    uint32_t tf = (tfactor(0x80808080u, tint) & 0xffffffu) | env_alpha;
+                    float* t4 = g_cstates[cur_state].tfactor;
+                    t4[0] = (float)((tf >> 16) & 255) / 255.0f, t4[1] = (float)((tf >> 8) & 255) / 255.0f;
+                    t4[2] = (float)(tf & 255) / 255.0f, t4[3] = (float)(tf >> 24) / 255.0f;
+                    env_tex = front ? (GfxTex*)(uintptr_t)env_iface : d3d8_world_texture_any(env_iface);
+                    if (env_tex)
+                    {
+                        if (g_ncenv == g_capcenv)
+                            g_capcenv = g_capcenv ? g_capcenv * 2 : 64,
+                            g_cenv = (GfxCharEnv*)realloc(g_cenv, g_capcenv * sizeof *g_cenv);
+                        GfxCharEnv* e = &g_cenv[g_ncenv++];
+                        memcpy(e->wv, WV, sizeof e->wv);
+                        memcpy(e->tex, GUEST_PTR(env_xf), sizeof e->tex);
+                        e->kind[0] = (float)cur_env, e->kind[1] = e->kind[2] = e->kind[3] = 0.0f;
+                        env_index = g_ncenv;
+                    }
+                }
+            }
             if (!hidden && tex && idx + nidx <= ibsize / isize)
                 for (int m = 0; m <= mirror; ++m)
                 {
@@ -1255,7 +1407,17 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
                     it->vb = vb, it->uv = uv, it->ib = ib, it->index_size = isize;
                     it->first = idx, it->count = n, it->prim = op == 0x54 ? GFX_TRIANGLELIST : GFX_TRIANGLESTRIP;
                     it->palette = palbase, it->state = cur_state, it->mirror = (uint32_t)m, it->tex = tex;
-                    d3d8_world_sampler(tex_iface, &it->samp);
+                    if (front)
+                        d3d8_world_sampler_front(&it->samp); /* (the texture's part on the worker) */
+                    else
+                        d3d8_world_sampler(tex_iface, &it->samp);
+                    it->env = env_index, it->env_tex = env_index ? env_tex : NULL;
+                    if (env_index) /* (stage 0's sampler state, with the layer texture's part) */
+                    {
+                        it->env_samp = it->samp;
+                        if (!front)
+                            d3d8_world_sampler(env_iface, &it->env_samp);
+                    }
                     ++g_ccount.items;
                 }
             idx += nidx, drawn += nidx;
@@ -1267,7 +1429,10 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
             p += 0xc + n * 2;
     }
     if (envmap)
-        return g_pending = 1, 0; /* the game draws it (a batch to hand its shadow on) */
+    {
+        chars_pending();
+        return 0; /* the game draws it (a batch to hand its shadow on) */
+    }
     /* what 1002dc10 leaves behind: the model skinned this frame, the index count in its fifth argument */
     wr8(model + 0xb8, 1);
     uint32_t a5 = rt_arg(g, 4), a6 = rt_arg(g, 5);
@@ -1275,15 +1440,88 @@ static int chars_take(Guest* g, uint32_t res, uint32_t model)
         wr32(a5, drawn);
     if (a6)
         wr32(a6, 0);
-    g_pending = 1;
+    g_ccount.env_meshes += env_mats > 0;
+    chars_pending();
     return 1;
 }
 
-static int g_chars_off; /* FFXI_SCENE_CHARS=0: the zone only */
+static int g_chars_off;  /* FFXI_SCENE_CHARS=0: the zone only */
+/* a take running (its game calls - the resource and texture lookups - may reach d3d8's front flush, which waits for it
+ * to end: the take's items point into the arrays it would send and empty) */
+static int g_taking, g_send_put_off;
+static void chars_send(void);
+static void chars_flush(void);
+
+#if defined(HAVE_SELF)
+static GfxCharItem* g_self_items; /* the mesh's items as taken, for its shadow picture */
+static uint32_t g_self_n, g_self_cap, g_self_nb;
+static float g_self_pal[128 * 16];
+
+/* after a take in shadow mode 1, before anything can send the batch: the items from n0 on and their palette kept */
+static void self_keep(uint32_t n0)
+{
+    g_self_n = g_ncitems > n0 ? g_ncitems - n0 : 0;
+    if (!g_self_n)
+        return;
+    if (g_self_n > g_self_cap)
+        g_self_cap = g_self_n * 2, g_self_items = (GfxCharItem*)realloc(g_self_items, g_self_cap * sizeof *g_self_items);
+    memcpy(g_self_items, g_citems + n0, g_self_n * sizeof *g_self_items);
+    uint32_t base = g_self_items[0].palette; /* (one palette a mesh, the last in the batch) */
+    g_self_nb = g_npal - base;
+    if (g_self_nb > 128)
+        g_self_n = 0;
+    else
+        memcpy(g_self_pal, g_pal + 16 * (size_t)base, (size_t)g_self_nb * 64);
+}
+
+static void self_send(void) { d3d8_world_front() ? chars_send() : chars_flush(); }
+
+static void self_shadow(uint32_t model)
+{
+    if (!g_self_n)
+        return;
+    uint32_t tf = 0x80808080u;
+    d3d8_get_render_state(60, &tf);
+    self_send(); /* (what is recorded so far, into the target as it is) */
+    if (!(guest_thiscall(SELF_BEGIN, model + 0x48, 2, (uint32_t[]){ SELF_TEXTURES, tf }) & 0xff))
+        return; /* (too far for one, or no picture: the game draws none) */
+    float W[16], V[16], P[16], WV[16];
+    if (d3d8_get_transform(256, W) && d3d8_get_transform(2, V) && d3d8_get_transform(3, P))
+    {
+        if (g_npal + g_self_nb > g_cappal)
+            g_cappal = (g_npal + g_self_nb) * 2 + 1024, g_pal = (float*)realloc(g_pal, (size_t)g_cappal * 64);
+        memcpy(g_pal + 16 * (size_t)g_npal, g_self_pal, (size_t)g_self_nb * 64);
+        if (g_ncstates == g_capcstates)
+            g_capcstates = g_capcstates ? g_capcstates * 2 : 256,
+            g_cstates = (GfxCharState*)realloc(g_cstates, g_capcstates * sizeof *g_cstates);
+        GfxCharState* s = &g_cstates[g_ncstates];
+        memset(s, 0, sizeof *s);
+        mat_mul(WV, W, V);
+        mat_mul(s->wvp, WV, P);
+        memcpy(s->world, W, sizeof s->world);
+        s->fog[1] = 1.0f;
+        if (g_ncitems + g_self_n > g_capcitems)
+            g_capcitems = (g_ncitems + g_self_n) * 2,
+            g_citems = (GfxCharItem*)realloc(g_citems, g_capcitems * sizeof *g_citems);
+        for (uint32_t i = 0; i < g_self_n; ++i)
+        {
+            GfxCharItem* it = &g_citems[g_ncitems++];
+            *it = g_self_items[i];
+            it->palette = g_npal, it->state = g_ncstates, it->env = 0, it->env_tex = NULL;
+        }
+        g_npal += g_self_nb, ++g_ncstates;
+        g_cmask = 1;
+        chars_pending();
+        self_send();
+        g_cmask = 0;
+    }
+    guest_thiscall(SELF_END, model + 0x48, 1, (uint32_t[]){ 0 });
+}
+#endif
 
 static void mesh_draw(Guest* g)
 {
-    if (!g_on || g_flushing || g_chars_off)
+    if ((!g_on && !g_chars_only) || g_flushing || g_chars_off)
     {
         rt_orig_mesh_draw(g);
         return;
@@ -1292,16 +1530,64 @@ static void mesh_draw(Guest* g)
     uint32_t mgr = rd32(FFXI_SCENE_RES_MGR);
     uint32_t res = mgr && handle ? guest_thiscall(FFXI_SCENE_RES_GET, mgr, 1, (uint32_t[]){ handle }) : 0;
     ++g_ccount.meshes;
-    if (!chars_take(g, res, model))
+    ++g_taking;
+    uint32_t why0[8], sil0 = g_ccount.state_why[2];
+    memcpy(why0, g_ccount.why, sizeof why0);
+#if defined(HAVE_SELF)
+    uint32_t n0 = g_ncitems;
+    int self = rd8(FFXI_SCENE_SHADOW_MODE) == 1;
+    g_self_n = 0;
+#endif
+    int took = chars_take(g, res, model);
+#if defined(HAVE_SELF)
+    if (took && self)
+        self_keep(n0);
+#endif
+    --g_taking;
+    if (g_send_put_off)
+        g_send_put_off = 0, chars_send(); /* (a flush that came during the take, from the game's own calls in it) */
+    if (!took)
     {
         ++g_ccount.left;
+        /* FFXI_SILPROBE (with FFXI_D3D_WORKER=0): the state of the game's draws of a few of the ones left, by kind (the
+         * silhouette shadows, the environment-mapped), every 10 s up to 4 times each */
+        static int probe = -1, probed[2];
+        static uint32_t probe_at[2];
+        if (probe < 0)
+            probe = getenv("FFXI_SILPROBE") && *getenv("FFXI_SILPROBE") ? 1 : 0;
+        int pk = g_ccount.state_why[2] != sil0 ? 0 : g_ccount.why[3] != why0[3] ? 1 : -1;
+        if (probe && pk >= 0 && probed[pk] < 4 && g_frame_no - probe_at[pk] > 600)
+        {
+            probe_at[pk] = g_frame_no, ++probed[pk];
+            float W[16], V[16], P[16];
+            int x = d3d8_get_transform(256, W) && d3d8_get_transform(2, V) && d3d8_get_transform(3, P);
+            rt_log("[recomp] scene: probe, a mesh left to the game (%s), frame %u, model %08x, shadow mode %u, tint %08x; "
+                   "P %.3f %.3f %.3f %.3f / %.3f %.3f; V %.2f %.2f %.2f %.2f; W %.2f %.2f %.2f\n",
+                pk ? "environment-mapped" : "silhouette", g_frame_no, model, rd16(FFXI_SCENE_SHADOW_MODE),
+                rd32(FFXI_SCENE_TINT), x ? P[0] : 0, x ? P[5] : 0, x ? P[10] : 0, x ? P[11] : 0, x ? P[14] : 0, x ? P[15] : 0,
+                x ? V[12] : 0, x ? V[13] : 0, x ? V[14] : 0, x ? V[0] : 0, x ? W[12] : 0, x ? W[13] : 0, x ? W[14] : 0);
+            d3d8_probe_draws = 3;
+        }
+        uint64_t t0 = g_log ? rt_monotonic_ns() : 0;
         rt_orig_mesh_draw(g);
+        d3d8_probe_draws = 0;
+        if (t0)
+        {
+            int w = 0;
+            while (w < 7 && g_ccount.why[w] == why0[w])
+                ++w;
+            g_ccount.left_ns[w] += rt_monotonic_ns() - t0;
+        }
         return;
     }
+#if defined(HAVE_SELF)
+    if (self)
+        self_shadow(model);
+#endif
     rt_return(g, 0, 0x18);
 }
 
-static void chars_reset(void) { g_ncitems = g_nsoitems = g_ncstates = g_npal = 0; }
+static void chars_reset(void) { g_ncitems = g_nsoitems = g_ncstates = g_npal = g_ncenv = 0; }
 
 /* every character taken so far this frame, for the shadows: a frame has a batch for each run of the game's draws between
  * the scene renderer's (several in a crowd), and each batch's shadow layer is drawn from all of them, so a character
@@ -1336,6 +1622,7 @@ static void chars_shadow_frame(GfxCharFrame* out, const GfxCharFrame* f)
     *out = *f;
     out->palette = g_shpal, out->nbones = g_nshpal, out->state = g_shstates, out->nstate = g_nshstates;
     out->item = g_shitems, out->nitem = g_nshitems;
+    out->env = NULL, out->nenv = 0; /* (the shadow layer has no environment layer) */
 }
 
 static int chars_frame_of(GfxCharFrame* fp, const uint32_t vp[6], const uint32_t gvp[6])
@@ -1348,6 +1635,8 @@ static int chars_frame_of(GfxCharFrame* fp, const uint32_t vp[6], const uint32_t
     f.pixel[0] = gvp[2] ? 1.0f / (float)gvp[2] : 0.0f, f.pixel[1] = gvp[3] ? 1.0f / (float)gvp[3] : 0.0f;
     f.alpha_ref = 69.0f; /* the model state's ALPHAREF 0x45, GREATER */
     f.palette = g_pal, f.nbones = g_npal, f.state = g_cstates, f.nstate = g_ncstates, f.item = g_citems, f.nitem = g_ncitems;
+    f.env = g_cenv, f.nenv = g_ncenv;
+    f.mask = g_cmask;
     *fp = f;
     return 1;
 }
@@ -1367,7 +1656,157 @@ static void chars_frame(void)
         for (int c = 0; c < 3; ++c)
             g_wf[c] = rdf32(l + 4 + 4u * c) / 0.5f;
 }
+
+/* FFXI_SCENE_CHARS=1 with the scene renderer off (or a build without the zone's addresses): only the characters are
+ * taken, the game drawing everything else. Their batch is drawn at the next of the game's draws that isn't a character's
+ * (the world flush), into the game's targets as they are then, and with nothing of the zone renderer's effects. */
+
+static void chars_flush(void)
+{
+    if (!g_pending || g_flushing)
+        return;
+    g_pending = 0;
+    g_flushing = 1;
+    uint32_t vp[6], gvp[6];
+    GfxCharFrame cf;
+    if (d3d8_world_begin(vp, gvp) && chars_frame_of(&cf, vp, gvp) && cf.nitem)
+        gfx_chars_draw(&cf);
+    chars_reset();
+    g_flushing = 0;
+}
+
+/* With the worker on (d3d8_world_front): the batch from the game's thread, sent to the worker with its palette, states
+ * and items copied (d3d8_host_call), before the call after it (d3d8 calls this then); the worker resolves the items'
+ * index buffers and textures (their interfaces until then), the texture's part of each sampler, and the targets as they
+ * are at that point of the frame, and draws. */
+typedef struct CharsRec
+{
+    uint32_t nbones, nstate, nitem, nenv, mask, pad[3];
+} CharsRec;
+
+/* FFXI_SCENELOG: what the worker made of the batches (counted there, logged from the game's thread: a thread's stdio
+ * other than the main one's breaks it on the Switch) */
+static volatile uint32_t g_cr_batches, g_cr_items, g_cr_no_ib, g_cr_no_tex, g_cr_no_begin;
+static uint32_t g_cs_sends, g_cs_items;
+
+static void chars_run(const void* data)
+{
+    const CharsRec* h = (const CharsRec*)data;
+    const uint8_t* p = (const uint8_t*)(h + 1);
+    const float* pal = (const float*)p;
+    p += (size_t)h->nbones * 64;
+    const GfxCharState* st = (const GfxCharState*)p;
+    p += (size_t)h->nstate * sizeof *st;
+    GfxCharItem* it = (GfxCharItem*)(uintptr_t)p; /* (the record is the worker's to change) */
+    p += (size_t)h->nitem * sizeof *it;
+    const GfxCharEnv* env = (const GfxCharEnv*)p;
+    for (uint32_t i = 0; i < h->nitem; ++i)
+    {
+        uint32_t ib_iface = (uint32_t)(uintptr_t)it[i].ib, tex_iface = (uint32_t)(uintptr_t)it[i].tex, size = 0, isize = 2;
+        it[i].ib = d3d8_world_ibuf(ib_iface, &size, &isize);
+        it[i].tex = d3d8_world_texture(tex_iface);
+        d3d8_world_sampler_fix(tex_iface, &it[i].samp);
+        g_cr_no_ib += !it[i].ib, g_cr_no_tex += !it[i].tex;
+        if (it[i].env)
+        {
+            uint32_t env_iface = (uint32_t)(uintptr_t)it[i].env_tex;
+            it[i].env_tex = d3d8_world_texture_any(env_iface);
+            d3d8_world_sampler_fix(env_iface, &it[i].env_samp);
+        }
+    }
+    g_cr_batches++, g_cr_items += h->nitem;
+    uint32_t vp[6], gvp[6];
+    if (!d3d8_world_begin(vp, gvp))
+    {
+        g_cr_no_begin++;
+        return;
+    }
+    GfxCharFrame f;
+    memset(&f, 0, sizeof f);
+    memcpy(f.vp, vp, sizeof f.vp);
+    f.pixel[0] = gvp[2] ? 1.0f / (float)gvp[2] : 0.0f, f.pixel[1] = gvp[3] ? 1.0f / (float)gvp[3] : 0.0f;
+    f.alpha_ref = 69.0f; /* the model state's ALPHAREF 0x45, GREATER (chars_frame_of's) */
+    f.palette = pal, f.nbones = h->nbones, f.state = st, f.nstate = h->nstate, f.item = it, f.nitem = h->nitem;
+    f.env = env, f.nenv = h->nenv, f.mask = h->mask;
+    gfx_chars_draw(&f);
+}
+
+static void chars_send(void)
+{
+    if (g_taking)
+    {
+        g_send_put_off = 1;
+        return;
+    }
+    if (!g_pending || g_flushing)
+        return;
+    g_pending = 0;
+    if (g_ncitems && g_npal)
+    {
+        static uint8_t* buf;
+        static size_t cap;
+        size_t n = sizeof(CharsRec) + (size_t)g_npal * 64 + (size_t)g_ncstates * sizeof *g_cstates +
+            (size_t)g_ncitems * sizeof *g_citems + (size_t)g_ncenv * sizeof *g_cenv;
+        uint8_t* to = (uint8_t*)d3d8_host_call_begin(chars_run, (uint32_t)n);
+        if (!to && n > cap)
+            cap = n * 2, buf = (uint8_t*)realloc(buf, cap);
+        CharsRec* h = (CharsRec*)(to ? to : buf);
+        h->nbones = g_npal, h->nstate = g_ncstates, h->nitem = g_ncitems, h->nenv = g_ncenv, h->mask = g_cmask;
+        uint8_t* p = (uint8_t*)(h + 1);
+        memcpy(p, g_pal, (size_t)g_npal * 64), p += (size_t)g_npal * 64;
+        memcpy(p, g_cstates, (size_t)g_ncstates * sizeof *g_cstates), p += (size_t)g_ncstates * sizeof *g_cstates;
+        memcpy(p, g_citems, (size_t)g_ncitems * sizeof *g_citems), p += (size_t)g_ncitems * sizeof *g_citems;
+        if (g_ncenv)
+            memcpy(p, g_cenv, (size_t)g_ncenv * sizeof *g_cenv);
+        if (to)
+            d3d8_host_call_end();
+        else
+            d3d8_host_call(chars_run, buf, (uint32_t)n);
+        g_cs_sends++, g_cs_items += g_ncitems;
+    }
+    chars_reset();
+}
+
+/* a frame of the characters alone (scene_frame's) */
+static void chars_only_frame(void)
+{
+    if (g_pending)
+        d3d8_world_front() ? chars_send() : chars_flush();
+    ++g_frame_no; /* (scene_frame's own, which returns before it here: the per-frame caches in chars_take need it) */
+    chars_reset();
+#if defined(FFXI_SCENE_CHAR_DRAW) && defined(FFXI_SCENE_CHAR_DRAW_END)
+    /* the game's own character draws (the meshes left to it) don't end the batch: it is drawn after them */
+    d3d8_world_ranges(0, 0, FFXI_SCENE_CHAR_DRAW, FFXI_SCENE_CHAR_DRAW_END, 0);
+#endif
+    chars_frame();
+    static uint32_t frames;
+    if (g_log && ++frames >= 120)
+    {
+        rt_log("[recomp] scene: characters alone, %u frames: %.0f mesh draws taken a frame, %.0f left to the game (kind %u, "
+               "buffers %u, state %u, stream %u, vb %u, uv %u, ib %u, palette %u), %.0f draw items a frame, %u meshes built, "
+               "%.1f a frame with their environment layer\n",
+            frames, (double)(g_ccount.meshes - g_ccount.left) / frames, (double)g_ccount.left / frames, g_ccount.why[0],
+            g_ccount.why[1], g_ccount.why[2], g_ccount.why[3], g_ccount.why[4], g_ccount.why[5], g_ccount.why[6],
+            g_ccount.why[7], (double)g_ccount.items / frames, g_ccount.built, (double)g_ccount.env_meshes / frames);
+        rt_log("[recomp] scene: characters left to the game, its draws in ms a frame by why: kind %.2f, buffers %.2f "
+               "(no buffer %u, not skinned %u, no index buffer %u), state %.2f (fading %u, shine %u, silhouettes %u), "
+               "stream %.2f, vb %.2f, uv %.2f, ib %.2f, palette %.2f\n",
+            g_ccount.left_ns[0] * 1e-6 / frames, g_ccount.left_ns[1] * 1e-6 / frames, g_ccount.buf_why[0], g_ccount.buf_why[1],
+            g_ccount.buf_why[2], g_ccount.left_ns[2] * 1e-6 / frames, g_ccount.state_why[0], g_ccount.state_why[1],
+            g_ccount.state_why[2], g_ccount.left_ns[3] * 1e-6 / frames, g_ccount.left_ns[4] * 1e-6 / frames,
+            g_ccount.left_ns[5] * 1e-6 / frames, g_ccount.left_ns[6] * 1e-6 / frames, g_ccount.left_ns[7] * 1e-6 / frames);
+        if (d3d8_world_front())
+            rt_log("[recomp] scene: characters sent to the worker: %.1f batches a frame, %.0f items; it ran %.1f batches, %.0f "
+                   "items, of them %.1f without their index buffer, %.1f without their texture; %u batches with no target\n",
+                (double)g_cs_sends / 120, (double)g_cs_items / 120, (double)g_cr_batches / 120, (double)g_cr_items / 120,
+                (double)g_cr_no_ib / 120, (double)g_cr_no_tex / 120, g_cr_no_begin);
+        g_cs_sends = g_cs_items = 0, g_cr_batches = g_cr_items = g_cr_no_ib = g_cr_no_tex = g_cr_no_begin = 0;
+        memset(&g_ccount, 0, sizeof g_ccount);
+        frames = 0;
+    }
+}
 #endif /* characters */
+#ifdef HAVE_SCENE
 
 #ifdef FFXI_HOOK_FX_DRAW
 extern GuestFn rt_hook_fx_draw;
@@ -1388,19 +1827,54 @@ uint32_t scene_zone_pick(uint32_t inst, uint32_t model, uint32_t lights, int mov
 }
 #endif /* HAVE_SCENE */
 
+#if defined(HAVE_SCENE) || defined(HAVE_CHARS)
+/* the world flush (d3d8_set_world_flush): the scene renderer's batch, or the characters' alone */
+static void world_flush(void)
+{
+#ifdef HAVE_SCENE
+#ifdef HAVE_CHARS
+    if (g_on || !g_chars_only)
+#endif
+    {
+        flush();
+        return;
+    }
+#endif
+#ifdef HAVE_CHARS
+    chars_flush();
+#endif
+}
+#endif
+
 void scene_setup(void)
 {
     const char* log = getenv("FFXI_SCENELOG");
     g_log = log && log[0] && log[0] != '0';
-#ifdef HAVE_SCENE
-    g_have = 1;
-    g_scratch = gheap_alloc(0x200, 1);
-    d3d8_set_world_flush(flush);
 #ifdef HAVE_CHARS
-    rt_wrap_mesh_draw = mesh_draw;
     const char* ch = getenv("FFXI_SCENE_CHARS");
     g_chars_off = ch && ch[0] == '0';
+    g_chars_only = ch && ch[0] == '1';
 #endif
+#ifdef HAVE_SCENE
+    g_have = 1;
+#endif
+#if defined(HAVE_CHARS) && !defined(HAVE_SCENE)
+    if (g_chars_only)
+#endif
+#if defined(HAVE_SCENE) || defined(HAVE_CHARS)
+    {
+        g_scratch = gheap_alloc(0x200, 1);
+        d3d8_set_world_flush(world_flush);
+#ifdef HAVE_CHARS
+        rt_wrap_mesh_draw = mesh_draw;
+        if (g_chars_only) /* (with the worker on, sent from the game's thread: chars_send) */
+            d3d8_set_world_front_flush(chars_send);
+        if (g_chars_only)
+            rt_log("[recomp] scene: the characters drawn by the scene renderer (FFXI_SCENE_CHARS=1), the zone by the game\n");
+#endif
+    }
+#endif
+#ifdef HAVE_SCENE
 #ifdef FFXI_HOOK_FX_DRAW
     if (g_log)
         rt_hook_fx_draw = fx_draw;
@@ -1413,6 +1887,29 @@ void scene_setup(void)
 
 void scene_frame(void)
 {
+#ifdef HAVE_CHARS
+#ifdef HAVE_SCENE
+    if (g_chars_only && gfx_fx_get("scene") < 0.5f)
+    {
+        if (g_on)
+        {
+            if (g_pending)
+                flush();
+            rt_log("[recomp] scene: the zone drawn by the game\n");
+            g_on = 0;
+        }
+        g_npicks = 0, g_opaque.n = g_blend.n = g_late.n = 0;
+        chars_only_frame();
+        return;
+    }
+#else
+    if (g_chars_only)
+    {
+        chars_only_frame();
+        return;
+    }
+#endif
+#endif
 #ifdef HAVE_SCENE
     if (g_pending)
         flush(); /* (d3d8 flushes before Present; a frame that never drew after its walk) */

@@ -407,6 +407,12 @@ static void match_case(char* path)
 
 void vfs_match_case(char* host_path)
 {
+#if defined(__SWITCH__)
+    /* the SD card's FAT/exFAT finds a name in any case, as Windows does: nothing to match, and each
+     * stat here is a trip to the card (about a third of a file's 6.7 ms open) */
+    (void)host_path;
+    return;
+#endif
     if (plat_path_sep != '\\')
         match_case(host_path);
 }

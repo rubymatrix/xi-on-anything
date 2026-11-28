@@ -43,6 +43,14 @@ static DWORD WINAPI thread_entry(LPVOID p)
     return 0;
 }
 
+int plat_thread_start(void (*fn)(void*), void* arg);
+int plat_thread_start_core(void (*fn)(void*), void* arg, int core)
+{
+    (void)core;
+    return plat_thread_start(fn, arg);
+}
+int plat_thread_start_render(void (*fn)(void*), void* arg) { return plat_thread_start(fn, arg); }
+
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
     ThreadStart* s = (ThreadStart*)malloc(sizeof *s);
@@ -63,6 +71,9 @@ int plat_thread_start(void (*fn)(void*), void* arg)
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
+
+void plat_sleep_ms(uint32_t ms);
+void plat_sleep_us(uint32_t us) { plat_sleep_ms((us + 999u) / 1000u); }
 
 /* Sleep rounds up to the system timer's tick: 15.6 ms unless something raised the resolution (SDL
  * does, on the desktop; the UWP build has no SDL). The game's frame limiter sleeps in short steps, so

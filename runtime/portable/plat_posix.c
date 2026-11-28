@@ -312,12 +312,53 @@ typedef struct NxWorker
     void (*fn)(void*);
     void* arg;
     s32 prio;
+    int core;
     CondVar cv;
     volatile uint32_t started;
+    void* stack;
+    int pooled;
 } NxWorker;
+/* The pool's idle threads kept for the next job; one more ends when its job does, and reap frees its Thread and
+ * stack (8 MB, taken from the heap, all of it memory) at the next start. The pool had grown to 28 in a long session,
+ * 18 of them idle: 144 MB held for nothing (heap_sites.c found it) */
+#define POOL_KEEP 6u
 static Mutex g_pool_lock;
 static NxWorker* g_idle;
+static NxWorker* g_dead; /* ended, their Thread not yet closed */
 static uint32_t g_workers, g_idle_n;
+
+/* the jobs the threads were given, in order (g_pool_lock): plat_thread_list, for the main thread to print */
+#define NX_TLOG 48
+static struct
+{
+    void (*fn)(void*);
+    int core, prio;
+} g_tlog[NX_TLOG];
+static uint32_t g_tlog_n;
+static void tlog(void (*fn)(void*), int core, int prio)
+{
+    if (g_tlog_n < NX_TLOG)
+        g_tlog[g_tlog_n].fn = fn, g_tlog[g_tlog_n].core = core, g_tlog[g_tlog_n].prio = prio;
+    __atomic_store_n(&g_tlog_n, g_tlog_n + 1, __ATOMIC_RELEASE);
+}
+uint32_t plat_thread_list(char* out, size_t n)
+{
+    extern void _start(void); /* the .nro's base: the jobs as offsets, for aarch64-none-elf-nm of the .elf */
+    mutexLock(&g_pool_lock);
+    uint32_t count = g_tlog_n;
+    size_t at = 0;
+    out[0] = 0;
+    for (uint32_t i = 0; i < count && i < NX_TLOG && at + 1 < n; ++i)
+    {
+        int w = snprintf(out + at, n - at, "%s0x%lx core %d prio 0x%x", i ? "; " : "",
+            (unsigned long)((uintptr_t)g_tlog[i].fn - (uintptr_t)_start), g_tlog[i].core, g_tlog[i].prio);
+        if (w < 0)
+            break;
+        at += (size_t)w;
+    }
+    mutexUnlock(&g_pool_lock);
+    return count;
+}
 
 static void worker_main(void* p)
 {
@@ -330,6 +371,14 @@ static void worker_main(void* p)
         svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)w->prio); /* a job may have raised it (sdl_nx's audio) */
         mutexLock(&g_pool_lock);
         w->fn = NULL;
+        if (w->pooled == 1 && g_idle_n >= POOL_KEEP)
+        {
+            w->next = g_dead;
+            g_dead = w;
+            g_workers--;
+            mutexUnlock(&g_pool_lock);
+            return; /* (libnx's entry ends the thread) */
+        }
         w->next = g_idle;
         g_idle = w;
         g_idle_n++;
@@ -347,27 +396,98 @@ void plat_thread_counts(uint32_t* made, uint32_t* idle)
 }
 #endif
 
+#if defined(__SWITCH__)
+static int nx_thread_new(void (*fn)(void*), void* arg, int core, int pooled);
+#endif
+static int plat_thread_start_posix(void (*fn)(void*), void* arg);
+
+/* a thread that never ends, on a core of its own choosing where the platform lets it (the Switch: 0-2) */
+int plat_thread_start_core(void (*fn)(void*), void* arg, int core)
+{
+#if defined(__SWITCH__)
+    mutexLock(&g_pool_lock);
+    return nx_thread_new(fn, arg, core, 0);
+#else
+    (void)core;
+    return plat_thread_start(fn, arg);
+#endif
+}
+
+/* the render thread (gfx_queue.c): one that never ends, on the Switch on core 1 at the main thread's priority, the
+ * core's only thread (the pool's threads go to core 2: nx_thread_new) */
+int plat_thread_start_render(void (*fn)(void*), void* arg)
+{
+#if defined(__SWITCH__)
+    mutexLock(&g_pool_lock);
+    return nx_thread_new(fn, arg, 1, 2);
+#else
+    return plat_thread_start(fn, arg);
+#endif
+}
+
+#if defined(__SWITCH__)
+/* (g_pool_lock held) the threads that ended: each has, or is about to (it let go of the lock last) */
+static void reap(void)
+{
+    while (g_dead)
+    {
+        NxWorker* d = g_dead;
+        g_dead = d->next;
+        threadWaitForExit(&d->t);
+        threadClose(&d->t);
+        free(d->stack);
+        free(d);
+    }
+}
+#endif
+
 int plat_thread_start(void (*fn)(void*), void* arg)
 {
 #if defined(__SWITCH__)
     mutexLock(&g_pool_lock);
+    reap();
     NxWorker* w = g_idle;
     if (w)
     {
         g_idle = w->next;
         g_idle_n--;
         w->fn = fn, w->arg = arg;
+        tlog(fn, w->core, w->prio);
         condvarWakeOne(&w->cv);
         mutexUnlock(&g_pool_lock);
         return 1;
     }
+    return nx_thread_new(fn, arg, -1, 1);
+#else
+    return plat_thread_start_posix(fn, arg);
+#endif
+}
+
+#if defined(__SWITCH__)
+/* (called with g_pool_lock held; unlocks it) core -1: the pool's choice. pooled: 1 the pool's (main's priority, back
+ * to the pool when its job ends), 0 one of its own a step below, 2 one of its own at the main thread's priority */
+static int nx_thread_new(void (*fn)(void*), void* arg, int core_want, int pooled)
+{
+    NxWorker* w;
     /* Horizon doesn't share a core between threads of one priority: a thread runs until it waits. The
-     * application's main thread (the game's) has core 0; the threads made here take cores 1 and 2 in
-     * turn - the first, the render thread (gfx_queue.c), core 1 - at the main thread's priority. libnx's
-     * pthread_create can't choose a core. A reused thread keeps its core. */
-    int core = 1 + (int)(g_workers % 2);
+     * application's main thread (the game's) has core 0, the render thread core 1 (plat_thread_start_render), and
+     * the pool's threads core 2 - a game thread on core 1 took it whenever the render thread waited for its next
+     * batch, and kept it until it waited itself. FFXI_SWITCH_RENDER_CORE=0: the pool takes cores 1 and 2 in turn,
+     * as before. libnx's pthread_create can't choose a core. A reused thread keeps its core. */
+    static int alone = -1;
+    if (alone < 0)
+    {
+        const char* e = getenv("FFXI_SWITCH_RENDER_CORE");
+        alone = !(e && e[0] == '0');
+    }
+    int core = core_want >= 0 ? core_want : alone ? 2 : 1 + (int)(g_workers % 2);
     s32 prio = 0x2C;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    /* one of its own core's (plat_thread_start_core: the d3d8 worker) a step below the game's threads: on a core it
+     * shares with them it would otherwise run until it waits, while one of them with a ticket for the guest lock
+     * couldn't run - and the game's main thread waited behind that ticket (8% of its time) */
+    if (pooled == 0 && prio < 0x3F)
+        prio += 1;
     /* the stack page-aligned and whole pages (libnx carves the TLS and reent out of its top) */
     const size_t stack_sz = 8u << 20; /* translated frames are large */
     void* stack = aligned_alloc(0x1000, stack_sz);
@@ -379,7 +499,7 @@ int plat_thread_start(void (*fn)(void*), void* arg)
         mutexUnlock(&g_pool_lock);
         return 0;
     }
-    w->fn = fn, w->arg = arg, w->prio = prio;
+    w->fn = fn, w->arg = arg, w->prio = prio, w->core = core, w->stack = stack, w->pooled = pooled;
     condvarInit(&w->cv);
     if (R_FAILED(threadCreate(&w->t, worker_main, w, stack, stack_sz, prio, core)) || R_FAILED(threadStart(&w->t)))
     {
@@ -388,13 +508,19 @@ int plat_thread_start(void (*fn)(void*), void* arg)
         mutexUnlock(&g_pool_lock);
         return 0;
     }
-    g_workers++;
+    if (pooled == 1)
+        g_workers++;
+    tlog(fn, core, prio);
     mutexUnlock(&g_pool_lock);
     /* until it has started (as libnx's pthread_create waits) */
     while (!__atomic_load_n(&w->started, __ATOMIC_SEQ_CST))
         svcWaitForAddress((void*)&w->started, ArbitrationType_WaitIfEqual, 0, 1000000000ll);
-    return 1; /* its Thread and stack are kept for the next start */
+    return 1; /* its Thread and stack are kept for the next start (up to POOL_KEEP idle) */
+}
 #endif
+
+static int plat_thread_start_posix(void (*fn)(void*), void* arg)
+{
     ThreadStart* s = (ThreadStart*)malloc(sizeof *s);
     if (!s)
         return 0;
@@ -419,6 +545,14 @@ int plat_thread_start(void (*fn)(void*), void* arg)
         return 0;
     }
     return 1;
+}
+
+void plat_sleep_us(uint32_t us)
+{
+    struct timespec t = { (time_t)(us / 1000000u), (long)(us % 1000000u) * 1000L };
+    while (nanosleep(&t, &t) != 0 && errno == EINTR)
+    {
+    }
 }
 
 void plat_sleep_ms(uint32_t ms)
@@ -509,6 +643,10 @@ uint64_t rt_monotonic_ns(void)
      * arguments and was most of the game thread's busy time (the guest lock's quantum, the game's
      * timers, the profile's per-call timing all read this) */
     return (uint64_t)(emscripten_get_now() * 1e6);
+#elif defined(__SWITCH__)
+    /* the CPU's counter (19.2 MHz) straight: newlib's clock_gettime around it was 4% of the game thread's
+     * time, the game reading its timers through this thousands of times a frame (docs/switch.md) */
+    return armTicksToNs(armGetSystemTick());
 #endif
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -598,10 +736,285 @@ struct PlatFile
 {
     int fd;
     HttpFile* h; /* the browser's served files */
+    uint32_t path_hash; /* (the Switch's read profile) */
+    uint64_t path64;    /* PLAT_CACHED on the Switch: read through the block cache (bc_read), by this */
 };
+
+#if defined(__SWITCH__)
+/* FFXI_PROFILE: what the game reads, on any thread (atomics; the game thread reports it, plat_read_report): reads,
+ * bytes and time by size, and of them those of a file, offset and size read before (what a cache would save) */
+static int g_read_prof = -1;
+static uint64_t g_rd_n[4], g_rd_bytes[4], g_rd_ns[4], g_rd_again_n, g_rd_again_bytes, g_rd_again_ns;
+static uint64_t g_rd_seen[1u << 16];
+
+static uint32_t path_hash(const char* p)
+{
+    uint32_t h = 2166136261u;
+    for (; *p; ++p)
+        h = (h ^ (uint8_t)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p)) * 16777619u;
+    return h;
+}
+
+static void read_note(const PlatFile* f, int64_t off, int64_t got, uint64_t ns)
+{
+    if (got <= 0)
+        return;
+    int b = got < 4096 ? 0 : got < 65536 ? 1 : got < 1048576 ? 2 : 3;
+    __atomic_fetch_add(&g_rd_n[b], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_rd_bytes[b], (uint64_t)got, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_rd_ns[b], ns, __ATOMIC_RELAXED);
+    uint64_t key = ((uint64_t)f->path_hash << 32) ^ ((uint64_t)off * 0x9E3779B97F4A7C15ull) ^ (uint64_t)got;
+    key |= 1;
+    uint64_t* slot = &g_rd_seen[(key ^ (key >> 29)) & 0xFFFFu];
+    if (__atomic_load_n(slot, __ATOMIC_RELAXED) == key)
+    {
+        __atomic_fetch_add(&g_rd_again_n, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_rd_again_bytes, (uint64_t)got, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_rd_again_ns, ns, __ATOMIC_RELAXED);
+    }
+    else
+        __atomic_store_n(slot, key, __ATOMIC_RELAXED);
+}
+
+/* FFXI_FILE_TRACE=1 (with FFXI_PROFILE): every open, read, write and close of the game's files, by any thread, into a
+ * ring the game's thread logs from each frame (plat_file_trace_next; another thread's stdio breaks the main one's):
+ * the time, the thread, the call, the file (its name's end), the offset and size, and how long it took. */
+typedef struct FtRec
+{
+    uint64_t at_us, us;
+    uint32_t hash, thread;
+    int64_t off, n;
+    char op; /* o open, r read, w write, c close */
+} FtRec;
+#define FT_N 8192u
+static int g_ft = -1;
+static FtRec g_ft_rec[FT_N];
+static uint32_t g_ft_head, g_ft_tail, g_ft_lost; /* head: next written (atomic); tail: next logged */
+static struct
+{
+    uint32_t hash;
+    char name[40];
+} g_ft_names[1024];
+
+static int ft_on(void)
+{
+    if (g_ft < 0)
+    {
+        const char* e = getenv("FFXI_FILE_TRACE");
+        g_ft = e && *e == '1' && g_read_prof > 0;
+    }
+    return g_ft;
+}
+
+static void ft_name(uint32_t hash, const char* path)
+{
+    size_t l = strlen(path);
+    const char* s = l > sizeof g_ft_names[0].name - 1 ? path + l - (sizeof g_ft_names[0].name - 1) : path;
+    uint32_t k = hash & 1023u;
+    g_ft_names[k].hash = hash;
+    snprintf(g_ft_names[k].name, sizeof g_ft_names[k].name, "%s", s);
+}
+
+static void ft_note(char op, uint32_t hash, int64_t off, int64_t n, uint64_t t0, uint64_t t1)
+{
+    uint32_t i = __atomic_fetch_add(&g_ft_head, 1, __ATOMIC_RELAXED);
+    if (i - __atomic_load_n(&g_ft_tail, __ATOMIC_RELAXED) >= FT_N)
+    {
+        __atomic_fetch_add(&g_ft_lost, 1, __ATOMIC_RELAXED);
+        return; /* (the slot is still to be logged: this one is lost, counted) */
+    }
+    FtRec* r = &g_ft_rec[i % FT_N];
+    static uint64_t start;
+    if (!start)
+        start = t0;
+    r->at_us = (t0 - start) / 1000u, r->us = (t1 - t0) / 1000u, r->hash = hash, r->thread = (uint32_t)threadGetCurHandle();
+    r->off = off, r->n = n;
+    __atomic_store_n(&r->op, op, __ATOMIC_RELEASE);
+}
+
+int plat_file_trace_next(char* out, size_t n)
+{
+    if (g_ft <= 0)
+        return 0;
+    uint32_t t = g_ft_tail;
+    if (t == __atomic_load_n(&g_ft_head, __ATOMIC_ACQUIRE))
+    {
+        uint32_t lost = __atomic_exchange_n(&g_ft_lost, 0, __ATOMIC_RELAXED);
+        if (!lost)
+            return 0;
+        snprintf(out, n, "[file] %u calls not traced (the ring full)", lost);
+        return 1;
+    }
+    FtRec* r = &g_ft_rec[t % FT_N];
+    char op = __atomic_load_n(&r->op, __ATOMIC_ACQUIRE);
+    if (!op)
+        return 0; /* (being written) */
+    uint32_t k = r->hash & 1023u;
+    const char* name = g_ft_names[k].hash == r->hash ? g_ft_names[k].name : "?";
+    snprintf(out, n, "[file] %llu.%03llu s thread %x %s %s at %lld, %lld bytes, %.2f ms",
+        (unsigned long long)(r->at_us / 1000000u), (unsigned long long)(r->at_us / 1000u % 1000u), r->thread,
+        op == 'o' ? "open" : op == 'r' ? "read" : op == 'w' ? "write" : "close", name, (long long)r->off, (long long)r->n,
+        (double)r->us * 1e-3);
+    r->op = 0;
+    __atomic_store_n(&g_ft_tail, t + 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
+int plat_read_report(char* out, size_t n)
+{
+    if (g_read_prof <= 0)
+        return 0;
+    static const char* names[4] = { "under 4 KB", "4-64 KB", "64 KB-1 MB", "1 MB and over" };
+    int o = snprintf(out, n, "reads:");
+    for (int b = 0; b < 4; ++b)
+    {
+        uint64_t c = __atomic_exchange_n(&g_rd_n[b], 0, __ATOMIC_RELAXED);
+        uint64_t by = __atomic_exchange_n(&g_rd_bytes[b], 0, __ATOMIC_RELAXED);
+        uint64_t ns = __atomic_exchange_n(&g_rd_ns[b], 0, __ATOMIC_RELAXED);
+        if (c && o < (int)n)
+            o += snprintf(out + o, n - (size_t)o, " %s %llu (%.1f MB, %.0f ms, %.2f ms each);", names[b],
+                (unsigned long long)c, (double)by / 1048576.0, (double)ns * 1e-6, (double)ns * 1e-6 / (double)c);
+    }
+    uint64_t an = __atomic_exchange_n(&g_rd_again_n, 0, __ATOMIC_RELAXED);
+    uint64_t ab = __atomic_exchange_n(&g_rd_again_bytes, 0, __ATOMIC_RELAXED);
+    uint64_t ans = __atomic_exchange_n(&g_rd_again_ns, 0, __ATOMIC_RELAXED);
+    if (o < (int)n)
+        snprintf(out + o, n - (size_t)o, " read before: %llu (%.1f MB, %.0f ms)", (unsigned long long)an,
+            (double)ab / 1048576.0, (double)ans * 1e-6);
+    return 1;
+}
+#endif
+
+#if defined(__SWITCH__)
+/* The game's DATs through a block cache (PLAT_CACHED: k32_io.c's read-only opens of them). On the Switch's card a read
+ * costs ~1 ms however small (a request to the file system service), and in a crowd the game reads 100-400 times in
+ * 10 s, under 64 KB mostly and 40-60% of them a file, offset and size read before. Reads under 256 KB go through 64 KB
+ * blocks, the last 32 MB of them kept (4-way sets, least recently used out); bigger ones go to the card as they are.
+ * The DATs are never written while the game runs (k32_io.c opens them so only read-only), so a block stays good. */
+#define BC_BLOCK 65536u
+#define BC_WAYS 4u
+#define BC_SETS 128u /* 512 blocks: 32 MB */
+#define BC_DIRECT (256u * 1024u)
+
+typedef struct BcBlock
+{
+    uint64_t path, block; /* path: the file's FNV-1a 64 (case folded); 0 empty */
+    uint32_t len;         /* < BC_BLOCK only for a file's last */
+    uint64_t used;
+    uint8_t* data;
+} BcBlock;
+
+static BcBlock g_bc[BC_SETS][BC_WAYS];
+static pthread_mutex_t g_bc_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_bc_tick;
+
+static uint64_t path_hash64(const char* p)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (; *p; ++p)
+        h = (h ^ (uint8_t)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p)) * 1099511628211ull;
+    return h ? h : 1;
+}
+
+/* a block's bytes into out (at most len), from the cache or the card; its length, or -1 */
+static int64_t bc_block(PlatFile* f, uint64_t block, uint8_t* out)
+{
+    unsigned set = (unsigned)((f->path64 ^ (block * 0x9E3779B97F4A7C15ull)) >> 7) % BC_SETS;
+    pthread_mutex_lock(&g_bc_mu);
+    for (unsigned w = 0; w < BC_WAYS; ++w)
+    {
+        BcBlock* b = &g_bc[set][w];
+        if (b->path == f->path64 && b->block == block && b->data)
+        {
+            b->used = ++g_bc_tick;
+            uint32_t len = b->len;
+            memcpy(out, b->data, len);
+            pthread_mutex_unlock(&g_bc_mu);
+            return len;
+        }
+    }
+    pthread_mutex_unlock(&g_bc_mu);
+    /* a miss: from the card, outside the cache's lock */
+    ssize_t r;
+    if (lseek(f->fd, (off_t)(block * BC_BLOCK), SEEK_SET) < 0)
+        return -1;
+    do
+        r = read(f->fd, out, BC_BLOCK);
+    while (r < 0 && errno == EINTR);
+    if (r < 0)
+        return -1;
+    pthread_mutex_lock(&g_bc_mu);
+    BcBlock* victim = &g_bc[set][0];
+    for (unsigned w = 0; w < BC_WAYS; ++w)
+    {
+        BcBlock* b = &g_bc[set][w];
+        if (b->path == f->path64 && b->block == block)
+        {
+            victim = b; /* (another thread read it meanwhile) */
+            break;
+        }
+        if (!b->data || b->used < victim->used)
+            victim = b;
+    }
+    if (!victim->data)
+        victim->data = (uint8_t*)malloc(BC_BLOCK);
+    if (victim->data)
+    {
+        memcpy(victim->data, out, (size_t)r);
+        victim->path = f->path64, victim->block = block, victim->len = (uint32_t)r, victim->used = ++g_bc_tick;
+    }
+    pthread_mutex_unlock(&g_bc_mu);
+    return r;
+}
+
+/* a cached file's read at its position: through the blocks, the position then moved past what was read */
+static int64_t bc_read(PlatFile* f, void* buf, uint32_t n)
+{
+    off_t pos = lseek(f->fd, 0, SEEK_CUR);
+    if (pos < 0)
+        return -1;
+    if (n >= BC_DIRECT)
+    {
+        ssize_t r;
+        do
+            r = read(f->fd, buf, n);
+        while (r < 0 && errno == EINTR);
+        return r;
+    }
+    static __thread uint8_t* tmp;
+    if (!tmp && !(tmp = (uint8_t*)malloc(BC_BLOCK)))
+        return -1;
+    uint64_t done = 0;
+    while (done < n)
+    {
+        uint64_t at = (uint64_t)pos + done, block = at / BC_BLOCK, in = at % BC_BLOCK;
+        int64_t len = bc_block(f, block, tmp);
+        if (len < 0)
+        {
+            if (!done)
+                return -1;
+            break;
+        }
+        if ((uint64_t)len <= in)
+            break; /* the end of the file */
+        uint64_t take = (uint64_t)len - in;
+        if (take > n - done)
+            take = n - done;
+        memcpy((uint8_t*)buf + done, tmp + in, (size_t)take);
+        done += take;
+        if ((uint64_t)len < BC_BLOCK)
+            break;
+    }
+    lseek(f->fd, pos + (off_t)done, SEEK_SET);
+    return (int64_t)done;
+}
+#endif
 
 PlatFile* plat_file_open(const char* path, int flags)
 {
+#if defined(__SWITCH__)
+    uint64_t open_t0 = rt_monotonic_ns(); /* (FFXI_FILE_TRACE) */
+#endif
 #if defined(__EMSCRIPTEN__)
     if (HTTP(path))
     {
@@ -642,6 +1055,19 @@ PlatFile* plat_file_open(const char* path, int flags)
     }
     PlatFile* f = (PlatFile*)calloc(1, sizeof *f);
     f->fd = fd;
+#if defined(__SWITCH__)
+    if (g_read_prof < 0)
+    {
+        const char* e = getenv("FFXI_PROFILE");
+        g_read_prof = e && *e && *e != '0';
+    }
+    if (g_read_prof)
+        f->path_hash = path_hash(path);
+    if ((flags & PLAT_CACHED) && !(flags & PLAT_WRITE))
+        f->path64 = path_hash64(path);
+    if (g_read_prof > 0 && ft_on())
+        ft_name(f->path_hash, path), ft_note('o', f->path_hash, (flags & PLAT_WRITE) ? 1 : 0, 0, open_t0, rt_monotonic_ns());
+#endif
     t_error = PLAT_OK;
     return f;
 }
@@ -658,11 +1084,29 @@ int64_t plat_file_read(PlatFile* f, void* buf, uint32_t n)
     }
 #endif
     ssize_t r;
-    do
-        r = read(f->fd, buf, n);
-    while (r < 0 && errno == EINTR);
+#if defined(__SWITCH__)
+    int64_t off = g_read_prof > 0 ? (int64_t)lseek(f->fd, 0, SEEK_CUR) : 0;
+    uint64_t t0 = g_read_prof > 0 ? rt_monotonic_ns() : 0;
+#endif
+#if defined(__SWITCH__)
+    if (f->path64)
+        r = (ssize_t)bc_read(f, buf, n);
+    else
+#endif
+        do
+            r = read(f->fd, buf, n);
+        while (r < 0 && errno == EINTR);
     if (r < 0)
         set_error(NULL);
+#if defined(__SWITCH__)
+    if (g_read_prof > 0)
+    {
+        uint64_t t1 = rt_monotonic_ns();
+        read_note(f, off, r, t1 - t0);
+        if (ft_on())
+            ft_note('r', f->path_hash, off, r, t0, t1);
+    }
+#endif
     return r;
 }
 
@@ -674,11 +1118,19 @@ int64_t plat_file_write(PlatFile* f, const void* buf, uint32_t n)
         return -1;
     }
     ssize_t r;
+#if defined(__SWITCH__)
+    uint64_t t0 = g_read_prof > 0 && ft_on() ? rt_monotonic_ns() : 0;
+    int64_t off = t0 ? (int64_t)lseek(f->fd, 0, SEEK_CUR) : 0;
+#endif
     do
         r = write(f->fd, buf, n);
     while (r < 0 && errno == EINTR);
     if (r < 0)
         set_error(NULL);
+#if defined(__SWITCH__)
+    if (t0)
+        ft_note('w', f->path_hash, off, r, t0, rt_monotonic_ns());
+#endif
     return r;
 }
 
@@ -721,12 +1173,19 @@ int plat_file_flush(PlatFile* f)
 
 void plat_file_close(PlatFile* f)
 {
+#if defined(__SWITCH__)
+    uint64_t t0 = g_read_prof > 0 && ft_on() ? rt_monotonic_ns() : 0;
+#endif
 #if defined(__EMSCRIPTEN__)
     if (f->h)
         httpfs_close(f->h);
     else
 #endif
         close(f->fd);
+#if defined(__SWITCH__)
+    if (t0)
+        ft_note('c', f->path_hash, 0, 0, t0, rt_monotonic_ns());
+#endif
     free(f);
 }
 

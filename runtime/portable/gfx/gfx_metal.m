@@ -6232,6 +6232,7 @@ static id<MTLRenderPipelineState> chars_pipeline(int shadow, int gi, int ao, int
     return p;
 }
 
+int gfx_chars_env(void) { return 0; } /* (its environment-mapped meshes the game's) */
 int gfx_chars_draw(const GfxCharFrame* f)
 {
     if (!g_dev || !f->nitem || !f->nbones || !chars_init())

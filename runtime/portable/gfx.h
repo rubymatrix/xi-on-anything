@@ -148,6 +148,8 @@ typedef struct GfxLight
     float spot[4]; /* cos(theta / 2), cos(phi / 2) */
 } GfxLight;
 
+enum { GFX_UV_TEXM, GFX_UV_VSC, GFX_UV_PSC, GFX_NUV }; /* GfxDraw.u_ver's blocks of GfxU */
+
 /* The values the generated functions read: one buffer for both stages. Layout is mirrored in
  * gfx_msl.c's MSL struct; keep them together. */
 typedef struct GfxU
@@ -189,6 +191,10 @@ typedef struct GfxDraw
     const uint32_t* ps_tokens;
     uint32_t vs_token_count, ps_token_count; /* their lengths in words, END included; 0 unknown (the
                                               * render worker then draws directly) */
+    /* the version of what u's texture matrices, vertex and pixel shader constants hold (GFX_UV_*): d3d8.c gives
+     * each content of them a number of its own, 0 for one not known; the queue then compares and copies a block
+     * only when its version isn't the one the render thread already has */
+    uint32_t u_ver[GFX_NUV];
     GfxU u;
     GfxTex* tex[8];
     GfxSampler samp[8];
@@ -419,7 +425,19 @@ typedef struct GfxCharItem
     uint32_t mirror;    /* the mirrored copy: mirror bones and axes */
     GfxTex* tex;
     GfxSampler samp;
+    uint32_t env;       /* the environment-mapped layer (gfx_chars_env): 1 + its GfxCharFrame.env, 0 none */
+    GfxTex* env_tex;    /* ... stage 1's texture (2D or cube) */
+    GfxSampler env_samp;
 } GfxCharItem;
+/* An environment-mapped material's stage 1, as the game sets it: the camera-space normal (kind 1) or reflection
+ * vector (kind 2) through D3DTS_TEXTURE1 (three coordinates), MODULATEALPHA_ADDCOLOR over stage 0 (the colour plus
+ * its alpha times the texture's), the alphas added; the texture factor is the state's (no MODULATE2X by it here) */
+typedef struct GfxCharEnv
+{
+    float wv[16];       /* world x view (D3D row-major) */
+    float tex[16];      /* D3DTS_TEXTURE1 */
+    float kind[4];      /* 1 normal, 2 reflection */
+} GfxCharEnv;
 typedef struct GfxCharFrame
 {
     uint32_t vp[6];
@@ -431,9 +449,14 @@ typedef struct GfxCharFrame
     uint32_t nstate;
     const GfxCharItem* item;
     uint32_t nitem;
+    const GfxCharEnv* env; /* items' env - 1 (an index past nenv: the item drawn without it) */
+    uint32_t nenv;
+    uint32_t mask;         /* flat 0x80ffffff, no depth: an actor's shadow picture (gfx_deko3d.c alone) */
 } GfxCharFrame;
 /* Draws a batch of characters into the current targets; 0 when it drew nothing. */
 int gfx_chars_draw(const GfxCharFrame* f);
+/* 1 when gfx_chars_draw draws the items' environment-mapped layer (GfxCharItem.env); 0 and the game draws those. */
+int gfx_chars_env(void);
 /* The lamps lit this frame (the light pool's point lights, world space), for the clustered lamps (scene_lamps): set
  * once a frame before its batches; n 0 none. */
 void gfx_lamps(const GfxWorldLight* l, uint32_t n);
@@ -521,6 +544,9 @@ int gfx_rt_supported(void);
 
 /* The frame is done: the back buffer goes to the window. */
 void gfx_present(GfxTex* backbuffer);
+#if defined(__SWITCH__)
+void gfx_nx_swap_interval(int n); /* gfx_gl.c: vblanks per frame, 1 or 2 (the render thread's) */
+#endif
 /* Metal and Android's C++ Vulkan (the screen's safe area, host/display_fit.c): the rectangle of the
  * drawable, in its pixels, the back buffer is presented into, the rest black; w 0 for all of it
  * (Android: the letterbox present_rect.h makes). */
@@ -574,6 +600,10 @@ void gfx_pass_timing(int on);
 int gfx_pass_report(char (*out)[96], int max);
 uint64_t gfx_now_ns(void);
 void gfx_prof_front(uint64_t ns);
+/* The render thread's time by kind of recorded call (gfx_queue.c, FFXI_PROFILE on the Switch; gfx_gl.c alone has it
+ * and logs it under its frame line). The present is timed by the back end itself. */
+enum { GFX_RT_DRAW, GFX_RT_CHARS, GFX_RT_CLEAR, GFX_RT_UPLOAD, GFX_RT_COPY, GFX_RT_READ, GFX_RT_CALL, GFX_RT_OTHER, GFX_RT_N };
+void gfx_prof_rt(int kind, uint64_t ns);
 /* A draw dropped, and why (the profile line counts each reason). */
 enum
 {

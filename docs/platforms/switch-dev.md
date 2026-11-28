@@ -7,20 +7,26 @@ what has been verified, and what is left.
 
 | Path | What it is | Modeled on |
 | --- | --- | --- |
-| `tools/build_switch.py` | `plat-test`, `gfx-test`, `host`, `setup`, `run`, `deploy`, `logs` | `build_android.py`, `xbox.py` |
+| `tools/build_switch.py` | `plat-test`, `host`, `setup`, `install` (host then setup, the launcher's entry, as `build_android.py install`; `FFXI_PROGRESS=1` prints `@phase`/`@progress` as `build_posix.py`; `runtime.json` stamped beside the `.nro` on the card), `run`, `deploy`, `logs` | `build_android.py`, `xbox.py` |
+| `tools/setup_switch.py`, `setup_switch_gui.py`, `platforms/switch/setup-switch.bat`/`.sh` | the player's one command (the GUI, tkinter, runs it with the window's answers and installs what the PC lacks): checks the PC, then runs `prepare.py`, `frame_sites.py` (when the build has none), `build_switch.py host` (its `@progress` lines, `FFXI_PROGRESS=1`, drive the bar) and `build_switch.setup()`; answers kept in `build/switch/setup.json`, output in `build/switch/setup.log` | `tools/setup.py` (the Mac's) |
 | `tools/switch_toolchain.py` | finds devkitPro (and its msys2 on Windows) and the emulator | `android_toolchain.py` |
 | `platforms/switch/switch_mtp.ps1` | `setup --mtp`: copies to a console over USB MTP (DBI's MTP responder), on Windows | — |
 | `platforms/switch/switch_main.c` | libnx entry: sockets, the screen's size, `run.args`, the log; calls `xi_host_main` | `platforms/ios/ios_main.c` |
+| `platforms/switch/switch_settings.c` | the settings app (`build_switch.py settings`, `xi-on-anything-settings.nro`, its own folder on the card): libnx's text console over `data/settings.reg` (resolution, interface, background, as modern.c's `save_display`) and `run.args` (the other lines kept); + starts the game (`envSetNextLoad`) | |
 | `platforms/switch/sdl_nx.c`, `nx_bridge.h` | the SDL3 calls the runtime makes, over libnx (HID, touch, swkbd, audout) | `sdl_web.c`, `sdl_uwp.c` |
 | `runtime/portable/plat_posix.c` (`__SWITCH__`) | memory, address waits, thread ids, time | the Emscripten branch |
 | `platforms/switch/tls_nx.c`, `platforms/switch/mbedtls_config.h` | mbedtls' clock and entropy | — |
 | `platforms/switch/app.json` | the application NPDM (for the forwarder) | hbloader's |
 | `platforms/switch/tests/switch_plat_test.c` | the platform layer's self-test, as its own `.nro` | — |
 | `runtime/portable/gfx/gfx_gl.c`, `gfx_gl_api.h` | graphics: OpenGL 4.3 core on Mesa's nouveau through EGL; also builds on the desktop (SDL3's GL context) for testing | `gfx_webgpu.c`, `gfx_vulkan.c` |
+| `runtime/portable/gfx/gfx_deko3d.c`, `dk_uam.c`, `dk_shaders/` | graphics on deko3d, the default (OpenGL with `XI_SWITCH_GFX=gl`, below) | `gfx_gl.c` |
+| `third_party/uam` | deko3d's shader compiler as a library for the console; its changes are in `XI_CHANGES.md` | devkitPro's uam 1.1.0 |
 | `platforms/switch/tests/switch_gfx_test.c` | `tests/gfx/gfx_test.c` on GL as its own `.nro` (`build_switch.py gfx-test`) | — |
 
-The translation is the desktop one (`generated/all`, `generated/ffxi`). The generated C is portable, and
-the Switch adds no wraps or hooks. Compile flags: `-D__SWITCH__ -DRT_GUEST_WINDOW -DFFXI_SWITCH
+The translation is the Switch's own (`generated/switch-all`, `generated/switch-ffxi`): the desktop one with the
+faster forms measured on the console turned on (`XI_TRANSLATE_FAST=1`, `recomp/x86c.py`: native hot loops and matrix
+products, x87 in fixed locals, registers kept across calls, ftol inline), which the other ports leave out. The
+generated C is portable, and the Switch adds no wraps or hooks. Compile flags: `-D__SWITCH__ -DRT_GUEST_WINDOW -DFFXI_SWITCH
 -DFFXI_GUEST_2GB`, libnx's `-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE`, GCC (devkitA64).
 The addon host is not built (`host/addons_none.c`), as in the browser build. Discord is off.
 
@@ -48,6 +54,45 @@ never waits keeps the others off its core. Finished threads are kept for reuse (
 FFXiMain starts a thread for every sound, and a Horizon thread that ends unjoined keeps its 8 MB stack and
 its place in the thread limit: without the pool, CreateThread failed after 73 sounds and later effects
 were silent. The `[audio]` line counts the pool (`threads N (M idle)`).
+
+## Graphics on deko3d
+
+`python tools/build_switch.py host` builds the game on deko3d, the default since 2026-11-26, with no Mesa in it, as
+`build/switch/xi-on-anything.nro`. `XI_SWITCH_GFX=gl` builds the OpenGL one instead, as `xi-on-anything-gl.nro`, for a
+folder of its own on the card (the homebrew menu shows one `.nro` a folder); it uses the same `sdmc:/switch/xi-on-anything`
+data. `XI_SWITCH_DK_DEBUG=1` links
+deko3d's debug library, which checks every call.
+
+- **Same shape as OpenGL's**: the render thread owns the device (`GFXQ_OWNED`), streams are buffer textures, and the
+  shaders are the generator's GL text in a dialect of its own (`gfx_dk_generate`). deko3d's conventions are D3D's, so
+  nothing is flipped or remapped. The scene effects, water, shadows and ray tracing are not drawn, as on OpenGL.
+- **Programs** are compiled by uam on a thread (75-160 ms each on the console) and kept in
+  `shader-cache/dk/<hash>.bin`; a draw whose program isn't ready is skipped. Change `CACHE_MAGIC` when uam's output
+  changes. `FFXI_DK_SYNC=1` waits for programs; `FFXI_DK_CACHE=<folder>` moves the cache.
+- **Two frames in flight**, each with its own commands, staging and ring. What a frame frees is reused once its fence
+  has passed.
+- **The log**: `[dk]` lines every 5 seconds (`FFXI_PROFILE=1`), and `[switch] heap:` every 30. The run before's log is
+  `host64.prev.log`.
+
+Bugs found in the libraries, worked around or fixed here:
+
+| Where | What | Here |
+| --- | --- | --- |
+| uam (Mesa 19's scheduler) | a block's last instruction that sets a dependency barrier stalled one clock, not two: the next block could read its result too early. In Mhaura, slivers of lamp light for single frames | `nv50_ir_emit_gm107.cpp`: two clocks |
+| deko3d, `dkCmdBufClear` | keeps only the newest of a list's 1 KB control chunks; the rest leak, ~3 KB a frame | taken back in `cbAlloc` (`ctl_reclaim`) |
+| deko3d, the copy engine | the first level's tile height isn't shrunk as the sampler shrinks it: images 6-8 rows (of blocks) tall came out wrong in their right part | a custom tile size at creation |
+| deko3d, `dkCmdBufCopyImage` | takes a compressed image's rectangle in blocks | converted in `gfx_copy` |
+
+Measured in Mhaura at 1020/307 MHz, uncapped, in scenes of 400-700 character draw items (2026-11-25; one short
+run each, the camera not the same, OpenGL's only 5 samples):
+
+| | OpenGL | deko3d |
+| --- | --- | --- |
+| fps | 32 | 38 |
+| GPU busy | 77% | 46% |
+| idle over those runs, cores 0 / 1 / 2 | 8 / 27 / 42% | 6 / 85 / 54% |
+
+The game's own thread (core 0) is the limit on both. Zcull and depth compression made no difference.
 
 ## Audio
 
@@ -158,6 +203,28 @@ loaded without error but drew some programs wrong (gfx_test's cull and depth che
 compiles when first drawn. The way past it is deko3d's precompiled shaders, or a switch-mesa with its disk
 cache.
 
+## Mesa 26: mesa-switch, with the disk cache (branch switch/mesa-cache)
+
+[mesa-switch](https://github.com/danfromtico/mesa-switch) (Mesa 26.2.4; Cemu-nx, PPSSPP-nx and dolphin-nx
+use it) has a Horizon GPU backend over libnx, Gallium NVC0 for GL, no libdrm_nouveau, and Mesa's disk cache
+on the Switch (`MESA_SHADER_CACHE_DIR`, else `$HOME/.mesa`, else `sdmc:/.mesa`). Built from source, GL only
+(no Rust), with its `build-opengl.sh` in MSYS2's own shell (`MSYSTEM=MSYS`; `pacman -S meson bison flex
+python-mako python-packaging python-yaml switch-zlib switch-libexpat`) and its MSYS2 cross file with the
+programs as MSYS paths (`/d/msys64/...`: MSYS's Meson reads `D:/...` as relative) and `C:/msys64` changed
+to where MSYS2 is. `XI_SWITCH_MESA=<DESTDIR>/opt/devkitpro/portlibs/switch` builds against it
+(`build_switch.py`: gfx_gl.c with its headers, its libraries ahead of portlibs'); the `.nro` is 46.5 MB
+(34.5 with switch-mesa). `switch_main.c` puts the cache in `sdmc:/switch/xi-on-anything/shader-cache`.
+Published as our build, `mesa-switch-26.2.4-0ff5207.zip` (12 MB, reproducible, its SHA-256 in `build_switch.py`) on
+the fork's release `switch-mesa-26.2.4`: `build_switch.py mesa` downloads and checks it into `build/switch/mesa/`,
+the setup runs it before the build (devkitPro's Mesa when it can't), and the build links it when it is there.
+It needs devkitPro's `switch-zlib` and `switch-libexpat`.
+
+- Ryubing: no display (the backend's first GPU mapping fails, `VA bind ... 0x195c`).
+- On a console (2026-11-18, 512x448, a 512 background, uncapped): the sign-in and the world as before, 44-54
+  fps. The first start wrote 436 KB of cache (`foz_cache.foz`, Fossilize's single file); a second start in
+  the same places added 24 KB, its first seconds' longest frame 165 ms (2468 the first time), the worst hitch
+  outside a zone load 223 ms (572), zone loads unchanged (~2.5 s: the game's files, not shaders).
+
 ## Found: the black screen at start was a miscompile
 
 The black screen at start (the main thread spinning in gfx_queue.c's `rec`, the log stopping after
@@ -171,33 +238,96 @@ Found with the object's disassembly and Ryubing's GDB stub: `enable_gdb_stub` in
 `aarch64-none-elf-gdb` with `add-symbol-file <elf> -o <module base>` from `monitor get info`. If the default
 port 55555 is taken (it can be on macOS), Ryubing crashes at start with `Address already in use`: pick another.
 
+## Performance (measured 2026-11-17, handheld, branch switch/perf)
+
+`FFXI_PROFILE=1` splits each frame (gfx_gl.c's line, handed to the game's thread to log; gfx_queue.c's render
+thread line; the API time). What it showed, in the world (about 1,200 draws a frame):
+
+- **The game's thread** (the recompiled game, plus ~4 ms of d3d8 recording) is 26 ms a frame at 1020 MHz: 38 fps
+  at best. At 1785 MHz (`FFXI_SWITCH_CPU`) it is 10-13 ms.
+- **A busy town** (2026-11-19, Windurst's crowds, 1,100-1,500 draws): game + d3d about 39 ms at 1224 MHz (sys-clk's
+  profile; 22-26 fps), 27-29 ms at 1785 (a steady 30, the adaptive cap's). Of the game thread's working time about
+  57% is the game's own code (spread thin; its hottest functions wait on its memory), 31% d3d8 and the queue's
+  recording, 12% the runtime. Storing only the registers that cross calls (regs_across_calls.py) and the constants'
+  versions (GfxDraw.u_ver) each gave under a millisecond.
+- **The render thread** is ~19 ms (GL ~15 of it), in parallel: not the limit at 1020 MHz, so deko3d would not
+  have helped then.
+- **The GPU** is the limit once the CPU is faster: a 2048x2048 background (Config's smallest) is 4.5 times the
+  handheld's pixels, and the swap waited 11 ms a frame (27 at stock clocks). At 1280x720 it waited 0.9 ms:
+  32 -> 41 fps at 1224/614 MHz. So the background follows the screen by default (host64.c, `FFXI_SWITCH_BG`).
+- **Zone changes** were 3.3-3.7 s. The CPU boost while loading (switch_main.c: a watcher turns on
+  `appletSetCpuBoostMode(FastLoad)` when no frame has come for 300 ms, off after 5 frames, as FastLoad also
+  holds the GPU at 76 MHz) makes them 2.5-2.7 s.
+- **The frame rate by default** (switch_main.c, when run.args has no `--fps-divisor`): uncapped when the build
+  has frame delta sites (`frame_supported()`), else 30. At 60 without the sites the world ran visibly slow on a
+  console, as the game counts its time in frames; 30 holds, so its time is right. With the sites (build
+  2025-12-26's, mapped 2026-11-17) uncapped kept the world's clock at 59-61 sixtieths a second while the
+  console drew 35-60 fps in handheld (2026-11-18), and played smoothly.
+- **Files**: an open was 6.7 ms (stat for the case, stat again, open, fstat: each a trip to the SD card). The
+  case match is skipped on the Switch (FAT finds any case), CreateFileA stats only for the dispositions that
+  report it, and read-only `.DAT`s are kept open once closed (k32_io.c, 32 at most): 2.5 ms an open.
+
+## The CRT filter
+
+`FFXI_CRT=1` (scanlines) or `2` (with an aperture grille), `FFXI_CRT_CURVE=1` (the glass's curve): the
+present (`gfx_gl.c`, `crt_present`) draws the back buffer through a shader of its own instead of the blit,
+compiled once at the first present (a blit again if it doesn't compile). A row's beam is a Gaussian, wider
+for a brighter row, mixed with the next row's; the grille is red, green and blue every 3 of the screen's
+columns. The lines' depth follows the screen's lines per row: none at one (a picture as tall as the
+screen), full at two, so they don't beat against the screen's rows; a picture of half the screen's height
+or less is shown at a whole multiple of its height (512x448 at 1024x896 docked), touches following
+(`nx_present_rect`). The settings app sets it. Checked in Ryubing on the sign-in screen, and on a console
+(2026-11-18, 512x448 with a 512 background, uncapped): about 47 fps in the world with CRT and the curve, 43
+without, two runs in different scenes - its cost is under the noise; the game's own thread sets the rate.
+
+## Back to the sign-in screen
+
+When the game ends by itself (a lost connection, its logout), `switch_main.c` restarts the application
+(`appletRestartProgram`) if it is the forwarder (the running application's NACP name is the `.nro`'s):
+the forwarder's hbloader then loads the `.nro` at the sign-in screen again. Not by loading the `.nro` again
+in the same process (`envSetNextLoad`): the game's threads (plat_posix.c's pool, the render thread) outlive
+`GameStart` and only the process's end stops them. Not after a close from HOME (`nx_exit_requested`),
+nor when the sign-in screen is left without a game (`xi_host_game_started`, host64.c), nor over a game held
+with R (a restart there starts that game). `FFXI_SWITCH_RELOGIN=0` turns it off. Confirmed on a console
+(2026-11-18): a lost connection came back to the sign-in screen.
+
 ## Not yet
 
-- **Physical mode** has not run. Ryubing gives a bare `.nro` no system resource, and loads neither an ExeFS
-  folder nor a bare PFS0 from its command line. A proper NSP (hacbrewpack, with the player's keys) would
-  test it there; on a console, hbloader's NPDM should give it.
-- **Graphics**: `gfx-test.nro` in Ryubing still fails its read-back checks: reads after a draw come back
-  mostly zero (the emulator's GPU-to-CPU sync, or ours). Also missing on GL: the scene effects, the scene
-  renderer, water and sun shadows, and a shader cache (above). deko3d after that.
-- A forwarder NSP (a HOME menu icon): tried 2026-11-16 (nx-hbloader set to our `.nro`, packed by
-  hacBrewPack) and dropped for now; it failed to start on the console.
-- Addons (`addons_none.c`), HD rumble, sleep and resume (the connections end).
+- **Physical mode** has not run: Ryubing gives a bare `.nro` no system resource, and loads neither an
+  ExeFS folder nor a bare PFS0 from its command line. A proper NSP (hacbrewpack, with the player's keys) is
+  the way to test it there; on a console, hbloader's NPDM should give it.
+- **Graphics**: `gfx-test.nro` in Ryubing still fails its read-back checks (reads
+  after a draw come back mostly zero there: the emulator's GPU-to-CPU sync, or ours - to be found); the scene
+  effects, the scene renderer, water and sun shadows on GL; no shader cache (above). deko3d after it.
+- **Audio**: the sign-in's effects play on the console (2026-11-15). In game, hit effects were missing:
+  the console's log showed no underruns and 94 buffers made but 73 played, the rest lost to CreateThread
+  failing. With the thread pool, confirmed on the console: 880 made, 880 played in ~9 minutes, 24 threads.
+- A forwarder NSP (a HOME menu icon) built on the PC: tried 2026-11-16 (nx-hbloader set to our `.nro`,
+  packed by hacBrewPack with the emulator's keys) and dropped: it failed to start on the console (no error
+  code seen), and every player would need their own keys and tools. The setup now puts Sphaira on the card
+  instead, which makes the forwarder on the console with its own keys (the player guide's *Home screen
+  icon*); confirmed on a console, 2026-11-18.
+- Addons (`addons_none.c`), HD rumble, sleep and resume (the
+  connections end).
 
 ## Testing in the emulator
 
-`build_switch.py run [file.nro]` copies the `.nro` to the emulator's virtual SD card and starts it. It uses
-`XI_SWITCH_EMU` if set; on macOS, `Ryujinx.app` in `/Applications` or `~/Applications`; otherwise the
-newest portable Ryubing at `<XI_EMU_DIR>/<version>/Ryujinx.exe` (`XI_EMU_DIR` defaults to
-`D:/Emulator/Ryubing`). The app's files are in `<emulator>/portable/sdcard/switch/xi-on-anything/`, and the
-emulator's log in `portable/Logs`. Turn off Ryubing's "expand DRAM" so memory matches a real 4 GB console,
-and turn on "Enable guest Internet access" (Settings > Network), or no name resolves.
+Build for it with devkitPro's Mesa, `XI_SWITCH_MESA=0`: Mesa 26's Horizon backend gets no display in Ryubing
+(above), and the build takes Mesa 26 whenever `build_switch.py mesa` (or the setup) has downloaded it.
 
-The display defaults are `platforms/switch/switch.reg`, loaded after the desktop `ffxi.reg` and before what the game
-saves (`settings.reg`, the overlay). The desktop file's 3440x1440 window and 6880x2880 background drew the
-lobby 21:9 squeezed into 16:9, and the game saves its whole registry on the first run, so a bad default
-sticks. Config > Advanced's Display page reads and writes `data/settings.reg` (loaded last), as on the
-desktop with the sign-in screen.
+`build_switch.py run [file.nro]` copies the `.nro` to the emulator's virtual SD card and starts it (a
+portable Ryubing under `XI_EMU_DIR`, default `D:/Emulator/Ryubing`; on macOS `Ryujinx.app` in
+`/Applications` or `~/Applications`; or `XI_SWITCH_EMU`). The app's files
+are then in `<emulator>/portable/sdcard/switch/xi-on-anything/`, and the emulator's own log in
+`portable/Logs`. Turn off Ryubing's "expand DRAM" option so the memory matches a real 4 GB console, and
+turn on "Enable guest Internet access" (Settings > Network), without which no name resolves.
 
-The back end's lines, and anything else written with `svcOutputDebugString`, are in Ryubing's log as
-`KernelSvc OutputDebugString`. `build_switch.py gfx-test` builds the graphics test. Run it as any `.nro`: it
-writes `gfx-test.log` beside it and ends green (every check passed) or red.
+The display defaults are `platforms/switch/switch.reg`, loaded after the desktop `ffxi.reg` and before what the
+game saves (`settings.reg`, the overlay): the desktop file's 3440x1440 window and 6880x2880 background
+drew the lobby 21:9 squeezed into 16:9, and the game saves its whole registry on the first run, so a bad
+default stays. Config > Advanced's Display page reads and writes `data/settings.reg` (loaded last), as on
+the desktop with the sign-in screen.
+
+The back end's lines, and anything written with `svcOutputDebugString`, are in Ryubing's own log, as
+`KernelSvc OutputDebugString`. `build_switch.py gfx-test` builds the graphics test; run it as any `.nro`;
+it writes `gfx-test.log` beside it and ends green (every check passed) or red.

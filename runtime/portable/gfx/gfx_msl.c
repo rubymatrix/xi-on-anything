@@ -114,8 +114,9 @@ static const char WGSL_PRELUDE[] =
     "fn xinf() -> f32 { var b = 0x7f800000u; return bitcast<f32>(b); }\n";
 
 #define WGSL(b) ((b)->glsl == 2)
-#define GLSL(b) ((b)->glsl == 1 || (b)->glsl == 3) /* Vulkan's or OpenGL's */
-#define GL(b) ((b)->glsl == 3)
+#define GLSL(b) ((b)->glsl == 1 || (b)->glsl == 3 || (b)->glsl == 4) /* Vulkan's, OpenGL's or deko3d's */
+#define GL(b) ((b)->glsl == 3 || (b)->glsl == 4) /* OpenGL's, and deko3d's (OpenGL's but for DK below) */
+#define DK(b) ((b)->glsl == 4)
 
 /* The back end's water (GfxFsKey.water), after the game's own color and fog: the scene behind it
  * (wcol, a copy of the target made before the frame's first water draw) seen through the surface,
@@ -285,7 +286,7 @@ static void glsl_vout(Sb* b, const GfxVsKey* k)
 {
     sb_printf(b, "struct VOut {\n  vec4 pos;\n  float psize;\n");
     glsl_varyings(b, k, 0);
-    const char* loc = GL(b) ? "" : "layout(location = 0) "; /* GL 4.30: blocks match by name */
+    const char* loc = GL(b) && !DK(b) ? "" : "layout(location = 0) "; /* GL 4.30: blocks match by name */
     sb_printf(b, "};\n#ifdef GFX_VS\n%sout VOutB {\n", loc);
     glsl_varyings(b, k, 1);
     sb_printf(b, "} vo;\n#else\n%sin VOutB {\n", loc);
@@ -539,7 +540,7 @@ void gfx_msl_vs_return(Sb* b, const GfxVsKey* k)
     }
     if (GLSL(b))
     {
-        if (GL(b)) /* y negated: row 0 is D3D's top; z to -1..1 without glClipControl (gfx_gl_generate) */
+        if (GL(b) && !DK(b)) /* y negated: row 0 is D3D's top; z to -1..1 without glClipControl (gfx_gl_generate) */
             sb_printf(b, "  gl_Position = float4(o.pos.x, -o.pos.y, gl_clip_z(o.pos), o.pos.w);\n  gl_PointSize = o.psize;\n");
         else
             sb_printf(b, "  gl_Position = o.pos;\n  gl_PointSize = o.psize;\n");
@@ -1216,6 +1217,25 @@ char* gfx_gl_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs
     return out.s;
 }
 
+/* deko3d's: OpenGL's text without descriptor sets, as gfx_gl_generate makes it, but at its own dialect */
+char* gfx_dk_generate(const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens, const uint32_t* ps_tokens)
+{
+    char* s = glsl_generate(4, vk, fk, vs_tokens, ps_tokens);
+    if (!s)
+        return NULL;
+    static const char SET[] = "set = 0, ";
+    char *r = s, *w = s;
+    while (*r)
+    {
+        if (!strncmp(r, SET, sizeof SET - 1))
+            r += sizeof SET - 1;
+        else
+            *w++ = *r++;
+    }
+    *w = 0;
+    return s;
+}
+
 static char* glsl_generate(int dialect, const GfxVsKey* vk, const GfxFsKey* fk, const uint32_t* vs_tokens,
     const uint32_t* ps_tokens)
 {
@@ -1226,7 +1246,7 @@ static char* glsl_generate(int dialect, const GfxVsKey* vk, const GfxFsKey* fk, 
     sb_printf(&b, "#ifdef GFX_VS\n");
     for (int s = 0; s < GFX_NSTREAMS; ++s)
     {
-        if (dialect == 3) /* GL: texture buffers (texel loads; Ryubing has no generic loads, which Mesa makes of storage buffers) */
+        if (dialect >= 3) /* GL and deko3d: texture buffers (texel loads; Ryubing has no generic loads, which Mesa makes of storage buffers) */
             sb_printf(&b, "layout(binding = %d) uniform usamplerBuffer s%d;\n#define SW%d(i) texelFetch(s%d, i).x\n", 1 + s, s, s, s);
         else
             sb_printf(&b, "layout(std430, set = 0, binding = %d) readonly buffer SB%d { uint w[]; } s%d;\n#define SW%d(i) s%d.w[i]\n", 1 + s, s, s, s, s);

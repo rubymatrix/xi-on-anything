@@ -44,18 +44,52 @@ extern RT_HOT_GLOBAL unsigned char* rt_guest_base;
 #define RT_INLINE static inline
 #endif
 
-RT_INLINE uint8_t rd8(uint32_t a) { return *GUEST_PTR(a); }
-RT_INLINE uint16_t rd16(uint32_t a) { uint16_t v; memcpy(&v, GUEST_PTR(a), 2); return v; }
-RT_INLINE uint32_t rd32(uint32_t a) { uint32_t v; memcpy(&v, GUEST_PTR(a), 4); return v; }
-RT_INLINE uint64_t rd64(uint32_t a) { uint64_t v; memcpy(&v, GUEST_PTR(a), 8); return v; }
-RT_INLINE void wr8(uint32_t a, uint8_t v) { *GUEST_PTR(a) = v; }
-RT_INLINE void wr16(uint32_t a, uint16_t v) { memcpy(GUEST_PTR(a), &v, 2); }
-RT_INLINE void wr32(uint32_t a, uint32_t v) { memcpy(GUEST_PTR(a), &v, 4); }
-RT_INLINE void wr64(uint32_t a, uint64_t v) { memcpy(GUEST_PTR(a), &v, 8); }
-RT_INLINE float rdf32(uint32_t a) { float v; memcpy(&v, GUEST_PTR(a), 4); return v; }
-RT_INLINE double rdf64(uint32_t a) { double v; memcpy(&v, GUEST_PTR(a), 8); return v; }
-RT_INLINE void wrf32(uint32_t a, float v) { memcpy(GUEST_PTR(a), &v, 4); }
-RT_INLINE void wrf64(uint32_t a, double v) { memcpy(GUEST_PTR(a), &v, 8); }
+/* The accessors take the window's base as an argument, RT_GB: the global, except in translated code built with
+ * RT_LOCAL_BASE (the end of this file), where it is a copy each function makes on entry (REGS_DECL). The base
+ * never changes once the window is reserved, and a store into guest memory (a char store, which may alias
+ * anything) made the compiler load the global again before the next access: on the Switch, 352,000 such
+ * reloads in the translated code, two accesses in three a dependent load longer (docs/switch.md). */
+#if defined(RT_GUEST_WINDOW) && defined(RT_LOCAL_BASE)
+/* Translated code built with RT_LOCAL_BASE (build_switch.py's generated files): RT_GB is rt_gb, at file scope the
+ * global itself under a second name (an asm label), which is what the inline helpers here and in runtime.h use, and
+ * in a translated function the copy REGS_DECL makes, which shadows it */
+extern RT_HOT_GLOBAL unsigned char* rt_gb __asm__("rt_guest_base");
+#define RT_GB rt_gb
+#define RT_GB_DECL unsigned char* const rt_gb = rt_guest_base; (void)rt_gb;
+#define GUEST_PTR_B(b, a) ((b) + (uint32_t)(a))
+#elif defined(RT_GUEST_WINDOW)
+#define RT_GB rt_guest_base
+#define RT_GB_DECL
+#define GUEST_PTR_B(b, a) ((b) + (uint32_t)(a))
+#else
+#define RT_GB_DECL
+#define RT_GB ((unsigned char*)0)
+#define GUEST_PTR_B(b, a) ((void)(b), GUEST_PTR(a))
+#endif
+RT_INLINE uint8_t rd8_b(unsigned char* b, uint32_t a) { return *GUEST_PTR_B(b, a); }
+RT_INLINE uint16_t rd16_b(unsigned char* b, uint32_t a) { uint16_t v; memcpy(&v, GUEST_PTR_B(b, a), 2); return v; }
+RT_INLINE uint32_t rd32_b(unsigned char* b, uint32_t a) { uint32_t v; memcpy(&v, GUEST_PTR_B(b, a), 4); return v; }
+RT_INLINE uint64_t rd64_b(unsigned char* b, uint32_t a) { uint64_t v; memcpy(&v, GUEST_PTR_B(b, a), 8); return v; }
+RT_INLINE void wr8_b(unsigned char* b, uint32_t a, uint8_t v) { *GUEST_PTR_B(b, a) = v; }
+RT_INLINE void wr16_b(unsigned char* b, uint32_t a, uint16_t v) { memcpy(GUEST_PTR_B(b, a), &v, 2); }
+RT_INLINE void wr32_b(unsigned char* b, uint32_t a, uint32_t v) { memcpy(GUEST_PTR_B(b, a), &v, 4); }
+RT_INLINE void wr64_b(unsigned char* b, uint32_t a, uint64_t v) { memcpy(GUEST_PTR_B(b, a), &v, 8); }
+RT_INLINE float rdf32_b(unsigned char* b, uint32_t a) { float v; memcpy(&v, GUEST_PTR_B(b, a), 4); return v; }
+RT_INLINE double rdf64_b(unsigned char* b, uint32_t a) { double v; memcpy(&v, GUEST_PTR_B(b, a), 8); return v; }
+RT_INLINE void wrf32_b(unsigned char* b, uint32_t a, float v) { memcpy(GUEST_PTR_B(b, a), &v, 4); }
+RT_INLINE void wrf64_b(unsigned char* b, uint32_t a, double v) { memcpy(GUEST_PTR_B(b, a), &v, 8); }
+#define rd8(a) rd8_b(RT_GB, (a))
+#define rd16(a) rd16_b(RT_GB, (a))
+#define rd32(a) rd32_b(RT_GB, (a))
+#define rd64(a) rd64_b(RT_GB, (a))
+#define wr8(a, v) wr8_b(RT_GB, (a), (v))
+#define wr16(a, v) wr16_b(RT_GB, (a), (v))
+#define wr32(a, v) wr32_b(RT_GB, (a), (v))
+#define wr64(a, v) wr64_b(RT_GB, (a), (v))
+#define rdf32(a) rdf32_b(RT_GB, (a))
+#define rdf64(a) rdf64_b(RT_GB, (a))
+#define wrf32(a, v) wrf32_b(RT_GB, (a), (v))
+#define wrf64(a, v) wrf64_b(RT_GB, (a), (v))
 
 typedef struct Guest
 {
@@ -80,9 +114,19 @@ typedef void (*GuestFn)(Guest*);
  * addresses before lookup. RD is 0 when the image sits at its preferred base. */
 extern RT_HOT_GLOBAL uint32_t rt_reloc_delta;
 extern uint32_t rt_image_lo, rt_image_hi; /* runtime range of the image */
+#if defined(RT_LOCAL_BASE)
+/* As the window's base above: a copy per translated function (REGS_DECL), since after every guest store the global
+ * was loaded again (54 times in f_1002efe0 alone); rt_rd at file scope is the global under a second name */
+extern RT_HOT_GLOBAL uint32_t rt_rd __asm__("rt_reloc_delta");
+#define RD rt_rd
+#define RT_RD_DECL const uint32_t rt_rd = rt_reloc_delta; (void)rt_rd;
+#else
 #define RD rt_reloc_delta
+#define RT_RD_DECL
+#endif
 
 #define REGS_DECL                                                                                \
+    RT_GB_DECL RT_RD_DECL                                                                        \
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;                                             \
     unsigned cf, pf, af, zf, sf, of, df;                                                         \
     unsigned rt_sp_n = 0; /* back edges taken here while another thread waited (RT_SAFEPOINT) */ \
@@ -96,6 +140,74 @@ extern uint32_t rt_image_lo, rt_image_hi; /* runtime range of the image */
     g->esp = esp; g->ebp = ebp; g->esi = esi; g->edi = edi;                                      \
     g->cf = (uint8_t)cf; g->pf = (uint8_t)pf; g->af = (uint8_t)af; g->zf = (uint8_t)zf;          \
     g->sf = (uint8_t)sf; g->of = (uint8_t)of; g->df = (uint8_t)df
+
+/* Around a call and at a return (recomp/x86c.py): the registers and DF, not the arithmetic flags. No compiled
+ * code leaves a flag live across a call (the callee may change them all) or reads one at a function's entry, so
+ * they were 12 memory accesses a call for nothing (docs/switch.md, the game thread's profile). A tail jump into
+ * another function, where flags can be live, still stores them all (REGS_STORE). */
+#define REGS_STORE_CALL                                                                          \
+    g->eax = eax; g->ecx = ecx; g->edx = edx; g->ebx = ebx;                                      \
+    g->esp = esp; g->ebp = ebp; g->esi = esi; g->edi = edi; g->df = (uint8_t)df
+#define REGS_LOAD_CALL                                                                           \
+    eax = g->eax; ecx = g->ecx; edx = g->edx; ebx = g->ebx;                                      \
+    esp = g->esp; ebp = g->ebp; esi = g->esi; edi = g->edi; df = g->df
+
+/* Around a direct call and at a return (recomp/regs_across_calls.py): only the registers in m (a constant: eax 1,
+ * ecx 2, edx 4, ebx 8, esp 0x10, ebp 0x20, esi 0x40, edi 0x80, the arithmetic flags 0x100), and DF. A call stores what
+ * its callee may use or change and reloads what it may change; a return stores what the function may have changed.
+ * RT_REGS_CHECK (a test build): REGS_PUT stores everything, and RT_REGS_CHECK_CALL after a call compares each register
+ * it doesn't reload with what the callee left (rt_regs_off logs a difference: the analysis was wrong there). */
+#if defined(RT_REGS_CHECK)
+#define REGS_PUT_M(m) 0x1FFu
+#else
+#define REGS_PUT_M(m) (m)
+#endif
+#define REGS_PUT(m)                                                                              \
+    do {                                                                                         \
+        if (REGS_PUT_M(m) & 0x01u) g->eax = eax;                                                 \
+        if (REGS_PUT_M(m) & 0x02u) g->ecx = ecx;                                                 \
+        if (REGS_PUT_M(m) & 0x04u) g->edx = edx;                                                 \
+        if (REGS_PUT_M(m) & 0x08u) g->ebx = ebx;                                                 \
+        if (REGS_PUT_M(m) & 0x10u) g->esp = esp;                                                 \
+        if (REGS_PUT_M(m) & 0x20u) g->ebp = ebp;                                                 \
+        if (REGS_PUT_M(m) & 0x40u) g->esi = esi;                                                 \
+        if (REGS_PUT_M(m) & 0x80u) g->edi = edi;                                                 \
+        if (REGS_PUT_M(m) & 0x100u)                                                              \
+        {                                                                                        \
+            g->cf = (uint8_t)cf; g->pf = (uint8_t)pf; g->af = (uint8_t)af; g->zf = (uint8_t)zf;  \
+            g->sf = (uint8_t)sf; g->of = (uint8_t)of;                                            \
+        }                                                                                        \
+        g->df = (uint8_t)df;                                                                     \
+    } while (0)
+#define REGS_GET(m)                                                                              \
+    do {                                                                                         \
+        if ((m) & 0x01u) eax = g->eax;                                                           \
+        if ((m) & 0x02u) ecx = g->ecx;                                                           \
+        if ((m) & 0x04u) edx = g->edx;                                                           \
+        if ((m) & 0x08u) ebx = g->ebx;                                                           \
+        if ((m) & 0x10u) esp = g->esp;                                                           \
+        if ((m) & 0x20u) ebp = g->ebp;                                                           \
+        if ((m) & 0x40u) esi = g->esi;                                                           \
+        if ((m) & 0x80u) edi = g->edi;                                                           \
+        if ((m) & 0x100u)                                                                        \
+        {                                                                                        \
+            cf = g->cf; pf = g->pf; af = g->af; zf = g->zf; sf = g->sf; of = g->of;              \
+        }                                                                                        \
+        df = g->df;                                                                              \
+    } while (0)
+#if defined(RT_REGS_CHECK)
+void rt_regs_off(uint32_t at, unsigned reg, uint32_t mine, uint32_t left);
+#define RT_REGS_CHECK_CALL(m, at)                                                                \
+    do {                                                                                         \
+        const uint32_t mine_[8] = { eax, ecx, edx, ebx, esp, ebp, esi, edi };                    \
+        const uint32_t left_[8] = { g->eax, g->ecx, g->edx, g->ebx, g->esp, g->ebp, g->esi, g->edi }; \
+        for (unsigned r_ = 0; r_ < 8; ++r_)                                                      \
+            if (!((m) >> r_ & 1u) && mine_[r_] != left_[r_])                                     \
+                rt_regs_off((at), r_, mine_[r_], left_[r_]);                                     \
+    } while (0)
+#else
+#define RT_REGS_CHECK_CALL(m, at) ((void)0)
+#endif
 
 /* PF: set when the low byte has an even number of 1 bits. 0x6996 is the parity of each nibble. */
 #define PARITY(v) ((unsigned)(!((0x6996u >> ((((uint32_t)(v) & 0xFFu) ^ (((uint32_t)(v) & 0xFFu) >> 4)) & 0xFu)) & 1u)))
@@ -248,6 +360,22 @@ RT_INLINE int64_t fist64(Guest* g, double x) { return fist64_cw(g->fcw, x); }
         x87_s4 = x87_s5, x87_s5 = x87_s6, x87_s6 = x87_s7, x87_s7 = x87_t,                       \
         x87_top = (x87_top + 1) & 7u, x87_t)
 
+/* x87 in fixed locals by depth (recomp/x87_slots.py): x87_r<k> is the value k pushes deep from the function's entry,
+ * x87_t0 the top at its entry, x87_cw the control word. A call gives the callee the top and the control word and
+ * reads back ST0 when it returned a float; RT_X87_CHECK then checks the top it left is the one the translation
+ * expects (rt_x87_off logs it, once an address). */
+#define X87S_DECL                                                                                \
+    double x87_r0, x87_r1, x87_r2, x87_r3, x87_r4, x87_r5, x87_r6, x87_r7;                       \
+    unsigned x87_t0, x87_cw
+#define X87S_LOAD x87_t0 = g->top & 7u; x87_cw = g->fcw
+void rt_x87_off(Guest* g, uint32_t at);
+#define RT_X87_CHECK(ok, at)                                                                     \
+    do                                                                                           \
+    {                                                                                            \
+        if (!(ok))                                                                               \
+            rt_x87_off(g, (at));                                                                 \
+    } while (0)
+
 /* FXAM: C3 C2 C0 = 001 NaN, 010 normal, 011 infinity, 100 zero, 110 denormal; C1 = sign. */
 RT_INLINE void fxam(Guest* g)
 {
@@ -327,3 +455,7 @@ RT_INLINE void wrf80(uint32_t a, double v)
     memcpy(GUEST_PTR(a), &m, 8);
     memcpy(GUEST_PTR(a) + 8, &se, 2);
 }
+
+
+/* native versions of hot game loops the translation calls (recomp/native_loops.py) */
+#include "native_skin.h"
