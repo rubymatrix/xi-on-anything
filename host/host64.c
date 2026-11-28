@@ -1322,6 +1322,36 @@ static void report_overlay(const char* name, unsigned files)
     rt_log("[recomp] dats: %s, %u files\n", name, files);
 }
 
+/* A file the game reads that installs launched without the viewer (private servers) do not have:
+ * written to name in --data-dir (else next to the host) and mounted over guest, the game's path
+ * to it. The install itself is never written. 0 with a message if it cannot be written. */
+static int stand_in(const char* data_dir, const char* argv0, const char* name, const void* bytes, uint32_t n, const char* guest)
+{
+    char host[760];
+    if (data_dir)
+        snprintf(host, sizeof host, "%s%c%s", data_dir, plat_path_sep, name);
+    else
+    {
+        const char *dir_end = argv0, *p;
+        for (p = argv0; *p; ++p)
+            if (*p == '/' || *p == plat_path_sep)
+                dir_end = p + 1;
+        snprintf(host, sizeof host, "%.*s%s", (int)(dir_end - argv0), argv0, name);
+    }
+    PlatFile* f = plat_file_open(host, PLAT_WRITE | PLAT_CREATE | PLAT_TRUNCATE);
+    int ok = f && plat_file_write(f, bytes, n) == n;
+    if (f)
+        plat_file_close(f);
+    if (!ok)
+    {
+        fprintf(stderr, "cannot write %s\n", host);
+        return 0;
+    }
+    vfs_mount(guest, host);
+    printf("[recomp] %s: none in the install, %s stands in\n", guest, host);
+    return 1;
+}
+
 #ifndef _WIN32
 #include <SDL3/SDL.h>
 #include <signal.h>
@@ -1915,37 +1945,26 @@ int main(int argc, char** argv)
     }
     {
         /* The game reads patch.ver from its folder and will not start without it; the lobby sees
-         * the version inside. Installs launched without the viewer (private
-         * servers) ship none: then one is made for this build's version, in --data-dir (else next
-         * to the host), and mounted over the game's path. The install itself is never written. */
-        char pv[760];
+         * the version inside. Without one, one is made for this build's version. */
+        char pv[760], guest_pv[760], name[64];
         PlatStat st;
+        uint8_t file[0x120];
         snprintf(pv, sizeof pv, "%s%cpatch.ver", host_game, plat_path_sep);
+        snprintf(guest_pv, sizeof guest_pv, "%s\\patch.ver", game);
+        snprintf(name, sizeof name, "patch.%s.ver", FFXI_VERSION);
+        if (!plat_stat(pv, &st) &&
+            (!gamecore_make_patch_ver(FFXI_VERSION, file) || !stand_in(data_dir, argv[0], name, file, sizeof file, guest_pv)))
+            return 1;
+        /* Character creation checks a new name against the viewer's name dictionary, and without
+         * one refuses every name itself ("That name is taken", FFXI-3322) and asks the server
+         * nothing. Our gamecore lets every name through (gamecore_files.c, 1110): an empty
+         * dictionary, its four section sizes 0, will do. */
+        static const uint8_t EMPTY_DIC[0x20];
+        snprintf(pv, sizeof pv, "%s%c..%cPlayOnlineViewer%cdata%cdic%centryz.dic", host_game, plat_path_sep,
+            plat_path_sep, plat_path_sep, plat_path_sep, plat_path_sep);
+        snprintf(guest_pv, sizeof guest_pv, "%s\\..\\PlayOnlineViewer\\data\\dic\\entryz.dic", game);
         if (!plat_stat(pv, &st))
-        {
-            uint8_t file[0x120];
-            if (data_dir)
-                snprintf(pv, sizeof pv, "%s%cpatch.%s.ver", data_dir, plat_path_sep, FFXI_VERSION);
-            else
-            {
-                const char *dir_end = argv[0], *p;
-                for (p = argv[0]; *p; ++p)
-                    if (*p == '/' || *p == plat_path_sep)
-                        dir_end = p + 1;
-                snprintf(pv, sizeof pv, "%.*spatch.%s.ver", (int)(dir_end - argv[0]), argv[0], FFXI_VERSION);
-            }
-            PlatFile* f = gamecore_make_patch_ver(FFXI_VERSION, file) ? plat_file_open(pv, PLAT_WRITE | PLAT_CREATE | PLAT_TRUNCATE) : NULL;
-            if (!f || plat_file_write(f, file, sizeof file) != sizeof file)
-            {
-                fprintf(stderr, "cannot write %s\n", pv);
-                return 1;
-            }
-            plat_file_close(f);
-            char guest_pv[760];
-            snprintf(guest_pv, sizeof guest_pv, "%s\\patch.ver", game);
-            vfs_mount(guest_pv, pv);
-            printf("[recomp] no patch.ver in the install: version %s from %s\n", FFXI_VERSION, pv);
-        }
+            stand_in(data_dir, argv[0], "entryz.dic", EMPTY_DIC, sizeof EMPTY_DIC, guest_pv);
     }
     gamecore_slots_init();
     gamecore_files_init();

@@ -28,6 +28,7 @@ Windows Credential Manager, or the Secret Service on Linux). It keeps its files 
 There: `signin.cfg`, `settings.reg` (the display settings, written once with defaults), `saved.reg`
 (the game's own saves), `modern.cfg`, `addons.cfg` and the addon folders (`xi`, `ashita`,
 `windower`), an optional `textures/`, `patch.<version>.ver` for an install without a `patch.ver`,
+`entryz.dic` (an empty name dictionary, which character creation needs) for one without the viewer's,
 `host64.log` when started from Finder, and an optional `background.png`/`.jpg` behind the screen.
 Closing the window or Ctrl+C quits at any point (on macOS also Cmd+Q and the Dock's Quit).
 
@@ -62,7 +63,7 @@ build/host64 --game ~/SquareEnix/"FINAL FANTASY XI" \
 | `--loader-version <a.b.c>` | The loader version sent at sign-in, `2.2.0` by default (current xiloader). LandSandBoat refuses a version it does not expect. When the refusal names the one it wants (`2.1.x`), `host64` retries once with that (an `x` as 0). The sign-in screen remembers it (`loader_version=` in `signin.cfg`). |
 | `--reg <file.reg>` | A registry export to load (up to 8; later files win). The game reads its settings (resolution, window mode, sound) from its registry keys. Start from this repo's `assets/ffxi.reg`. |
 | `--reg-overlay <file.reg>` | Where the game saves settings it changes. Loaded after the `--reg` files, which are never rewritten. |
-| `--data-dir <folder>` | Where `host64` keeps its own files (see above). Default: the sign-in screen's data folder; with no sign-in screen, none (the `patch.<version>.ver` then goes beside `host64`). |
+| `--data-dir <folder>` | Where `host64` keeps its own files (see above). Default: the sign-in screen's data folder; with no sign-in screen, none (the `patch.<version>.ver` and `entryz.dic` then go beside `host64`). |
 | `--reg-final <file.reg>` | Loaded after the overlay, so it wins over what the game saved (up to 8). Without one, `<data dir>/settings.reg` is loaded here. |
 | `--dats <folder>` | DAT overlays, the way XIPivot does them (up to 8; the first folder given wins). See below. |
 | `--textures <folder>` | A texture pack: high-resolution replacements for the game's textures (up to 8; the first with a texture wins). Default `<data dir>/textures`. The bundled packs come after these. |
