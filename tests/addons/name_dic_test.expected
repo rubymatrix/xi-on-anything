@@ -1,0 +1,7 @@
+-- no dictionary in the viewer
+entryz.dic: none in the install
+[harness] = FindFirstFileA found, 32 bytes; CreateFileA opened
+stand-in: 0000000000000000000000000000000000000000000000000000000000000000
+-- the viewer's own dictionary
+no stand-in
+none written
