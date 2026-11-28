@@ -118,6 +118,8 @@ void xi_raise_kind(XiEvent* e, int kind);
 /* A line for the game alone, next frame: it already went through the host's commands and the addons
  * (a line text_out changed, an alias nobody handled). */
 void xi_chat_queue_game(int mode, const char* line);
+/* How much of a line the game's command parser gets (hooks.c has why). */
+size_t xi_game_line_len(const char* line);
 /* Whether text_in sees the game's own lines (chat, battle and system messages), not only the host's. */
 int xi_chat_game_lines(void);
 

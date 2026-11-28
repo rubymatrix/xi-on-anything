@@ -588,6 +588,8 @@ int xi_command(const char* in, int mode, int injected)
     t.mode_mod = mode;
     t.injected = injected;
     t.data = (const uint8_t*)line, t.size = strlen(line);
+    if (t.size > sizeof mod - 1)
+        t.size = sizeof mod - 1; /* an alias expands to up to 2 KB */
     memcpy(mod, line, t.size);
     t.mod = mod, t.mod_size = t.size, t.mod_cap = sizeof mod - 1;
     xi_raise(&t);
