@@ -202,7 +202,7 @@ int addons_harness(const char* script)
         else if (!strcmp(cmd, "command"))
         {
             if (!xi_command(p, 1, 0))
-                printf("[game] %s\n", p);
+                printf("[game] %.*s\n", (int)xi_game_line_len(p), p);
         }
         else if (!strcmp(cmd, "frames") || !strcmp(cmd, "run"))
         {

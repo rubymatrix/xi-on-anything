@@ -88,10 +88,46 @@ static uint32_t guest_scratch(int which, uint32_t size)
 
 /* --- the command line ------------------------------------------------------------------------ */
 
+/* The longest prefix of p (n bytes) within max bytes that splits no unit: a colour code (0x1E/0x1F xx), a
+ * Shift-JIS pair, an auto-translate phrase (0xFD .. 0xFD, 6 bytes). */
+static size_t unit_cut(const unsigned char* p, size_t n, size_t max)
+{
+    size_t i = 0;
+    while (i < n)
+    {
+        size_t unit = 1;
+        if ((p[i] == 0x1E || p[i] == 0x1F) && i + 1 < n)
+            unit = 2;
+        else if (p[i] == 0xFD && i + 5 < n)
+            unit = 6;
+        else if (((p[i] >= 0x81 && p[i] <= 0x9F) || (p[i] >= 0xE0 && p[i] <= 0xFC)) && i + 1 < n)
+            unit = 2;
+        if (i + unit > max)
+            break;
+        i += unit;
+    }
+    return i;
+}
+
+/* The game's command parser copies a line into a 248-byte stack buffer with no bound (FFXiMain 11-02
+ * 0x101aea80 calls 0x101ae090), so a longer line overwrites its caller's frame: a 300-byte line from the
+ * control port crashed the game. Its input line holds 120 bytes and its chat log shows about 145 of a line,
+ * so only lines the host runs get this long; the game gets them cut, after the host and the addons saw them
+ * whole. */
+size_t xi_game_line_len(const char* line) { return unit_cut((const unsigned char*)line, strlen(line), 247); }
+
 static int g_injecting; /* the line parse_input sees is one the host runs (queued commands) */
 static int g_raw;       /* ... and one that already went through the host and addons: straight to the game */
 
 #if defined(FFXI_WRAP_PARSE_INPUT)
+static void game_parse_input(Guest* g, uint32_t text, const char* line)
+{
+    size_t n = xi_game_line_len(line);
+    if (line[n])
+        wr8(text + (uint32_t)n, 0);
+    rt_orig_parse_input(g);
+}
+
 static void wrap_parse_input(Guest* g)
 {
     char line[1024];
@@ -103,7 +139,7 @@ static void wrap_parse_input(Guest* g)
     if (g_raw)
     {
         g_raw = 0;
-        rt_orig_parse_input(g);
+        game_parse_input(g, text, line);
         return;
     }
     /* /shutdown doesn't unload the addons here: a player's shutdown counts down 30 seconds in game (and moving or
@@ -114,7 +150,7 @@ static void wrap_parse_input(Guest* g)
         rt_return(g, 0, 0);
         return;
     }
-    rt_orig_parse_input(g);
+    game_parse_input(g, text, line);
 }
 #endif
 
@@ -142,27 +178,12 @@ static void enqueue(int mode, const char* text, int command)
 
 void xi_chat_write(int mode, const char* text)
 {
-    /* long lines are cut at a unit boundary: a colour code (0x1E/0x1F xx), a Shift-JIS pair and an
-     * auto-translate phrase (0xFD .. 0xFD, 6 bytes) are never split */
+    /* long lines are cut at a unit boundary */
     const unsigned char* p = (const unsigned char*)text;
     size_t n = strlen(text);
     while (n > 240)
     {
-        size_t cut = 0, i = 0;
-        while (i < n && i < 240)
-        {
-            size_t unit = 1;
-            if ((p[i] == 0x1E || p[i] == 0x1F) && i + 1 < n)
-                unit = 2;
-            else if (p[i] == 0xFD && i + 5 < n)
-                unit = 6;
-            else if (((p[i] >= 0x81 && p[i] <= 0x9F) || (p[i] >= 0xE0 && p[i] <= 0xFC)) && i + 1 < n)
-                unit = 2;
-            if (i + unit > 240)
-                break;
-            i += unit;
-            cut = i;
-        }
+        size_t cut = unit_cut(p, n, 240);
         char piece[256];
         memcpy(piece, p, cut);
         piece[cut] = 0;
@@ -239,7 +260,7 @@ static void game_run(int mode, const char* line, int raw)
     if (xi_headless)
     {
         if (raw || !xi_command(line, mode, 1))
-            printf("[game] %s\n", line);
+            printf("[game] %.*s\n", (int)xi_game_line_len(line), line);
         fflush(stdout);
         return;
     }
